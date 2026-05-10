@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>JSR Stempeluhr</title>
+<script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
+html,body,#root{height:100%;width:100%;overflow:hidden;}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+  background:#080c14;color:white;user-select:none;-webkit-user-select:none;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useRef}=React;
+
+function Kiosk(){
+  const [pin,setPin]=useState('');
+  const [phase,setPhase]=useState('pin'); // pin | confirm | success | error | action
+  const [employee,setEmployee]=useState(null);
+  const [session,setSession]=useState(null);
+  const [time,setTime]=useState(new Date());
+  const resetTimer=useRef(null);
+
+  useEffect(()=>{
+    const t=setInterval(()=>setTime(new Date()),1000);
+    return()=>clearInterval(t);
+  },[]);
+
+  function resetToPin(){
+    setPin('');
+    setPhase('pin');
+    setEmployee(null);
+    setSession(null);
+  }
+
+  function scheduleReset(ms=4000){
+    if(resetTimer.current) clearTimeout(resetTimer.current);
+    resetTimer.current=setTimeout(resetToPin,ms);
+  }
+
+  function handlePin(digit){
+    if(pin.length>=4) return;
+    const newPin=pin+digit;
+    setPin(newPin);
+    if(newPin.length===4){
+      // Look up employee by PIN
+      setTimeout(()=>lookupPin(newPin),100);
+    }
+  }
+
+  function handleDel(){
+    setPin(p=>p.slice(0,-1));
+  }
+
+  function lookupPin(p){
+    try{
+      const pins=JSON.parse(localStorage.getItem('jsr_pins_v1')||'{}');
+      const empId=Object.keys(pins).find(id=>pins[id].code===p);
+      if(!empId){setPhase('error');scheduleReset(2500);return;}
+
+      const employees=JSON.parse(localStorage.getItem('jsr_emp_v3')||'[]');
+      const emp=employees.find(e=>e.id===empId);
+      if(!emp||!['active','training'].includes(emp.status)){setPhase('error');scheduleReset(2500);return;}
+
+      const today=new Date().toISOString().slice(0,10);
+      const sessions=JSON.parse(localStorage.getItem('jsr_time_v1')||'[]');
+      const activeSess=sessions.find(s=>s.emp_id===empId&&s.date===today&&!s.clock_out);
+      const doneSess=sessions.find(s=>s.emp_id===empId&&s.date===today&&s.clock_out);
+
+      setEmployee(emp);
+      setSession(activeSess||doneSess||null);
+      setPhase('confirm');
+    }catch(e){setPhase('error');scheduleReset(2500);}
+  }
+
+  function stamp(action){
+    try{
+      const today=new Date().toISOString().slice(0,10);
+      const nowStr=new Date().toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'});
+      let sessions=JSON.parse(localStorage.getItem('jsr_time_v1')||'[]');
+
+      if(action==='in'){
+        sessions=[...sessions,{
+          id:'ts'+Date.now(),emp_id:employee.id,date:today,
+          clock_in:nowStr,clock_out:null,hours:null,
+          pauses:[],smokes:[],pause_active:null,smoke_active:null
+        }];
+      } else if(action==='out'){
+        sessions=sessions.map(s=>{
+          if(s.emp_id!==employee.id||s.date!==today||s.clock_out) return s;
+          const [h1,m1]=s.clock_in.split(':').map(Number);
+          const [h2,m2]=nowStr.split(':').map(Number);
+          const gross=Math.max(0,(h2*60+m2)-(h1*60+m1));
+          const pauseMins=(s.pauses||[]).reduce((a,p)=>a+(p.duration||0),0);
+          const smokeMins=(s.smokes||[]).reduce((a,p)=>a+(p.duration||0),0);
+          const net=Math.max(0,gross-pauseMins-smokeMins);
+          return {...s,clock_out:nowStr,pause_active:null,smoke_active:null,
+            hours:Math.round(net/6)/10,hours_gross:Math.round(gross/6)/10,
+            pause_total:pauseMins,smoke_total:smokeMins};
+        });
+      } else if(action==='pause_start'){
+        sessions=sessions.map(s=>{
+          if(s.emp_id!==employee.id||s.date!==today||s.clock_out||s.pause_active||s.smoke_active) return s;
+          return {...s,pause_active:nowStr};
+        });
+      } else if(action==='pause_end'){
+        sessions=sessions.map(s=>{
+          if(s.emp_id!==employee.id||s.date!==today||!s.pause_active) return s;
+          const [h1,m1]=s.pause_active.split(':').map(Number);
+          const [h2,m2]=nowStr.split(':').map(Number);
+          const dur=Math.max(0,(h2*60+m2)-(h1*60+m1));
+          return {...s,pause_active:null,pauses:[...(s.pauses||[]),{start:s.pause_active,end:nowStr,duration:dur}]};
+        });
+      } else if(action==='smoke_start'){
+        sessions=sessions.map(s=>{
+          if(s.emp_id!==employee.id||s.date!==today||s.clock_out||s.pause_active||s.smoke_active) return s;
+          return {...s,smoke_active:nowStr};
+        });
+      } else if(action==='smoke_end'){
+        sessions=sessions.map(s=>{
+          if(s.emp_id!==employee.id||s.date!==today||!s.smoke_active) return s;
+          const [h1,m1]=s.smoke_active.split(':').map(Number);
+          const [h2,m2]=nowStr.split(':').map(Number);
+          const dur=Math.max(0,(h2*60+m2)-(h1*60+m1));
+          return {...s,smoke_active:null,smokes:[...(s.smokes||[]),{start:s.smoke_active,end:nowStr,duration:dur}]};
+        });
+      }
+
+      localStorage.setItem('jsr_time_v1',JSON.stringify(sessions));
+      setPhase('success');
+      scheduleReset(3000);
+    }catch(e){setPhase('error');scheduleReset(2500);}
+  }
+
+  const timeStr=time.toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  const dateStr=time.toLocaleDateString('de-DE',{weekday:'long',day:'2-digit',month:'long',year:'numeric'});
+
+  // ── PIN SCREEN ──────────────────────────────────────────────────────
+  if(phase==='pin'||phase==='error'){
+    return(
+      <div style={{height:'100vh',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',background:'#080c14',gap:0}}>
+        {/* Header */}
+        <div style={{textAlign:'center',marginBottom:32}}>
+          <div style={{fontSize:13,fontWeight:800,color:'#60a5fa',letterSpacing:'.2em',textTransform:'uppercase',marginBottom:8}}>JSR BPO · Stempeluhr</div>
+          <div style={{fontSize:42,fontWeight:800,fontFamily:'monospace',color:'white',letterSpacing:4}}>{timeStr}</div>
+          <div style={{fontSize:14,color:'#475569',marginTop:4}}>{dateStr}</div>
+        </div>
+
+        {/* PIN display */}
+        <div style={{marginBottom:24}}>
+          <div style={{fontSize:12,color:'#475569',textAlign:'center',letterSpacing:'.15em',textTransform:'uppercase',marginBottom:12}}>
+            {phase==='error'?'PIN nicht erkannt — bitte erneut versuchen':'PIN eingeben'}
+          </div>
+          <div style={{display:'flex',gap:16,justifyContent:'center'}}>
+            {[0,1,2,3].map(i=>(
+              <div key={i} style={{
+                width:20,height:20,borderRadius:'50%',
+                background:i<pin.length?(phase==='error'?'#ef4444':'#6366f1'):'transparent',
+                border:'2px solid '+(i<pin.length?(phase==='error'?'#ef4444':'#6366f1'):'#334155'),
+                transition:'all .15s'
+              }}/>
+            ))}
+          </div>
+        </div>
+
+        {/* Numpad */}
+        <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:12,width:280}}>
+          {[1,2,3,4,5,6,7,8,9,'←',0,''].map((k,i)=>(
+            k===''?<div key={i}/>:
+            <button key={i}
+              onClick={()=>k==='←'?handleDel():handlePin(String(k))}
+              style={{
+                height:72,borderRadius:16,border:'none',cursor:'pointer',
+                fontSize:k==='←'?24:28,fontWeight:700,
+                background:k==='←'?'#1e293b':'#1a2035',
+                color:k==='←'?'#94a3b8':'white',
+                transition:'all .1s',
+                boxShadow:'0 4px 12px rgba(0,0,0,.3)'
+              }}>
+              {k}
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  // ── CONFIRM SCREEN ──────────────────────────────────────────────────
+  if(phase==='confirm'&&employee){
+    const today=new Date().toISOString().slice(0,10);
+    const sessions=JSON.parse(localStorage.getItem('jsr_time_v1')||'[]');
+    const activeSess=sessions.find(s=>s.emp_id===employee.id&&s.date===today&&!s.clock_out);
+    const doneSess=sessions.find(s=>s.emp_id===employee.id&&s.date===today&&s.clock_out);
+    const isIn=!!activeSess;
+    const isDone=!!doneSess;
+    const inPause=activeSess?.pause_active;
+    const inSmoke=activeSess?.smoke_active;
+
+    const actions=[];
+    if(!isIn&&!isDone) actions.push({label:'⬇ Einstempeln',action:'in',bg:'#065f46',color:'white'});
+    if(isIn){
+      actions.push({label:'⬆ Ausstempeln',action:'out',bg:'#7f1d1d',color:'white'});
+      if(!inPause&&!inSmoke){
+        actions.push({label:'☕ Pause',action:'pause_start',bg:'#1e3a5f',color:'white'});
+        actions.push({label:'🚬 Raucher',action:'smoke_start',bg:'#3b2a1a',color:'white'});
+      }
+      if(inPause) actions.push({label:'☕ Pause beenden',action:'pause_end',bg:'#1e3a5f',color:'white'});
+      if(inSmoke) actions.push({label:'🚬 Raucher beenden',action:'smoke_end',bg:'#3b2a1a',color:'white'});
+    }
+
+    return(
+      <div style={{height:'100vh',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',background:'#080c14',padding:32}}>
+        {/* Avatar */}
+        <div style={{width:96,height:96,borderRadius:'50%',
+          background:employee.photo_color||'#1d4ed8',
+          display:'flex',alignItems:'center',justifyContent:'center',
+          fontSize:32,fontWeight:800,color:'white',marginBottom:20,
+          boxShadow:'0 0 0 4px rgba(99,102,241,.3)'}}>
+          {(employee.first_name||'?')[0]}{(employee.last_name||'?')[0]}
+        </div>
+        <div style={{fontSize:28,fontWeight:800,marginBottom:4}}>{employee.first_name} {employee.last_name}</div>
+        <div style={{fontSize:14,color:'#64748b',marginBottom:8}}>{employee.position} · {employee.location}</div>
+        <div style={{fontSize:13,color:isIn?'#34d399':isDone?'#94a3b8':'#fbbf24',marginBottom:28,fontWeight:600}}>
+          {isDone?'✓ Heute bereits ausgestempelt ('+doneSess.clock_in+' – '+doneSess.clock_out+')':
+           isIn?(inPause?'☕ In Pause seit '+inPause:inSmoke?'🚬 Raucherpause seit '+inSmoke:'✓ Eingestempelt seit '+activeSess.clock_in):
+           '○ Noch nicht eingestempelt heute'}
+        </div>
+
+        {/* Action buttons */}
+        <div style={{display:'flex',flexDirection:'column',gap:12,width:'100%',maxWidth:320}}>
+          {actions.map(a=>(
+            <button key={a.action} onClick={()=>stamp(a.action)}
+              style={{height:64,borderRadius:16,border:'none',cursor:'pointer',
+                fontSize:20,fontWeight:700,background:a.bg,color:a.color,
+                boxShadow:'0 4px 16px rgba(0,0,0,.3)'}}>
+              {a.label}
+            </button>
+          ))}
+          <button onClick={resetToPin}
+            style={{height:48,borderRadius:12,border:'1px solid #1e293b',cursor:'pointer',
+              fontSize:14,background:'transparent',color:'#475569'}}>
+            Abbrechen
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ── SUCCESS SCREEN ──────────────────────────────────────────────────
+  if(phase==='success'){
+    return(
+      <div style={{height:'100vh',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',background:'#022c22',gap:16}}>
+        <div style={{fontSize:80}}>✅</div>
+        <div style={{fontSize:28,fontWeight:800,color:'#34d399'}}>Gestempelt!</div>
+        <div style={{fontSize:14,color:'#6ee7b7'}}>{employee?.first_name} {employee?.last_name}</div>
+        <div style={{fontSize:14,color:'#064e3b',marginTop:8}}>{timeStr}</div>
+      </div>
+    );
+  }
+
+  return null;
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<Kiosk/>);
+</script>
+</body>
+</html>
