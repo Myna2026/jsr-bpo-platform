@@ -6710,16 +6710,9 @@ function WorkforcePlanningView({employees, projects, showToast}){
 
   // ── HELPERS ───────────────────────────────────────────────────────
   const DAYS = ['MO','DI','MI','DO','FR','SA','SO'];
-  const SHIFTS = [
-    {label:'Frühschicht',  value:'08:00-16:30', hours:8,   net:7.5},
-    {label:'Früh kurz',    value:'08:00-15:30', hours:7,   net:6.5},
-    {label:'Früh lang',    value:'08:00-17:30', hours:9,   net:8.5},
-    {label:'Spätschicht',  value:'13:30-22:00', hours:8,   net:7.5},
-    {label:'Spät kurz',    value:'14:30-22:00', hours:7,   net:6.5},
-    {label:'Spät mittel',  value:'12:30-22:00', hours:9,   net:8.5},
-    {label:'Spät lang',    value:'11:30-22:00', hours:10,  net:9.5},
-    {label:'Frei',         value:'',            hours:0,   net:0},
-  ];
+  const getShiftConfig=()=>{try{return JSON.parse(localStorage.getItem('jsr_shift_cfg')||'{}');}catch(e){return{};}};
+  const getProjShifts=(projId,skill)=>{const cfg=getShiftConfig();const key=projId&&skill?projId+'_'+skill:projId?projId+'_all':'';const found=cfg[key]||cfg[projId+'_all']||[];return [...found,{id:'frei',label:'Frei',value:'',hours:0,net:0}];};
+  const SHIFTS=getProjShifts(selProjId,selSkill);
 
   function getShiftMeta(shiftVal){
     if(!shiftVal || shiftVal===0 || shiftVal==='0') return {hours:0,net:0};
@@ -12693,7 +12686,7 @@ function LocationsView({employees}){
 
   // ── HELPERS ────────────────────────────────────────────────────────────
   const LOCS = locations||[{id:'tirana',name:'Tirana'},{id:'prishtina',name:'Prishtina'}];
-  const SHIFTS = ['Standard','Schicht 1','Schicht 2','Schicht 3'];
+  const SHIFTS=(()=>{try{const c=JSON.parse(localStorage.getItem('jsr_shift_cfg')||'{}');const all=[...new Set(Object.values(c).flat().map(s=>s.label))];return all.length>0?all:['Standard','Schicht 1','Schicht 2'];}catch(e){return['Standard'];}})();
   const TABLE_SIZES = [{v:1,label:'1er Einzelplatz'},{v:2,label:'2er Tisch'},{v:4,label:'4er Tisch'},{v:8,label:'8er Tisch'}];
 
   // Stable color per project - based on position in projects array
@@ -15056,6 +15049,7 @@ function SystemSettingsTab({projects, setProjects, employees}){
     {key:'positions',   label:'💼 Positionen'},
 
     {key:'hardware_types',   label:'🖥 Hardware'},
+    {key:'shift_cfg',         label:'🕑 Schichten'},
     {key:'raumkosten',       label:'🏢 Raumkosten'},
     {key:'workmodels',  label:'⏰ Arbeitszeitmodelle'},
     {key:'kpicfg',      label:'📊 KPI-Konfiguration'},
@@ -15112,6 +15106,9 @@ function SystemSettingsTab({projects, setProjects, employees}){
   const saveRkLocations=locs=>{localStorage.setItem('jsr_rk_locations',JSON.stringify(locs));setRkLocationsRaw([...locs]);};
   const [rkLocId, setRkLocId] = useState('rk_loc_tirana');
   const [rkOhV, setRkOhV] = useState(0); // version bump to force overhead re-render
+  const DEF_SHIFT_CFG={"proj_hc_sales":[{"id":"s1","label":"Frueh","value":"08:00-16:30","hours":8.0,"net":7.5},{"id":"s2","label":"Frueh lang","value":"09:00-17:30","hours":8.5,"net":8.0},{"id":"s3","label":"Spaet frueh","value":"11:30-20:00","hours":8.5,"net":8.0},{"id":"s4","label":"Spaet","value":"13:30-22:00","hours":8.5,"net":8.0},{"id":"s5","label":"Frueh kurz","value":"08:00-15:30","hours":7.5,"net":7.0}],"proj_hc_support":[{"id":"s1","label":"Frueh lang","value":"08:00-17:30","hours":9.5,"net":9.0},{"id":"s2","label":"Spaet frueh","value":"11:30-20:00","hours":8.5,"net":8.0}],"proj_giga_all":[{"id":"s1","label":"Standard","value":"09:00-17:30","hours":8.5,"net":8.0},{"id":"s2","label":"Spaet","value":"10:30-19:00","hours":8.5,"net":8.0}]};
+  const [shiftCfg,setShiftCfgRaw]=useState(()=>{try{const s=JSON.parse(localStorage.getItem('jsr_shift_cfg')||'null');return s||DEF_SHIFT_CFG;}catch(e){return DEF_SHIFT_CFG;}});
+  const saveShiftCfg=cfg=>{localStorage.setItem('jsr_shift_cfg',JSON.stringify(cfg));setShiftCfgRaw({...cfg});};
   const bumpOh = () => setRkOhV(v=>v+1);
   // Overhead: [{id, role, emp_id}] per location - stored in jsr_rk_overhead_<locId>
   const getRkOverhead=(locId)=>{try{return JSON.parse(localStorage.getItem('jsr_rk_overhead_'+locId)||'[]');}catch(e){return[];}};
@@ -16083,6 +16080,66 @@ function SystemSettingsTab({projects, setProjects, employees}){
                   alert('Raumkosten ' + ['Januar','Februar','März','April','Mai','Juni','Juli','August','September','Oktober','November','Dezember'][rkMonth-1] + ' ' + rkYear + ' gespeichert!');
                 }}>💾 Speichern</button>
               </div>
+            </div>
+          );
+        })()}
+
+        {/* SHIFT CFG */}
+        {activeSection==='shift_cfg'&&(()=>{
+          const allEntries=Object.entries(shiftCfg);
+          const calcH=v=>{
+            const m=v.match(/(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})/);
+            if(!m)return{hours:0,net:0};
+            const s=parseInt(m[1])*60+parseInt(m[2]),e=parseInt(m[3])*60+parseInt(m[4]),h=(e-s)/60;
+            return{hours:Math.round(h*10)/10,net:Math.round((h-.5)*10)/10};
+          };
+          return(
+            <div>
+              <div className="card" style={{marginBottom:12}}>
+                <div className="card-header">
+                  <span className="card-title">Schichten pro Projekt und Skill</span>
+                  <button className="btn btn-primary btn-sm" onClick={()=>{
+                    const proj=window.prompt('Projekt-ID (z.B. proj_hc):');
+                    if(!proj)return;
+                    const skill=window.prompt('Skill-Key (z.B. sales) oder leer:');
+                    const key=proj+'_'+(skill||'all');
+                    if(shiftCfg[key]){alert('Existiert bereits.');return;}
+                    saveShiftCfg({...shiftCfg,[key]:[]});
+                  }}>+ Projekt / Skill</button>
+                </div>
+                <div style={{padding:'8px 16px 12px',fontSize:12,color:'var(--muted)'}}>Format HH:MM-HH:MM. Nettostunden = brutto minus 30 Min Pause.</div>
+              </div>
+              {allEntries.map(([key,shifts])=>{
+                const lu=key.lastIndexOf('_');
+                const projId=key.substring(0,lu);
+                const skillKey=key.substring(lu+1);
+                const proj=(projects||[]).find(p=>p.id===projId);
+                const projName=proj?proj.name:projId;
+                const skillLabel=skillKey==='all'?'Alle Skills':skillKey;
+                return(
+                  <div key={key} className="card" style={{marginBottom:10}}>
+                    <div className="card-header">
+                      <span className="card-title">{projName} <span style={{marginLeft:8,fontSize:11,padding:'2px 8px',borderRadius:4,background:'var(--blue-bg)',color:'var(--blue)',fontWeight:700}}>{skillLabel}</span></span>
+                      <div style={{display:'flex',gap:6}}>
+                        <button className="btn btn-sm btn-primary" onClick={()=>saveShiftCfg({...shiftCfg,[key]:[...shifts,{id:'sh_'+Date.now(),label:'Neue Schicht',value:'08:00-16:30',hours:8,net:7.5}]})}>+ Schicht</button>
+                        <button className="btn btn-sm" style={{color:'var(--red)'}} onClick={()=>{if(!window.confirm('Loeschen?'))return;const u={...shiftCfg};delete u[key];saveShiftCfg(u);}}>x Eintrag</button>
+                      </div>
+                    </div>
+                    <div>
+                      {shifts.length===0&&<div style={{padding:'12px 16px',fontSize:12,color:'var(--muted)'}}>Noch keine Schichten.</div>}
+                      {shifts.map((sh,i)=>(
+                        <div key={sh.id||i} style={{display:'grid',gridTemplateColumns:'180px 160px 70px 70px auto',gap:8,padding:'10px 16px',borderBottom:'1px solid var(--border)',alignItems:'center'}}>
+                          <input className="form-input" value={sh.label} placeholder="Bezeichnung" onChange={e=>saveShiftCfg({...shiftCfg,[key]:shifts.map((s,j)=>j===i?{...s,label:e.target.value}:s)})}/>
+                          <input className="form-input" value={sh.value} placeholder="08:00-16:30" style={{fontWeight:700,fontFamily:'monospace'}} onChange={e=>{const {hours,net}=calcH(e.target.value);saveShiftCfg({...shiftCfg,[key]:shifts.map((s,j)=>j===i?{...s,value:e.target.value,hours,net}:s)});}}/>
+                          <div style={{textAlign:'center'}}><div style={{fontWeight:700,fontSize:13}}>{sh.hours}h</div><div style={{fontSize:10,color:'var(--muted)'}}>brutto</div></div>
+                          <div style={{textAlign:'center'}}><div style={{fontWeight:700,fontSize:13,color:'var(--blue)'}}>{sh.net}h</div><div style={{fontSize:10,color:'var(--muted)'}}>netto</div></div>
+                          <button className="btn btn-sm" style={{color:'var(--red)'}} onClick={()=>saveShiftCfg({...shiftCfg,[key]:shifts.filter((_,j)=>j!==i)})}>x</button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           );
         })()}
@@ -17822,6 +17879,7 @@ function App(){
       ]}));
     }
   
+    if(!localStorage.getItem('jsr_shift_cfg')){localStorage.setItem('jsr_shift_cfg',JSON.stringify({"proj_hc_sales":[{"id":"s1","label":"Frueh","value":"08:00-16:30","hours":8.0,"net":7.5},{"id":"s2","label":"Frueh lang","value":"09:00-17:30","hours":8.5,"net":8.0},{"id":"s3","label":"Spaet frueh","value":"11:30-20:00","hours":8.5,"net":8.0},{"id":"s4","label":"Spaet","value":"13:30-22:00","hours":8.5,"net":8.0},{"id":"s5","label":"Frueh kurz","value":"08:00-15:30","hours":7.5,"net":7.0}],"proj_hc_support":[{"id":"s1","label":"Frueh lang","value":"08:00-17:30","hours":9.5,"net":9.0},{"id":"s2","label":"Spaet frueh","value":"11:30-20:00","hours":8.5,"net":8.0}],"proj_giga_all":[{"id":"s1","label":"Standard","value":"09:00-17:30","hours":8.5,"net":8.0},{"id":"s2","label":"Spaet","value":"10:30-19:00","hours":8.5,"net":8.0}]}));}
     if(!localStorage.getItem('jsr_workforce_plans')){const wp={};const pk='proj_hc_all_2025_05';const sh=[['emp_001','2025-05-05','08:00-16:30'],['emp_001','2025-05-06','08:00-16:30'],['emp_001','2025-05-07','08:00-16:30'],['emp_001','2025-05-08','08:00-16:30'],['emp_001','2025-05-09','08:00-16:30'],['emp_002','2025-05-05','13:30-22:00'],['emp_002','2025-05-06','13:30-22:00'],['emp_002','2025-05-07','13:30-22:00'],['emp_002','2025-05-08','13:30-22:00'],['emp_002','2025-05-09','13:30-22:00'],['emp_003','2025-05-05','08:00-16:30'],['emp_003','2025-05-06','08:00-16:30'],['emp_003','2025-05-07','08:00-16:30'],['emp_003','2025-05-08','08:00-16:30'],['emp_003','2025-05-09','08:00-16:30'],['emp_004','2025-05-05','08:00-16:30'],['emp_004','2025-05-06','08:00-16:30'],['emp_004','2025-05-07','08:00-16:30'],['emp_004','2025-05-08','08:00-16:30'],['emp_004','2025-05-09','08:00-16:30'],['emp_004','2025-05-10','13:30-22:00']];wp[pk]={};sh.forEach(([id,d,s])=>{const sm=s.match(/(\d+):(\d+)-(\d+):(\d+)/);const h=sm?(parseInt(sm[3])*60+parseInt(sm[4])-parseInt(sm[1])*60-parseInt(sm[2]))/60:0;wp[pk][id+'_'+d]={shift:s,hours:h,net:h-0.5};});wp['forecast_'+pk]={19:{MO:30,DI:30,MI:32,DO:28,FR:28,SA:8,SO:0}};localStorage.setItem('jsr_workforce_plans',JSON.stringify(wp));}
   },[]);
 
