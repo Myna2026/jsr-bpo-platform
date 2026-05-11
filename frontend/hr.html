@@ -6894,9 +6894,18 @@ function WorkforcePlanningView({employees, projects, showToast}){
 
   // ── HOLIDAYCHECK FORMAT PARSER ────────────────────────────────────
   function parseHolidaycheckFormat(wb, skill) {
-    const DAYMAP = {'Montag':'MO','Dienstag':'DI','Mittwoch':'MI','Donnerstag':'DO','Freitag':'FR','Samstag':'SA','Sonntag':'SO'};
-    const wsName = wb.SheetNames.find(n=>n.toLowerCase().includes('tagesplan')) || wb.SheetNames[0];
-    const rows = XLSX.utils.sheet_to_json(wb.Sheets[wsName], {header:1, defval:null});
+    const DAYMAP={'Montag':'MO','Dienstag':'DI','Mittwoch':'MI','Donnerstag':'DO','Freitag':'FR','Samstag':'SA','Sonntag':'SO'};
+    const warnings=[];
+    const wsName=wb.SheetNames.find(n=>n.toLowerCase().includes('tagesplan'));
+    if(!wsName) throw new Error('Sheet Tagesplanung nicht gefunden. Sheets: '+wb.SheetNames.join(', ')+'. Falsches File?');
+    if(!wb.SheetNames.find(n=>n.toLowerCase().includes('intervall'))) warnings.push('Sheet Intervallplanung fehlt - Intervalle werden nicht importiert.');
+    const rows=XLSX.utils.sheet_to_json(wb.Sheets[wsName],{header:1,defval:null});
+    const dataRows=rows.filter(r=>r[0]&&typeof r[0]==='number'&&r[0]>=1&&r[0]<=54);
+    if(dataRows.length===0) throw new Error('Keine Tagesdaten in Spalte A (KW 1-54). Spaltenstruktur hat sich geaendert?\nErste Zeile: '+rows[0].slice(0,6).join(' | '));
+    if(!(dataRows[0][3] instanceof Date)) warnings.push('Datum nicht in Spalte D erkannt (Wert: '+String(dataRows[0][3]).slice(0,15)+'). Format ggf. geaendert.');
+    if(!dataRows.some(r=>parseFloat(r[5])>0)) warnings.push('Keine Stunden in Spalte F (FC Sales). Andere Spalte?');
+    if(warnings.length>0&&!window.confirm('Format-Hinweise:\n\n'+warnings.join('\n')+'\n\nTrotzdem fortfahren?')) throw new Error('Import abgebrochen.');
+
     
     // Parse intervals
     const intervals = {};
@@ -6926,8 +6935,12 @@ function WorkforcePlanningView({employees, projects, showToast}){
       const kw = parseInt(row[0]);
       if(isNaN(kw)||kw<1||kw>54) return;
       const dateVal = row[3];
-      if(!(dateVal instanceof Date)) return;
-      const dateStr = dateVal.toISOString().slice(0,10);
+      if(!dateVal) return;
+      let dateStr;
+      if(dateVal instanceof Date) dateStr=dateVal.toISOString().slice(0,10);
+      else if(typeof dateVal==='number') dateStr=new Date(Math.round((dateVal-25569)*86400000)).toISOString().slice(0,10);
+      else if(typeof dateVal==='string') dateStr=dateVal.slice(0,10);
+      else return;
       const weekdayTxt = String(row[1]||'');
       const fcSales = parseFloat(row[5])||parseFloat(row[4])||0;
       const fcBackoffice = parseFloat(row[6])||0;
@@ -7056,6 +7069,8 @@ function WorkforcePlanningView({employees, projects, showToast}){
   };
   // ── PREDEFINED IMPORTER PROFILES ─────────────────────────────────
   function confirmForecastImport(preview){
+    if(!preview||!preview.days||!preview.days.length){alert('Keine Daten gefunden.');return;}
+    if(!selProjId){alert('Bitte Projekt auswaehlen.');return;}
     const key=planKey();
     const fkey='forecast_'+key;
     const fcByKwDay={};
@@ -7148,8 +7163,7 @@ function WorkforcePlanningView({employees, projects, showToast}){
             <div style={{display:'flex',gap:8}}>
               <button className="btn" onClick={()=>setImportPreview(null)}>Abbrechen</button>
               <button className="btn btn-primary" onClick={()=>{
-                confirmForecastImport(importPreview);
-                setImportPreview(null);
+                const snap=importPreview;setImportPreview(null);setTimeout(()=>confirmForecastImport(snap),0);
               }}>✅ Importieren ({importPreview.days.length} Tage)</button>
             </div>
           </div>
