@@ -6771,8 +6771,12 @@ function WorkforcePlanningView({employees, projects, showToast}){
 
   function getShiftsForPlan(){
     const cfg=getShiftConfig();
-    const key=selProjId&&selSkill?selProjId+'_'+selSkill:selProjId+'_all';
-    return cfg[key]||cfg[selProjId+'_all']||[];
+    if(!selProjId) return [];
+    const exactKey=selProjId+(selSkill?'_'+selSkill:'_all');
+    if(cfg[exactKey]&&cfg[exactKey].length) return cfg[exactKey];
+    const allForProj=Object.entries(cfg).filter(([k])=>k.startsWith(selProjId+'_')).flatMap(([,v])=>v);
+    if(allForProj.length) return allForProj;
+    return [];
   }
 
   function parseShiftToSlots(shiftValue){
@@ -6914,7 +6918,7 @@ function WorkforcePlanningView({employees, projects, showToast}){
     const reader=new FileReader();
     reader.onload=ev=>{
       try{
-        const wb=XLSX.read(new Uint8Array(ev.target.result),{type:'array',cellDates:true});
+        const wb=XLSX.read(new Uint8Array(ev.target.result),{type:'array',cellDates:false});
         const wsName=wb.SheetNames.find(n=>n.toLowerCase().includes('intervall'));
         if(!wsName) throw new Error('Sheet "Intervallplanung" nicht gefunden. Sheets: '+wb.SheetNames.join(', '));
         const rows=XLSX.utils.sheet_to_json(wb.Sheets[wsName],{header:1,defval:null});
@@ -6924,12 +6928,37 @@ function WorkforcePlanningView({employees, projects, showToast}){
         const dfc={};
         rows.slice(1).forEach(row=>{
           if(!row[0]||!row[1]) return;
-          const d=row[0] instanceof Date?row[0].toISOString().slice(0,10):String(row[0]).slice(0,10);
+          let d='';
+          if(row[0] instanceof Date){
+            d=row[0].toISOString().slice(0,10);
+          } else if(typeof row[0]==='number'){
+            // Excel serial date: days since 1900-01-01 (with leap year bug)
+            const epoch=new Date(Date.UTC(1899,11,30));
+            const ms=Math.round((row[0]|0)*86400000);
+            d=new Date(epoch.getTime()+ms).toISOString().slice(0,10);
+          } else {
+            d=String(row[0]||'').slice(0,10);
+          }
+          // Parse time: raw number (Excel fraction of day), Date, or string
           let timeStr='';
           const tv=row[1];
-          if(tv instanceof Date){const h=String(tv.getUTCHours()).padStart(2,'0');const mi=String(tv.getUTCMinutes()).padStart(2,'0');timeStr=h+':'+mi;}
-          else if(typeof tv==='number'){const ms=Math.round(tv*86400000);const h=Math.floor(ms/3600000);const mi=Math.floor((ms%3600000)/60000);timeStr=String(h).padStart(2,'0')+':'+String(mi).padStart(2,'0');}
-          else timeStr=String(tv).slice(0,5);
+          if(typeof tv==='number'&&tv>=0&&tv<1){
+            // Excel time fraction: 0.333... = 08:00
+            const totalMin=Math.round(tv*24*60);
+            const h=Math.floor(totalMin/60);
+            const mi=totalMin%60;
+            timeStr=String(h).padStart(2,'0')+':'+String(mi).padStart(2,'0');
+          } else if(typeof tv==='number'&&tv>=1){
+            // Excel datetime: integer=date, decimal=time
+            const totalMin=Math.round((tv%1)*24*60);
+            const h=Math.floor(totalMin/60);
+            const mi=totalMin%60;
+            timeStr=String(h).padStart(2,'0')+':'+String(mi).padStart(2,'0');
+          } else if(tv instanceof Date){
+            timeStr=String(tv.getUTCHours()).padStart(2,'0')+':'+String(tv.getUTCMinutes()).padStart(2,'0');
+          } else {
+            timeStr=String(tv||'').slice(0,5);
+          }
           const hours=parseFloat(row[3])||0;
           // Map time to slot index
           const slotIdx=TIME_SLOTS.indexOf(timeStr);
