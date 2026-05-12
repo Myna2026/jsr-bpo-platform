@@ -394,14 +394,14 @@ const dayName = dateStr => ['So','Mo','Di','Mi','Do','Fr','Sa'][new Date(dateStr
 
 const DUMMY_EMPLOYEES = [
   {
-    id:'emp_001', staff_number:'AL-2401', status:'active',
+    id:'emp_001', staff_number:'AL-2401', shift_earliest:'08:00', shift_latest:'20:00', status:'active',
     first_name:'Artjola', last_name:'Kelmendi', birthday:'1995-03-14', gender:'f',
     email:'a.kelmendi@jsr-bpo.com', phone:'+355 69 123 4567', city:'Tirana', location:'al',
     position:'Senior Support Agent', project_id:'proj_hc', project_skill:'support',
     language_level:'C1', writing_level:'C1', assessed_level:'C1',
     languages_str:'Albanisch (Muttersprache), Deutsch (C1), Englisch (B2)',
     work_model:'full_time', work_hours:'8', hourly_rate:'350',
-    work_weekend:false, work_holidays:false, vacation_days_quota:20, productive_pct:85,
+    work_weekend:false, work_holidays:false, vacation_days_quota:20, productive_pct:8, vacation_days_quota:25,
     hire_date:'2022-05-01', contract_start:'2022-05-01', contract:'permanent', contract_signed_manual:true,
     monthly_bonus:0, portal_password:'1234',
     bank_name:'Raiffeisen Bank Albania', bank_account:'AL47 2121 1009 0000 0002 3569 8741',
@@ -423,7 +423,7 @@ const DUMMY_EMPLOYEES = [
     ],
   },
   {
-    id:'emp_002', staff_number:'AL-2309', status:'active',
+    id:'emp_002', staff_number:'AL-2309', shift_earliest:'08:00', shift_latest:'22:00', status:'active',
     first_name:'Blerim', last_name:'Hoxha', birthday:'1990-11-22', gender:'m',
     email:'b.hoxha@jsr-bpo.com', phone:'+355 69 987 6543', city:'Tirana', location:'al',
     position:'Sales Agent', project_id:'proj_hc', project_skill:'sales',
@@ -447,7 +447,7 @@ const DUMMY_EMPLOYEES = [
     absences:[{type:'vacation', from:'2024-08-05', to:'2024-08-16', days:10, paid:true, approved:true, note:'Sommerurlaub'}],
   },
   {
-    id:'emp_003', staff_number:'XK-1801', status:'active',
+    id:'emp_003', staff_number:'XK-1801', shift_earliest:'08:00', shift_latest:'20:00', status:'active',
     first_name:'Fjolla', last_name:'Berisha', birthday:'1997-07-08', gender:'f',
     email:'f.berisha@jsr-bpo.com', phone:'+383 44 567 890', city:'Prishtina', location:'xk',
     position:'Support Agent', project_id:'proj_hc', project_skill:'support',
@@ -467,7 +467,7 @@ const DUMMY_EMPLOYEES = [
     absences:[{type:'sick', from:'2024-10-14', to:'2024-10-15', days:2, paid:true, approved:true, note:'Arzttermin'}],
   },
   {
-    id:'emp_004', staff_number:'AL-2502', status:'active',
+    id:'emp_004', staff_number:'AL-2502', shift_earliest:'08:00', shift_latest:'22:00', status:'active',
     first_name:'Erion', last_name:'Cela', birthday:'1993-04-19', gender:'m',
     email:'e.cela@jsr-bpo.com', phone:'+355 69 234 5678', city:'Tirana', location:'al',
     position:'Sales Team Lead', project_id:'proj_hc', project_skill:'sales',
@@ -6891,33 +6891,118 @@ function WorkforcePlanningView({employees,projects,showToast}){
     const sh=getShifts();
     if(!Object.keys(ifc).length){alert('Bitte zuerst FC importieren.');return;}
     const u={...plan};
+
+    // Pre-compute monthly net target and already planned net per employee
+    const empNetPlanned={};
+    const empNetTarget={};
+    planEmps.forEach(emp=>{
+      // Count already planned net hours this month (existing plan)
+      let net=0;
+      mdays().forEach(d=>{
+        const e=u['s_'+emp.id+'_'+iso(d)];
+        if(e) net+=e.net||0;
+      });
+      empNetPlanned[emp.id]=net;
+      // Monthly net target: work_hours * work_days_in_month (excl weekends, absence)
+      const workH=parseFloat(emp.work_hours||8);
+      let workDays=0;
+      mdays().forEach(d=>{
+        const dow=d.getDay();
+        if(dow===0||dow===6) return; // skip weekends by default
+        if(!absent(emp,iso(d))) workDays++;
+      });
+      // Netto = Brutto minus average pause (0.5h per shift)
+      empNetTarget[emp.id]=Math.round(workDays*(workH-0.5)*10)/10;
+    });
+
+    // Helper: parse shift time to minutes
+    function shiftStartMin(val){
+      const m=val.match(/^(\d{1,2}):(\d{2})/);
+      return m?parseInt(m[1])*60+parseInt(m[2]):0;
+    }
+    function shiftEndMin(val){
+      const m=val.match(/-(\d{1,2}):(\d{2})$/);
+      return m?parseInt(m[1])*60+parseInt(m[2]):0;
+    }
+
     mdays().forEach(d=>{
       const ds=iso(d),dow=d.getDay();
       const daySlots=ifc[ds];
       if(!daySlots||!daySlots.some(v=>v>0)) return;
+
       planEmps.forEach(emp=>{
-        if(absent(emp,ds)) return;
-        if(dow===0&&!emp.work_weekend) return;
-        if(dow===6&&!emp.work_weekend) return;
+        // 1. Already planned this day -> skip
         if(u['s_'+emp.id+'_'+ds]) return;
+
+        // 2. Absence (vacation, sick, etc.) -> skip
+        if(absent(emp,ds)) return;
+
+        // 3. Weekend constraints
+        if(dow===0&&!emp.work_weekend) return; // Sunday
+        if(dow===6&&!emp.work_weekend) return; // Saturday
+
+        // 4. Monthly net hours already reached -> skip
+        if(empNetPlanned[emp.id]>=(empNetTarget[emp.id]||0)) return;
+
+        // 5. Employee shift time constraints
+        // emp.shift_earliest: earliest start in minutes (e.g. '08:00' -> 480)
+        // emp.shift_latest:   latest end   in minutes (e.g. '20:00' -> 1200)
+        const earliest=emp.shift_earliest
+          ?emp.shift_earliest.split(':').reduce((h,m,i)=>h+(i===0?parseInt(m)*60:parseInt(m)),0)
+          :0;
+        const latest=emp.shift_latest
+          ?emp.shift_latest.split(':').reduce((h,m,i)=>h+(i===0?parseInt(m)*60:parseInt(m)),0)
+          :1440;
+
+        // 6. Filter allowed shifts
+        const allowed=sh.filter(s=>{
+          if(!s.value) return false;
+          const start=shiftStartMin(s.value);
+          const end=shiftEndMin(s.value);
+          if(earliest>0&&start<earliest) return false;
+          if(latest<1440&&end>latest) return false;
+          return true;
+        });
+        if(!allowed.length) return;
+
+        // 7. Best shift = max FC coverage among allowed shifts
         let best=null,bestScore=-1;
-        sh.forEach(s=>{
-          if(!s.value) return;
+        allowed.forEach(s=>{
           const sc=slotIdxs(s.value).reduce((sum,i)=>sum+(parseFloat(daySlots[i])||0),0);
           if(sc>bestScore){bestScore=sc;best=s;}
         });
-        if(best&&bestScore>0){
-          u['s_'+emp.id+'_'+ds]={shift:best.value,hours:best.hours,net:best.net,label:best.label};
-          const sl=slotIdxs(best.value);
-          sl.forEach((i,pos)=>{
-            const mid=Math.floor(sl.length/2);
-            u['i_'+emp.id+'_'+ds+'_'+i]=sl.length>6&&pos===mid&&pos>=4?'p':'1';
-          });
-        }
+
+        if(!best||bestScore<=0) return;
+
+        // 8. Check if adding this shift would exceed monthly target
+        const netAfter=(empNetPlanned[emp.id]||0)+(best.net||0);
+        // Allow slight overage (max 0.5h over target) rather than leaving gaps
+        if(netAfter>(empNetTarget[emp.id]||0)+0.5) return;
+
+        // 9. Assign shift
+        u['s_'+emp.id+'_'+ds]={shift:best.value,hours:best.hours,net:best.net,label:best.label};
+        empNetPlanned[emp.id]=(empNetPlanned[emp.id]||0)+(best.net||0);
+
+        // 10. Populate interval cells
+        const sl=slotIdxs(best.value);
+        sl.forEach((i,pos)=>{
+          const mid=Math.floor(sl.length/2);
+          u['i_'+emp.id+'_'+ds+'_'+i]=sl.length>6&&pos===mid&&pos>=4?'p':'1';
+        });
       });
     });
+
     save(u);
+    // Summary
+    const planned=planEmps.map(emp=>{
+      const days=mdays().filter(d=>u['s_'+emp.id+'_'+iso(d)]).length;
+      const net=Math.round((empNetPlanned[emp.id]||0)*10)/10;
+      return emp.first_name+' '+emp.last_name+': '+days+'T / '+net+'h Netto';
+    }).join('
+');
     showToast&&showToast('Vorplanung abgeschlossen','success');
+    console.log('Autoplan summary:
+'+planned);
   }
 
   // ── Coverage ───────────────────────────────────────────────
