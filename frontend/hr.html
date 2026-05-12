@@ -6685,367 +6685,366 @@ function PayrollView({employees, projects, showToast}){
   );
 }
 
-function WorkforcePlanningView({employees, projects, showToast}){
-  // ── TIME SLOTS: 08:00 - 22:30 in 30min steps = 30 slots ──────────
+function WorkforcePlanningView({employees,projects,showToast}){
+
+  // ── TIME SLOTS 08:00-22:30 in 30min steps ─────────────────────
   const TIME_SLOTS=[];
   for(let h=8;h<=22;h++){
-    TIME_SLOTS.push(h+':00');
-    if(h<22) TIME_SLOTS.push(h+':30');
+    TIME_SLOTS.push(String(h).padStart(2,'0')+':00');
+    if(h<22) TIME_SLOTS.push(String(h).padStart(2,'0')+':30');
   }
-  TIME_SLOTS.push('22:30');
-  // Slots: 08:00,08:30,...,22:00,22:30 = 30 slots
+  TIME_SLOTS.push('22:30'); // 30 slots total
 
-  const DAYS_DE=['MO','DI','MI','DO','FR','SA','SO'];
-  const MONTHS_DE=['Januar','Februar','März','April','Mai','Juni','Juli','August','September','Oktober','November','Dezember'];
+  const DAYS=['MO','DI','MI','DO','FR','SA','SO'];
+  const MONTHS=['Januar','Februar','März','April','Mai','Juni','Juli','August','September','Oktober','November','Dezember'];
 
-  // ── STATE ─────────────────────────────────────────────────────────
+  // ── STATE ────────────────────────────────────────────────────
   const today=new Date();
-  const [view,setView]=useState('schicht'); // 'schicht' | 'intervall'
+  const [viewMode,setViewMode]=useState('schicht');
   const [selProjId,setSelProjId]=useState('');
   const [selSkill,setSelSkill]=useState('');
   const [selYear,setSelYear]=useState(today.getFullYear());
   const [selMonth,setSelMonth]=useState(today.getMonth()+1);
-  const [selDate,setSelDate]=useState(null); // for intervall view: which day
-  const [planData,setPlanData]=useState({});       // jsr_wfp2_<key>
-  const [intervalFC,setIntervalFC]=useState({});   // jsr_wfp2_ifc_<key>
-  const [dayFC,setDayFC]=useState({});             // jsr_wfp2_dfc_<key>
-  const [importModalOpen,setImportModalOpen]=useState(false);
+  const [selDate,setSelDate]=useState(null);
+  const [planData,setPlanData]=useState({});
+  const [fcIntervals,setFcIntervals]=useState({});
+  const [fcDayTotals,setFcDayTotals]=useState({});
+  const [importModal,setImportModal]=useState(false);
   const [importPreview,setImportPreview]=useState(null);
-  const [editShiftModal,setEditShiftModal]=useState(null); // {empId,dateStr}
-  const [editCellModal,setEditCellModal]=useState(null);   // {empId,dateStr,slot}
+  const [shiftPicker,setShiftPicker]=useState(null);
+  const [cellPicker,setCellPicker]=useState(null);
+  const [importing,setImporting]=useState(false);
 
-  // ── PLAN KEY ──────────────────────────────────────────────────────
-  const planKey=()=>selProjId+(selSkill?'_'+selSkill:'_all')+'_'+selYear+'_'+String(selMonth).padStart(2,'0');
+  // ── PLAN KEY ────────────────────────────────────────────────
+  const pk=()=>selProjId+'_'+(selSkill||'all')+'_'+selYear+'_'+String(selMonth).padStart(2,'0');
 
-  // ── PERSIST / LOAD ────────────────────────────────────────────────
-  useState(()=>{
+  // Load data when project/month changes
+  useEffect(()=>{
     if(!selProjId) return;
-    const k=planKey();
-    try{ setPlanData(JSON.parse(localStorage.getItem('jsr_wfp2_'+k)||'{}')); }catch(e){ setPlanData({}); }
-    try{ setIntervalFC(JSON.parse(localStorage.getItem('jsr_wfp2_ifc_'+k)||'{}')); }catch(e){ setIntervalFC({}); }
-    try{ setDayFC(JSON.parse(localStorage.getItem('jsr_wfp2_dfc_'+k)||'{}')); }catch(e){ setDayFC({}); }
-  });
+    const k=pk();
+    try{setPlanData(JSON.parse(localStorage.getItem('jsr_wfp2_'+k)||'{}'));}catch(e){setPlanData({});}
+    try{setFcIntervals(JSON.parse(localStorage.getItem('jsr_wfp2_ifc_'+k)||'{}'));}catch(e){setFcIntervals({});}
+    try{setFcDayTotals(JSON.parse(localStorage.getItem('jsr_wfp2_dfc_'+k)||'{}'));}catch(e){setFcDayTotals({});}
+  },[selProjId,selSkill,selYear,selMonth]);
 
   function savePlan(data){
-    const k=planKey();
-    localStorage.setItem('jsr_wfp2_'+k,JSON.stringify(data));
+    localStorage.setItem('jsr_wfp2_'+pk(),JSON.stringify(data));
     setPlanData({...data});
   }
 
-  // ── HELPERS ───────────────────────────────────────────────────────
-  function getKW(date){
-    const d=new Date(Date.UTC(date.getFullYear(),date.getMonth(),date.getDate()));
-    const day=d.getUTCDay()||7;
-    d.setUTCDate(d.getUTCDate()+4-day);
-    const ys=new Date(Date.UTC(d.getUTCFullYear(),0,1));
-    return Math.ceil((((d-ys)/86400000)+1)/7);
+  // ── HELPERS ─────────────────────────────────────────────────
+  function getKW(d){
+    const dt=new Date(Date.UTC(d.getFullYear(),d.getMonth(),d.getDate()));
+    const day=dt.getUTCDay()||7;
+    dt.setUTCDate(dt.getUTCDate()+4-day);
+    const ys=new Date(Date.UTC(dt.getUTCFullYear(),0,1));
+    return Math.ceil((((dt-ys)/86400000)+1)/7);
   }
 
-  function getWeeksOfMonth(year,month){
+  function getWeeks(year,month){
     const weeks=[];
     const d=new Date(year,month-1,1);
-    const dow=d.getDay();
-    const offset=dow===0?-6:1-dow;
-    d.setDate(d.getDate()+offset);
-    while(true){
+    const off=d.getDay()===0?-6:1-d.getDay();
+    d.setDate(d.getDate()+off);
+    while(weeks.length<6){
       if(d.getFullYear()>year||(d.getFullYear()===year&&d.getMonth()>month-1)) break;
       const days=[];
       for(let i=0;i<7;i++) days.push(new Date(d.getFullYear(),d.getMonth(),d.getDate()+i));
       weeks.push({kw:getKW(d),days});
       d.setDate(d.getDate()+7);
-      if(weeks.length>=6) break;
     }
     return weeks;
   }
 
-  function getDaysOfMonth(year,month){
+  function getMonthDays(year,month){
     const days=[];
-    const total=new Date(year,month,0).getDate();
-    for(let d=1;d<=total;d++) days.push(new Date(year,month-1,d));
+    const n=new Date(year,month,0).getDate();
+    for(let i=1;i<=n;i++) days.push(new Date(year,month-1,i));
     return days;
   }
 
-  function getShiftConfig(){
-    try{ return JSON.parse(localStorage.getItem('jsr_shift_cfg')||'{}'); }catch(e){ return{}; }
+  function fmt(d){return d.toISOString().slice(0,10);}
+
+  function getAbsence(emp,dateStr){
+    return(emp.absences||[]).find(a=>a.from&&a.to&&dateStr>=a.from&&dateStr<=a.to);
   }
 
-  function getShiftsForPlan(){
-    const cfg=getShiftConfig();
-    if(!selProjId) return [];
-    const exactKey=selProjId+(selSkill?'_'+selSkill:'_all');
-    if(cfg[exactKey]&&cfg[exactKey].length) return cfg[exactKey];
-    const allForProj=Object.entries(cfg).filter(([k])=>k.startsWith(selProjId+'_')).flatMap(([,v])=>v);
-    if(allForProj.length) return allForProj;
-    return [];
+  function getShifts(){
+    try{
+      const cfg=JSON.parse(localStorage.getItem('jsr_shift_cfg')||'{}');
+      const key=selProjId+(selSkill?'_'+selSkill:'_all');
+      if(cfg[key]&&cfg[key].length) return cfg[key];
+      // fallback: collect all shifts for this project
+      return Object.entries(cfg).filter(([k])=>k.startsWith(selProjId+'_')).flatMap(([,v])=>v);
+    }catch(e){return[];}
   }
 
-  function parseShiftToSlots(shiftValue){
-    // Return array of slot indices that this shift covers
-    if(!shiftValue) return [];
-    const m=shiftValue.match(/(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})/);
-    if(!m) return [];
-    const startMin=parseInt(m[1])*60+parseInt(m[2]);
-    const endMin=parseInt(m[3])*60+parseInt(m[4]);
-    const slots=[];
-    TIME_SLOTS.forEach((slot,idx)=>{
-      const [sh,sm]=slot.split(':').map(Number);
-      const slotMin=sh*60+sm;
-      if(slotMin>=startMin&&slotMin<endMin) slots.push(idx);
-    });
-    return slots;
+  function shiftToSlots(val){
+    if(!val) return[];
+    const m=val.match(/(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})/);
+    if(!m) return[];
+    const s=parseInt(m[1])*60+parseInt(m[2]);
+    const e=parseInt(m[3])*60+parseInt(m[4]);
+    return TIME_SLOTS.map((t,i)=>{
+      const [h,mi]=t.split(':').map(Number);
+      const tm=h*60+mi;
+      return tm>=s&&tm<e?i:-1;
+    }).filter(i=>i>=0);
   }
 
-  function slotToMinutes(slot){
-    const [h,m]=slot.split(':').map(Number);
-    return h*60+m;
-  }
+  // ── PLAN ACCESSORS ───────────────────────────────────────────
+  function getShiftEntry(empId,dateStr){return planData['s_'+empId+'_'+dateStr]||null;}
 
-  function isPauseAllowed(slotIdx,shiftStartSlotIdx,shiftEndSlotIdx){
-    // No pause in first 2h (4 slots) and last 1h (2 slots)
-    if(slotIdx<shiftStartSlotIdx+4) return false;
-    if(slotIdx>=shiftEndSlotIdx-2) return false;
-    return true;
-  }
-
-  function getAbsenceOnDate(emp,dateStr){
-    return (emp.absences||[]).find(a=>a.from&&a.to&&dateStr>=a.from&&dateStr<=a.to);
-  }
-
-  function formatDate(d){ return d.toISOString().slice(0,10); }
-
-  // ── FILTERED EMPLOYEES ────────────────────────────────────────────
-  const planEmps=(employees||[]).filter(e=>{
-    if(e.status!=='active') return false;
-    if(!selProjId||e.project_id!==selProjId) return false;
-    if(selSkill&&e.project_skill!==selSkill) return false;
-    return true;
-  });
-
-  // ── PLAN ENTRY GETTERS/SETTERS ────────────────────────────────────
-  // Schicht plan: key = empId_dateStr → {shift, hours, net}
-  function getShiftEntry(empId,dateStr){ return planData['s_'+empId+'_'+dateStr]||null; }
-  function setShiftEntry(empId,dateStr,shift,hours,net){
-    const upd={...planData,['s_'+empId+'_'+dateStr]:{shift,hours,net}};
-    // Auto-populate interval plan from shift
-    if(shift){
-      const slots=parseShiftToSlots(shift);
-      const shiftStart=slots[0]||0;
-      const shiftEnd=slots[slots.length-1]||0;
-      slots.forEach((si,idx)=>{
-        const pause=isPauseAllowed(si,shiftStart,shiftEnd)&&idx===Math.floor(slots.length/2)?'p':'1';
-        upd['i_'+empId+'_'+dateStr+'_'+si]=pause;
+  function setShiftEntry(empId,dateStr,sh){
+    const upd={...planData};
+    if(!sh||!sh.value){
+      delete upd['s_'+empId+'_'+dateStr];
+      // Clear interval cells for this day
+      TIME_SLOTS.forEach((_,si)=>delete upd['i_'+empId+'_'+dateStr+'_'+si]);
+    } else {
+      upd['s_'+empId+'_'+dateStr]={shift:sh.value,hours:sh.hours,net:sh.net,label:sh.label};
+      // Auto-populate interval cells
+      const slots=shiftToSlots(sh.value);
+      TIME_SLOTS.forEach((_,si)=>{
+        const inShift=slots.includes(si);
+        if(inShift){
+          // Place one pause in middle, not in first 4 slots or last 2 slots of shift
+          const posInShift=slots.indexOf(si);
+          const isPause=slots.length>6&&posInShift===Math.floor(slots.length/2)&&posInShift>=4&&posInShift<=slots.length-3;
+          upd['i_'+empId+'_'+dateStr+'_'+si]=isPause?'p':'1';
+        } else {
+          delete upd['i_'+empId+'_'+dateStr+'_'+si];
+        }
       });
     }
     savePlan(upd);
   }
 
-  // Interval plan: key = empId_dateStr_slotIdx → '1'|'p'|'0'
-  function getIntervalCell(empId,dateStr,slotIdx){ return planData['i_'+empId+'_'+dateStr+'_'+slotIdx]||'0'; }
-  function setIntervalCell(empId,dateStr,slotIdx,val){
-    const upd={...planData,['i_'+empId+'_'+dateStr+'_'+slotIdx]:val};
-    savePlan(upd);
+  function getCell(empId,dateStr,si){return planData['i_'+empId+'_'+dateStr+'_'+si]||'0';}
+  function setCell(empId,dateStr,si,val){
+    savePlan({...planData,['i_'+empId+'_'+dateStr+'_'+si]:val});
   }
 
-  // ── FC DATA ───────────────────────────────────────────────────────
-  function getFCForDate(dateStr){
-    // Returns array of 30 values (hours per slot) for this date
-    return intervalFC[dateStr]||[];
+  // ── FC IMPORT ────────────────────────────────────────────────
+  function parseTimeStr(tv){
+    // Handles: Date object, number (Excel fraction), string '08:00:00' / '8:00 AM'
+    if(tv instanceof Date){
+      return String(tv.getUTCHours()).padStart(2,'0')+':'+String(tv.getUTCMinutes()).padStart(2,'0');
+    }
+    if(typeof tv==='number'){
+      const frac=tv<1?tv:(tv%1);
+      const totalMin=Math.round(frac*1440);
+      return String(Math.floor(totalMin/60)).padStart(2,'0')+':'+String(totalMin%60).padStart(2,'0');
+    }
+    if(typeof tv==='string'){
+      // Remove AM/PM, take HH:MM
+      const clean=tv.replace(/\s*(AM|PM)$/i,'').trim();
+      const parts=clean.split(':');
+      let h=parseInt(parts[0])||0;
+      const mi=parseInt(parts[1])||0;
+      if(/PM/i.test(tv)&&h<12) h+=12;
+      if(/AM/i.test(tv)&&h===12) h=0;
+      return String(h).padStart(2,'0')+':'+String(mi).padStart(2,'0');
+    }
+    return '';
   }
 
-  function getDayFCHours(dateStr){ return dayFC[dateStr]||0; }
-
-  // ── AUTO-PLAN (KI / Algorithmus) ─────────────────────────────────
-  function autoSchedule(){
-    if(!selProjId){ alert('Bitte Projekt wählen.'); return; }
-    const shifts=getShiftsForPlan();
-    if(!shifts.length){ alert('Keine Schichten für dieses Projekt/Skill konfiguriert.'); return; }
-    const days=getDaysOfMonth(selYear,selMonth);
-    const upd={...planData};
-
-    // Calculate work days and target hours per employee
-    planEmps.forEach(emp=>{
-      const workH=parseFloat(emp.work_hours||8);
-      let plannedH=0;
-      const targetH=workH*22; // approx monthly target
-
-      days.forEach(day=>{
-        const dateStr=formatDate(day);
-        const dow=day.getDay(); // 0=Sun, 6=Sat
-        const absence=getAbsenceOnDate(emp,dateStr);
-        if(absence) return; // skip absent days
-        if(dow===0&&!emp.work_weekend) return; // no Sunday
-        if(dow===6&&!emp.work_weekend) return; // no Saturday (unless allowed)
-
-        // Skip if already planned
-        if(upd['s_'+emp.id+'_'+dateStr]) return;
-
-        // Find best shift based on FC curve for this day
-        const fcSlots=intervalFC[dateStr]||[];
-        if(!fcSlots.length) return; // no FC data
-
-        // Find shift that covers the peak hours
-        let bestShift=null;
-        let bestScore=0;
-        shifts.forEach(sh=>{
-          if(!sh.value) return;
-          const slots=parseShiftToSlots(sh.value);
-          let score=slots.reduce((s,si)=>s+(parseFloat(fcSlots[si])||0),0);
-          if(score>bestScore){ bestScore=score; bestShift=sh; }
-        });
-
-        if(bestShift&&plannedH<targetH){
-          upd['s_'+emp.id+'_'+dateStr]={shift:bestShift.value,hours:bestShift.hours,net:bestShift.net};
-          plannedH+=bestShift.net||0;
-          // Also populate interval cells
-          const slots=parseShiftToSlots(bestShift.value);
-          const shStart=slots[0]||0;
-          const shEnd=slots[slots.length-1]||0;
-          slots.forEach((si,idx)=>{
-            const isPause=isPauseAllowed(si,shStart,shEnd)&&idx===Math.floor(slots.length/2);
-            upd['i_'+emp.id+'_'+dateStr+'_'+si]=isPause?'p':'1';
-          });
-        }
-      });
-    });
-
-    savePlan(upd);
-    showToast&&showToast('Automatische Vorplanung abgeschlossen','success');
+  function parseDateVal(rv){
+    // Handles: Date object, number (Excel serial), string 'DD.MM.YY' / 'YYYY-MM-DD' / 'M/D/YYYY'
+    if(rv instanceof Date){
+      const y=rv.getUTCFullYear();
+      const mo=String(rv.getUTCMonth()+1).padStart(2,'0');
+      const d=String(rv.getUTCDate()).padStart(2,'0');
+      return y+'-'+mo+'-'+d;
+    }
+    if(typeof rv==='number'){
+      const ep=new Date(Date.UTC(1899,11,30));
+      return new Date(ep.getTime()+Math.round((rv|0)*86400000)).toISOString().slice(0,10);
+    }
+    if(typeof rv==='string'){
+      const s=rv.trim();
+      // DD.MM.YY or DD.MM.YYYY
+      const m1=s.match(/^(\d{1,2})\.(\d{1,2})\.(\d{2,4})$/);
+      if(m1){
+        const y=parseInt(m1[3]);
+        const year=y<100?(y>=50?1900+y:2000+y):y;
+        return year+'-'+String(parseInt(m1[2])).padStart(2,'0')+'-'+String(parseInt(m1[1])).padStart(2,'0');
+      }
+      // YYYY-MM-DD
+      if(s.match(/^\d{4}-\d{2}-\d{2}/)) return s.slice(0,10);
+      // M/D/YYYY
+      const m2=s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+      if(m2) return m2[3]+'-'+String(parseInt(m2[1])).padStart(2,'0')+'-'+String(parseInt(m2[2])).padStart(2,'0');
+    }
+    return '';
   }
 
-  // ── FC IMPORT ─────────────────────────────────────────────────────
   function handleFCImport(file){
-    if(!file) return;
+    if(!file||importing) return;
+    setImporting(true);
     const reader=new FileReader();
     reader.onload=ev=>{
       try{
-        const wb=XLSX.read(new Uint8Array(ev.target.result),{type:'array',cellDates:false});
-        const wsName=wb.SheetNames.find(n=>n.toLowerCase().includes('intervall'));
-        if(!wsName) throw new Error('Sheet "Intervallplanung" nicht gefunden. Sheets: '+wb.SheetNames.join(', '));
-        const rows=XLSX.utils.sheet_to_json(wb.Sheets[wsName],{header:1,defval:null,raw:false});
+        const wb=XLSX.read(new Uint8Array(ev.target.result),{type:'array',cellDates:true});
 
-        // Parse: A=Datum, B=Zeit, D=Stunden
-        const ifc={};
-        const dfc={};
-        rows.slice(1).forEach(row=>{
+        // Find Intervallplanung sheet
+        const wsIntName=wb.SheetNames.find(n=>n.toLowerCase().includes('intervall'));
+        if(!wsIntName) throw new Error('Sheet "Intervallplanung" nicht gefunden.\nVorhandene Sheets: '+wb.SheetNames.join(', '));
+
+        const rows=XLSX.utils.sheet_to_json(wb.Sheets[wsIntName],{header:1,defval:null});
+        // Cols: A=Datum(0), B=Zeit(1), C=Calls(2), D=Stunden(3)
+
+        const ifc={};  // {dateStr: [30 values]}
+        const dfc={};  // {dateStr: totalHours}
+        let skipped=0;
+
+        rows.slice(1).forEach((row,ri)=>{
           if(!row[0]||!row[1]) return;
-          let d='';
-          if(row[0] instanceof Date){
-            d=row[0].toISOString().slice(0,10);
-          } else if(typeof row[0]==='number'){
-            // Excel serial date: days since 1900-01-01 (with leap year bug)
-            const epoch=new Date(Date.UTC(1899,11,30));
-            const ms=Math.round((row[0]|0)*86400000);
-            d=new Date(epoch.getTime()+ms).toISOString().slice(0,10);
-          } else {
-            d=String(row[0]||'').slice(0,10);
-          }
-          // Parse time string '8:00 AM', '08:00:00', '8:00' etc
-          let timeStr='';
-          const tv=row[1];
-          if(typeof tv==='string'&&tv.trim()){
-            const clean=tv.replace(/\s*(AM|PM)$/i,'').trim();
-            const parts=clean.split(':');
-            let h=parseInt(parts[0])||0;
-            const mi=parseInt(parts[1])||0;
-            if(/PM/i.test(tv)&&h<12) h+=12;
-            if(/AM/i.test(tv)&&h===12) h=0;
-            timeStr=String(h).padStart(2,'0')+':'+String(mi).padStart(2,'0');
-          } else if(typeof tv==='number'){
-            const frac=tv<1?tv:(tv%1);
-            const totalMin=Math.round(frac*24*60);
-            timeStr=String(Math.floor(totalMin/60)).padStart(2,'0')+':'+String(totalMin%60).padStart(2,'0');
-          } else if(tv instanceof Date){
-            timeStr=String(tv.getUTCHours()).padStart(2,'0')+':'+String(tv.getUTCMinutes()).padStart(2,'0');
-          }
-const hours=parseFloat(row[3])||0;
-          // Map time to slot index
-          const slotIdx=TIME_SLOTS.indexOf(timeStr);
-          if(slotIdx>=0){
+          const d=parseDateVal(row[0]);
+          if(!d||d.length<10){skipped++;return;}
+          const t=parseTimeStr(row[1]);
+          if(!t){skipped++;return;}
+          const hours=parseFloat(String(row[3]||'0').replace(',','.').replace(/[^0-9.-]/g,''))||0;
+          const si=TIME_SLOTS.indexOf(t);
+          if(si>=0){
             if(!ifc[d]) ifc[d]=new Array(TIME_SLOTS.length).fill(0);
-            ifc[d][slotIdx]=hours;
+            ifc[d][si]=hours;
             dfc[d]=(dfc[d]||0)+hours;
           }
         });
 
-        // Also try Tagesplanung sheet for day totals
-        const wsDay=wb.SheetNames.find(n=>n.toLowerCase().includes('tagesplan'));
-        if(wsDay){
-          const dayRows=XLSX.utils.sheet_to_json(wb.Sheets[wsDay],{header:1,defval:null});
-          dayRows.slice(1).forEach(row=>{
-            if(!row[3]) return;
-            const d=row[3] instanceof Date?row[3].toISOString().slice(0,10):null;
-            if(d) dfc[d]=parseFloat(row[5])||parseFloat(row[4])||dfc[d]||0;
-          });
+        const days=Object.keys(ifc).length;
+        if(days===0){
+          throw new Error(
+            'Keine Daten importiert. '+skipped+' Zeilen übersprungen.\n'+
+            'Erwartetes Format: Spalte A=Datum (DD.MM.YY), B=Zeit (08:00:00), D=Stunden.\n'+
+            'Erste Datenzeile: '+JSON.stringify(rows[1])
+          );
         }
 
-        const days=Object.keys(ifc).length;
-        const totalH=Object.values(dfc).reduce((s,v)=>s+v,0);
-        setImportPreview({filename:file.name,ifc,dfc,days,totalH:Math.round(totalH*10)/10});
+        const totalH=Math.round(Object.values(dfc).reduce((s,v)=>s+v,0)*10)/10;
+        setImportPreview({filename:file.name,ifc,dfc,days,totalH,skipped});
+
       }catch(err){
-        alert('Import-Fehler: '+err.message);
+        alert('Import-Fehler:\n'+err.message);
       }
+      setImporting(false);
     };
+    reader.onerror=()=>{alert('Datei konnte nicht gelesen werden.');setImporting(false);};
     reader.readAsArrayBuffer(file);
   }
 
   function confirmImport(preview){
-    const k=planKey();
+    const k=pk();
     localStorage.setItem('jsr_wfp2_ifc_'+k,JSON.stringify(preview.ifc));
     localStorage.setItem('jsr_wfp2_dfc_'+k,JSON.stringify(preview.dfc));
-    setIntervalFC({...preview.ifc});
-    setDayFC({...preview.dfc});
+    setFcIntervals({...preview.ifc});
+    setFcDayTotals({...preview.dfc});
     setImportPreview(null);
-    setImportModalOpen(false);
-    showToast&&showToast('FC importiert: '+preview.days+' Tage, '+preview.totalH+'h gesamt','success');
+    setImportModal(false);
+    showToast&&showToast('FC importiert: '+preview.days+' Tage · '+preview.totalH+'h gesamt','success');
   }
 
-  // ── MONTHLY STATS ─────────────────────────────────────────────────
-  function getEmpMonthStats(emp){
-    const days=getDaysOfMonth(selYear,selMonth);
-    let planned=0,net=0,absenceDays=0;
-    days.forEach(day=>{
-      const ds=formatDate(day);
-      const absence=getAbsenceOnDate(emp,ds);
-      if(absence){ absenceDays++; return; }
-      const entry=getShiftEntry(emp.id,ds);
-      if(entry){ planned++; net+=entry.net||0; }
-    });
-    const workH=parseFloat(emp.work_hours||8);
-    const target=workH*22;
-    return{planned,net,absenceDays,target,diff:Math.round((net-target)*10)/10};
-  }
+  // ── AUTO SCHEDULE ────────────────────────────────────────────
+  function autoSchedule(){
+    const shifts=getShifts();
+    if(!shifts.length){
+      alert('Keine Schichten für dieses Projekt/Skill konfiguriert.\nBitte unter Admin → Schichten anlegen.');
+      return;
+    }
+    if(!Object.keys(fcIntervals).length){
+      alert('Kein FC importiert. Bitte zuerst FC-Dokument hochladen.');
+      return;
+    }
+    const upd={...planData};
+    const days=getMonthDays(selYear,selMonth);
 
-  // ── COMPUTE DAY COVERAGE for interval view ────────────────────────
-  function getDayCoverage(dateStr){
-    const fcSlots=getFCForDate(dateStr);
-    const coverage=new Array(TIME_SLOTS.length).fill(0);
     planEmps.forEach(emp=>{
-      if(getAbsenceOnDate(emp,dateStr)) return;
-      TIME_SLOTS.forEach((_,si)=>{
-        const v=getIntervalCell(emp.id,dateStr,si);
-        if(v==='1') coverage[si]++;
+      const workH=parseFloat(emp.work_hours||8);
+      const targetNet=workH*22;
+      let plannedNet=0;
+
+      days.forEach(day=>{
+        const ds=fmt(day);
+        const dow=day.getDay();
+        if(getAbsence(emp,ds)) return;
+        if(dow===0&&!emp.work_weekend) return;
+        if(dow===6&&!emp.work_weekend) return;
+        if(upd['s_'+emp.id+'_'+ds]) return; // already planned
+        if(plannedNet>=targetNet) return;
+
+        const daySlots=fcIntervals[ds]||[];
+        if(!daySlots.length) return;
+
+        // Find best shift: maximize coverage of FC demand
+        let best=null,bestScore=-1;
+        shifts.forEach(sh=>{
+          if(!sh.value) return;
+          const slots=shiftToSlots(sh.value);
+          const score=slots.reduce((s,si)=>s+(parseFloat(daySlots[si])||0),0);
+          if(score>bestScore){bestScore=score;best=sh;}
+        });
+
+        if(best&&bestScore>0){
+          upd['s_'+emp.id+'_'+ds]={shift:best.value,hours:best.hours,net:best.net,label:best.label};
+          plannedNet+=best.net||0;
+          const slots=shiftToSlots(best.value);
+          slots.forEach((si,idx)=>{
+            const isPause=slots.length>6&&idx===Math.floor(slots.length/2)&&idx>=4&&idx<=slots.length-3;
+            upd['i_'+emp.id+'_'+ds+'_'+si]=isPause?'p':'1';
+          });
+        }
       });
     });
-    return{coverage,fcSlots};
+
+    savePlan(upd);
+    showToast&&showToast('Vorplanung abgeschlossen','success');
   }
 
-  // ── SELECTED PROJ ─────────────────────────────────────────────────
+  // ── MONTH STATS ──────────────────────────────────────────────
+  function getStats(emp){
+    let planned=0,net=0,absD=0;
+    getMonthDays(selYear,selMonth).forEach(day=>{
+      const ds=fmt(day);
+      if(getAbsence(emp,ds)){absD++;return;}
+      const e=getShiftEntry(emp.id,ds);
+      if(e){planned++;net+=e.net||0;}
+    });
+    const target=parseFloat(emp.work_hours||8)*22;
+    return{planned,net:Math.round(net*10)/10,absD,target,diff:Math.round((net-target)*10)/10};
+  }
+
+  // ── COVERAGE ────────────────────────────────────────────────
+  function getCoverage(dateStr){
+    const cov=new Array(TIME_SLOTS.length).fill(0);
+    planEmps.forEach(emp=>{
+      if(getAbsence(emp,dateStr)) return;
+      TIME_SLOTS.forEach((_,si)=>{if(getCell(emp.id,dateStr,si)==='1') cov[si]++;});
+    });
+    return cov;
+  }
+
+  // ── DERIVED ─────────────────────────────────────────────────
   const selProj=(projects||[]).find(p=>p.id===selProjId);
-  const projSkills=selProj?.skills||[];
-  const weeks=getWeeksOfMonth(selYear,selMonth);
-  const monthDays=getDaysOfMonth(selYear,selMonth);
-  const fcImported=Object.keys(intervalFC).length>0;
+  const planEmps=(employees||[]).filter(e=>
+    e.status==='active'&&e.project_id===selProjId&&
+    (!selSkill||e.project_skill===selSkill)
+  );
+  const weeks=getWeeks(selYear,selMonth);
+  const monthDays=getMonthDays(selYear,selMonth);
+  const hasFc=Object.keys(fcIntervals).length>0;
+  const shifts=getShifts();
 
-  // ── RENDER ────────────────────────────────────────────────────────
+  // ── RENDER ──────────────────────────────────────────────────
   return(
-    <div style={{padding:16,maxWidth:'100%',minHeight:'100vh'}}>
+    <div style={{padding:16}}>
 
-      {/* ── TOOLBAR ── */}
+      {/* TOOLBAR */}
       <div style={{display:'flex',flexWrap:'wrap',gap:8,marginBottom:14,alignItems:'center'}}>
-        <div style={{fontWeight:800,fontSize:16,color:'var(--fg)',marginRight:4}}>📅 Workforce Planung</div>
+        <div style={{fontWeight:800,fontSize:16}}>📅 Workforce Planung</div>
 
         <select className="form-select" style={{width:190}} value={selProjId}
-          onChange={e=>{setSelProjId(e.target.value);setSelSkill('');setPlanData({});setIntervalFC({});setDayFC({});}}>
+          onChange={e=>{setSelProjId(e.target.value);setSelSkill('');setPlanData({});setFcIntervals({});setFcDayTotals({});}}>
           <option value="">— Projekt wählen —</option>
           {(projects||[]).filter(p=>p.status==='active').map(p=>(
             <option key={p.id} value={p.id}>{p.name}</option>
@@ -7053,10 +7052,10 @@ const hours=parseFloat(row[3])||0;
         </select>
 
         {selProj&&(
-          <select className="form-select" style={{width:160}} value={selSkill}
-            onChange={e=>{setSelSkill(e.target.value);setPlanData({});setIntervalFC({});setDayFC({});}}>
+          <select className="form-select" style={{width:150}} value={selSkill}
+            onChange={e=>{setSelSkill(e.target.value);setPlanData({});setFcIntervals({});setFcDayTotals({});}}>
             <option value="">Alle Skills</option>
-            {projSkills.map(s=>(
+            {(selProj.skills||[]).map(s=>(
               <option key={s.key||s.label} value={s.key||s.label}>{s.label}</option>
             ))}
           </select>
@@ -7064,169 +7063,151 @@ const hours=parseFloat(row[3])||0;
 
         <select className="form-select" style={{width:130}} value={selMonth}
           onChange={e=>setSelMonth(parseInt(e.target.value))}>
-          {MONTHS_DE.map((m,i)=><option key={i+1} value={i+1}>{m}</option>)}
+          {MONTHS.map((m,i)=><option key={i+1} value={i+1}>{m}</option>)}
         </select>
-
-        <select className="form-select" style={{width:90}} value={selYear}
+        <select className="form-select" style={{width:88}} value={selYear}
           onChange={e=>setSelYear(parseInt(e.target.value))}>
           {[2024,2025,2026,2027].map(y=><option key={y} value={y}>{y}</option>)}
         </select>
 
         {selProjId&&(
           <>
-            {/* View toggle */}
-            <div style={{display:'flex',borderRadius:'var(--r)',overflow:'hidden',border:'1.5px solid var(--border)',marginLeft:4}}>
-              {[['schicht','📋 Schichtplan'],['intervall','🕐 Intervall']].map(([v,l])=>(
-                <button key={v} onClick={()=>setView(v)}
-                  style={{padding:'5px 14px',fontSize:12,fontWeight:700,cursor:'pointer',fontFamily:'var(--font)',
-                    border:'none',background:view===v?'var(--blue)':'transparent',
-                    color:view===v?'#fff':'var(--muted)'}}>
+            <div style={{display:'flex',border:'1.5px solid var(--border)',borderRadius:'var(--r)',overflow:'hidden'}}>
+              {[['schicht','📋 Schicht'],['intervall','🕐 Intervall']].map(([v,l])=>(
+                <button key={v} onClick={()=>setViewMode(v)}
+                  style={{padding:'5px 12px',fontSize:12,fontWeight:700,border:'none',
+                    fontFamily:'var(--font)',cursor:'pointer',
+                    background:viewMode===v?'var(--blue)':'transparent',
+                    color:viewMode===v?'#fff':'var(--muted)'}}>
                   {l}
                 </button>
               ))}
             </div>
 
-            <button className="btn btn-sm" style={{background:'var(--blue-bg)',color:'var(--blue)',border:'1.5px solid var(--blue)',fontWeight:700}}
-              onClick={()=>setImportModalOpen(true)}>
+            <button className="btn btn-sm"
+              style={{background:'var(--blue-bg)',color:'var(--blue)',border:'1.5px solid var(--blue)',fontWeight:700}}
+              onClick={()=>setImportModal(true)}>
               📥 FC importieren
             </button>
 
-            {fcImported&&(
+            {hasFc&&(
               <button className="btn btn-sm btn-primary" onClick={autoSchedule}>
                 ⚡ Vorplanen
               </button>
             )}
 
-            <div style={{marginLeft:'auto',fontSize:11,color:fcImported?'var(--green)':'var(--muted)',fontWeight:700}}>
-              {fcImported?('✅ FC: '+Object.keys(intervalFC).length+' Tage'):'⚠ Kein FC importiert'}
+            <div style={{marginLeft:'auto',fontSize:11,fontWeight:700,
+              color:hasFc?'var(--green)':'var(--muted)'}}>
+              {hasFc?'✅ FC: '+Object.keys(fcIntervals).length+' Tage':'⚠ Kein FC'}
               {' · '}{planEmps.length} MA
+              {shifts.length>0?' · '+shifts.length+' Schichten':''}
             </div>
           </>
         )}
       </div>
 
       {!selProjId&&(
-        <div style={{padding:48,textAlign:'center',color:'var(--muted)',fontSize:14,
+        <div style={{padding:48,textAlign:'center',color:'var(--muted)',
           background:'var(--surface-2)',borderRadius:'var(--r)',border:'1px solid var(--border)'}}>
           Bitte zuerst ein Projekt wählen.
         </div>
       )}
 
       {selProjId&&planEmps.length===0&&(
-        <div style={{padding:32,textAlign:'center',color:'var(--muted)',fontSize:13,
+        <div style={{padding:32,textAlign:'center',color:'var(--muted)',
           background:'var(--surface-2)',borderRadius:'var(--r)',border:'1px solid var(--border)'}}>
-          Keine aktiven Mitarbeiter auf {selProj?.name||selProjId}{selSkill?' / Skill: '+selSkill:''}.<br/>
-          <span style={{fontSize:11}}>Mitarbeiter müssen Projekt + Skill zugewiesen haben.</span>
+          Keine aktiven Mitarbeiter auf {selProj?.name}{selSkill?' / '+selSkill:''}.
         </div>
       )}
 
-      {/* ════════════════════════════════════════════════════
-          SCHICHTPLANUNG VIEW
-      ════════════════════════════════════════════════════ */}
-      {selProjId&&planEmps.length>0&&view==='schicht'&&(
+      {/* ════ SCHICHTPLAN ════ */}
+      {selProjId&&planEmps.length>0&&viewMode==='schicht'&&(
         <div>
-          {weeks.map(({kw,days},wi)=>{
-            // Day totals
-            const dayNetTotals={};
-            const dayFCTotals={};
-            DAYS_DE.forEach((d,di)=>{
-              const day=days[di];
-              if(!day) return;
-              const ds=formatDate(day);
-              let net=0;
+          {weeks.map(({kw,days})=>{
+            const dayIST={};const dayFC2={};
+            DAYS.forEach((dn,di)=>{
+              const ds=fmt(days[di]);
+              let s=0;
               planEmps.forEach(emp=>{
-                if(getAbsenceOnDate(emp,ds)) return;
-                const entry=getShiftEntry(emp.id,ds);
-                if(entry) net+=entry.net||0;
+                if(getAbsence(emp,ds)) return;
+                const e=getShiftEntry(emp.id,ds);
+                if(e) s+=e.net||0;
               });
-              dayNetTotals[d]=Math.round(net*10)/10;
-              dayFCTotals[d]=Math.round((getDayFCHours(ds))*10)/10;
+              dayIST[dn]=Math.round(s*10)/10;
+              dayFC2[dn]=Math.round((fcDayTotals[ds]||0)*10)/10;
             });
-
             return(
               <div key={kw} style={{marginBottom:20,overflowX:'auto'}}>
-                <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:6}}>
-                  <div style={{fontWeight:800,fontSize:12,color:'var(--blue)',
-                    background:'var(--blue-bg)',borderRadius:6,padding:'3px 10px'}}>
-                    KW {kw}
-                  </div>
-                  <div style={{fontSize:11,color:'var(--muted)'}}>
+                <div style={{display:'flex',gap:10,alignItems:'center',marginBottom:6}}>
+                  <span style={{fontWeight:800,fontSize:12,color:'var(--blue)',
+                    background:'var(--blue-bg)',borderRadius:6,padding:'3px 10px'}}>KW {kw}</span>
+                  <span style={{fontSize:11,color:'var(--muted)'}}>
                     {days[0].toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit'})} – {days[6].toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit',year:'numeric'})}
-                  </div>
-                  {!fcImported&&wi===0&&(
-                    <div style={{fontSize:11,color:'var(--orange,#f59e0b)',fontWeight:700}}>
-                      ⚠ Kein FC importiert — Vorplanung nicht möglich
-                    </div>
-                  )}
+                  </span>
                 </div>
-
                 <table style={{width:'100%',borderCollapse:'collapse',fontSize:11,minWidth:800}}>
                   <colgroup>
                     <col style={{width:150}}/>
-                    {days.map((_,i)=><col key={i} style={{width:'calc((100% - 150px)/7)'}}/>)}
-                    <col style={{width:60}}/><col style={{width:60}}/>
+                    {days.map((_,i)=><col key={i}/>)}
+                    <col style={{width:55}}/><col style={{width:55}}/>
                   </colgroup>
                   <thead>
                     <tr style={{background:'var(--surface-2)'}}>
-                      <th style={{padding:'6px 8px',textAlign:'left',fontWeight:700,fontSize:11,
-                        borderBottom:'2px solid var(--border)'}}>Mitarbeiter</th>
+                      <th style={{padding:'6px 8px',textAlign:'left',borderBottom:'2px solid var(--border)'}}>Mitarbeiter</th>
                       {days.map((day,di)=>{
                         const isWE=di>=5;
-                        const inMonth=day.getMonth()===selMonth-1;
-                        const isToday=formatDate(day)===formatDate(today);
+                        const inM=day.getMonth()===selMonth-1;
+                        const isTd=fmt(day)===fmt(today);
                         return(
                           <th key={di} style={{padding:'4px 2px',textAlign:'center',fontSize:10,
                             borderBottom:'2px solid var(--border)',borderLeft:'1px solid var(--border)',
-                            background:isToday?'var(--blue-bg)':isWE?'var(--surface-3)':'var(--surface-2)',
-                            color:!inMonth?'var(--dim)':isWE?'var(--muted)':'var(--fg)',
-                            fontWeight:isToday?800:600}}>
-                            <div>{DAYS_DE[di]}</div>
+                            background:isTd?'var(--blue-bg)':isWE?'var(--surface-3)':'var(--surface-2)',
+                            color:!inM?'var(--dim)':isWE?'var(--muted)':'var(--fg)',
+                            fontWeight:isTd?800:600}}>
+                            <div>{DAYS[di]}</div>
                             <div style={{fontWeight:400,fontSize:9}}>{day.toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit'})}</div>
                           </th>
                         );
                       })}
-                      <th style={{padding:'4px',textAlign:'center',fontSize:9,borderLeft:'2px solid var(--border)',borderBottom:'2px solid var(--border)',background:'var(--surface-2)'}}>Σ Br.</th>
-                      <th style={{padding:'4px',textAlign:'center',fontSize:9,borderBottom:'2px solid var(--border)',background:'var(--surface-2)'}}>Σ Net.</th>
+                      <th style={{padding:'4px',textAlign:'center',fontSize:9,borderLeft:'2px solid var(--border)',borderBottom:'2px solid var(--border)',background:'var(--surface-2)'}}>Brutto</th>
+                      <th style={{padding:'4px',textAlign:'center',fontSize:9,borderBottom:'2px solid var(--border)',background:'var(--surface-2)'}}>Netto</th>
                     </tr>
                   </thead>
                   <tbody>
                     {planEmps.map((emp,ei)=>{
-                      let wBrutto=0,wNetto=0;
+                      let wB=0,wN=0;
                       return(
                         <tr key={emp.id} style={{borderBottom:'1px solid var(--border)',
                           background:ei%2===0?'transparent':'var(--surface-2)'}}>
-                          <td style={{padding:'5px 8px',fontWeight:500,fontSize:11}}>
+                          <td style={{padding:'5px 8px'}}>
                             <div style={{fontWeight:700,fontSize:11}}>{emp.first_name} {emp.last_name}</div>
                             <div style={{fontSize:9,color:'var(--muted)'}}>{emp.project_skill||'—'}</div>
                           </td>
                           {days.map((day,di)=>{
-                            const ds=formatDate(day);
-                            const inMonth=day.getMonth()===selMonth-1;
-                            const absence=getAbsenceOnDate(emp,ds);
+                            const ds=fmt(day);
+                            const inM=day.getMonth()===selMonth-1;
+                            const abs=getAbsence(emp,ds);
                             const entry=getShiftEntry(emp.id,ds);
-                            const isWE=di>=5;
-                            if(entry&&!absence){ wBrutto+=entry.hours||0; wNetto+=entry.net||0; }
+                            if(entry&&!abs){wB+=entry.hours||0;wN+=entry.net||0;}
                             return(
                               <td key={di} style={{padding:'2px',textAlign:'center',
                                 borderLeft:'1px solid var(--border)',
-                                background:isWE?'var(--surface-3)':absence?'#fef9c3':'transparent',
-                                opacity:inMonth?1:0.4}}>
-                                {absence?(
+                                background:di>=5?'var(--surface-3)':abs?'#fef9c3':'transparent',
+                                opacity:inM?1:0.4}}>
+                                {abs?(
                                   <div style={{fontSize:9,color:'#92400e',fontWeight:700,padding:'4px 1px'}}>
-                                    {absence.type==='vacation'?'🏖 Urlaub':absence.type==='sick'?'🤒 Krank':'❌ Abw.'}
+                                    {abs.type==='vacation'?'🏖':abs.type==='sick'?'🤒':'❌'}
                                   </div>
                                 ):(
-                                  <button onClick={()=>inMonth&&setEditShiftModal({empId:emp.id,dateStr:ds,empName:emp.first_name+' '+emp.last_name,currentEntry:entry})}
-                                    style={{width:'100%',padding:'3px 1px',border:'none',cursor:inMonth?'pointer':'default',
-                                      borderRadius:3,fontSize:9,lineHeight:1.3,
-                                      background:entry&&entry.hours>0?'var(--blue-bg)':'transparent',
-                                      color:entry&&entry.hours>0?'var(--blue)':'var(--dim)',
-                                      fontWeight:entry&&entry.hours>0?700:400,minHeight:32}}>
-                                    {entry&&entry.shift?(
-                                      <>
-                                        <div style={{fontSize:9}}>{entry.shift}</div>
-                                        <div style={{fontSize:8,opacity:.8}}>{entry.hours}h/{entry.net}h</div>
-                                      </>
+                                  <button onClick={()=>inM&&setShiftPicker({empId:emp.id,ds,empName:emp.first_name+' '+emp.last_name,entry})}
+                                    style={{width:'100%',padding:'3px 1px',border:'none',
+                                      cursor:inM?'pointer':'default',borderRadius:3,
+                                      background:entry?'var(--blue-bg)':'transparent',
+                                      color:entry?'var(--blue)':'var(--dim)',
+                                      fontWeight:entry?700:400,minHeight:32,fontSize:9}}>
+                                    {entry?(
+                                      <><div>{entry.shift||entry.label}</div>
+                                      <div style={{fontSize:8,opacity:.8}}>{entry.hours}h/{entry.net}h</div></>
                                     ):(
                                       <div style={{fontSize:14,opacity:.3}}>+</div>
                                     )}
@@ -7236,49 +7217,41 @@ const hours=parseFloat(row[3])||0;
                             );
                           })}
                           <td style={{padding:'4px',textAlign:'center',fontWeight:700,fontSize:10,
-                            borderLeft:'2px solid var(--border)',color:'var(--fg)'}}>
-                            {wBrutto>0?wBrutto:'—'}
-                          </td>
-                          <td style={{padding:'4px',textAlign:'center',fontWeight:700,fontSize:10,color:'var(--blue)'}}>
-                            {wNetto>0?wNetto:'—'}
-                          </td>
+                            borderLeft:'2px solid var(--border)'}}>{wB>0?Math.round(wB*10)/10:'—'}</td>
+                          <td style={{padding:'4px',textAlign:'center',fontWeight:700,fontSize:10,
+                            color:'var(--blue)'}}>{wN>0?Math.round(wN*10)/10:'—'}</td>
                         </tr>
                       );
                     })}
 
-                    {/* IST ROW */}
+                    {/* IST row */}
                     <tr style={{borderTop:'2px solid var(--border)',background:'var(--surface-2)',fontWeight:700}}>
                       <td style={{padding:'5px 8px',fontSize:10,color:'var(--muted)'}}>Σ IST Netto (h)</td>
-                      {DAYS_DE.map((d,di)=>{
-                        const v=dayNetTotals[d]||0;
-                        return(
-                          <td key={di} style={{padding:'4px 2px',textAlign:'center',fontSize:11,
-                            borderLeft:'1px solid var(--border)',color:v>0?'var(--green)':'var(--dim)',
-                            fontWeight:700}}>
-                            {v>0?v:'—'}
-                          </td>
-                        );
-                      })}
+                      {DAYS.map((dn,di)=>(
+                        <td key={di} style={{padding:'4px 2px',textAlign:'center',fontSize:11,
+                          borderLeft:'1px solid var(--border)',
+                          color:dayIST[dn]>0?'var(--green)':'var(--dim)'}}>
+                          {dayIST[dn]>0?dayIST[dn]:'—'}
+                        </td>
+                      ))}
                       <td style={{borderLeft:'2px solid var(--border)'}}/><td/>
                     </tr>
 
-                    {/* FORECAST ROW */}
-                    <tr style={{background:'#fffbeb',borderBottom:'1px solid var(--border)'}}>
+                    {/* FC row */}
+                    <tr style={{background:'#fffbeb'}}>
                       <td style={{padding:'5px 8px',fontSize:10,color:'#92400e',fontWeight:700}}>📊 FC Bedarf (h)</td>
-                      {DAYS_DE.map((d,di)=>{
-                        const fc=dayFCTotals[d]||0;
-                        const ist=dayNetTotals[d]||0;
+                      {DAYS.map((dn,di)=>{
+                        const fc=dayFC2[dn]||0;
+                        const ist=dayIST[dn]||0;
                         const diff=Math.round((ist-fc)*10)/10;
-                        const diffColor=fc===0?'var(--dim)':diff>=0?'var(--green)':'var(--red)';
                         return(
-                          <td key={di} style={{padding:'3px 2px',textAlign:'center',fontSize:10,
+                          <td key={di} style={{padding:'3px 2px',textAlign:'center',
                             borderLeft:'1px solid var(--border)'}}>
-                            <div style={{color:'#92400e',fontWeight:700}}>{fc||'—'}</div>
-                            {fc>0&&(
-                              <div style={{fontSize:8,color:diffColor,fontWeight:700}}>
-                                {diff>=0?'+':''}{diff}
-                              </div>
-                            )}
+                            <div style={{fontSize:10,color:'#92400e',fontWeight:700}}>{fc||'—'}</div>
+                            {fc>0&&<div style={{fontSize:8,fontWeight:700,
+                              color:diff>=0?'var(--green)':'var(--red)'}}>
+                              {diff>=0?'+':''}{diff}
+                            </div>}
                           </td>
                         );
                       })}
@@ -7290,47 +7263,42 @@ const hours=parseFloat(row[3])||0;
             );
           })}
 
-          {/* MONTH SUMMARY */}
+          {/* Month summary */}
           <div className="card" style={{marginTop:12}}>
             <div className="card-header">
-              <span className="card-title">📋 Monatsübersicht {MONTHS_DE[selMonth-1]} {selYear}</span>
+              <span className="card-title">📋 Monatsübersicht {MONTHS[selMonth-1]} {selYear}</span>
             </div>
             <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
               <thead>
                 <tr style={{background:'var(--surface-2)',borderBottom:'2px solid var(--border)'}}>
-                  <th style={{padding:'8px 12px',textAlign:'left'}}>Mitarbeiter</th>
-                  <th style={{padding:'8px',textAlign:'center'}}>Skill</th>
-                  <th style={{padding:'8px',textAlign:'center'}}>Geplante Tage</th>
-                  <th style={{padding:'8px',textAlign:'center'}}>Brutto (h)</th>
-                  <th style={{padding:'8px',textAlign:'center'}}>Netto (h)</th>
-                  <th style={{padding:'8px',textAlign:'center'}}>Soll (h)</th>
-                  <th style={{padding:'8px',textAlign:'center'}}>Differenz</th>
-                  <th style={{padding:'8px',textAlign:'center'}}>Abwesenheit</th>
+                  {['Mitarbeiter','Skill','Tage','Brutto','Netto','Soll','Differenz','Abwesenheit'].map(h=>(
+                    <th key={h} style={{padding:'7px 10px',textAlign:h==='Mitarbeiter'?'left':'center',fontWeight:700}}>{h}</th>
+                  ))}
                 </tr>
               </thead>
               <tbody>
                 {planEmps.map((emp,i)=>{
-                  const s=getEmpMonthStats(emp);
-                  const diffColor=Math.abs(s.diff)<2?'var(--green)':s.diff<0?'var(--red)':'var(--orange,#f59e0b)';
+                  const s=getStats(emp);
+                  const dc=Math.abs(s.diff)<1?'var(--green)':s.diff<0?'var(--red)':'#f59e0b';
                   return(
                     <tr key={emp.id} style={{borderBottom:'1px solid var(--border)',
                       background:i%2===0?'transparent':'var(--surface-2)'}}>
-                      <td style={{padding:'7px 12px',fontWeight:600}}>{emp.first_name} {emp.last_name}</td>
+                      <td style={{padding:'7px 10px',fontWeight:600}}>{emp.first_name} {emp.last_name}</td>
                       <td style={{padding:'7px',textAlign:'center'}}>
                         <span style={{background:'var(--blue-bg)',color:'var(--blue)',
-                          borderRadius:4,padding:'2px 8px',fontSize:10,fontWeight:700}}>
+                          borderRadius:4,padding:'2px 7px',fontSize:10,fontWeight:700}}>
                           {emp.project_skill||'—'}
                         </span>
                       </td>
                       <td style={{padding:'7px',textAlign:'center',fontWeight:700}}>{s.planned}</td>
-                      <td style={{padding:'7px',textAlign:'center',fontWeight:700}}>{Math.round(s.net/0.9375*10)/10}h</td>
+                      <td style={{padding:'7px',textAlign:'center'}}>{Math.round(s.net/0.9375*10)/10}h</td>
                       <td style={{padding:'7px',textAlign:'center',fontWeight:700,color:'var(--blue)'}}>{s.net}h</td>
                       <td style={{padding:'7px',textAlign:'center',color:'var(--muted)'}}>{s.target}h</td>
-                      <td style={{padding:'7px',textAlign:'center',fontWeight:800,color:diffColor}}>
+                      <td style={{padding:'7px',textAlign:'center',fontWeight:800,color:dc}}>
                         {s.diff>=0?'+':''}{s.diff}h
                       </td>
                       <td style={{padding:'7px',textAlign:'center',color:'#92400e'}}>
-                        {s.absenceDays>0?s.absenceDays+'T':'—'}
+                        {s.absD>0?s.absD+'T':'—'}
                       </td>
                     </tr>
                   );
@@ -7341,27 +7309,23 @@ const hours=parseFloat(row[3])||0;
         </div>
       )}
 
-      {/* ════════════════════════════════════════════════════
-          INTERVALLPLANUNG VIEW
-      ════════════════════════════════════════════════════ */}
-      {selProjId&&planEmps.length>0&&view==='intervall'&&(
+      {/* ════ INTERVALLPLAN ════ */}
+      {selProjId&&planEmps.length>0&&viewMode==='intervall'&&(
         <div>
           {/* Day selector */}
-          <div style={{display:'flex',gap:4,flexWrap:'wrap',marginBottom:12}}>
+          <div style={{display:'flex',flexWrap:'wrap',gap:4,marginBottom:12}}>
             {monthDays.map(day=>{
-              const ds=formatDate(day);
-              const fc=getDayFCHours(ds);
-              const inMonth=true;
+              const ds=fmt(day);
+              const fc=Math.round((fcDayTotals[ds]||0)*10)/10;
               const isWE=day.getDay()===0||day.getDay()===6;
               const isSel=selDate===ds;
               return(
                 <button key={ds} onClick={()=>setSelDate(ds)}
-                  style={{padding:'5px 8px',border:isSel?'2px solid var(--blue)':'1px solid var(--border)',
-                    borderRadius:'var(--r)',fontSize:10,fontWeight:isSel?800:500,
-                    cursor:'pointer',fontFamily:'var(--font)',
+                  style={{padding:'5px 7px',border:isSel?'2px solid var(--blue)':'1px solid var(--border)',
+                    borderRadius:'var(--r)',fontSize:10,fontWeight:isSel?800:500,cursor:'pointer',
+                    fontFamily:'var(--font)',textAlign:'center',minWidth:40,
                     background:isSel?'var(--blue-bg)':isWE?'var(--surface-3)':'var(--surface-2)',
-                    color:isSel?'var(--blue)':isWE?'var(--muted)':'var(--fg)',
-                    minWidth:42,textAlign:'center'}}>
+                    color:isSel?'var(--blue)':isWE?'var(--muted)':'var(--fg)'}}>
                   <div>{day.toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit'})}</div>
                   <div style={{fontSize:8,color:fc>0?'var(--blue)':'var(--dim)',fontWeight:700}}>
                     {fc>0?fc+'h':'—'}
@@ -7372,100 +7336,106 @@ const hours=parseFloat(row[3])||0;
           </div>
 
           {!selDate&&(
-            <div style={{padding:32,textAlign:'center',color:'var(--muted)',fontSize:13,
-              background:'var(--surface-2)',borderRadius:'var(--r)',border:'1px solid var(--border)'}}>
-              Bitte einen Tag auswählen.
+            <div style={{padding:32,textAlign:'center',color:'var(--muted)',
+              background:'var(--surface-2)',borderRadius:'var(--r)'}}>
+              Tag auswählen
             </div>
           )}
 
           {selDate&&(()=>{
-            const {coverage,fcSlots}=getDayCoverage(selDate);
-            const fcDate=new Date(selDate);
-            const dayName=DAYS_DE[fcDate.getDay()===0?6:fcDate.getDay()-1];
-            const maxFC=fcSlots.length>0?Math.max(...fcSlots):0;
-            const maxCov=Math.max(...coverage,1);
+            const fcSlots=fcIntervals[selDate]||[];
+            const cov=getCoverage(selDate);
+            const maxFC=fcSlots.length?Math.max(...fcSlots):0;
+            const dayObj=new Date(selDate);
+            const dayName=DAYS[dayObj.getDay()===0?6:dayObj.getDay()-1];
 
             return(
               <div>
-                <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:12}}>
+                <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:10}}>
                   <div style={{fontWeight:800,fontSize:14}}>
-                    {dayName} {new Date(selDate).toLocaleDateString('de-DE',{day:'2-digit',month:'long',year:'numeric'})}
+                    {dayName} {dayObj.toLocaleDateString('de-DE',{day:'2-digit',month:'long',year:'numeric'})}
                   </div>
                   <div style={{fontSize:12,color:'var(--muted)'}}>
-                    FC gesamt: <b style={{color:'var(--blue)'}}>{Math.round(getDayFCHours(selDate)*10)/10}h</b>
+                    FC gesamt: <b style={{color:'var(--blue)'}}>{Math.round((fcDayTotals[selDate]||0)*10)/10}h</b>
                   </div>
+                  {fcSlots.length===0&&(
+                    <div style={{fontSize:11,color:'#92400e',fontWeight:700}}>
+                      ⚠ Kein FC für diesen Tag importiert
+                    </div>
+                  )}
                 </div>
 
                 <div style={{overflowX:'auto'}}>
-                  <table style={{borderCollapse:'collapse',fontSize:10,minWidth:900}}>
+                  <table style={{borderCollapse:'collapse',fontSize:10}}>
                     <thead>
                       <tr>
                         <th style={{padding:'5px 10px',textAlign:'left',fontWeight:700,
                           borderBottom:'2px solid var(--border)',background:'var(--surface-2)',
-                          position:'sticky',left:0,zIndex:2,minWidth:120}}>
+                          position:'sticky',left:0,zIndex:2,minWidth:130,whiteSpace:'nowrap'}}>
                           Mitarbeiter
                         </th>
-                        {TIME_SLOTS.map((slot,si)=>(
-                          <th key={si} style={{padding:'2px 1px',textAlign:'center',
-                            borderBottom:'2px solid var(--border)',
-                            borderLeft:slot.endsWith(':00')?'2px solid var(--border)':'1px solid var(--border)',
-                            background:'var(--surface-2)',fontSize:8,whiteSpace:'nowrap',
-                            color:slot.endsWith(':00')?'var(--fg)':'var(--muted)',fontWeight:slot.endsWith(':00')?700:400,
-                            minWidth:22}}>
-                            {slot.endsWith(':00')?slot.slice(0,-3):''}
-                          </th>
-                        ))}
-                        <th style={{padding:'4px',textAlign:'center',fontSize:9,
+                        {TIME_SLOTS.map((slot,si)=>{
+                          const isHour=slot.endsWith(':00');
+                          return(
+                            <th key={si} style={{
+                              padding:'2px 0',textAlign:'center',minWidth:20,
+                              borderBottom:'2px solid var(--border)',
+                              borderLeft:isHour?'2px solid var(--border)':'1px solid var(--border)',
+                              background:'var(--surface-2)',fontSize:8,
+                              color:isHour?'var(--fg)':'var(--muted)',
+                              fontWeight:isHour?700:400}}>
+                              {isHour?slot.slice(0,5):''}
+                            </th>
+                          );
+                        })}
+                        <th style={{padding:'4px',textAlign:'center',fontSize:9,minWidth:50,
                           borderLeft:'2px solid var(--border)',borderBottom:'2px solid var(--border)',
-                          background:'var(--surface-2)',minWidth:50}}>Σ Netto</th>
+                          background:'var(--surface-2)'}}>Netto</th>
                       </tr>
                     </thead>
                     <tbody>
                       {planEmps.map((emp,ei)=>{
-                        const absence=getAbsenceOnDate(emp,selDate);
+                        const abs=getAbsence(emp,selDate);
                         const entry=getShiftEntry(emp.id,selDate);
-                        let netH=0;
-                        TIME_SLOTS.forEach((_,si)=>{
-                          const v=getIntervalCell(emp.id,selDate,si);
-                          if(v==='1') netH+=0.5;
-                        });
+                        const empSlots=shiftToSlots(entry?.shift||'');
+                        let netH=TIME_SLOTS.filter((_,si)=>getCell(emp.id,selDate,si)==='1').length*0.5;
                         return(
                           <tr key={emp.id} style={{borderBottom:'1px solid var(--border)',
-                            background:absence?'#fef9c3':ei%2===0?'transparent':'var(--surface-2)'}}>
-                            <td style={{padding:'4px 8px',fontWeight:600,fontSize:10,
-                              position:'sticky',left:0,background:absence?'#fef9c3':ei%2===0?'var(--surface)':'var(--surface-2)',
-                              borderRight:'1px solid var(--border)',zIndex:1,minWidth:120}}>
+                            background:abs?'#fef9c3':ei%2===0?'transparent':'var(--surface-2)'}}>
+                            <td style={{padding:'4px 8px',fontWeight:600,position:'sticky',left:0,
+                              background:abs?'#fef9c3':ei%2===0?'var(--surface)':'var(--surface-2)',
+                              borderRight:'1px solid var(--border)',zIndex:1,minWidth:130}}>
                               <div>{emp.first_name} {emp.last_name}</div>
-                              <div style={{fontSize:8,color:'var(--muted)'}}>{entry?entry.shift:'kein Dienst'}</div>
+                              <div style={{fontSize:8,color:'var(--muted)'}}>
+                                {abs?'Abwesend':entry?entry.shift:'Kein Dienst'}
+                              </div>
                             </td>
-                            {absence?(
+                            {abs?(
                               <td colSpan={TIME_SLOTS.length+1} style={{padding:'4px 12px',
-                                color:'#92400e',fontWeight:700,fontSize:11}}>
-                                {absence.type==='vacation'?'🏖 Urlaub':absence.type==='sick'?'🤒 Krank':'❌ Abwesenheit'}
+                                color:'#92400e',fontWeight:700}}>
+                                {abs.type==='vacation'?'🏖 Urlaub':abs.type==='sick'?'🤒 Krank':'❌ Abwesenheit'}
                               </td>
                             ):(
                               <>
                                 {TIME_SLOTS.map((slot,si)=>{
-                                  const v=getIntervalCell(emp.id,selDate,si);
-                                  const isPause=v==='p';
-                                  const isActive=v==='1';
-                                  const shiftSlots=entry?parseShiftToSlots(entry.shift):[];
-                                  const inShift=shiftSlots.includes(si);
+                                  const v=getCell(emp.id,selDate,si);
+                                  const inShift=empSlots.includes(si);
+                                  const isHour=slot.endsWith(':00');
                                   return(
-                                    <td key={si} onClick={()=>inShift&&setEditCellModal({empId:emp.id,dateStr:selDate,slotIdx:si,slotTime:slot})}
-                                      style={{padding:0,textAlign:'center',
-                                        borderLeft:slot.endsWith(':00')?'2px solid var(--border)':'1px solid var(--border)',
+                                    <td key={si}
+                                      onClick={()=>inShift&&setCellPicker({empId:emp.id,ds:selDate,si,slot})}
+                                      style={{padding:0,textAlign:'center',height:24,
+                                        borderLeft:isHour?'2px solid var(--border)':'1px solid var(--border)',
                                         cursor:inShift?'pointer':'default',
-                                        background:isPause?'#fef3c7':isActive?'var(--blue-bg)':inShift?'var(--surface-3)':'transparent',
-                                        minWidth:22,height:24}}>
-                                      {isPause?(<span style={{fontSize:8,color:'#92400e',fontWeight:700}}>P</span>):
-                                       isActive?(<span style={{fontSize:8,color:'var(--blue)',fontWeight:700}}>●</span>):
-                                       inShift?(<span style={{fontSize:8,color:'var(--dim)'}}>○</span>):null}
+                                        background:v==='p'?'#fef3c7':v==='1'?'var(--blue-bg)':
+                                          inShift?'var(--surface-3)':'transparent'}}>
+                                      {v==='p'&&<span style={{fontSize:8,color:'#92400e',fontWeight:700}}>P</span>}
+                                      {v==='1'&&<span style={{fontSize:9,color:'var(--blue)',fontWeight:700}}>●</span>}
                                     </td>
                                   );
                                 })}
-                                <td style={{padding:'3px',textAlign:'center',fontWeight:700,fontSize:10,
-                                  borderLeft:'2px solid var(--border)',color:'var(--blue)'}}>
+                                <td style={{padding:'3px',textAlign:'center',fontWeight:700,
+                                  borderLeft:'2px solid var(--border)',color:'var(--blue)',fontSize:10}}>
                                   {netH>0?netH+'h':'—'}
                                 </td>
                               </>
@@ -7474,22 +7444,23 @@ const hours=parseFloat(row[3])||0;
                         );
                       })}
 
-                      {/* FC ROW */}
+                      {/* FC Bedarf */}
                       {fcSlots.length>0&&(
                         <tr style={{borderTop:'2px solid var(--border)',background:'#fffbeb'}}>
                           <td style={{padding:'4px 8px',fontWeight:700,fontSize:10,color:'#92400e',
                             position:'sticky',left:0,background:'#fffbeb',borderRight:'1px solid var(--border)'}}>
-                            📊 FC Bedarf (h)
+                            📊 FC (h)
                           </td>
                           {TIME_SLOTS.map((slot,si)=>{
                             const fc=parseFloat(fcSlots[si])||0;
+                            const isHour=slot.endsWith(':00');
                             return(
-                              <td key={si} style={{padding:'1px',textAlign:'center',
-                                borderLeft:slot.endsWith(':00')?'2px solid var(--border)':'1px solid var(--border)'}}>
+                              <td key={si} style={{padding:'1px',
+                                borderLeft:isHour?'2px solid var(--border)':'1px solid var(--border)'}}>
                                 {fc>0&&(
                                   <div style={{height:16,display:'flex',alignItems:'flex-end',justifyContent:'center'}}>
                                     <div style={{width:14,background:'#f59e0b',borderRadius:1,
-                                      height:Math.max(2,Math.round((fc/maxFC)*14))+'px',opacity:.8}}/>
+                                      height:Math.max(2,Math.round((fc/maxFC)*14))+'px'}}/>
                                   </div>
                                 )}
                               </td>
@@ -7497,69 +7468,71 @@ const hours=parseFloat(row[3])||0;
                           })}
                           <td style={{padding:'3px',textAlign:'center',fontWeight:700,fontSize:10,
                             borderLeft:'2px solid var(--border)',color:'#92400e'}}>
-                            {Math.round(getDayFCHours(selDate)*10)/10}h
+                            {Math.round((fcDayTotals[selDate]||0)*10)/10}h
                           </td>
                         </tr>
                       )}
 
-                      {/* COVERAGE ROW */}
+                      {/* MA IST */}
                       <tr style={{borderTop:'1px solid var(--border)',background:'var(--surface-2)'}}>
                         <td style={{padding:'4px 8px',fontWeight:700,fontSize:10,color:'var(--muted)',
                           position:'sticky',left:0,background:'var(--surface-2)',borderRight:'1px solid var(--border)'}}>
                           👥 MA IST
                         </td>
-                        {coverage.map((cov,si)=>{
-                          const fc=parseFloat(fcSlots[si])||0;
+                        {cov.map((c,si)=>{
+                          const fc=parseFloat((fcIntervals[selDate]||[])[si])||0;
                           const need=fc>0?Math.ceil(fc/0.5):0;
-                          const diff=cov-need;
-                          const bg=need===0?'transparent':diff>=0?'#dcfce7':diff>=-1?'#fef9c3':'#fee2e2';
+                          const diff=c-need;
+                          const isHour=TIME_SLOTS[si]?.endsWith(':00');
                           return(
                             <td key={si} style={{padding:'2px 1px',textAlign:'center',
-                              borderLeft:TIME_SLOTS[si]?.endsWith(':00')?'2px solid var(--border)':'1px solid var(--border)',
-                              background:bg,fontSize:9,fontWeight:700,
+                              borderLeft:isHour?'2px solid var(--border)':'1px solid var(--border)',
+                              background:need===0?'transparent':diff>=0?'#dcfce7':diff>=-1?'#fef9c3':'#fee2e2',
+                              fontSize:9,fontWeight:700,
                               color:need===0?'var(--dim)':diff>=0?'#166534':diff>=-1?'#92400e':'#991b1b'}}>
-                              {cov>0?cov:''}
+                              {c>0?c:''}
                             </td>
                           );
                         })}
-                        <td style={{padding:'3px',borderLeft:'2px solid var(--border)'}}/>
+                        <td style={{borderLeft:'2px solid var(--border)'}}/>
                       </tr>
 
-                      {/* NEED ROW */}
-                      <tr style={{background:'var(--surface-3)',borderBottom:'1px solid var(--border)'}}>
+                      {/* Bedarf */}
+                      <tr style={{background:'var(--surface-3)'}}>
                         <td style={{padding:'4px 8px',fontWeight:700,fontSize:10,color:'var(--muted)',
                           position:'sticky',left:0,background:'var(--surface-3)',borderRight:'1px solid var(--border)'}}>
-                          📌 MA Bedarf
+                          📌 Bedarf
                         </td>
                         {TIME_SLOTS.map((slot,si)=>{
-                          const fc=parseFloat(fcSlots[si])||0;
+                          const fc=parseFloat((fcIntervals[selDate]||[])[si])||0;
                           const need=fc>0?Math.ceil(fc/0.5):0;
+                          const isHour=slot.endsWith(':00');
                           return(
                             <td key={si} style={{padding:'2px 1px',textAlign:'center',
-                              borderLeft:slot.endsWith(':00')?'2px solid var(--border)':'1px solid var(--border)',
+                              borderLeft:isHour?'2px solid var(--border)':'1px solid var(--border)',
                               fontSize:9,color:need>0?'var(--fg)':'var(--dim)',fontWeight:700}}>
                               {need>0?need:''}
                             </td>
                           );
                         })}
-                        <td style={{padding:'3px',borderLeft:'2px solid var(--border)'}}/>
+                        <td style={{borderLeft:'2px solid var(--border)'}}/>
                       </tr>
 
-                      {/* DIFF ROW */}
-                      <tr style={{background:'var(--surface-2)'}}>
-                        <td style={{padding:'4px 8px',fontWeight:700,fontSize:10,
-                          position:'sticky',left:0,background:'var(--surface-2)',borderRight:'1px solid var(--border)',
-                          color:'var(--muted)'}}>
-                          Δ Differenz
+                      {/* Differenz */}
+                      <tr>
+                        <td style={{padding:'4px 8px',fontWeight:700,fontSize:10,color:'var(--muted)',
+                          position:'sticky',left:0,background:'var(--surface)',borderRight:'1px solid var(--border)'}}>
+                          Δ Diff
                         </td>
-                        {coverage.map((cov,si)=>{
-                          const fc=parseFloat(fcSlots[si])||0;
+                        {cov.map((c,si)=>{
+                          const fc=parseFloat((fcIntervals[selDate]||[])[si])||0;
                           const need=fc>0?Math.ceil(fc/0.5):0;
-                          const diff=cov-need;
-                          if(need===0&&cov===0) return <td key={si} style={{borderLeft:TIME_SLOTS[si]?.endsWith(':00')?'2px solid var(--border)':'1px solid var(--border)'}}/>;
+                          if(!need&&!c) return <td key={si} style={{borderLeft:TIME_SLOTS[si]?.endsWith(':00')?'2px solid var(--border)':'1px solid var(--border)'}}/>;
+                          const diff=c-need;
+                          const isHour=TIME_SLOTS[si]?.endsWith(':00');
                           return(
                             <td key={si} style={{padding:'2px 1px',textAlign:'center',
-                              borderLeft:TIME_SLOTS[si]?.endsWith(':00')?'2px solid var(--border)':'1px solid var(--border)',
+                              borderLeft:isHour?'2px solid var(--border)':'1px solid var(--border)',
                               fontSize:9,fontWeight:800,
                               color:diff>=0?'#166534':'#991b1b',
                               background:diff>=0?'#dcfce7':'#fee2e2'}}>
@@ -7567,7 +7540,7 @@ const hours=parseFloat(row[3])||0;
                             </td>
                           );
                         })}
-                        <td style={{padding:'3px',borderLeft:'2px solid var(--border)'}}/>
+                        <td style={{borderLeft:'2px solid var(--border)'}}/>
                       </tr>
                     </tbody>
                   </table>
@@ -7578,47 +7551,48 @@ const hours=parseFloat(row[3])||0;
         </div>
       )}
 
-      {/* ── SHIFT PICKER MODAL ── */}
-      {editShiftModal&&(
+      {/* ════ SHIFT PICKER MODAL ════ */}
+      {shiftPicker&&(
         <div className="modal-overlay">
-          <div className="modal" style={{width:400}}>
+          <div className="modal" style={{width:420}}>
             <div className="modal-header">
-              <span className="modal-title">Schicht — {editShiftModal.empName} · {editShiftModal.dateStr}</span>
-              <button className="btn" onClick={()=>setEditShiftModal(null)}>×</button>
+              <span className="modal-title">
+                Schicht — {shiftPicker.empName} · {shiftPicker.ds}
+              </span>
+              <button className="btn" onClick={()=>setShiftPicker(null)}>×</button>
             </div>
             <div className="modal-body">
               <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:12}}>
-                {[...getShiftsForPlan(),{id:'frei',label:'Frei/Kein Dienst',value:'',hours:0,net:0}].map(sh=>(
+                {[...shifts,{id:'frei',label:'Frei',value:'',hours:0,net:0}].map(sh=>(
                   <button key={sh.id||sh.value} className="btn"
                     style={{padding:'10px 8px',textAlign:'left',fontSize:11,
-                      background:editShiftModal.currentEntry?.shift===sh.value?'var(--blue-bg)':'var(--surface-2)',
-                      color:editShiftModal.currentEntry?.shift===sh.value?'var(--blue)':'var(--fg)',
-                      border:editShiftModal.currentEntry?.shift===sh.value?'2px solid var(--blue)':'1px solid var(--border)',
+                      background:shiftPicker.entry?.shift===sh.value?'var(--blue-bg)':'var(--surface-2)',
+                      color:shiftPicker.entry?.shift===sh.value?'var(--blue)':'var(--fg)',
+                      border:shiftPicker.entry?.shift===sh.value?'2px solid var(--blue)':'1px solid var(--border)',
                       borderRadius:'var(--r)'}}
-                    onClick={()=>{
-                      setShiftEntry(editShiftModal.empId,editShiftModal.dateStr,sh.value,sh.hours,sh.net);
-                      setEditShiftModal(null);
-                    }}>
+                    onClick={()=>{setShiftEntry(shiftPicker.empId,shiftPicker.ds,sh);setShiftPicker(null);}}>
                     <div style={{fontWeight:700}}>{sh.label}</div>
                     <div style={{fontSize:9,color:'var(--muted)',marginTop:2}}>
-                      {sh.value||'Kein Einsatz'}{sh.hours>0?' · '+sh.hours+'h ('+sh.net+'h netto)':''}
+                      {sh.value||'Kein Dienst'}{sh.hours>0?' · '+sh.hours+'h / '+sh.net+'h netto':''}
                     </div>
                   </button>
                 ))}
               </div>
               <div style={{borderTop:'1px solid var(--border)',paddingTop:10}}>
-                <div style={{fontSize:11,fontWeight:700,marginBottom:6,color:'var(--muted)'}}>Eigene Schicht:</div>
+                <div style={{fontSize:11,fontWeight:700,marginBottom:6,color:'var(--muted)'}}>Eigene Zeit:</div>
                 <div style={{display:'flex',gap:6}}>
-                  <input className="form-input" id="custom-shift-inp" placeholder="z.B. 09:00-18:00"
-                    defaultValue={editShiftModal.currentEntry?.shift||''}/>
+                  <input className="form-input" id="csi" placeholder="z.B. 09:00-18:00"
+                    defaultValue={shiftPicker.entry?.shift||''}/>
                   <button className="btn btn-primary" onClick={()=>{
-                    const v=document.getElementById('custom-shift-inp').value.trim();
+                    const v=document.getElementById('csi').value.trim();
                     if(v){
                       const m=v.match(/(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})/);
                       const h=m?(parseInt(m[3])*60+parseInt(m[4])-parseInt(m[1])*60-parseInt(m[2]))/60:0;
-                      setShiftEntry(editShiftModal.empId,editShiftModal.dateStr,v,h,h-0.5);
+                      setShiftEntry(shiftPicker.empId,shiftPicker.ds,{id:'custom',label:v,value:v,hours:Math.round(h*10)/10,net:Math.round((h-0.5)*10)/10});
+                    } else {
+                      setShiftEntry(shiftPicker.empId,shiftPicker.ds,null);
                     }
-                    setEditShiftModal(null);
+                    setShiftPicker(null);
                   }}>OK</button>
                 </div>
               </div>
@@ -7627,25 +7601,22 @@ const hours=parseFloat(row[3])||0;
         </div>
       )}
 
-      {/* ── INTERVAL CELL EDIT MODAL ── */}
-      {editCellModal&&(
+      {/* ════ CELL PICKER MODAL ════ */}
+      {cellPicker&&(
         <div className="modal-overlay">
-          <div className="modal" style={{width:300}}>
+          <div className="modal" style={{width:280}}>
             <div className="modal-header">
-              <span className="modal-title">Slot {editCellModal.slotTime}</span>
-              <button className="btn" onClick={()=>setEditCellModal(null)}>×</button>
+              <span className="modal-title">Slot {cellPicker.slot}</span>
+              <button className="btn" onClick={()=>setCellPicker(null)}>×</button>
             </div>
             <div className="modal-body">
               <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8}}>
-                {[['1','● Aktiv','var(--blue)'],['p','P Pause','#92400e'],['0','○ Frei','var(--dim)']].map(([v,l,c])=>(
+                {[['1','● Aktiv','var(--blue)'],['p','P Pause','#92400e'],['0','○ Frei','var(--muted)']].map(([v,l,c])=>(
                   <button key={v} className="btn"
-                    style={{padding:'10px 4px',fontWeight:700,fontSize:12,color:c,
-                      border:'1.5px solid '+(getIntervalCell(editCellModal.empId,editCellModal.dateStr,editCellModal.slotIdx)===v?c:'var(--border)'),
-                      background:getIntervalCell(editCellModal.empId,editCellModal.dateStr,editCellModal.slotIdx)===v?'var(--surface-2)':'transparent'}}
-                    onClick={()=>{
-                      setIntervalCell(editCellModal.empId,editCellModal.dateStr,editCellModal.slotIdx,v);
-                      setEditCellModal(null);
-                    }}>
+                    style={{padding:'10px 4px',fontWeight:700,fontSize:12,
+                      color:getCell(cellPicker.empId,cellPicker.ds,cellPicker.si)===v?c:'var(--muted)',
+                      border:'1.5px solid '+(getCell(cellPicker.empId,cellPicker.ds,cellPicker.si)===v?c:'var(--border)')}}
+                    onClick={()=>{setCell(cellPicker.empId,cellPicker.ds,cellPicker.si,v);setCellPicker(null);}}>
                     {l}
                   </button>
                 ))}
@@ -7655,59 +7626,79 @@ const hours=parseFloat(row[3])||0;
         </div>
       )}
 
-      {/* ── FC IMPORT MODAL ── */}
-      {importModalOpen&&(
+      {/* ════ FC IMPORT MODAL ════ */}
+      {importModal&&(
         <div className="modal-overlay">
           <div className="modal" style={{width:520}}>
             <div className="modal-header">
               <span className="modal-title">📥 FC-Dokument importieren</span>
-              <button className="btn" onClick={()=>{setImportModalOpen(false);setImportPreview(null);}}>×</button>
+              <button className="btn" onClick={()=>{setImportModal(false);setImportPreview(null);}}>×</button>
             </div>
             <div className="modal-body">
               {!importPreview?(
                 <>
-                  <div style={{fontSize:12,color:'var(--muted)',marginBottom:16}}>
-                    Lade das FC-Dokument vom Partner hoch (z.B. FC_Mai_25Hrs__SALES.xlsx).<br/>
-                    Benötigt wird Sheet <b>Intervallplanung</b> mit Spalten A=Datum, B=Zeit, D=Stunden.
+                  <div style={{fontSize:12,color:'var(--muted)',marginBottom:16,lineHeight:1.5}}>
+                    FC-Dokument vom Partner hochladen (z.B. FC_Mai_25Hrs__SALES.xlsx)<br/>
+                    Sheet <b>Intervallplanung</b> · Spalte A=Datum · B=Zeit · D=Stunden
                   </div>
-                  <label style={{display:'block',padding:'24px',border:'2px dashed var(--border)',
-                    borderRadius:'var(--r)',textAlign:'center',cursor:'pointer',background:'var(--surface-2)'}}>
+                  <label style={{display:'block',padding:'28px',border:'2px dashed var(--border)',
+                    borderRadius:'var(--r)',textAlign:'center',cursor:'pointer',
+                    background:importing?'var(--surface-3)':'var(--surface-2)'}}>
                     <input type="file" accept=".xlsx,.xls" style={{display:'none'}}
-                      onChange={e=>handleFCImport(e.target.files[0])}/>
-                    <div style={{fontSize:28,marginBottom:8}}>📂</div>
-                    <div style={{fontSize:13,fontWeight:700}}>FC-Dokument hochladen</div>
+                      disabled={importing}
+                      onChange={e=>{if(e.target.files[0]) handleFCImport(e.target.files[0]);}}/>
+                    <div style={{fontSize:28,marginBottom:8}}>{importing?'⏳':'📂'}</div>
+                    <div style={{fontSize:13,fontWeight:700}}>
+                      {importing?'Wird verarbeitet...':'FC-Dokument hochladen'}
+                    </div>
                     <div style={{fontSize:11,color:'var(--muted)',marginTop:4}}>
-                      {selProj?.name||''} · {selSkill||'Alle Skills'} · {MONTHS_DE[selMonth-1]} {selYear}
+                      {selProj?.name||''}{selSkill?' · '+selSkill:''} · {MONTHS[selMonth-1]} {selYear}
                     </div>
                   </label>
                 </>
               ):(
                 <>
-                  <div style={{padding:'12px 14px',background:'var(--blue-bg)',borderRadius:'var(--r)',marginBottom:12}}>
-                    <div style={{fontWeight:700,fontSize:13,marginBottom:4}}>✅ {importPreview.filename}</div>
+                  <div style={{padding:'12px 14px',background:'var(--blue-bg)',
+                    borderRadius:'var(--r)',marginBottom:12}}>
+                    <div style={{fontWeight:700,fontSize:13,marginBottom:4}}>
+                      ✅ {importPreview.filename}
+                    </div>
                     <div style={{fontSize:12,color:'var(--muted)'}}>
-                      {importPreview.days} Tage · {importPreview.totalH}h Gesamtbedarf
+                      {importPreview.days} Tage mit Daten · {importPreview.totalH}h Gesamtbedarf
+                      {importPreview.skipped>0&&' · '+importPreview.skipped+' Zeilen übersprungen'}
                     </div>
                   </div>
-                  <div style={{overflowY:'auto',maxHeight:200,fontSize:11}}>
-                    <table style={{width:'100%',borderCollapse:'collapse'}}>
+                  <div style={{overflowY:'auto',maxHeight:220}}>
+                    <table style={{width:'100%',borderCollapse:'collapse',fontSize:11}}>
                       <thead>
                         <tr style={{background:'var(--surface-2)'}}>
                           <th style={{padding:'5px 8px',textAlign:'left'}}>Datum</th>
                           <th style={{padding:'5px 8px',textAlign:'right'}}>FC Stunden</th>
-                          <th style={{padding:'5px 8px',textAlign:'right'}}>Slots mit Daten</th>
+                          <th style={{padding:'5px 8px',textAlign:'right'}}>Slots</th>
+                          <th style={{padding:'5px 8px',textAlign:'right'}}>Peak</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {Object.entries(importPreview.dfc).slice(0,15).map(([d,h])=>(
-                          <tr key={d} style={{borderBottom:'1px solid var(--border)'}}>
-                            <td style={{padding:'4px 8px',fontWeight:600}}>{d}</td>
-                            <td style={{padding:'4px 8px',textAlign:'right',color:'var(--blue)',fontWeight:700}}>{Math.round(h*10)/10}h</td>
-                            <td style={{padding:'4px 8px',textAlign:'right',color:'var(--muted)'}}>
-                              {(importPreview.ifc[d]||[]).filter(v=>v>0).length}
-                            </td>
-                          </tr>
-                        ))}
+                        {Object.entries(importPreview.dfc).sort().slice(0,20).map(([d,h])=>{
+                          const slots=importPreview.ifc[d]||[];
+                          const peakIdx=slots.reduce((mx,v,i)=>v>slots[mx]?i:mx,0);
+                          const peakTime=TIME_SLOTS[peakIdx]||'—';
+                          const peakNeed=Math.ceil((slots[peakIdx]||0)/0.5);
+                          return(
+                            <tr key={d} style={{borderBottom:'1px solid var(--border)'}}>
+                              <td style={{padding:'4px 8px',fontWeight:600}}>{d}</td>
+                              <td style={{padding:'4px 8px',textAlign:'right',color:'var(--blue)',fontWeight:700}}>
+                                {Math.round(h*10)/10}h
+                              </td>
+                              <td style={{padding:'4px 8px',textAlign:'right',color:'var(--muted)'}}>
+                                {slots.filter(v=>v>0).length}
+                              </td>
+                              <td style={{padding:'4px 8px',textAlign:'right',color:'var(--muted)'}}>
+                                {peakTime} ({peakNeed} MA)
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
