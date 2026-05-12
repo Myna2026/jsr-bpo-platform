@@ -6685,446 +6685,340 @@ function PayrollView({employees, projects, showToast}){
   );
 }
 
-
-// ═══════════════════════════════════════════════════════════════════
-// WORKFORCE PLANNING VIEW
-// Struktur: Projekt → Skill → Monat → 4 KWs → pro Tag: Schicht + Stunden
-// Vernetzt mit: Mitarbeiter (Abwesenheiten, Skill, Projekt), Forecast
-// ═══════════════════════════════════════════════════════════════════
-
 function WorkforcePlanningView({employees, projects, showToast}){
-  const today = new Date();
-  const [selYear,  setSelYear]  = useState(today.getFullYear());
-  const [selMonth, setSelMonth] = useState(today.getMonth()+1); // 1-12
-  const [selProjId, setSelProjId] = useState('');
-  const [selSkill,  setSelSkill]  = useState(''); // '' = alle Skills zusammen
-  const [plans, setPlans] = useState(()=>{
-    try{return JSON.parse(localStorage.getItem('jsr_workforce_plans')||'{}');}catch(e){return{};}
-  });
-  const [editCell, setEditCell] = useState(null); // {empId, date, field}
-  const [shiftModal, setShiftModal] = useState(null); // {empId, date}
-  const [forecastModal, setForecastModal] = useState(null); // {kw, year}
+  // ── TIME SLOTS: 08:00 - 22:30 in 30min steps = 30 slots ──────────
+  const TIME_SLOTS=[];
+  for(let h=8;h<=22;h++){
+    TIME_SLOTS.push(h+':00');
+    if(h<22) TIME_SLOTS.push(h+':30');
+  }
+  TIME_SLOTS.push('22:30');
+  // Slots: 08:00,08:30,...,22:00,22:30 = 30 slots
 
-  // ── PERSIST ───────────────────────────────────────────────────────
-  useEffect(()=>{localStorage.setItem('jsr_workforce_plans',JSON.stringify(plans));},[plans]);
+  const DAYS_DE=['MO','DI','MI','DO','FR','SA','SO'];
+  const MONTHS_DE=['Januar','Februar','März','April','Mai','Juni','Juli','August','September','Oktober','November','Dezember'];
+
+  // ── STATE ─────────────────────────────────────────────────────────
+  const today=new Date();
+  const [view,setView]=useState('schicht'); // 'schicht' | 'intervall'
+  const [selProjId,setSelProjId]=useState('');
+  const [selSkill,setSelSkill]=useState('');
+  const [selYear,setSelYear]=useState(today.getFullYear());
+  const [selMonth,setSelMonth]=useState(today.getMonth()+1);
+  const [selDate,setSelDate]=useState(null); // for intervall view: which day
+  const [planData,setPlanData]=useState({});       // jsr_wfp2_<key>
+  const [intervalFC,setIntervalFC]=useState({});   // jsr_wfp2_ifc_<key>
+  const [dayFC,setDayFC]=useState({});             // jsr_wfp2_dfc_<key>
+  const [importModalOpen,setImportModalOpen]=useState(false);
+  const [importPreview,setImportPreview]=useState(null);
+  const [editShiftModal,setEditShiftModal]=useState(null); // {empId,dateStr}
+  const [editCellModal,setEditCellModal]=useState(null);   // {empId,dateStr,slot}
+
+  // ── PLAN KEY ──────────────────────────────────────────────────────
+  const planKey=()=>selProjId+(selSkill?'_'+selSkill:'_all')+'_'+selYear+'_'+String(selMonth).padStart(2,'0');
+
+  // ── PERSIST / LOAD ────────────────────────────────────────────────
+  useState(()=>{
+    if(!selProjId) return;
+    const k=planKey();
+    try{ setPlanData(JSON.parse(localStorage.getItem('jsr_wfp2_'+k)||'{}')); }catch(e){ setPlanData({}); }
+    try{ setIntervalFC(JSON.parse(localStorage.getItem('jsr_wfp2_ifc_'+k)||'{}')); }catch(e){ setIntervalFC({}); }
+    try{ setDayFC(JSON.parse(localStorage.getItem('jsr_wfp2_dfc_'+k)||'{}')); }catch(e){ setDayFC({}); }
+  });
+
+  function savePlan(data){
+    const k=planKey();
+    localStorage.setItem('jsr_wfp2_'+k,JSON.stringify(data));
+    setPlanData({...data});
+  }
 
   // ── HELPERS ───────────────────────────────────────────────────────
-  const DAYS = ['MO','DI','MI','DO','FR','SA','SO'];
-  const getShiftConfig=()=>{try{return JSON.parse(localStorage.getItem('jsr_shift_cfg')||'{}');}catch(e){return{};}};
-  const getProjShifts=(projId,skill)=>{const cfg=getShiftConfig();const key=projId&&skill?projId+'_'+skill:projId?projId+'_all':'';const found=cfg[key]||cfg[projId+'_all']||[];return [...found,{id:'frei',label:'Frei',value:'',hours:0,net:0}];};
-  const SHIFTS=getProjShifts(selProjId,selSkill);
-
-  function getShiftMeta(shiftVal){
-    if(!shiftVal || shiftVal===0 || shiftVal==='0') return {hours:0,net:0};
-    if(shiftVal==='Urlaub'||shiftVal==='Krank') return {hours:0,net:0,special:shiftVal};
-    const s=SHIFTS.find(x=>x.value===shiftVal);
-    if(s) return {hours:s.hours,net:s.net,split:s.split||false,value2:s.value2,label:s.label};
-    // Parse custom HH:MM-HH:MM
-    const m=shiftVal.match(/(\d{2}):(\d{2})-(\d{2}):(\d{2})/);
-    if(m){
-      const start=parseInt(m[1])*60+parseInt(m[2]);
-      const end=parseInt(m[3])*60+parseInt(m[4]);
-      const total=(end-start)/60;
-      return {hours:total, net:total-0.5};
-    }
-    return {hours:0,net:0};
-  }
-
-  // Get ISO week number
   function getKW(date){
     const d=new Date(Date.UTC(date.getFullYear(),date.getMonth(),date.getDate()));
-    const dayNum=d.getUTCDay()||7;
-    d.setUTCDate(d.getUTCDate()+4-dayNum);
-    const yearStart=new Date(Date.UTC(d.getUTCFullYear(),0,1));
-    return Math.ceil((((d-yearStart)/86400000)+1)/7);
+    const day=d.getUTCDay()||7;
+    d.setUTCDate(d.getUTCDate()+4-day);
+    const ys=new Date(Date.UTC(d.getUTCFullYear(),0,1));
+    return Math.ceil((((d-ys)/86400000)+1)/7);
   }
 
-  // Get all Mondays of a month → gives us weeks
   function getWeeksOfMonth(year,month){
     const weeks=[];
     const d=new Date(year,month-1,1);
-    // Find first Monday on or before month start
-    const dow=d.getDay(); // 0=Sun
+    const dow=d.getDay();
     const offset=dow===0?-6:1-dow;
     d.setDate(d.getDate()+offset);
-    while(d.getMonth()<month-1||(d.getFullYear()===year&&d.getMonth()===month-1)||
-      (d.getMonth()===month-1)){
+    while(true){
       if(d.getFullYear()>year||(d.getFullYear()===year&&d.getMonth()>month-1)) break;
-      const weekDays=[];
-      for(let i=0;i<7;i++){
-        weekDays.push(new Date(d.getFullYear(),d.getMonth(),d.getDate()+i));
-      }
-      weeks.push({kw:getKW(d), days:weekDays});
+      const days=[];
+      for(let i=0;i<7;i++) days.push(new Date(d.getFullYear(),d.getMonth(),d.getDate()+i));
+      weeks.push({kw:getKW(d),days});
       d.setDate(d.getDate()+7);
       if(weeks.length>=6) break;
     }
     return weeks;
   }
 
-  // Plan key: projId_skill_year_month
-  function planKey(){
-    return `${selProjId}_${selSkill||'all'}_${selYear}_${String(selMonth).padStart(2,'0')}`;
+  function getDaysOfMonth(year,month){
+    const days=[];
+    const total=new Date(year,month,0).getDate();
+    for(let d=1;d<=total;d++) days.push(new Date(year,month-1,d));
+    return days;
   }
 
-  function getPlan(){return plans[planKey()]||{};}
-
-  function setDayEntry(empId, dateStr, shift){
-    const key=planKey();
-    const meta=getShiftMeta(shift);
-    setPlans(p=>({...p,[key]:{...p[key],[`${empId}_${dateStr}`]:{shift,hours:meta.hours,net:meta.net}}}));
+  function getShiftConfig(){
+    try{ return JSON.parse(localStorage.getItem('jsr_shift_cfg')||'{}'); }catch(e){ return{}; }
   }
 
-  function getForecast(kw){
-    const key=planKey();
-    return plans[`forecast_${key}`]?.[String(kw)]||{MO:0,DI:0,MI:0,DO:0,FR:0,SA:0,SO:0};
+  function getShiftsForPlan(){
+    const cfg=getShiftConfig();
+    const key=selProjId&&selSkill?selProjId+'_'+selSkill:selProjId+'_all';
+    return cfg[key]||cfg[selProjId+'_all']||[];
   }
 
-  function setForecast(kw,dayKey,val){
-    const key=planKey();
-    const fkey=`forecast_${key}`;
-    const kwStr=String(kw);setPlans(p=>({...p,[fkey]:{...p[fkey],[kwStr]:{...(p[fkey]?.[kwStr]||{}),[dayKey]:parseFloat(val)||0}}}));
+  function parseShiftToSlots(shiftValue){
+    // Return array of slot indices that this shift covers
+    if(!shiftValue) return [];
+    const m=shiftValue.match(/(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})/);
+    if(!m) return [];
+    const startMin=parseInt(m[1])*60+parseInt(m[2]);
+    const endMin=parseInt(m[3])*60+parseInt(m[4]);
+    const slots=[];
+    TIME_SLOTS.forEach((slot,idx)=>{
+      const [sh,sm]=slot.split(':').map(Number);
+      const slotMin=sh*60+sm;
+      if(slotMin>=startMin&&slotMin<endMin) slots.push(idx);
+    });
+    return slots;
   }
 
-  // ── FILTER EMPLOYEES ──────────────────────────────────────────────
-  const projEmployees = (employees||[]).filter(e=>{
+  function slotToMinutes(slot){
+    const [h,m]=slot.split(':').map(Number);
+    return h*60+m;
+  }
+
+  function isPauseAllowed(slotIdx,shiftStartSlotIdx,shiftEndSlotIdx){
+    // No pause in first 2h (4 slots) and last 1h (2 slots)
+    if(slotIdx<shiftStartSlotIdx+4) return false;
+    if(slotIdx>=shiftEndSlotIdx-2) return false;
+    return true;
+  }
+
+  function getAbsenceOnDate(emp,dateStr){
+    return (emp.absences||[]).find(a=>a.from&&a.to&&dateStr>=a.from&&dateStr<=a.to);
+  }
+
+  function formatDate(d){ return d.toISOString().slice(0,10); }
+
+  // ── FILTERED EMPLOYEES ────────────────────────────────────────────
+  const planEmps=(employees||[]).filter(e=>{
     if(e.status!=='active') return false;
-    if(!selProjId) return false;
-    if(e.project_id!==selProjId) return false;
-    if(selSkill && e.project_skill!==selSkill) return false;
+    if(!selProjId||e.project_id!==selProjId) return false;
+    if(selSkill&&e.project_skill!==selSkill) return false;
     return true;
   });
 
-  // Check if employee is absent on a date
-  function getAbsenceOnDate(emp, dateStr){
-    const absences=emp.absences||[];
-    return absences.find(a=>{
-      if(!a.from||!a.to) return false;
-      return dateStr>=a.from && dateStr<=a.to;
-    });
-  }
-
-  // Get entry for employee on date
-  function getEntry(empId, dateStr){
-    return getPlan()[`${empId}_${dateStr}`]||null;
-  }
-
-  // ── SELECTED PROJECT / SKILLS ──────────────────────────────────────
-  const selProj = (projects||[]).find(p=>p.id===selProjId);
-  const projSkills = selProj?.skills||[];
-
-  // ── COMPUTE WEEK TOTALS ────────────────────────────────────────────
-  function getWeekTotals(weekDays){
-    const totals={};
-    DAYS.forEach((d,i)=>{
-      const dateStr=weekDays[i]?.toISOString().slice(0,10);
-      if(!dateStr) return;
-      let sumHours=0, sumNet=0;
-      projEmployees.forEach(emp=>{
-        const entry=getEntry(emp.id,dateStr);
-        const absence=getAbsenceOnDate(emp,dateStr);
-        if(absence) return; // absent = 0
-        if(entry){sumHours+=entry.hours||0;sumNet+=entry.net||0;}
-      });
-      totals[d]={hours:sumHours, net:sumNet};
-    });
-    return totals;
-  }
-
-  const weeks=getWeeksOfMonth(selYear,selMonth);
-  const MONTHS=['Januar','Februar','März','April','Mai','Juni','Juli','August','September','Oktober','November','Dezember'];
-
-  // ── EMPLOYEE MONTH SUMMARY ────────────────────────────────────────
-  function getEmpMonthSummary(emp){
-    let totalHours=0, totalNet=0, plannedDays=0;
-    weeks.forEach(({days})=>{
-      days.forEach(day=>{
-        const dateStr=day.toISOString().slice(0,10);
-        const entry=getEntry(emp.id,dateStr);
-        const absence=getAbsenceOnDate(emp,dateStr);
-        if(entry&&!absence){
-          totalHours+=entry.hours||0;
-          totalNet+=entry.net||0;
-          if(entry.hours>0) plannedDays++;
-        }
-      });
-    });
-    return {totalHours,totalNet,plannedDays};
-  }
-
-  const [importPreview, setImportPreview] = useState(null);
-  const [importModalOpen, setImportModalOpen] = useState(false);
-  const [aiImportPrompt, setAiImportPrompt] = useState('');
-  const [pendingFile, setPendingFile] = useState(null);
-  const [pendingFileRows, setPendingFileRows] = useState(null);
-  const [aiImportLoading, setAiImportLoading] = useState(false);
-  const [shiftRecModal,setShiftRecModal]=React.useState(false);
-  const [shiftRec,setShiftRec]=React.useState(null);
-  const [shiftRecLoading,setShiftRecLoading]=React.useState(false);
-
-  // ── PREDEFINED IMPORTERS ──────────────────────────────────────────
-  // Each importer knows how to read a specific Excel format from a client
-  const BUILTIN_IMPORTERS = [
-    {
-      id:'holidaycheck_sales',
-      label:'Holidaycheck — Sales',
-      description:'Sheet "Tagesplanung": KW(A), Datum(D), FC Sales(F), FC Backoffice(G). Intervalle: Sheet "Intervallplanung".',
-      skill:'sales',
-      fn: (wb) => parseHolidaycheckFormat(wb,'sales'),
-    },
-    {
-      id:'holidaycheck_support',
-      label:'Holidaycheck — Support',
-      description:'Sheet "Tagesplanung": KW(A), Datum(D), FC Sales(F) als Support-Stunden. Intervalle: Sheet "Intervallplanung".',
-      skill:'support',
-      fn: (wb) => parseHolidaycheckFormat(wb,'support'),
-    },
-  ];
-
-  // Load custom AI-generated importers from localStorage
-  const customImporters = (() => {
-    try { return JSON.parse(localStorage.getItem('jsr_custom_importers')||'[]'); }
-    catch(e) { return []; }
-  })();
-
-  const allImporters = [
-    ...BUILTIN_IMPORTERS,
-    ...customImporters.map(ci=>({
-      ...ci,
-      isCustom: true,
-      fn: (wb) => parseWithAiMapping(wb, ci.mapping),
-    })),
-  ];
-
-  // ── HOLIDAYCHECK FORMAT PARSER ────────────────────────────────────
-  function parseHolidaycheckFormat(wb, skill) {
-    const DAYMAP={'Montag':'MO','Dienstag':'DI','Mittwoch':'MI','Donnerstag':'DO','Freitag':'FR','Samstag':'SA','Sonntag':'SO'};
-    const warnings=[];
-    const wsName=wb.SheetNames.find(n=>n.toLowerCase().includes('tagesplan'));
-    if(!wsName) throw new Error('Sheet Tagesplanung nicht gefunden. Sheets: '+wb.SheetNames.join(', ')+'. Falsches File?');
-    if(!wb.SheetNames.find(n=>n.toLowerCase().includes('intervall'))) warnings.push('Sheet Intervallplanung fehlt - Intervalle werden nicht importiert.');
-    const rows=XLSX.utils.sheet_to_json(wb.Sheets[wsName],{header:1,defval:null});
-    const dataRows=rows.filter(r=>r[0]&&typeof r[0]==='number'&&r[0]>=1&&r[0]<=54);
-    if(dataRows.length===0) throw new Error('Keine Tagesdaten in Spalte A (KW 1-54). Spaltenstruktur hat sich geaendert?\nErste Zeile: '+rows[0].slice(0,6).join(' | '));
-    if(!(dataRows[0][3] instanceof Date)) warnings.push('Datum nicht in Spalte D erkannt (Wert: '+String(dataRows[0][3]).slice(0,15)+'). Format ggf. geaendert.');
-    if(!dataRows.some(r=>parseFloat(r[5])>0)) warnings.push('Keine Stunden in Spalte F (FC Sales). Andere Spalte?');
-    if(warnings.length>0&&!window.confirm('Format-Hinweise:\n\n'+warnings.join('\n')+'\n\nTrotzdem fortfahren?')) throw new Error('Import abgebrochen.');
-
-    
-    // Parse intervals
-    const intervals = {};
-    const wsIntName = wb.SheetNames.find(n=>n.toLowerCase().includes('intervall'));
-    if(wsIntName) {
-      const intRows = XLSX.utils.sheet_to_json(wb.Sheets[wsIntName], {header:1, defval:null});
-      intRows.slice(1).forEach(row=>{
-        if(!row[0]||!row[1]) return;
-        const d = row[0] instanceof Date ? row[0].toISOString().slice(0,10) : String(row[0]).slice(0,10);
-        if(!intervals[d]) intervals[d]=[];
-        const tv = row[1];
-        let ts = '';
-        if(tv instanceof Date) ts = tv.toTimeString().slice(0,5);
-        else if(typeof tv==='number') ts = new Date(Math.round(tv*86400000)).toISOString().slice(11,16);
-        else ts = String(tv).slice(0,5);
-        intervals[d].push({time:ts, calls:parseFloat(row[2])||0, hours:parseFloat(row[3])||0});
+  // ── PLAN ENTRY GETTERS/SETTERS ────────────────────────────────────
+  // Schicht plan: key = empId_dateStr → {shift, hours, net}
+  function getShiftEntry(empId,dateStr){ return planData['s_'+empId+'_'+dateStr]||null; }
+  function setShiftEntry(empId,dateStr,shift,hours,net){
+    const upd={...planData,['s_'+empId+'_'+dateStr]:{shift,hours,net}};
+    // Auto-populate interval plan from shift
+    if(shift){
+      const slots=parseShiftToSlots(shift);
+      const shiftStart=slots[0]||0;
+      const shiftEnd=slots[slots.length-1]||0;
+      slots.forEach((si,idx)=>{
+        const pause=isPauseAllowed(si,shiftStart,shiftEnd)&&idx===Math.floor(slots.length/2)?'p':'1';
+        upd['i_'+empId+'_'+dateStr+'_'+si]=pause;
       });
     }
-
-    let aht=0, avail=0;
-    const days = [];
-    let totalHours = 0;
-    rows.forEach(row=>{
-      if(row[8]&&String(row[8]).includes('AHT')) aht = parseFloat(row[9])||aht;
-      if(row[8]&&String(row[8]).includes('Avail')) avail = parseFloat(row[9])||avail;
-      if(!row[0]||typeof row[0]!=='number'||!row[3]) return;
-      const kw = parseInt(row[0]);
-      if(isNaN(kw)||kw<1||kw>54) return;
-      const dateVal = row[3];
-      if(!dateVal) return;
-      let dateStr;
-      if(dateVal instanceof Date) dateStr=dateVal.toISOString().slice(0,10);
-      else if(typeof dateVal==='number') dateStr=new Date(Math.round((dateVal-25569)*86400000)).toISOString().slice(0,10);
-      else if(typeof dateVal==='string') dateStr=dateVal.slice(0,10);
-      else return;
-      const weekdayTxt = String(row[1]||'');
-      const fcSales = parseFloat(row[5])||parseFloat(row[4])||0;
-      const fcBackoffice = parseFloat(row[6])||0;
-      if(fcSales<=0&&fcBackoffice<=0) return;
-      const dayIntervals = intervals[dateStr]||[];
-      const maxH = dayIntervals.length>0 ? Math.max(...dayIntervals.map(i=>i.hours)) : 0;
-      const fcForSkill = skill==='support' ? fcSales : fcSales;
-      days.push({date:dateStr, kw, weekday:weekdayTxt, dayKey:DAYMAP[weekdayTxt]||'MO',
-        fcSales:fcForSkill, fcBackoffice, intervals:dayIntervals, maxIntervalHours:maxH});
-      totalHours += fcForSkill;
-    });
-    return {days, aht, avail, totalHours};
+    savePlan(upd);
   }
 
-  // ── AI MAPPING PARSER (from saved KI-generated mapping) ──────────
-  function parseWithAiMapping(wb, mapping) {
-    const wsName = wb.SheetNames.find(n=>n.toLowerCase().includes(mapping.sheetFilter||'')) || wb.SheetNames[mapping.sheetIndex||0];
-    const rows = XLSX.utils.sheet_to_json(wb.Sheets[wsName], {header:1, defval:null});
-    const DAYMAP = {'Montag':'MO','Dienstag':'DI','Mittwoch':'MI','Donnerstag':'DO','Freitag':'FR','Samstag':'SA','Sonntag':'SO',
-      'Monday':'MO','Tuesday':'DI','Wednesday':'MI','Thursday':'DO','Friday':'FR','Saturday':'SA','Sunday':'SO'};
-    const days = [];
-    let totalHours = 0;
-    const startRow = mapping.headerRow||1;
-    rows.slice(startRow).forEach(row=>{
-      const kw = parseInt(row[mapping.colKw||0]);
-      if(isNaN(kw)||kw<1||kw>54) return;
-      const dateVal = row[mapping.colDate||3];
-      if(!dateVal) return;
-      const dateStr = dateVal instanceof Date ? dateVal.toISOString().slice(0,10) : String(dateVal).slice(0,10);
-      const weekdayTxt = String(row[mapping.colWeekday||1]||'');
-      const fcHours = parseFloat(row[mapping.colFcHours||5])||0;
-      if(fcHours<=0) return;
-      days.push({date:dateStr, kw, weekday:weekdayTxt, dayKey:DAYMAP[weekdayTxt]||'MO',
-        fcSales:fcHours, fcBackoffice:0, intervals:[], maxIntervalHours:0});
-      totalHours += fcHours;
-    });
-    return {days, aht:0, avail:0, totalHours};
+  // Interval plan: key = empId_dateStr_slotIdx → '1'|'p'|'0'
+  function getIntervalCell(empId,dateStr,slotIdx){ return planData['i_'+empId+'_'+dateStr+'_'+slotIdx]||'0'; }
+  function setIntervalCell(empId,dateStr,slotIdx,val){
+    const upd={...planData,['i_'+empId+'_'+dateStr+'_'+slotIdx]:val};
+    savePlan(upd);
   }
 
-  // ── RUN BUILTIN IMPORTER ──────────────────────────────────────────
-  function runBuiltinImporter(file, parserFn, skill) {
-    const reader = new FileReader();
-    reader.onload = ev => {
-      try {
-        const wb = XLSX.read(new Uint8Array(ev.target.result), {type:'array', cellDates:true});
-        const result = parserFn(wb);
-        if(!result.days||result.days.length===0) {
-          alert('Keine Daten gefunden. Bitte prüfe ob das richtige File für diesen Importer gewählt wurde.');
-          return;
+  // ── FC DATA ───────────────────────────────────────────────────────
+  function getFCForDate(dateStr){
+    // Returns array of 30 values (hours per slot) for this date
+    return intervalFC[dateStr]||[];
+  }
+
+  function getDayFCHours(dateStr){ return dayFC[dateStr]||0; }
+
+  // ── AUTO-PLAN (KI / Algorithmus) ─────────────────────────────────
+  function autoSchedule(){
+    if(!selProjId){ alert('Bitte Projekt wählen.'); return; }
+    const shifts=getShiftsForPlan();
+    if(!shifts.length){ alert('Keine Schichten für dieses Projekt/Skill konfiguriert.'); return; }
+    const days=getDaysOfMonth(selYear,selMonth);
+    const upd={...planData};
+
+    // Calculate work days and target hours per employee
+    planEmps.forEach(emp=>{
+      const workH=parseFloat(emp.work_hours||8);
+      let plannedH=0;
+      const targetH=workH*22; // approx monthly target
+
+      days.forEach(day=>{
+        const dateStr=formatDate(day);
+        const dow=day.getDay(); // 0=Sun, 6=Sat
+        const absence=getAbsenceOnDate(emp,dateStr);
+        if(absence) return; // skip absent days
+        if(dow===0&&!emp.work_weekend) return; // no Sunday
+        if(dow===6&&!emp.work_weekend) return; // no Saturday (unless allowed)
+
+        // Skip if already planned
+        if(upd['s_'+emp.id+'_'+dateStr]) return;
+
+        // Find best shift based on FC curve for this day
+        const fcSlots=intervalFC[dateStr]||[];
+        if(!fcSlots.length) return; // no FC data
+
+        // Find shift that covers the peak hours
+        let bestShift=null;
+        let bestScore=0;
+        shifts.forEach(sh=>{
+          if(!sh.value) return;
+          const slots=parseShiftToSlots(sh.value);
+          let score=slots.reduce((s,si)=>s+(parseFloat(fcSlots[si])||0),0);
+          if(score>bestScore){ bestScore=score; bestShift=sh; }
+        });
+
+        if(bestShift&&plannedH<targetH){
+          upd['s_'+emp.id+'_'+dateStr]={shift:bestShift.value,hours:bestShift.hours,net:bestShift.net};
+          plannedH+=bestShift.net||0;
+          // Also populate interval cells
+          const slots=parseShiftToSlots(bestShift.value);
+          const shStart=slots[0]||0;
+          const shEnd=slots[slots.length-1]||0;
+          slots.forEach((si,idx)=>{
+            const isPause=isPauseAllowed(si,shStart,shEnd)&&idx===Math.floor(slots.length/2);
+            upd['i_'+emp.id+'_'+dateStr+'_'+si]=isPause?'p':'1';
+          });
         }
-        setImportPreview({filename:file.name, skill:skill||selSkill||'all', ...result});
-        setImportModalOpen(false);
-      } catch(err) {
-        alert('Fehler beim Lesen: '+err.message);
+      });
+    });
+
+    savePlan(upd);
+    showToast&&showToast('Automatische Vorplanung abgeschlossen','success');
+  }
+
+  // ── FC IMPORT ─────────────────────────────────────────────────────
+  function handleFCImport(file){
+    if(!file) return;
+    const reader=new FileReader();
+    reader.onload=ev=>{
+      try{
+        const wb=XLSX.read(new Uint8Array(ev.target.result),{type:'array',cellDates:true});
+        const wsName=wb.SheetNames.find(n=>n.toLowerCase().includes('intervall'));
+        if(!wsName) throw new Error('Sheet "Intervallplanung" nicht gefunden. Sheets: '+wb.SheetNames.join(', '));
+        const rows=XLSX.utils.sheet_to_json(wb.Sheets[wsName],{header:1,defval:null});
+
+        // Parse: A=Datum, B=Zeit, D=Stunden
+        const ifc={};
+        const dfc={};
+        rows.slice(1).forEach(row=>{
+          if(!row[0]||!row[1]) return;
+          const d=row[0] instanceof Date?row[0].toISOString().slice(0,10):String(row[0]).slice(0,10);
+          let timeStr='';
+          const tv=row[1];
+          if(tv instanceof Date) timeStr=tv.toTimeString().slice(0,5);
+          else if(typeof tv==='number') timeStr=new Date(Math.round(tv*86400000)).toISOString().slice(11,16);
+          else timeStr=String(tv).slice(0,5);
+          const hours=parseFloat(row[3])||0;
+          // Map time to slot index
+          const slotIdx=TIME_SLOTS.indexOf(timeStr);
+          if(slotIdx>=0){
+            if(!ifc[d]) ifc[d]=new Array(TIME_SLOTS.length).fill(0);
+            ifc[d][slotIdx]=hours;
+            dfc[d]=(dfc[d]||0)+hours;
+          }
+        });
+
+        // Also try Tagesplanung sheet for day totals
+        const wsDay=wb.SheetNames.find(n=>n.toLowerCase().includes('tagesplan'));
+        if(wsDay){
+          const dayRows=XLSX.utils.sheet_to_json(wb.Sheets[wsDay],{header:1,defval:null});
+          dayRows.slice(1).forEach(row=>{
+            if(!row[3]) return;
+            const d=row[3] instanceof Date?row[3].toISOString().slice(0,10):null;
+            if(d) dfc[d]=parseFloat(row[5])||parseFloat(row[4])||dfc[d]||0;
+          });
+        }
+
+        const days=Object.keys(ifc).length;
+        const totalH=Object.values(dfc).reduce((s,v)=>s+v,0);
+        setImportPreview({filename:file.name,ifc,dfc,days,totalH:Math.round(totalH*10)/10});
+      }catch(err){
+        alert('Import-Fehler: '+err.message);
       }
     };
     reader.readAsArrayBuffer(file);
   }
 
-  // ── AI IMPORTER ───────────────────────────────────────────────────
-  async function runAiImporter(file, prompt) {
-    setAiImportLoading(true);
-    try {
-      // Read file content for AI
-      const reader = new FileReader();
-      reader.onload = async ev => {
-        try {
-          const wb = XLSX.read(new Uint8Array(ev.target.result), {type:'array', cellDates:true});
-          // Build preview of first rows for AI
-          const sheetPreviews = wb.SheetNames.slice(0,3).map(name=>{
-            const rows = XLSX.utils.sheet_to_json(wb.Sheets[name], {header:1, defval:null}).slice(0,5);
-            return {name, rows};
-          });
-          const previewText = sheetPreviews.map(s=>'Sheet "'+s.name+'":\n'+s.rows.map(r=>r.map(v=>v===null?'':String(v||'').slice(0,20)).join(' | ')).join('\n')).join('\n\n');;
-
-          const aiKey = localStorage.getItem('jsr_anthropic_key')||'';
-          if(!aiKey) {
-            alert('Kein API-Key hinterlegt. Bitte unter Admin → System → API-Key eingeben.');
-            setAiImportLoading(false);
-            return;
-          }
-
-          const sysPrompt = 'Du bist ein Daten-Mapping-Experte. Analysiere die Excel-Vorschau und erstelle ein JSON-Mapping-Objekt.'+
-            ' Antworte NUR mit einem validen JSON-Objekt, kein Markdown, keine Erklärung.'+
-            ' Format: {"sheetFilter":"tagesplan","sheetIndex":0,"headerRow":1,"colKw":0,"colDate":3,"colWeekday":1,"colFcHours":5,"description":"kurze Beschreibung"}'+
-            ' Alle col-Werte sind 0-basierte Spalten-Indizes.';
-
-          const resp = await fetch('https://api.anthropic.com/v1/messages', {
-            method:'POST',
-            headers:{'Content-Type':'application/json','x-api-key':aiKey,'anthropic-version':'2023-06-01'},
-            body: JSON.stringify({
-              model:'claude-sonnet-4-20250514',
-              max_tokens:500,
-              system: sysPrompt,
-              messages:[{role:'user',content:'Excel-Vorschau:\n'+previewText+'\n\nBenutzer-Anweisung: '+prompt+'\n\nErstelle das Mapping-JSON:'}]
-            })
-          });
-          const data = await resp.json();
-          const raw = (data.content||[]).map(c=>c.text||'').join('').trim();
-          const clean = raw.replace(/```json|```/g,'').trim();
-          const mapping = JSON.parse(clean);
-
-          // Test the mapping
-          const result = parseWithAiMapping(wb, mapping);
-          if(!result.days||result.days.length===0) {
-            alert('KI-Mapping hat keine Daten gefunden. Bitte Beschreibung präzisieren.');
-            setAiImportLoading(false);
-            return;
-          }
-
-          // Ask if user wants to save this importer
-          const importerName = prompt.slice(0,40)+'...';
-          setImportPreview({filename:file.name, skill:selSkill||'all', ...result,
-            _pendingMapping: mapping, _mappingName: importerName});
-          setImportModalOpen(false);
-        } catch(err) {
-          alert('KI-Fehler: '+err.message);
-        }
-        setAiImportLoading(false);
-      };
-      reader.readAsArrayBuffer(file);
-    } catch(e) {
-      alert('Fehler: '+e.message);
-      setAiImportLoading(false);
-    }
-  };
-  // ── PREDEFINED IMPORTER PROFILES ─────────────────────────────────
-  function confirmForecastImport(preview){
-    if(!preview||!preview.days||!preview.days.length){alert('Keine Daten gefunden.');return;}
-    if(!selProjId){alert('Bitte Projekt auswaehlen.');return;}
-    const key=planKey();
-    const fkey='forecast_'+key;
-    const fcByKwDay={};
-    preview.days.forEach(d=>{
-      if(!d.dayKey) return;
-      const kwStr=String(d.kw);
-      if(!fcByKwDay[kwStr]) fcByKwDay[kwStr]={MO:0,DI:0,MI:0,DO:0,FR:0,SA:0,SO:0};
-      fcByKwDay[kwStr][d.dayKey]=Math.round((d.fcSales+(selSkill==='backoffice'?d.fcBackoffice:0))*10)/10;
-    });
-    setPlans(p=>({...p,[fkey]:fcByKwDay}));
-    const intervalData={};
-    preview.days.forEach(d=>{
-      if(d.intervals&&d.intervals.length>0) intervalData[d.date]=d.intervals;
-    });
-    if(Object.keys(intervalData).length>0){
-      localStorage.setItem('jsr_wf_intervals_'+key,JSON.stringify(intervalData));
-    }
-    localStorage.setItem('jsr_wf_meta_'+key,JSON.stringify({
-      aht:preview.aht,avail:preview.avail,
-      importedAt:new Date().toISOString(),
-      filename:preview.filename,
-      totalHours:preview.totalHours,
-      days:preview.days.length,
-    }));
-    showToast&&showToast(
-      'Forecast importiert: '+preview.days.length+' Tage, '+Math.round(preview.totalHours)+'h. '
-      +Object.keys(intervalData).length+' Tage mit Intervallen gespeichert.','success');
+  function confirmImport(preview){
+    const k=planKey();
+    localStorage.setItem('jsr_wfp2_ifc_'+k,JSON.stringify(preview.ifc));
+    localStorage.setItem('jsr_wfp2_dfc_'+k,JSON.stringify(preview.dfc));
+    setIntervalFC({...preview.ifc});
+    setDayFC({...preview.dfc});
+    setImportPreview(null);
+    setImportModalOpen(false);
+    showToast&&showToast('FC importiert: '+preview.days+' Tage, '+preview.totalH+'h gesamt','success');
   }
 
-  function renderShiftCell(entry){
-    if(!entry||!entry.shift) return <div style={{fontSize:16,opacity:.3}}>+</div>;
-    const m=getShiftMeta(entry.shift);
-    if(m.split&&m.value2) return(
-      <><div style={{fontSize:9,fontWeight:700}}>{entry.shift}</div>
-      <div style={{fontSize:8,color:'var(--blue)'}}>+{m.value2}</div>
-      <div style={{fontSize:8,opacity:.7}}>{entry.hours}h</div></>
-    );
-    return(
-      <><div style={{fontSize:10}}>{entry.shift}</div>
-      <div style={{fontSize:9,opacity:.8}}>{entry.hours}h</div></>
-    );
+  // ── MONTHLY STATS ─────────────────────────────────────────────────
+  function getEmpMonthStats(emp){
+    const days=getDaysOfMonth(selYear,selMonth);
+    let planned=0,net=0,absenceDays=0;
+    days.forEach(day=>{
+      const ds=formatDate(day);
+      const absence=getAbsenceOnDate(emp,ds);
+      if(absence){ absenceDays++; return; }
+      const entry=getShiftEntry(emp.id,ds);
+      if(entry){ planned++; net+=entry.net||0; }
+    });
+    const workH=parseFloat(emp.work_hours||8);
+    const target=workH*22;
+    return{planned,net,absenceDays,target,diff:Math.round((net-target)*10)/10};
   }
+
+  // ── COMPUTE DAY COVERAGE for interval view ────────────────────────
+  function getDayCoverage(dateStr){
+    const fcSlots=getFCForDate(dateStr);
+    const coverage=new Array(TIME_SLOTS.length).fill(0);
+    planEmps.forEach(emp=>{
+      if(getAbsenceOnDate(emp,dateStr)) return;
+      TIME_SLOTS.forEach((_,si)=>{
+        const v=getIntervalCell(emp.id,dateStr,si);
+        if(v==='1') coverage[si]++;
+      });
+    });
+    return{coverage,fcSlots};
+  }
+
+  // ── SELECTED PROJ ─────────────────────────────────────────────────
+  const selProj=(projects||[]).find(p=>p.id===selProjId);
+  const projSkills=selProj?.skills||[];
+  const weeks=getWeeksOfMonth(selYear,selMonth);
+  const monthDays=getDaysOfMonth(selYear,selMonth);
+  const fcImported=Object.keys(intervalFC).length>0;
+
+  // ── RENDER ────────────────────────────────────────────────────────
   return(
-    <div style={{padding:16,maxWidth:'100%'}}>
+    <div style={{padding:16,maxWidth:'100%',minHeight:'100vh'}}>
 
       {/* ── TOOLBAR ── */}
-      <div style={{display:'flex',flexWrap:'wrap',gap:10,marginBottom:16,alignItems:'center'}}>
-        <div style={{fontSize:17,fontWeight:800,color:'var(--fg)',marginRight:4}}>📅 Workforce Planung</div>
+      <div style={{display:'flex',flexWrap:'wrap',gap:8,marginBottom:14,alignItems:'center'}}>
+        <div style={{fontWeight:800,fontSize:16,color:'var(--fg)',marginRight:4}}>📅 Workforce Planung</div>
 
-        <select className="form-select" style={{width:180}} value={selProjId}
-          onChange={e=>{setSelProjId(e.target.value);setSelSkill('');}}>
+        <select className="form-select" style={{width:190}} value={selProjId}
+          onChange={e=>{setSelProjId(e.target.value);setSelSkill('');setPlanData({});setIntervalFC({});setDayFC({});}}>
           <option value="">— Projekt wählen —</option>
           {(projects||[]).filter(p=>p.status==='active').map(p=>(
             <option key={p.id} value={p.id}>{p.name}</option>
@@ -7132,18 +7026,18 @@ function WorkforcePlanningView({employees, projects, showToast}){
         </select>
 
         {selProj&&(
-          <select className="form-select" style={{width:180}} value={selSkill}
-            onChange={e=>setSelSkill(e.target.value)}>
-            <option value="">Alle Skills zusammen</option>
+          <select className="form-select" style={{width:160}} value={selSkill}
+            onChange={e=>{setSelSkill(e.target.value);setPlanData({});setIntervalFC({});setDayFC({});}}>
+            <option value="">Alle Skills</option>
             {projSkills.map(s=>(
               <option key={s.key||s.label} value={s.key||s.label}>{s.label}</option>
             ))}
           </select>
         )}
 
-        <select className="form-select" style={{width:120}} value={selMonth}
+        <select className="form-select" style={{width:130}} value={selMonth}
           onChange={e=>setSelMonth(parseInt(e.target.value))}>
-          {MONTHS.map((m,i)=><option key={i+1} value={i+1}>{m}</option>)}
+          {MONTHS_DE.map((m,i)=><option key={i+1} value={i+1}>{m}</option>)}
         </select>
 
         <select className="form-select" style={{width:90}} value={selYear}
@@ -7151,374 +7045,553 @@ function WorkforcePlanningView({employees, projects, showToast}){
           {[2024,2025,2026,2027].map(y=><option key={y} value={y}>{y}</option>)}
         </select>
 
-        <div style={{marginLeft:'auto',display:'flex',gap:8,alignItems:'center'}}>
-          <span style={{fontSize:12,color:'var(--muted)'}}>
-            {projEmployees.length} Mitarbeiter{selSkill?' · '+selSkill:''}
-          </span>
-          {selProjId&&(
-            <button className="btn btn-sm" style={{
-              background:'var(--blue-bg)',color:'var(--blue)',
-              border:'1.5px solid var(--blue)',borderRadius:'var(--r)',
-              padding:'5px 12px',fontSize:12,fontWeight:700}}
+        {selProjId&&(
+          <>
+            {/* View toggle */}
+            <div style={{display:'flex',borderRadius:'var(--r)',overflow:'hidden',border:'1.5px solid var(--border)',marginLeft:4}}>
+              {[['schicht','📋 Schichtplan'],['intervall','🕐 Intervall']].map(([v,l])=>(
+                <button key={v} onClick={()=>setView(v)}
+                  style={{padding:'5px 14px',fontSize:12,fontWeight:700,cursor:'pointer',fontFamily:'var(--font)',
+                    border:'none',background:view===v?'var(--blue)':'transparent',
+                    color:view===v?'#fff':'var(--muted)'}}>
+                  {l}
+                </button>
+              ))}
+            </div>
+
+            <button className="btn btn-sm" style={{background:'var(--blue-bg)',color:'var(--blue)',border:'1.5px solid var(--blue)',fontWeight:700}}
               onClick={()=>setImportModalOpen(true)}>
-              📥 Forecast importieren
+              📥 FC importieren
             </button>
-          )}
-        </div>
+
+            {fcImported&&(
+              <button className="btn btn-sm btn-primary" onClick={autoSchedule}>
+                ⚡ Vorplanen
+              </button>
+            )}
+
+            <div style={{marginLeft:'auto',fontSize:11,color:fcImported?'var(--green)':'var(--muted)',fontWeight:700}}>
+              {fcImported?('✅ FC: '+Object.keys(intervalFC).length+' Tage'):'⚠ Kein FC importiert'}
+              {' · '}{planEmps.length} MA
+            </div>
+          </>
+        )}
       </div>
 
-      {importPreview&&(
-        <div style={{
-          background:'var(--surface-2)',border:'1px solid var(--blue)',
-          borderRadius:'var(--r)',padding:16,marginBottom:16
-        }}>
-          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
-            <div style={{fontWeight:700,fontSize:14}}>
-              📊 Import-Vorschau — {importPreview.filename}
-            </div>
-            <div style={{display:'flex',gap:8}}>
-              <button className="btn" onClick={()=>setImportPreview(null)}>Abbrechen</button>
-              <button className="btn btn-primary" onClick={()=>{
-                const snap=importPreview;setImportPreview(null);setTimeout(()=>confirmForecastImport(snap),0);
-              }}>✅ Importieren ({importPreview.days.length} Tage)</button>
-            </div>
-          </div>
-          <div style={{fontSize:12,color:'var(--muted)',marginBottom:10}}>
-            Projekt: <b>{(projects||[]).find(p=>p.id===selProjId)?.name}</b>
-            {importPreview.skill&&<> · Skill: <b>{importPreview.skill}</b></>}
-            · AHT: <b>{importPreview.aht} min</b>
-            · Avail: <b>{Math.round((importPreview.avail||0)*100)}%</b>
-            · Gesamtbedarf: <b>{Math.round(importPreview.totalHours)}h</b>
-          </div>
-          <div style={{overflowX:'auto'}}>
-            <table style={{width:'100%',borderCollapse:'collapse',fontSize:11}}>
-              <thead>
-                <tr style={{background:'var(--surface)',borderBottom:'2px solid var(--border)'}}>
-                  <th style={{padding:'6px 8px',textAlign:'left'}}>Datum</th>
-                  <th style={{padding:'6px 8px',textAlign:'left'}}>KW</th>
-                  <th style={{padding:'6px 8px',textAlign:'left'}}>Tag</th>
-                  <th style={{padding:'6px 8px',textAlign:'right'}}>FC Sales (h)</th>
-                  <th style={{padding:'6px 8px',textAlign:'right'}}>FC Backoffice (h)</th>
-                  <th style={{padding:'6px 8px',textAlign:'center'}}>Intervallkurve</th>
-                </tr>
-              </thead>
-              <tbody>
-                {importPreview.days.map((d,i)=>(
-                  <tr key={i} style={{borderBottom:'1px solid var(--border)',background:i%2===0?'transparent':'var(--surface)'}}>
-                    <td style={{padding:'5px 8px',fontWeight:600}}>{d.date}</td>
-                    <td style={{padding:'5px 8px',color:'var(--blue)',fontWeight:700}}>KW {d.kw}</td>
-                    <td style={{padding:'5px 8px'}}>{d.weekday}</td>
-                    <td style={{padding:'5px 8px',textAlign:'right',fontWeight:700,color:'var(--green)'}}>
-                      {d.fcSales.toFixed(2)}h
-                    </td>
-                    <td style={{padding:'5px 8px',textAlign:'right',color:'var(--muted)'}}>
-                      {d.fcBackoffice>0?d.fcBackoffice.toFixed(2)+'h':'—'}
-                    </td>
-                    <td style={{padding:'5px 8px',textAlign:'center'}}>
-                      {d.intervals&&d.intervals.length>0?(
-                        <div style={{display:'flex',gap:1,alignItems:'flex-end',height:20,justifyContent:'center'}}>
-                          {d.intervals.filter((_,j)=>j%2===0).map((iv,j)=>(
-                            <div key={j} style={{
-                              width:4,background:'var(--blue)',borderRadius:1,
-                              height:Math.max(2,Math.round((iv.hours/d.maxIntervalHours||0)*18))
-                            }}/>
-                          ))}
-                        </div>
-                      ):'—'}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
       {!selProjId&&(
-        <div style={{padding:40,textAlign:'center',color:'var(--muted)',fontSize:13,
+        <div style={{padding:48,textAlign:'center',color:'var(--muted)',fontSize:14,
           background:'var(--surface-2)',borderRadius:'var(--r)',border:'1px solid var(--border)'}}>
-          Bitte zuerst ein Projekt auswählen.
+          Bitte zuerst ein Projekt wählen.
         </div>
       )}
 
-      {selProjId&&projEmployees.length===0&&(
-        <div style={{padding:24,textAlign:'center',color:'var(--muted)',fontSize:13,
+      {selProjId&&planEmps.length===0&&(
+        <div style={{padding:32,textAlign:'center',color:'var(--muted)',fontSize:13,
           background:'var(--surface-2)',borderRadius:'var(--r)',border:'1px solid var(--border)'}}>
-          Keine aktiven Mitarbeiter auf diesem Projekt{selSkill?` / Skill: ${selSkill}`:''}.<br/>
+          Keine aktiven Mitarbeiter auf {selProj?.name||selProjId}{selSkill?' / Skill: '+selSkill:''}.<br/>
           <span style={{fontSize:11}}>Mitarbeiter müssen Projekt + Skill zugewiesen haben.</span>
         </div>
       )}
 
-      {selProjId&&projEmployees.length>0&&weeks.map(({kw,days},wi)=>{
-        const totals=getWeekTotals(days);
-        const forecast=getForecast(kw);
-        return(
-          <div key={kw} style={{marginBottom:20,overflowX:'auto'}}>
-            {/* Week Header */}
-            <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:6}}>
-              <div style={{fontWeight:800,fontSize:13,color:'var(--blue)',
-                background:'var(--blue-bg)',borderRadius:6,padding:'3px 10px'}}>
-                KW {kw}
-              </div>
-              <div style={{fontSize:12,color:'var(--muted)'}}>
-                {days[0].toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit'})} – {days[6].toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit',year:'numeric'})}
-              </div>
-              <button className="btn btn-sm" style={{fontSize:10,marginLeft:4}}
-                onClick={()=>setForecastModal({kw,year:selYear})}>
-                📊 Forecast
-              </button>
-            </div>
+      {/* ════════════════════════════════════════════════════
+          SCHICHTPLANUNG VIEW
+      ════════════════════════════════════════════════════ */}
+      {selProjId&&planEmps.length>0&&view==='schicht'&&(
+        <div>
+          {weeks.map(({kw,days},wi)=>{
+            // Day totals
+            const dayNetTotals={};
+            const dayFCTotals={};
+            DAYS_DE.forEach((d,di)=>{
+              const day=days[di];
+              if(!day) return;
+              const ds=formatDate(day);
+              let net=0;
+              planEmps.forEach(emp=>{
+                if(getAbsenceOnDate(emp,ds)) return;
+                const entry=getShiftEntry(emp.id,ds);
+                if(entry) net+=entry.net||0;
+              });
+              dayNetTotals[d]=Math.round(net*10)/10;
+              dayFCTotals[d]=Math.round((getDayFCHours(ds))*10)/10;
+            });
 
-            <table style={{width:'100%',borderCollapse:'collapse',fontSize:12,tableLayout:'fixed',minWidth:900}}>
-              <colgroup>
-                <col style={{width:140}}/>
-                {days.map((_,i)=><col key={i} style={{width:`${(100-16)/7}%`}}/>)}
-                <col style={{width:70}}/>
-                <col style={{width:70}}/>
-              </colgroup>
-              <thead>
-                {/* Dates */}
-                <tr style={{background:'var(--surface-2)'}}>
-                  <th style={{padding:'6px 8px',textAlign:'left',fontWeight:700,fontSize:11,borderBottom:'2px solid var(--border)'}}>
-                    Mitarbeiter
-                  </th>
-                  {days.map((day,di)=>{
-                    const isWeekend=di>=5;
-                    const isToday=day.toISOString().slice(0,10)===today.toISOString().slice(0,10);
-                    const inMonth=day.getMonth()===selMonth-1;
-                    return(
-                      <th key={di} style={{
-                        padding:'4px 4px',textAlign:'center',fontSize:10,
-                        borderBottom:'2px solid var(--border)',
-                        borderLeft:'1px solid var(--border)',
-                        background:isToday?'var(--blue-bg)':isWeekend?'var(--surface-3)':'var(--surface-2)',
-                        color:!inMonth?'var(--dim)':isWeekend?'var(--muted)':'var(--fg)',
-                        fontWeight:isToday?800:600,
-                      }}>
-                        <div>{DAYS[di]}</div>
-                        <div style={{fontWeight:400,fontSize:9}}>{day.toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit'})}</div>
-                      </th>
-                    );
-                  })}
-                  <th style={{padding:'4px',textAlign:'center',fontSize:10,borderLeft:'2px solid var(--border)',borderBottom:'2px solid var(--border)',background:'var(--surface-2)'}}>
-                    Σ Brutto
-                  </th>
-                  <th style={{padding:'4px',textAlign:'center',fontSize:10,borderBottom:'2px solid var(--border)',background:'var(--surface-2)'}}>
-                    Σ Netto
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {projEmployees.map((emp,ei)=>{
-                  let weekHours=0,weekNet=0;
-                  return(
-                    <tr key={emp.id} style={{borderBottom:'1px solid var(--border)',
-                      background:ei%2===0?'transparent':'var(--surface-2)'}}>
-                      <td style={{padding:'5px 8px',fontWeight:500,fontSize:12}}>
-                        <div style={{fontWeight:600}}>{emp.first_name} {emp.last_name}</div>
-                        <div style={{fontSize:10,color:'var(--muted)'}}>{emp.project_skill||'—'}</div>
-                      </td>
+            return(
+              <div key={kw} style={{marginBottom:20,overflowX:'auto'}}>
+                <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:6}}>
+                  <div style={{fontWeight:800,fontSize:12,color:'var(--blue)',
+                    background:'var(--blue-bg)',borderRadius:6,padding:'3px 10px'}}>
+                    KW {kw}
+                  </div>
+                  <div style={{fontSize:11,color:'var(--muted)'}}>
+                    {days[0].toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit'})} – {days[6].toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit',year:'numeric'})}
+                  </div>
+                  {!fcImported&&wi===0&&(
+                    <div style={{fontSize:11,color:'var(--orange,#f59e0b)',fontWeight:700}}>
+                      ⚠ Kein FC importiert — Vorplanung nicht möglich
+                    </div>
+                  )}
+                </div>
+
+                <table style={{width:'100%',borderCollapse:'collapse',fontSize:11,minWidth:800}}>
+                  <colgroup>
+                    <col style={{width:150}}/>
+                    {days.map((_,i)=><col key={i} style={{width:'calc((100% - 150px)/7)'}}/>)}
+                    <col style={{width:60}}/><col style={{width:60}}/>
+                  </colgroup>
+                  <thead>
+                    <tr style={{background:'var(--surface-2)'}}>
+                      <th style={{padding:'6px 8px',textAlign:'left',fontWeight:700,fontSize:11,
+                        borderBottom:'2px solid var(--border)'}}>Mitarbeiter</th>
                       {days.map((day,di)=>{
-                        const dateStr=day.toISOString().slice(0,10);
+                        const isWE=di>=5;
                         const inMonth=day.getMonth()===selMonth-1;
-                        const absence=getAbsenceOnDate(emp,dateStr);
-                        const entry=getEntry(emp.id,dateStr);
-                        const isWeekend=di>=5;
-                        if(entry&&!absence){weekHours+=entry.hours||0;weekNet+=entry.net||0;}
+                        const isToday=formatDate(day)===formatDate(today);
                         return(
-                          <td key={di} style={{
-                            padding:'2px',textAlign:'center',
-                            borderLeft:'1px solid var(--border)',
-                            background:isWeekend?'var(--surface-3)':absence?'#fef9c3':'transparent',
-                            opacity:inMonth?1:0.4,
-                          }}>
-                            {absence?(
-                              <div style={{fontSize:10,color:'#92400e',fontWeight:700,padding:'4px 2px'}}>
-                                {absence.type==='vacation'?'🏖 Urlaub':absence.type==='sick'?'🤒 Krank':'❌ Abwesend'}
+                          <th key={di} style={{padding:'4px 2px',textAlign:'center',fontSize:10,
+                            borderBottom:'2px solid var(--border)',borderLeft:'1px solid var(--border)',
+                            background:isToday?'var(--blue-bg)':isWE?'var(--surface-3)':'var(--surface-2)',
+                            color:!inMonth?'var(--dim)':isWE?'var(--muted)':'var(--fg)',
+                            fontWeight:isToday?800:600}}>
+                            <div>{DAYS_DE[di]}</div>
+                            <div style={{fontWeight:400,fontSize:9}}>{day.toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit'})}</div>
+                          </th>
+                        );
+                      })}
+                      <th style={{padding:'4px',textAlign:'center',fontSize:9,borderLeft:'2px solid var(--border)',borderBottom:'2px solid var(--border)',background:'var(--surface-2)'}}>Σ Br.</th>
+                      <th style={{padding:'4px',textAlign:'center',fontSize:9,borderBottom:'2px solid var(--border)',background:'var(--surface-2)'}}>Σ Net.</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {planEmps.map((emp,ei)=>{
+                      let wBrutto=0,wNetto=0;
+                      return(
+                        <tr key={emp.id} style={{borderBottom:'1px solid var(--border)',
+                          background:ei%2===0?'transparent':'var(--surface-2)'}}>
+                          <td style={{padding:'5px 8px',fontWeight:500,fontSize:11}}>
+                            <div style={{fontWeight:700,fontSize:11}}>{emp.first_name} {emp.last_name}</div>
+                            <div style={{fontSize:9,color:'var(--muted)'}}>{emp.project_skill||'—'}</div>
+                          </td>
+                          {days.map((day,di)=>{
+                            const ds=formatDate(day);
+                            const inMonth=day.getMonth()===selMonth-1;
+                            const absence=getAbsenceOnDate(emp,ds);
+                            const entry=getShiftEntry(emp.id,ds);
+                            const isWE=di>=5;
+                            if(entry&&!absence){ wBrutto+=entry.hours||0; wNetto+=entry.net||0; }
+                            return(
+                              <td key={di} style={{padding:'2px',textAlign:'center',
+                                borderLeft:'1px solid var(--border)',
+                                background:isWE?'var(--surface-3)':absence?'#fef9c3':'transparent',
+                                opacity:inMonth?1:0.4}}>
+                                {absence?(
+                                  <div style={{fontSize:9,color:'#92400e',fontWeight:700,padding:'4px 1px'}}>
+                                    {absence.type==='vacation'?'🏖 Urlaub':absence.type==='sick'?'🤒 Krank':'❌ Abw.'}
+                                  </div>
+                                ):(
+                                  <button onClick={()=>inMonth&&setEditShiftModal({empId:emp.id,dateStr:ds,empName:emp.first_name+' '+emp.last_name,currentEntry:entry})}
+                                    style={{width:'100%',padding:'3px 1px',border:'none',cursor:inMonth?'pointer':'default',
+                                      borderRadius:3,fontSize:9,lineHeight:1.3,
+                                      background:entry&&entry.hours>0?'var(--blue-bg)':'transparent',
+                                      color:entry&&entry.hours>0?'var(--blue)':'var(--dim)',
+                                      fontWeight:entry&&entry.hours>0?700:400,minHeight:32}}>
+                                    {entry&&entry.shift?(
+                                      <>
+                                        <div style={{fontSize:9}}>{entry.shift}</div>
+                                        <div style={{fontSize:8,opacity:.8}}>{entry.hours}h/{entry.net}h</div>
+                                      </>
+                                    ):(
+                                      <div style={{fontSize:14,opacity:.3}}>+</div>
+                                    )}
+                                  </button>
+                                )}
+                              </td>
+                            );
+                          })}
+                          <td style={{padding:'4px',textAlign:'center',fontWeight:700,fontSize:10,
+                            borderLeft:'2px solid var(--border)',color:'var(--fg)'}}>
+                            {wBrutto>0?wBrutto:'—'}
+                          </td>
+                          <td style={{padding:'4px',textAlign:'center',fontWeight:700,fontSize:10,color:'var(--blue)'}}>
+                            {wNetto>0?wNetto:'—'}
+                          </td>
+                        </tr>
+                      );
+                    })}
+
+                    {/* IST ROW */}
+                    <tr style={{borderTop:'2px solid var(--border)',background:'var(--surface-2)',fontWeight:700}}>
+                      <td style={{padding:'5px 8px',fontSize:10,color:'var(--muted)'}}>Σ IST Netto (h)</td>
+                      {DAYS_DE.map((d,di)=>{
+                        const v=dayNetTotals[d]||0;
+                        return(
+                          <td key={di} style={{padding:'4px 2px',textAlign:'center',fontSize:11,
+                            borderLeft:'1px solid var(--border)',color:v>0?'var(--green)':'var(--dim)',
+                            fontWeight:700}}>
+                            {v>0?v:'—'}
+                          </td>
+                        );
+                      })}
+                      <td style={{borderLeft:'2px solid var(--border)'}}/><td/>
+                    </tr>
+
+                    {/* FORECAST ROW */}
+                    <tr style={{background:'#fffbeb',borderBottom:'1px solid var(--border)'}}>
+                      <td style={{padding:'5px 8px',fontSize:10,color:'#92400e',fontWeight:700}}>📊 FC Bedarf (h)</td>
+                      {DAYS_DE.map((d,di)=>{
+                        const fc=dayFCTotals[d]||0;
+                        const ist=dayNetTotals[d]||0;
+                        const diff=Math.round((ist-fc)*10)/10;
+                        const diffColor=fc===0?'var(--dim)':diff>=0?'var(--green)':'var(--red)';
+                        return(
+                          <td key={di} style={{padding:'3px 2px',textAlign:'center',fontSize:10,
+                            borderLeft:'1px solid var(--border)'}}>
+                            <div style={{color:'#92400e',fontWeight:700}}>{fc||'—'}</div>
+                            {fc>0&&(
+                              <div style={{fontSize:8,color:diffColor,fontWeight:700}}>
+                                {diff>=0?'+':''}{diff}
                               </div>
-                            ):(
-                              <button
-                                onClick={()=>inMonth&&setShiftModal({empId:emp.id,dateStr,currentShift:entry?.shift||''})}
-                                style={{
-                                  width:'100%',padding:'4px 2px',
-                                  border:'none',cursor:inMonth?'pointer':'default',
-                                  borderRadius:4,fontSize:10,lineHeight:1.3,
-                                  background:entry&&entry.hours>0?'var(--blue-bg)':'transparent',
-                                  color:entry&&entry.hours>0?'var(--blue)':'var(--dim)',
-                                  fontWeight:entry&&entry.hours>0?700:400,
-                                  minHeight:36,
-                                }}>
-                                {renderShiftCell(entry)}
-                              </button>
                             )}
                           </td>
                         );
                       })}
-                      <td style={{padding:'5px 4px',textAlign:'center',fontWeight:700,
-                        fontSize:12,borderLeft:'2px solid var(--border)',color:'var(--fg)'}}>
-                        {weekHours>0?weekHours:'—'}
+                      <td style={{borderLeft:'2px solid var(--border)'}}/><td/>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            );
+          })}
+
+          {/* MONTH SUMMARY */}
+          <div className="card" style={{marginTop:12}}>
+            <div className="card-header">
+              <span className="card-title">📋 Monatsübersicht {MONTHS_DE[selMonth-1]} {selYear}</span>
+            </div>
+            <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+              <thead>
+                <tr style={{background:'var(--surface-2)',borderBottom:'2px solid var(--border)'}}>
+                  <th style={{padding:'8px 12px',textAlign:'left'}}>Mitarbeiter</th>
+                  <th style={{padding:'8px',textAlign:'center'}}>Skill</th>
+                  <th style={{padding:'8px',textAlign:'center'}}>Geplante Tage</th>
+                  <th style={{padding:'8px',textAlign:'center'}}>Brutto (h)</th>
+                  <th style={{padding:'8px',textAlign:'center'}}>Netto (h)</th>
+                  <th style={{padding:'8px',textAlign:'center'}}>Soll (h)</th>
+                  <th style={{padding:'8px',textAlign:'center'}}>Differenz</th>
+                  <th style={{padding:'8px',textAlign:'center'}}>Abwesenheit</th>
+                </tr>
+              </thead>
+              <tbody>
+                {planEmps.map((emp,i)=>{
+                  const s=getEmpMonthStats(emp);
+                  const diffColor=Math.abs(s.diff)<2?'var(--green)':s.diff<0?'var(--red)':'var(--orange,#f59e0b)';
+                  return(
+                    <tr key={emp.id} style={{borderBottom:'1px solid var(--border)',
+                      background:i%2===0?'transparent':'var(--surface-2)'}}>
+                      <td style={{padding:'7px 12px',fontWeight:600}}>{emp.first_name} {emp.last_name}</td>
+                      <td style={{padding:'7px',textAlign:'center'}}>
+                        <span style={{background:'var(--blue-bg)',color:'var(--blue)',
+                          borderRadius:4,padding:'2px 8px',fontSize:10,fontWeight:700}}>
+                          {emp.project_skill||'—'}
+                        </span>
                       </td>
-                      <td style={{padding:'5px 4px',textAlign:'center',fontWeight:700,
-                        fontSize:12,color:'var(--muted)'}}>
-                        {weekNet>0?weekNet:'—'}
+                      <td style={{padding:'7px',textAlign:'center',fontWeight:700}}>{s.planned}</td>
+                      <td style={{padding:'7px',textAlign:'center',fontWeight:700}}>{Math.round(s.net/0.9375*10)/10}h</td>
+                      <td style={{padding:'7px',textAlign:'center',fontWeight:700,color:'var(--blue)'}}>{s.net}h</td>
+                      <td style={{padding:'7px',textAlign:'center',color:'var(--muted)'}}>{s.target}h</td>
+                      <td style={{padding:'7px',textAlign:'center',fontWeight:800,color:diffColor}}>
+                        {s.diff>=0?'+':''}{s.diff}h
+                      </td>
+                      <td style={{padding:'7px',textAlign:'center',color:'#92400e'}}>
+                        {s.absenceDays>0?s.absenceDays+'T':'—'}
                       </td>
                     </tr>
                   );
                 })}
-
-                {/* SUMME ROW */}
-                <tr style={{borderTop:'2px solid var(--border)',background:'var(--surface-2)',fontWeight:700}}>
-                  <td style={{padding:'6px 8px',fontSize:11,color:'var(--muted)'}}>Σ IST Stunden</td>
-                  {DAYS.map((d,di)=>(
-                    <td key={di} style={{padding:'5px 2px',textAlign:'center',fontSize:12,borderLeft:'1px solid var(--border)',
-                      color:totals[d]?.net>0?'var(--green)':'var(--dim)'}}>
-                      {totals[d]?.net>0?totals[d].net:'—'}
-                    </td>
-                  ))}
-                  <td style={{borderLeft:'2px solid var(--border)'}}/>
-                  <td/>
-                </tr>
-
-                {/* FORECAST ROW */}
-                <tr style={{background:'#fffbeb',borderBottom:'1px solid var(--border)'}}>
-                  <td style={{padding:'6px 8px',fontSize:11,color:'#92400e',fontWeight:700}}>📊 Forecast</td>
-                  {DAYS.map((d,di)=>{
-                    const fc=forecast[d]||0;
-                    const ist=totals[d]?.net||0;
-                    const diff=ist-fc;
-                    const color=fc===0?'var(--dim)':diff>=0?'var(--green)':'var(--red)';
-                    return(
-                      <td key={di} style={{padding:'3px 2px',textAlign:'center',fontSize:11,
-                        borderLeft:'1px solid var(--border)'}}>
-                        <div style={{color:'#92400e',fontWeight:700}}>{fc||'—'}</div>
-                        {fc>0&&ist>0&&(
-                          <div style={{fontSize:9,color,fontWeight:700}}>
-                            {diff>=0?'+':''}{diff}
-                          </div>
-                        )}
-                      </td>
-                    );
-                  })}
-                  <td style={{borderLeft:'2px solid var(--border)'}}/>
-                  <td/>
-                </tr>
               </tbody>
             </table>
           </div>
-        );
-      })}
+        </div>
+      )}
 
-      {/* ── MONTH SUMMARY ── */}
-      {selProjId&&projEmployees.length>0&&(
-        <div className="card" style={{marginTop:8}}>
-          <div className="card-header">
-            <span className="card-title">📋       {selProjId&&projEmployees.length>0&&(()=>{const iData=(()=>{try{return JSON.parse(localStorage.getItem("jsr_wf_intervals_"+planKey())||"{}")}catch(e){return{}}})();const hasCurves=Object.keys(iData).length>0;return hasCurves?(<div style={{marginBottom:20}}><div style={{display:"flex",alignItems:"center",gap:12,marginBottom:12,paddingTop:8,borderTop:"1px solid var(--border)"}}><div style={{fontWeight:700,fontSize:13,color:"var(--muted)"}}>Intervallkurven ({Object.keys(iData).length} Tage)</div><button className="btn btn-sm" style={{color:"var(--red)",border:"1px solid var(--red)"}} onClick={()=>{if(window.confirm("Import-Daten loeschen?"))localStorage.removeItem("jsr_wf_intervals_"+planKey());}}>x Loeschen</button><button className="btn btn-sm" style={{background:"var(--blue-bg)",color:"var(--blue)",border:"1.5px solid var(--blue)",fontWeight:700}} onClick={async ()=>{const key=localStorage.getItem("jsr_anthropic_key")||"";if(!key){alert("API-Key fehlt.");return;}setShiftRecLoading(true);try{const iData=(()=>{try{return JSON.parse(localStorage.getItem("jsr_wf_intervals_"+planKey())||"{}")}catch(e){return{}}})();const shiftOpts=SHIFTS.filter(s=>s.value).map(s=>s.label+" ("+s.value+", "+s.net+"h netto)").join(", ");const dayLines=Object.entries(iData).slice(0,10).map(([d,ivs])=>{const mxH=Math.max(...ivs.map(iv=>iv.hours));const totH=ivs.reduce((s,iv)=>s+iv.hours,0);const peak=ivs.reduce((mx,iv)=>iv.hours>mx.hours?iv:mx,ivs[0]);return d+": "+Math.round(totH*10)/10+"h, Peak "+peak.time;}).join(" | ");const resp=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1500,messages:[{role:"user",content:"Workforce-Planung. Schichten: "+shiftOpts+". MA: "+projEmployees.length+". Bedarf: "+dayLines+". JSON: [{date,shifts:[{label,count,reason}]}]. Nur JSON."}]})});const data=await resp.json();const raw=(data.content||[]).map(c=>c.text||"").join("").replace(/```json|```/g,"").trim();setShiftRec(JSON.parse(raw));}catch(e){alert("Fehler: "+e.message);}setShiftRecLoading(false);}} disabled={shiftRecLoading}>{shiftRecLoading?"Berechne...":"Schichten empfehlen"}</button></div>{weeks.map(({kw,days})=>(<div key={kw} style={{marginBottom:14}}><div style={{fontSize:11,fontWeight:700,color:"var(--blue)",marginBottom:6}}>KW {kw}</div><div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:6}}>{days.map((day,di)=>{const ds=day.toISOString().slice(0,10);const ivs=iData[ds]||[];const inM=day.getMonth()===selMonth-1;const mxH=ivs.length>0?Math.max(...ivs.map(iv=>iv.hours)):0;const totH=Math.round(ivs.reduce((s,iv)=>s+iv.hours,0)*10)/10;return(<div key={di} style={{opacity:inM?1:0.3}}><div style={{fontSize:9,color:"var(--muted)",marginBottom:2,textAlign:"center",fontWeight:600}}>{DAYS[di]} {day.toLocaleDateString("de-DE",{day:"2-digit",month:"2-digit"})}</div><div style={{height:40,display:"flex",alignItems:"flex-end",gap:1,background:"var(--surface-2)",borderRadius:4,padding:"2px 3px"}}>{ivs.length>0?ivs.map((iv,ii)=>(<div key={ii} title={iv.time+": "+iv.hours.toFixed(1)+"h"} style={{flex:1,background:"var(--blue)",borderRadius:1,minHeight:1,height:mxH>0?Math.max(2,Math.round((iv.hours/mxH)*36))+"px":"2px",opacity:.5+(.5*iv.hours/(mxH||1))}}/>)):(<div style={{margin:"auto",fontSize:9,color:"var(--dim)"}}>keine Daten</div>)}</div>{totH>0&&<div style={{fontSize:9,color:"var(--muted)",textAlign:"center",marginTop:2}}>{totH}h</div>}</div>);})}</div></div>))}{shiftRec&&(<div style={{marginTop:12,padding:14,background:"var(--surface-2)",border:"1px solid var(--blue)",borderRadius:"var(--r)"}}><div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}><div style={{fontWeight:700,fontSize:13}}>KI-Schichtempfehlung</div><button className="btn btn-sm" onClick={()=>setShiftRec(null)}>x Schliessen</button></div><div style={{display:"flex",flexWrap:"wrap",gap:10}}>{shiftRec.map((day,i)=>(<div key={i} style={{padding:"10px 12px",background:"var(--surface)",borderRadius:"var(--r)",border:"1px solid var(--border)",minWidth:160,flex:"1 1 160px"}}><div style={{fontWeight:700,fontSize:12,marginBottom:6,color:"var(--blue)"}}>{day.date}</div>{(day.shifts||[]).map((s,j)=>(<div key={j} style={{marginBottom:4}}><div style={{fontSize:12,fontWeight:600}}>{s.count}x {s.label}</div>{s.reason&&<div style={{fontSize:10,color:"var(--muted)"}}>{s.reason}</div>}</div>))}</div>))}</div></div>)}</div>):null;})()}
-
-Monatsübersicht {MONTHS[selMonth-1]} {selYear}</span>
+      {/* ════════════════════════════════════════════════════
+          INTERVALLPLANUNG VIEW
+      ════════════════════════════════════════════════════ */}
+      {selProjId&&planEmps.length>0&&view==='intervall'&&(
+        <div>
+          {/* Day selector */}
+          <div style={{display:'flex',gap:4,flexWrap:'wrap',marginBottom:12}}>
+            {monthDays.map(day=>{
+              const ds=formatDate(day);
+              const fc=getDayFCHours(ds);
+              const inMonth=true;
+              const isWE=day.getDay()===0||day.getDay()===6;
+              const isSel=selDate===ds;
+              return(
+                <button key={ds} onClick={()=>setSelDate(ds)}
+                  style={{padding:'5px 8px',border:isSel?'2px solid var(--blue)':'1px solid var(--border)',
+                    borderRadius:'var(--r)',fontSize:10,fontWeight:isSel?800:500,
+                    cursor:'pointer',fontFamily:'var(--font)',
+                    background:isSel?'var(--blue-bg)':isWE?'var(--surface-3)':'var(--surface-2)',
+                    color:isSel?'var(--blue)':isWE?'var(--muted)':'var(--fg)',
+                    minWidth:42,textAlign:'center'}}>
+                  <div>{day.toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit'})}</div>
+                  <div style={{fontSize:8,color:fc>0?'var(--blue)':'var(--dim)',fontWeight:700}}>
+                    {fc>0?fc+'h':'—'}
+                  </div>
+                </button>
+              );
+            })}
           </div>
-          <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
-            <thead>
-              <tr style={{background:'var(--surface-2)',borderBottom:'2px solid var(--border)'}}>
-                <th style={{padding:'8px 12px',textAlign:'left'}}>Mitarbeiter</th>
-                <th style={{padding:'8px',textAlign:'center'}}>Skill</th>
-                <th style={{padding:'8px',textAlign:'center'}}>Geplante Tage</th>
-                <th style={{padding:'8px',textAlign:'center'}}>Σ Bruttostunden</th>
-                <th style={{padding:'8px',textAlign:'center'}}>Σ Nettostunden</th>
-                <th style={{padding:'8px',textAlign:'center'}}>Urlaub/Krank</th>
-                <th style={{padding:'8px',textAlign:'center'}}>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {projEmployees.map((emp,i)=>{
-                const {totalHours,totalNet,plannedDays}=getEmpMonthSummary(emp);
-                const absenceDays=(emp.absences||[]).filter(a=>{
-                  const mo=`${selYear}-${String(selMonth).padStart(2,'0')}`;
-                  return a.from?.startsWith(mo)||a.to?.startsWith(mo);
-                }).reduce((s,a)=>s+(a.days||0),0);
-                const targetHours=parseFloat(emp.work_hours||8)*(emp.work_weekend?26:22);
-                return(
-                  <tr key={emp.id} style={{borderBottom:'1px solid var(--border)',
-                    background:i%2===0?'transparent':'var(--surface-2)'}}>
-                    <td style={{padding:'8px 12px',fontWeight:600}}>{emp.first_name} {emp.last_name}</td>
-                    <td style={{padding:'8px',textAlign:'center'}}>
-                      <span style={{background:'var(--blue-bg)',color:'var(--blue)',
-                        borderRadius:4,padding:'2px 8px',fontSize:11,fontWeight:700}}>
-                        {emp.project_skill||'—'}
-                      </span>
-                    </td>
-                    <td style={{padding:'8px',textAlign:'center',fontWeight:700}}>{plannedDays}</td>
-                    <td style={{padding:'8px',textAlign:'center',fontWeight:700,color:'var(--fg)'}}>
-                      {totalHours}h
-                    </td>
-                    <td style={{padding:'8px',textAlign:'center',fontWeight:700,color:'var(--blue)'}}>
-                      {totalNet}h
-                    </td>
-                    <td style={{padding:'8px',textAlign:'center',color:'#92400e'}}>
-                      {absenceDays>0?`${absenceDays}T`:'—'}
-                    </td>
-                    <td style={{padding:'8px',textAlign:'center'}}>
-                      {totalNet===0?(
-                        <span style={{color:'var(--dim)',fontSize:11}}>Nicht geplant</span>
-                      ):totalNet>=targetHours*0.9?(
-                        <span style={{color:'var(--green)',fontWeight:700,fontSize:11}}>✅ OK</span>
-                      ):(
-                        <span style={{color:'var(--red)',fontWeight:700,fontSize:11}}>⚠ Unter Soll</span>
+
+          {!selDate&&(
+            <div style={{padding:32,textAlign:'center',color:'var(--muted)',fontSize:13,
+              background:'var(--surface-2)',borderRadius:'var(--r)',border:'1px solid var(--border)'}}>
+              Bitte einen Tag auswählen.
+            </div>
+          )}
+
+          {selDate&&(()=>{
+            const {coverage,fcSlots}=getDayCoverage(selDate);
+            const fcDate=new Date(selDate);
+            const dayName=DAYS_DE[fcDate.getDay()===0?6:fcDate.getDay()-1];
+            const maxFC=fcSlots.length>0?Math.max(...fcSlots):0;
+            const maxCov=Math.max(...coverage,1);
+
+            return(
+              <div>
+                <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:12}}>
+                  <div style={{fontWeight:800,fontSize:14}}>
+                    {dayName} {new Date(selDate).toLocaleDateString('de-DE',{day:'2-digit',month:'long',year:'numeric'})}
+                  </div>
+                  <div style={{fontSize:12,color:'var(--muted)'}}>
+                    FC gesamt: <b style={{color:'var(--blue)'}}>{Math.round(getDayFCHours(selDate)*10)/10}h</b>
+                  </div>
+                </div>
+
+                <div style={{overflowX:'auto'}}>
+                  <table style={{borderCollapse:'collapse',fontSize:10,minWidth:900}}>
+                    <thead>
+                      <tr>
+                        <th style={{padding:'5px 10px',textAlign:'left',fontWeight:700,
+                          borderBottom:'2px solid var(--border)',background:'var(--surface-2)',
+                          position:'sticky',left:0,zIndex:2,minWidth:120}}>
+                          Mitarbeiter
+                        </th>
+                        {TIME_SLOTS.map((slot,si)=>(
+                          <th key={si} style={{padding:'2px 1px',textAlign:'center',
+                            borderBottom:'2px solid var(--border)',
+                            borderLeft:slot.endsWith(':00')?'2px solid var(--border)':'1px solid var(--border)',
+                            background:'var(--surface-2)',fontSize:8,whiteSpace:'nowrap',
+                            color:slot.endsWith(':00')?'var(--fg)':'var(--muted)',fontWeight:slot.endsWith(':00')?700:400,
+                            minWidth:22}}>
+                            {slot.endsWith(':00')?slot.slice(0,-3):''}
+                          </th>
+                        ))}
+                        <th style={{padding:'4px',textAlign:'center',fontSize:9,
+                          borderLeft:'2px solid var(--border)',borderBottom:'2px solid var(--border)',
+                          background:'var(--surface-2)',minWidth:50}}>Σ Netto</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {planEmps.map((emp,ei)=>{
+                        const absence=getAbsenceOnDate(emp,selDate);
+                        const entry=getShiftEntry(emp.id,selDate);
+                        let netH=0;
+                        TIME_SLOTS.forEach((_,si)=>{
+                          const v=getIntervalCell(emp.id,selDate,si);
+                          if(v==='1') netH+=0.5;
+                        });
+                        return(
+                          <tr key={emp.id} style={{borderBottom:'1px solid var(--border)',
+                            background:absence?'#fef9c3':ei%2===0?'transparent':'var(--surface-2)'}}>
+                            <td style={{padding:'4px 8px',fontWeight:600,fontSize:10,
+                              position:'sticky',left:0,background:absence?'#fef9c3':ei%2===0?'var(--surface)':'var(--surface-2)',
+                              borderRight:'1px solid var(--border)',zIndex:1,minWidth:120}}>
+                              <div>{emp.first_name} {emp.last_name}</div>
+                              <div style={{fontSize:8,color:'var(--muted)'}}>{entry?entry.shift:'kein Dienst'}</div>
+                            </td>
+                            {absence?(
+                              <td colSpan={TIME_SLOTS.length+1} style={{padding:'4px 12px',
+                                color:'#92400e',fontWeight:700,fontSize:11}}>
+                                {absence.type==='vacation'?'🏖 Urlaub':absence.type==='sick'?'🤒 Krank':'❌ Abwesenheit'}
+                              </td>
+                            ):(
+                              <>
+                                {TIME_SLOTS.map((slot,si)=>{
+                                  const v=getIntervalCell(emp.id,selDate,si);
+                                  const isPause=v==='p';
+                                  const isActive=v==='1';
+                                  const shiftSlots=entry?parseShiftToSlots(entry.shift):[];
+                                  const inShift=shiftSlots.includes(si);
+                                  return(
+                                    <td key={si} onClick={()=>inShift&&setEditCellModal({empId:emp.id,dateStr:selDate,slotIdx:si,slotTime:slot})}
+                                      style={{padding:0,textAlign:'center',
+                                        borderLeft:slot.endsWith(':00')?'2px solid var(--border)':'1px solid var(--border)',
+                                        cursor:inShift?'pointer':'default',
+                                        background:isPause?'#fef3c7':isActive?'var(--blue-bg)':inShift?'var(--surface-3)':'transparent',
+                                        minWidth:22,height:24}}>
+                                      {isPause?(<span style={{fontSize:8,color:'#92400e',fontWeight:700}}>P</span>):
+                                       isActive?(<span style={{fontSize:8,color:'var(--blue)',fontWeight:700}}>●</span>):
+                                       inShift?(<span style={{fontSize:8,color:'var(--dim)'}}>○</span>):null}
+                                    </td>
+                                  );
+                                })}
+                                <td style={{padding:'3px',textAlign:'center',fontWeight:700,fontSize:10,
+                                  borderLeft:'2px solid var(--border)',color:'var(--blue)'}}>
+                                  {netH>0?netH+'h':'—'}
+                                </td>
+                              </>
+                            )}
+                          </tr>
+                        );
+                      })}
+
+                      {/* FC ROW */}
+                      {fcSlots.length>0&&(
+                        <tr style={{borderTop:'2px solid var(--border)',background:'#fffbeb'}}>
+                          <td style={{padding:'4px 8px',fontWeight:700,fontSize:10,color:'#92400e',
+                            position:'sticky',left:0,background:'#fffbeb',borderRight:'1px solid var(--border)'}}>
+                            📊 FC Bedarf (h)
+                          </td>
+                          {TIME_SLOTS.map((slot,si)=>{
+                            const fc=parseFloat(fcSlots[si])||0;
+                            return(
+                              <td key={si} style={{padding:'1px',textAlign:'center',
+                                borderLeft:slot.endsWith(':00')?'2px solid var(--border)':'1px solid var(--border)'}}>
+                                {fc>0&&(
+                                  <div style={{height:16,display:'flex',alignItems:'flex-end',justifyContent:'center'}}>
+                                    <div style={{width:14,background:'#f59e0b',borderRadius:1,
+                                      height:Math.max(2,Math.round((fc/maxFC)*14))+'px',opacity:.8}}/>
+                                  </div>
+                                )}
+                              </td>
+                            );
+                          })}
+                          <td style={{padding:'3px',textAlign:'center',fontWeight:700,fontSize:10,
+                            borderLeft:'2px solid var(--border)',color:'#92400e'}}>
+                            {Math.round(getDayFCHours(selDate)*10)/10}h
+                          </td>
+                        </tr>
                       )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+
+                      {/* COVERAGE ROW */}
+                      <tr style={{borderTop:'1px solid var(--border)',background:'var(--surface-2)'}}>
+                        <td style={{padding:'4px 8px',fontWeight:700,fontSize:10,color:'var(--muted)',
+                          position:'sticky',left:0,background:'var(--surface-2)',borderRight:'1px solid var(--border)'}}>
+                          👥 MA IST
+                        </td>
+                        {coverage.map((cov,si)=>{
+                          const fc=parseFloat(fcSlots[si])||0;
+                          const need=fc>0?Math.ceil(fc/0.5):0;
+                          const diff=cov-need;
+                          const bg=need===0?'transparent':diff>=0?'#dcfce7':diff>=-1?'#fef9c3':'#fee2e2';
+                          return(
+                            <td key={si} style={{padding:'2px 1px',textAlign:'center',
+                              borderLeft:TIME_SLOTS[si]?.endsWith(':00')?'2px solid var(--border)':'1px solid var(--border)',
+                              background:bg,fontSize:9,fontWeight:700,
+                              color:need===0?'var(--dim)':diff>=0?'#166534':diff>=-1?'#92400e':'#991b1b'}}>
+                              {cov>0?cov:''}
+                            </td>
+                          );
+                        })}
+                        <td style={{padding:'3px',borderLeft:'2px solid var(--border)'}}/>
+                      </tr>
+
+                      {/* NEED ROW */}
+                      <tr style={{background:'var(--surface-3)',borderBottom:'1px solid var(--border)'}}>
+                        <td style={{padding:'4px 8px',fontWeight:700,fontSize:10,color:'var(--muted)',
+                          position:'sticky',left:0,background:'var(--surface-3)',borderRight:'1px solid var(--border)'}}>
+                          📌 MA Bedarf
+                        </td>
+                        {TIME_SLOTS.map((slot,si)=>{
+                          const fc=parseFloat(fcSlots[si])||0;
+                          const need=fc>0?Math.ceil(fc/0.5):0;
+                          return(
+                            <td key={si} style={{padding:'2px 1px',textAlign:'center',
+                              borderLeft:slot.endsWith(':00')?'2px solid var(--border)':'1px solid var(--border)',
+                              fontSize:9,color:need>0?'var(--fg)':'var(--dim)',fontWeight:700}}>
+                              {need>0?need:''}
+                            </td>
+                          );
+                        })}
+                        <td style={{padding:'3px',borderLeft:'2px solid var(--border)'}}/>
+                      </tr>
+
+                      {/* DIFF ROW */}
+                      <tr style={{background:'var(--surface-2)'}}>
+                        <td style={{padding:'4px 8px',fontWeight:700,fontSize:10,
+                          position:'sticky',left:0,background:'var(--surface-2)',borderRight:'1px solid var(--border)',
+                          color:'var(--muted)'}}>
+                          Δ Differenz
+                        </td>
+                        {coverage.map((cov,si)=>{
+                          const fc=parseFloat(fcSlots[si])||0;
+                          const need=fc>0?Math.ceil(fc/0.5):0;
+                          const diff=cov-need;
+                          if(need===0&&cov===0) return <td key={si} style={{borderLeft:TIME_SLOTS[si]?.endsWith(':00')?'2px solid var(--border)':'1px solid var(--border)'}}/>;
+                          return(
+                            <td key={si} style={{padding:'2px 1px',textAlign:'center',
+                              borderLeft:TIME_SLOTS[si]?.endsWith(':00')?'2px solid var(--border)':'1px solid var(--border)',
+                              fontSize:9,fontWeight:800,
+                              color:diff>=0?'#166534':'#991b1b',
+                              background:diff>=0?'#dcfce7':'#fee2e2'}}>
+                              {diff>=0?'+':''}{diff}
+                            </td>
+                          );
+                        })}
+                        <td style={{padding:'3px',borderLeft:'2px solid var(--border)'}}/>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            );
+          })()}
         </div>
       )}
 
       {/* ── SHIFT PICKER MODAL ── */}
-      {shiftModal&&(
+      {editShiftModal&&(
         <div className="modal-overlay">
-          <div className="modal" style={{width:360}}>
+          <div className="modal" style={{width:400}}>
             <div className="modal-header">
-              <span className="modal-title">
-                Schicht zuweisen — {shiftModal.dateStr}
-              </span>
-              <button className="btn" onClick={()=>setShiftModal(null)}>×</button>
+              <span className="modal-title">Schicht — {editShiftModal.empName} · {editShiftModal.dateStr}</span>
+              <button className="btn" onClick={()=>setEditShiftModal(null)}>×</button>
             </div>
             <div className="modal-body">
-              <div style={{marginBottom:12,fontSize:12,color:'var(--muted)'}}>
-                {(employees||[]).find(e=>e.id===shiftModal.empId)?.first_name}{' '}
-                {(employees||[]).find(e=>e.id===shiftModal.empId)?.last_name}
-              </div>
               <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:12}}>
-                {SHIFTS.map(s=>(
-                  <button key={s.value} className="btn"
-                    style={{
-                      padding:'10px 8px',textAlign:'left',fontSize:12,
-                      background:shiftModal.currentShift===s.value?'var(--blue-bg)':'var(--surface-2)',
-                      color:shiftModal.currentShift===s.value?'var(--blue)':'var(--fg)',
-                      border:shiftModal.currentShift===s.value?'2px solid var(--blue)':'1px solid var(--border)',
-                      borderRadius:'var(--r)',
-                    }}
+                {[...getShiftsForPlan(),{id:'frei',label:'Frei/Kein Dienst',value:'',hours:0,net:0}].map(sh=>(
+                  <button key={sh.id||sh.value} className="btn"
+                    style={{padding:'10px 8px',textAlign:'left',fontSize:11,
+                      background:editShiftModal.currentEntry?.shift===sh.value?'var(--blue-bg)':'var(--surface-2)',
+                      color:editShiftModal.currentEntry?.shift===sh.value?'var(--blue)':'var(--fg)',
+                      border:editShiftModal.currentEntry?.shift===sh.value?'2px solid var(--blue)':'1px solid var(--border)',
+                      borderRadius:'var(--r)'}}
                     onClick={()=>{
-                      setDayEntry(shiftModal.empId,shiftModal.dateStr,s.value);
-                      setShiftModal(null);
+                      setShiftEntry(editShiftModal.empId,editShiftModal.dateStr,sh.value,sh.hours,sh.net);
+                      setEditShiftModal(null);
                     }}>
-                    <div style={{fontWeight:700}}>{s.label}</div>
-                    <div style={{fontSize:10,color:'var(--muted)',marginTop:2}}>
-                      {s.value||'Kein Einsatz'} {s.hours>0?`· ${s.hours}h (${s.net}h netto)`:''}
+                    <div style={{fontWeight:700}}>{sh.label}</div>
+                    <div style={{fontSize:9,color:'var(--muted)',marginTop:2}}>
+                      {sh.value||'Kein Einsatz'}{sh.hours>0?' · '+sh.hours+'h ('+sh.net+'h netto)':''}
                     </div>
                   </button>
                 ))}
               </div>
               <div style={{borderTop:'1px solid var(--border)',paddingTop:10}}>
-                <div style={{fontSize:11,fontWeight:700,marginBottom:6,color:'var(--muted)'}}>Eigene Zeit eingeben:</div>
+                <div style={{fontSize:11,fontWeight:700,marginBottom:6,color:'var(--muted)'}}>Eigene Schicht:</div>
                 <div style={{display:'flex',gap:6}}>
-                  <input className="form-input" placeholder="z.B. 09:00-18:00"
-                    defaultValue={shiftModal.currentShift}
-                    id="custom-shift-input"/>
+                  <input className="form-input" id="custom-shift-inp" placeholder="z.B. 09:00-18:00"
+                    defaultValue={editShiftModal.currentEntry?.shift||''}/>
                   <button className="btn btn-primary" onClick={()=>{
-                    const val=document.getElementById('custom-shift-input').value.trim();
-                    if(val){setDayEntry(shiftModal.empId,shiftModal.dateStr,val);}
-                    setShiftModal(null);
+                    const v=document.getElementById('custom-shift-inp').value.trim();
+                    if(v){
+                      const m=v.match(/(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})/);
+                      const h=m?(parseInt(m[3])*60+parseInt(m[4])-parseInt(m[1])*60-parseInt(m[2]))/60:0;
+                      setShiftEntry(editShiftModal.empId,editShiftModal.dateStr,v,h,h-0.5);
+                    }
+                    setEditShiftModal(null);
                   }}>OK</button>
                 </div>
               </div>
@@ -7527,263 +7600,101 @@ Monatsübersicht {MONTHS[selMonth-1]} {selYear}</span>
         </div>
       )}
 
-      {/* ── IMPORT MODAL ── */}
+      {/* ── INTERVAL CELL EDIT MODAL ── */}
+      {editCellModal&&(
+        <div className="modal-overlay">
+          <div className="modal" style={{width:300}}>
+            <div className="modal-header">
+              <span className="modal-title">Slot {editCellModal.slotTime}</span>
+              <button className="btn" onClick={()=>setEditCellModal(null)}>×</button>
+            </div>
+            <div className="modal-body">
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8}}>
+                {[['1','● Aktiv','var(--blue)'],['p','P Pause','#92400e'],['0','○ Frei','var(--dim)']].map(([v,l,c])=>(
+                  <button key={v} className="btn"
+                    style={{padding:'10px 4px',fontWeight:700,fontSize:12,color:c,
+                      border:'1.5px solid '+(getIntervalCell(editCellModal.empId,editCellModal.dateStr,editCellModal.slotIdx)===v?c:'var(--border)'),
+                      background:getIntervalCell(editCellModal.empId,editCellModal.dateStr,editCellModal.slotIdx)===v?'var(--surface-2)':'transparent'}}
+                    onClick={()=>{
+                      setIntervalCell(editCellModal.empId,editCellModal.dateStr,editCellModal.slotIdx,v);
+                      setEditCellModal(null);
+                    }}>
+                    {l}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── FC IMPORT MODAL ── */}
       {importModalOpen&&(
         <div className="modal-overlay">
-          <div className="modal" style={{width:600,maxWidth:'96vw'}}>
+          <div className="modal" style={{width:520}}>
             <div className="modal-header">
-              <span className="modal-title">📥 Forecast importieren</span>
-              <button className="btn" onClick={()=>{setImportModalOpen(false);setPendingFile(null);setPendingFileRows(null);}}>×</button>
+              <span className="modal-title">📥 FC-Dokument importieren</span>
+              <button className="btn" onClick={()=>{setImportModalOpen(false);setImportPreview(null);}}>×</button>
             </div>
-            <div className="modal-body" style={{padding:'16px 20px'}}>
-
-              {/* File drop zone */}
-              <div style={{marginBottom:20}}>
-                <label style={{
-                  display:'block',padding:'20px',textAlign:'center',
-                  border:'2px dashed var(--border)',borderRadius:'var(--r)',
-                  cursor:'pointer',background:'var(--surface-2)',
-                  color:pendingFile?'var(--green)':'var(--muted)',fontWeight:600,fontSize:13,
-                  transition:'all .15s'
-                }}>
-                  <input type="file" accept=".xlsx,.xls" style={{display:'none'}}
-                    onChange={e=>{
-                      const f=e.target.files[0];
-                      if(!f) return;
-                      setPendingFile(f);
-                      // Read first rows for AI preview
-                      const reader=new FileReader();
-                      reader.onload=ev=>{
-                        try{
-                          const wb=XLSX.read(new Uint8Array(ev.target.result),{type:'array',cellDates:true});
-                          const previews=wb.SheetNames.map(name=>({
-                            name,
-                            rows:XLSX.utils.sheet_to_json(wb.Sheets[name],{header:1,defval:null}).slice(0,3)
-                          }));
-                          setPendingFileRows(previews);
-                        }catch(e){}
-                      };
-                      reader.readAsArrayBuffer(f);
-                    }}/>
-                  {pendingFile?(
-                    <><div style={{fontSize:20,marginBottom:4}}>✅</div>{pendingFile.name}</>
-                  ):(
-                    <><div style={{fontSize:28,marginBottom:4}}>📂</div>Excel-Datei hier ablegen oder klicken</>
-                  )}
-                </label>
-              </div>
-
-              {pendingFile&&(
+            <div className="modal-body">
+              {!importPreview?(
                 <>
-                  {/* Section 1: Predefined Importers */}
-                  <div style={{marginBottom:20}}>
-                    <div style={{fontSize:12,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',
-                      letterSpacing:'.06em',marginBottom:10,paddingBottom:6,borderBottom:'1px solid var(--border)'}}>
-                      🗂 Vordefinierter Importer wählen
+                  <div style={{fontSize:12,color:'var(--muted)',marginBottom:16}}>
+                    Lade das FC-Dokument vom Partner hoch (z.B. FC_Mai_25Hrs__SALES.xlsx).<br/>
+                    Benötigt wird Sheet <b>Intervallplanung</b> mit Spalten A=Datum, B=Zeit, D=Stunden.
+                  </div>
+                  <label style={{display:'block',padding:'24px',border:'2px dashed var(--border)',
+                    borderRadius:'var(--r)',textAlign:'center',cursor:'pointer',background:'var(--surface-2)'}}>
+                    <input type="file" accept=".xlsx,.xls" style={{display:'none'}}
+                      onChange={e=>handleFCImport(e.target.files[0])}/>
+                    <div style={{fontSize:28,marginBottom:8}}>📂</div>
+                    <div style={{fontSize:13,fontWeight:700}}>FC-Dokument hochladen</div>
+                    <div style={{fontSize:11,color:'var(--muted)',marginTop:4}}>
+                      {selProj?.name||''} · {selSkill||'Alle Skills'} · {MONTHS_DE[selMonth-1]} {selYear}
                     </div>
-                    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
-                      {allImporters.map(imp=>(
-                        <button key={imp.id}
-                          onClick={()=>runBuiltinImporter(pendingFile,imp.fn,imp.skill)}
-                          style={{
-                            padding:'12px 14px',textAlign:'left',borderRadius:'var(--r)',cursor:'pointer',
-                            border:'1.5px solid var(--border)',background:'var(--surface-2)',
-                            fontFamily:'var(--font)',transition:'all .15s',
-                          }}
-                          onMouseOver={e=>{e.currentTarget.style.borderColor='var(--blue)';e.currentTarget.style.background='var(--blue-bg)';}}
-                          onMouseOut={e=>{e.currentTarget.style.borderColor='var(--border)';e.currentTarget.style.background='var(--surface-2)';}}>
-                          <div style={{fontWeight:700,fontSize:13,marginBottom:3,color:'var(--fg)'}}>{imp.label}</div>
-                          <div style={{fontSize:11,color:'var(--muted)',lineHeight:1.4}}>{imp.description}</div>
-                          {imp.isCustom&&(
-                            <div style={{marginTop:4,fontSize:10,color:'var(--blue)'}}>✨ KI-generiert</div>
-                          )}
-                        </button>
-                      ))}
+                  </label>
+                </>
+              ):(
+                <>
+                  <div style={{padding:'12px 14px',background:'var(--blue-bg)',borderRadius:'var(--r)',marginBottom:12}}>
+                    <div style={{fontWeight:700,fontSize:13,marginBottom:4}}>✅ {importPreview.filename}</div>
+                    <div style={{fontSize:12,color:'var(--muted)'}}>
+                      {importPreview.days} Tage · {importPreview.totalH}h Gesamtbedarf
                     </div>
                   </div>
-
-                  {/* Section 2: AI Importer */}
-                  <div>
-                    <div style={{fontSize:12,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',
-                      letterSpacing:'.06em',marginBottom:10,paddingBottom:6,borderBottom:'1px solid var(--border)'}}>
-                      🤖 KI-Importer — Neues Format beschreiben
-                    </div>
-                    {pendingFileRows&&(
-                      <div style={{marginBottom:10,padding:'8px 10px',background:'var(--surface-3)',
-                        borderRadius:'var(--r)',fontSize:11,color:'var(--muted)'}}>
-                        <b>Erkannte Sheets:</b> {pendingFileRows.map(s=>s.name).join(', ')}<br/>
-                        <b>Erste Spalten ({pendingFileRows[0]?.name}):</b>{' '}
-                        {(pendingFileRows[0]?.rows[0]||[]).filter(Boolean).slice(0,6).join(' | ')}
-                      </div>
-                    )}
-                    <textarea
-                      value={aiImportPrompt}
-                      onChange={e=>setAiImportPrompt(e.target.value)}
-                      rows={3}
-                      style={{width:'100%',padding:'10px',borderRadius:'var(--r)',fontSize:13,
-                        border:'1.5px solid var(--border)',fontFamily:'var(--font)',resize:'vertical',
-                        background:'var(--surface)',color:'var(--fg)',marginBottom:8,boxSizing:'border-box'}}
-                      placeholder='Beschreibe was importiert werden soll, z.B.: "Hole den täglichen Stundenbedarf Sales aus Spalte F, Datum aus Spalte D, KW aus A. Intervalle sind im Sheet Intervallplanung."'
-                    />
-                    <button
-                      className="btn btn-primary"
-                      disabled={!aiImportPrompt.trim()||aiImportLoading}
-                      onClick={()=>runAiImporter(pendingFile, aiImportPrompt)}
-                      style={{width:'100%',padding:'10px',fontSize:13,fontWeight:700}}>
-                      {aiImportLoading?(
-                        <><span style={{display:'inline-block',animation:'spin 1s linear infinite',marginRight:6}}>⏳</span>KI analysiert...</>
-                      ):'🤖 KI-Importer starten'}
-                    </button>
+                  <div style={{overflowY:'auto',maxHeight:200,fontSize:11}}>
+                    <table style={{width:'100%',borderCollapse:'collapse'}}>
+                      <thead>
+                        <tr style={{background:'var(--surface-2)'}}>
+                          <th style={{padding:'5px 8px',textAlign:'left'}}>Datum</th>
+                          <th style={{padding:'5px 8px',textAlign:'right'}}>FC Stunden</th>
+                          <th style={{padding:'5px 8px',textAlign:'right'}}>Slots mit Daten</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {Object.entries(importPreview.dfc).slice(0,15).map(([d,h])=>(
+                          <tr key={d} style={{borderBottom:'1px solid var(--border)'}}>
+                            <td style={{padding:'4px 8px',fontWeight:600}}>{d}</td>
+                            <td style={{padding:'4px 8px',textAlign:'right',color:'var(--blue)',fontWeight:700}}>{Math.round(h*10)/10}h</td>
+                            <td style={{padding:'4px 8px',textAlign:'right',color:'var(--muted)'}}>
+                              {(importPreview.ifc[d]||[]).filter(v=>v>0).length}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
                 </>
               )}
-
-              {!pendingFile&&(
-                <div style={{textAlign:'center',color:'var(--dim)',fontSize:12,padding:'8px 0'}}>
-                  Bitte zuerst eine Excel-Datei auswählen.
-                </div>
-              )}
             </div>
-          </div>
-        </div>
-      )}
-
-            {/* ── FORECAST MODAL ── */}
-      {forecastModal&&(()=>{
-        const kw=forecastModal.kw;
-        const existing=getForecast(kw);
-        async function runShiftRec(){const key=localStorage.getItem("jsr_anthropic_key")||"";if(!key){alert("API-Key fehlt.");return;}setShiftRecLoading(true);try{const iData=(()=>{try{return JSON.parse(localStorage.getItem("jsr_wf_intervals_"+planKey())||"{}")}catch(e){return{}}})();const shiftOpts=SHIFTS.filter(s=>s.value).map(s=>s.label+" ("+s.value+", "+s.net+"h netto)").join(", ");const dayLines=Object.entries(iData).slice(0,10).map(([d,ivs])=>{const mxH=Math.max(...ivs.map(iv=>iv.hours));const totH=ivs.reduce((s,iv)=>s+iv.hours,0);const peak=ivs.reduce((mx,iv)=>iv.hours>mx.hours?iv:mx,ivs[0]);return d+": "+Math.round(totH*10)/10+"h, Peak "+peak.time+" ("+peak.hours.toFixed(1)+"h)";}).join(" | ");const prompt="Workforce-Planung. Schichten: "+shiftOpts+". MA: "+projEmployees.length+" ("+( selSkill||"alle")+"). Bedarf: "+dayLines+". Empfiehl Schichtverteilung. JSON: [{date,shifts:[{label,count,reason}]}]. Nur JSON.";const resp=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1500,messages:[{role:"user",content:prompt}]})});const data=await resp.json();const raw=(data.content||[]).map(c=>c.text||"").join("").replace(/```json|```/g,"").trim();setShiftRec(JSON.parse(raw));}catch(e){alert("Fehler: "+e.message);}setShiftRecLoading(false);}
-
-  return(
-          <div className="modal-overlay">
-            <div className="modal" style={{width:520}}>
-              <div className="modal-header">
-                <span className="modal-title">📊 Forecast KW {kw} — manuell</span>
-                <button className="btn" onClick={()=>setForecastModal(null)}>×</button>
-              </div>
-              <div className="modal-body">
-                <div style={{fontSize:12,color:'var(--muted)',marginBottom:14}}>
-                  Benötigte Netto-Stunden pro Tag (aus Auftraggeber-Forecast oder eigener Einschätzung).
-                </div>
-                <div style={{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:10}}>
-                  {['MO','DI','MI','DO','FR','SA','SO'].map(d=>(
-                    <div key={d} style={{textAlign:'center'}}>
-                      <label style={{display:'block',fontSize:11,fontWeight:700,
-                        color:'var(--muted)',marginBottom:4}}>{d}</label>
-                      <input type="number" min="0" max="999" step="0.5"
-                        id={'fc_'+kw+'_'+d}
-                        defaultValue={existing[d]||''}
-                        placeholder="0"
-                        style={{width:'100%',padding:'8px 4px',textAlign:'center',
-                          fontSize:16,fontWeight:800,
-                          border:'2px solid var(--border)',borderRadius:'var(--r)',
-                          fontFamily:'var(--font)',background:'var(--surface)',color:'var(--fg)'}}
-                      />
-                    </div>
-                  ))}
-                </div>
-                <div style={{marginTop:14,padding:'10px 12px',background:'var(--surface-2)',
-                  borderRadius:'var(--r)',fontSize:11,color:'var(--muted)'}}>
-                  Upload-Funktion (CSV vom Auftraggeber) folgt in einem spaeteren Release.
-                </div>
-              </div>
+            {importPreview&&(
               <div className="modal-footer">
-                <button className="btn" onClick={()=>setForecastModal(null)}>Abbrechen</button>
-                <button className="btn btn-primary" onClick={()=>{
-                  ['MO','DI','MI','DO','FR','SA','SO'].forEach(d=>{
-                    const el=document.getElementById('fc_'+kw+'_'+d);
-                    if(el) setForecast(kw,d,el.value);
-                  });
-                  setForecastModal(null);
-                }}>Speichern</button>
+                <button className="btn" onClick={()=>setImportPreview(null)}>← Zurück</button>
+                <button className="btn btn-primary" onClick={()=>confirmImport(importPreview)}>
+                  ✅ Importieren ({importPreview.days} Tage)
+                </button>
               </div>
-            </div>
-          </div>
-        );
-      })()}
-
-      {/* ── SHIFT PICKER MODAL ── */}
-      {shiftModal&&(
-        <div className="modal-overlay">
-          <div className="modal" style={{width:360}}>
-            <div className="modal-header">
-              <span className="modal-title">
-                Schicht zuweisen — {shiftModal.dateStr}
-              </span>
-              <button className="btn" onClick={()=>setShiftModal(null)}>×</button>
-            </div>
-            <div className="modal-body">
-              <div style={{marginBottom:12,fontSize:12,color:'var(--muted)'}}>
-                {(employees||[]).find(e=>e.id===shiftModal.empId)?.first_name}{' '}
-                {(employees||[]).find(e=>e.id===shiftModal.empId)?.last_name}
-              </div>
-              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:12}}>
-                {SHIFTS.map(s=>(
-                  <button key={s.value} className="btn"
-                    style={{
-                      padding:'10px 8px',textAlign:'left',fontSize:12,
-                      background:shiftModal.currentShift===s.value?'var(--blue-bg)':'var(--surface-2)',
-                      color:shiftModal.currentShift===s.value?'var(--blue)':'var(--fg)',
-                      border:shiftModal.currentShift===s.value?'2px solid var(--blue)':'1px solid var(--border)',
-                      borderRadius:'var(--r)',
-                    }}
-                    onClick={()=>{
-                      setDayEntry(shiftModal.empId,shiftModal.dateStr,s.value);
-                      setShiftModal(null);
-                    }}>
-                    <div style={{fontWeight:700}}>{s.label}</div>
-                    <div style={{fontSize:10,color:'var(--muted)',marginTop:2}}>
-                      {s.value||'Kein Einsatz'} {s.hours>0?`· ${s.hours}h (${s.net}h netto)`:''}
-                    </div>
-                  </button>
-                ))}
-              </div>
-              <div style={{borderTop:'1px solid var(--border)',paddingTop:10}}>
-                <div style={{fontSize:11,fontWeight:700,marginBottom:6,color:'var(--muted)'}}>Eigene Zeit eingeben:</div>
-                <div style={{display:'flex',gap:6}}>
-                  <input className="form-input" placeholder="z.B. 09:00-18:00"
-                    defaultValue={shiftModal.currentShift}
-                    id="custom-shift-input"/>
-                  <button className="btn btn-primary" onClick={()=>{
-                    const val=document.getElementById('custom-shift-input').value.trim();
-                    if(val){setDayEntry(shiftModal.empId,shiftModal.dateStr,val);}
-                    setShiftModal(null);
-                  }}>OK</button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── FORECAST MODAL ── */}
-      {forecastModal&&(
-        <div className="modal-overlay">
-          <div className="modal" style={{width:480}}>
-            <div className="modal-header">
-              <span className="modal-title">📊 Forecast KW {forecastModal.kw}</span>
-              <button className="btn" onClick={()=>setForecastModal(null)}>×</button>
-            </div>
-            <div className="modal-body">
-              <div style={{fontSize:12,color:'var(--muted)',marginBottom:12}}>
-                Benötigte Netto-Stunden pro Tag (aus Auftraggeber-Forecast)
-              </div>
-              <div style={{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:8}}>
-                {DAYS.map(d=>(
-                  <div key={d}>
-                    <label className="form-label" style={{fontSize:11,textAlign:'center',display:'block'}}>{d}</label>
-                    <input type="number" className="form-input" style={{textAlign:'center',fontSize:13,fontWeight:700}}
-                      min="0" step="0.5"
-                      key={d+forecastModal.kw} defaultValue={getForecast(forecastModal.kw)[d]||''}
-                      onChange={e=>setForecast(forecastModal.kw,d,e.target.value)}
-                      placeholder="0"/>
-                  </div>
-                ))}
-              </div>
-            </div>
-            <div className="modal-footer">
-              <button className="btn btn-primary" onClick={()=>setForecastModal(null)}>Speichern</button>
-            </div>
+            )}
           </div>
         </div>
       )}
