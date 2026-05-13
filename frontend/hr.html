@@ -7162,46 +7162,73 @@ function WorkforcePlanningView({employees,projects,showToast}){
   }
 
   // ── Vorplanung ─────────────────────────────────────────────
-  function autoplan(){
+  // ── Central monthly target calculator ────────────────────────
+  // Returns {brutto, net, workDays} based on contract
+  function calcEmpTarget(emp){
+    const workH=parseFloat(emp.work_hours||8);
+    // Count available work days this month
+    const workDays=mdays().filter(d=>{
+      const dow=d.getDay();
+      const canSat=emp.work_saturday===true||emp.work_saturday==='yes'||emp.work_weekend===true||emp.work_weekend==='yes';
+      const canSun=emp.work_sunday===true||emp.work_sunday==='yes'||emp.work_weekend===true||emp.work_weekend==='yes';
+      if(dow===6&&!canSat) return false;
+      if(dow===0&&!canSun) return false;
+      if(absent(emp,iso(d))) return false;
+      return true;
+    }).length;
+    // Contract brutto: monthly_hours > weekly_hours > daily*5*4.33
+    let brutto;
+    if(emp.monthly_hours&&parseFloat(emp.monthly_hours)>0){
+      brutto=parseFloat(emp.monthly_hours);
+    } else if(emp.weekly_hours&&parseFloat(emp.weekly_hours)>0){
+      brutto=Math.round(parseFloat(emp.weekly_hours)*4.33*10)/10;
+    } else {
+      // Default: daily hours * 5 days * 4.33 weeks
+      brutto=Math.round(workH*5*4.33*10)/10;
+    }
+    // Net = brutto minus 0.5h pause per work day, capped by actual days available
+    const maxBrutto=workDays*workH;
+    const cappedBrutto=Math.min(brutto,maxBrutto);
+    const net=Math.max(0,Math.round((cappedBrutto-workDays*0.5)*10)/10);
+    return{brutto:Math.round(cappedBrutto*10)/10,net,workDays};
+  }
+
+    function autoplan(){
     const sh=getShifts();
     if(!Object.keys(ifc).length){alert('Bitte zuerst FC importieren.');return;}
     const u={...plan};
 
-    // Pre-compute monthly net target and already planned net per employee
+    // Pre-compute targets using central calcEmpTarget
     const empNetPlanned={};
     const empNetTarget={};
-    const empRemainingDays={}; // how many unplanned workdays remain
+    const empRemainingDays={};
+    const todayStr=iso(today);
     planEmps.forEach(emp=>{
-      // Count already planned net hours this month (existing plan)
+      // Already planned net hours (including past)
       let alreadyNet=0;
       mdays().forEach(d=>{
         const e=u['s_'+emp.id+'_'+iso(d)];
         if(e) alreadyNet+=e.net||0;
       });
       empNetPlanned[emp.id]=alreadyNet;
-
-      const workH=parseFloat(emp.work_hours||8);
-      const shiftNetH=workH-0.5; // net per shift (brutto minus pause)
-
-      // Count actual available work days this month
-      // respecting weekend flag, absences
-      let totalWorkDays=0;
-      let remainingWorkDays=0;
-      const todayStr=iso(today);
+      // Use central target function
+      const t=calcEmpTarget(emp);
+      empNetTarget[emp.id]=t.net;
+      // Remaining unplanned future days
+      let rem=0;
       mdays().forEach(d=>{
         const ds=iso(d);
+        if(ds<todayStr) return;
+        if(u['s_'+emp.id+'_'+ds]) return;
         const dow=d.getDay();
-        if(dow===6&&!emp.work_weekend) return;
-        if(dow===0&&!emp.work_weekend) return;
+        const canSat=emp.work_saturday===true||emp.work_saturday==='yes'||emp.work_weekend===true||emp.work_weekend==='yes';
+        const canSun=emp.work_sunday===true||emp.work_sunday==='yes'||emp.work_weekend===true||emp.work_weekend==='yes';
+        if(dow===6&&!canSat) return;
+        if(dow===0&&!canSun) return;
         if(absent(emp,ds)) return;
-        totalWorkDays++;
-        if(ds>=todayStr&&!u['s_'+emp.id+'_'+ds]) remainingWorkDays++;
+        rem++;
       });
-
-      // Monthly net target = total work days * net hours per shift
-      const target=Math.round(totalWorkDays*shiftNetH*10)/10;
-      empNetTarget[emp.id]=target;
-      empRemainingDays[emp.id]=remainingWorkDays;
+      empRemainingDays[emp.id]=rem;
     });
 
     // Helper: parse shift time to minutes
@@ -8044,6 +8071,52 @@ Antworte NUR mit validem JSON in diesem Format:
       {/* ════ STUNDEN ÜBERSICHT ════ */}
       {projId&&planEmps.length>0&&mode==='stunden'&&(
         <div>
+          {(()=>{
+            const overEmps=planEmps.filter(emp=>{
+              let net=0;mdays().forEach(d=>{const e=getEntry(emp.id,iso(d));if(e)net+=e.net||0;});
+              return net>calcEmpTarget(emp).net+0.5;
+            });
+            if(!overEmps.length) return null;
+            return(
+              <div style={{marginBottom:12,padding:'10px 14px',background:'#fee2e2',
+                borderRadius:'var(--r)',border:'1px solid #ef4444',
+                display:'flex',alignItems:'center',gap:12,flexWrap:'wrap'}}>
+                <div style={{fontSize:12,fontWeight:700,color:'#dc2626'}}>
+                  ⚠ {overEmps.length} MA mit Überstunden
+                </div>
+                <div style={{fontSize:11,color:'#dc2626'}}>
+                  {overEmps.map(e=>{
+                    let net=0;mdays().forEach(d=>{const en=getEntry(e.id,iso(d));if(en)net+=en.net||0;});
+                    const over=Math.round((net-calcEmpTarget(e).net)*10)/10;
+                    return e.first_name+' '+e.last_name+': +'+over+'h';
+                  }).join(' · ')}
+                </div>
+                <button className="btn btn-sm" onClick={()=>{
+                  const u={...plan};
+                  overEmps.forEach(emp=>{
+                    const target=calcEmpTarget(emp);
+                    // Remove future planned days until within target
+                    let planned=0;
+                    mdays().forEach(d=>{const e=u['s_'+emp.id+'_'+iso(d)];if(e)planned+=e.net||0;});
+                    // Remove excess from future days (latest first)
+                    const futureDays=[...mdays()].filter(d=>iso(d)>=iso(today)&&u['s_'+emp.id+'_'+iso(d)]).reverse();
+                    for(const d of futureDays){
+                      if(planned<=target.net+0.25) break;
+                      const e=u['s_'+emp.id+'_'+iso(d)];
+                      planned-=e.net||0;
+                      delete u['s_'+emp.id+'_'+iso(d)];
+                      SLOTS.forEach((_,si)=>delete u['i_'+emp.id+'_'+iso(d)+'_'+si]);
+                    }
+                  });
+                  save(u);
+                  showToast&&showToast('Überstunden bereinigt','success');
+                }}
+                style={{background:'#dc2626',color:'#fff',border:'none',fontWeight:700,marginLeft:'auto'}}>
+                  ✕ Überstunden entfernen
+                </button>
+              </div>
+            );
+          })()}
           <div style={{marginBottom:16,padding:'12px 16px',background:'var(--surface-2)',
             borderRadius:'var(--r)',border:'1px solid var(--border)',fontSize:12,color:'var(--muted)'}}>
             Übersicht für <b style={{color:'var(--fg)'}}>{selProj?.name}{skill?' / '+skill:''}</b> · {MNAMES[month-1]} {year}
@@ -8059,16 +8132,11 @@ Antworte NUR mit validem JSON in diesem Format:
             <tbody>
               {planEmps.map((emp,i)=>{
                 const workH=parseFloat(emp.work_hours||8);
-                // Count actual work days (no weekends if not allowed, no absences)
-                const workDays=mdays().filter(d=>{
-                  const dow=d.getDay();
-                  if(dow===0&&!emp.work_weekend) return false;
-                  if(dow===6&&!emp.work_weekend) return false;
-                  if(absent(emp,iso(d))) return false;
-                  return true;
-                }).length;
-                const sollBrutto=Math.round(workDays*workH*10)/10;
-                const sollNetto=Math.round(workDays*(workH-0.5)*10)/10;
+                // Use central target function for consistency
+                const empT=calcEmpTarget(emp);
+                const workDays=empT.workDays;
+                const sollBrutto=empT.brutto;
+                const sollNetto=empT.net;
                 // Planned this month
                 let plannedBrutto=0,plannedNetto=0;
                 mdays().forEach(d=>{
@@ -8078,10 +8146,11 @@ Antworte NUR mit validem JSON in diesem Format:
                 plannedBrutto=Math.round(plannedBrutto*10)/10;
                 plannedNetto=Math.round(plannedNetto*10)/10;
                 const offen=Math.round((sollNetto-plannedNetto)*10)/10;
-                const isOver=plannedNetto>sollNetto+0.5;
+                const overtime=Math.round((plannedNetto-sollNetto)*10)/10;
+                const isOver=overtime>0.5;
                 const isOk=Math.abs(offen)<0.5;
                 const statusColor=isOver?'#dc2626':isOk?'#16a34a':'#d97706';
-                const statusLabel=isOver?'🔴 Überstunden':isOk?'✅ Vollständig':'⚠ Offen';
+                const statusLabel=isOver?('🔴 +'+overtime+'h Überstunden'):isOk?'✅ Vollständig':'⚠ '+Math.abs(offen)+'h offen';
                 return(
                   <tr key={emp.id} style={{borderBottom:'1px solid var(--border)',
                     background:i%2?'var(--surface-2)':'transparent'}}>
@@ -8118,18 +8187,10 @@ Antworte NUR mit validem JSON in diesem Format:
               <tr style={{background:'var(--surface-2)',borderTop:'2px solid var(--border)',fontWeight:700}}>
                 <td colSpan={4} style={{padding:'8px 10px',fontSize:12}}>Σ Team</td>
                 <td style={{padding:'8px',textAlign:'center'}}>
-                  {Math.round(planEmps.reduce((s,emp)=>{
-                    const workH=parseFloat(emp.work_hours||8);
-                    const wd=mdays().filter(d=>{const dow=d.getDay();if(dow===0&&!emp.work_weekend)return false;if(dow===6&&!emp.work_weekend)return false;if(absent(emp,iso(d)))return false;return true;}).length;
-                    return s+wd*workH;
-                  },0)*10)/10}h
+                  {Math.round(planEmps.reduce((s,emp)=>s+calcEmpTarget(emp).brutto,0)*10)/10}h
                 </td>
                 <td style={{padding:'8px',textAlign:'center'}}>
-                  {Math.round(planEmps.reduce((s,emp)=>{
-                    const workH=parseFloat(emp.work_hours||8);
-                    const wd=mdays().filter(d=>{const dow=d.getDay();if(dow===0&&!emp.work_weekend)return false;if(dow===6&&!emp.work_weekend)return false;if(absent(emp,iso(d)))return false;return true;}).length;
-                    return s+wd*(workH-0.5);
-                  },0)*10)/10}h
+                  {Math.round(planEmps.reduce((s,emp)=>s+calcEmpTarget(emp).net,0)*10)/10}h
                 </td>
                 <td style={{padding:'8px',textAlign:'center'}}>
                   {Math.round(planEmps.reduce((s,emp)=>{
@@ -8383,7 +8444,7 @@ Antworte NUR mit validem JSON in diesem Format:
                   const earliest=ep[0]*60+(ep[1]||0);
                   const latest=lp[0]*60+(lp[1]||0);
                   const col=t?getShiftColor(entry.shift):'#6b7280';
-                  const hasSplit=emp.work_split&&emp.split_morning&&emp.split_afternoon;
+                  const hasSplit=(emp.work_split===true||emp.work_split==='yes')&&emp.split_morning&&emp.split_afternoon;
 
                   return(
                     <div key={emp.id}
