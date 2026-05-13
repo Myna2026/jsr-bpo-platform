@@ -6812,6 +6812,8 @@ function WorkforcePlanningView({employees,projects,showToast}){
   const [shiftCtx,setShiftCtx]=useState(null);
   const [cellCtx,setCellCtx]=useState(null);
   const [aiLoading,setAiLoading]=useState(false);
+  const [shiftPicker,setShiftPicker]=useState(null); // {empId,ds,candidates,x,y}
+  const [blockMenu,setBlockMenu]=useState(null);     // {empId,ds,x,y}
   const [aiModal,setAiModal]=useState(false);
   const [aiResult,setAiResult]=useState(null);
 
@@ -8198,35 +8200,65 @@ Antworte NUR mit validem JSON in diesem Format:
                           e.currentTarget.removeAttribute('data-snap-shift');
                           e.currentTarget.removeAttribute('data-snap-blocked');
                         }}
+                        onDoubleClick={e=>{
+                          if(isPastDay||ab||blockedWE||!hasSplit||t) return;
+                          // Assign both split shifts
+                          const morn=shiftList.find(s=>s.value===emp.split_morning);
+                          const aftn=shiftList.find(s=>s.value===emp.split_afternoon);
+                          if(morn) setEntry(emp.id,ddDs,morn);
+                        }}
                         onDrop={e=>{
                           if(isPastDay||ab||blockedWE) return;
                           e.preventDefault();
                           e.currentTarget.style.outline='none';
                           const rect=e.currentTarget.getBoundingClientRect();
-                          const x=e.clientX-rect.left;
-                          const dropMin=xToMin(x);
-                          const snap=snapToShift(emp,dropMin);
-                          if(!snap.best) return;
-                          if(snap.isBlocked){
-                            alert(
-                              '🚫 Schicht '+snap.best.value+' ist für '+emp.first_name+' gesperrt!\n'+
-                              'Erlaubt: '+minToTime(earliest)+' – '+minToTime(latest)+'\n'+
-                              'Bitte weiter in eine erlaubte Schicht ziehen.'
-                            );
+                          const dropX=e.clientX-rect.left;
+                          const dropMin=xToMin(dropX);
+                          // Find ALL allowed shifts close to drop point (within 90min)
+                          const candidates=shiftList
+                            .filter(s=>s.value)
+                            .map(s=>{
+                              const t=parseShift(s.value);
+                              if(!t) return null;
+                              const dist=Math.abs(t.start-dropMin);
+                              const allowed=t.start>=earliest&&t.end<=latest;
+                              return{...s,t,dist,allowed};
+                            })
+                            .filter(Boolean)
+                            .sort((a,b)=>a.dist-b.dist);
+                          const allowed=candidates.filter(s=>s.allowed);
+                          const blocked=candidates.filter(s=>!s.allowed);
+                          if(!allowed.length){
+                            // Show blocked info
+                            const nearest=blocked[0];
+                            alert('🚫 '+(nearest?nearest.value+' ':'')+' gesperrt für '+emp.first_name+'\nErlaubt: '+minToTime(earliest)+' – '+minToTime(latest));
                             return;
                           }
-                          // Remove source if dragging existing block
                           const src=e.dataTransfer.getData('removeSource');
+                          // If multiple allowed shifts start within 60min of drop → show picker
+                          const closeAllowed=allowed.filter(s=>s.dist<=60);
+                          if(closeAllowed.length>1){
+                            // Show shift picker popup
+                            setShiftPicker({
+                              empId:emp.id,ds:ddDs,
+                              candidates:closeAllowed,
+                              src,
+                              x:e.clientX,y:e.clientY,
+                            });
+                            return;
+                          }
+                          // Single match → assign directly
+                          const best=allowed[0];
                           if(src){
                             const[srcEid,srcDs]=src.split('|');
                             if(srcEid!==emp.id||srcDs!==ddDs){
                               const u2={...plan};
                               delete u2['s_'+srcEid+'_'+srcDs];
-                              SLOTS.forEach((_,si)=>delete u2['i_'+srcEid+'_'+srcDs+'_'+si]);
+                              SLOTS.forEach((_,si2)=>delete u2['i_'+srcEid+'_'+srcDs+'_'+si2]);
                               save(u2);
                             }
                           }
-                          setEntry(emp.id,ddDs,snap.best);
+                          setEntry(emp.id,ddDs,best);
                         }}>
 
                         {/* Hour grid */}
@@ -8295,10 +8327,10 @@ Antworte NUR mit validem JSON in diesem Format:
                               e.dataTransfer.setData('removeSource',emp.id+'|'+ddDs);
                               e.dataTransfer.effectAllowed='move';
                             }}
-                            onClick={()=>{
+                            onClick={e=>{
                               if(isPastDay) return;
-                              if(window.confirm('Schicht '+entry.shift+' von '+emp.first_name+' entfernen?'))
-                                setEntry(emp.id,ddDs,null);
+                              e.stopPropagation();
+                              setBlockMenu({empId:emp.id,ds:ddDs,x:e.clientX,y:e.clientY});
                             }}
                             style={{
                               position:'absolute',
@@ -8399,6 +8431,144 @@ Antworte NUR mit validem JSON in diesem Format:
                     </div>
                   </div>
                 )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+
+      {/* ════ SHIFT PICKER POPUP ════ */}
+      {shiftPicker&&(
+        <div style={{position:'fixed',inset:0,zIndex:999}}
+          onClick={()=>setShiftPicker(null)}>
+          <div style={{
+            position:'fixed',
+            left:Math.min(shiftPicker.x,window.innerWidth-220),
+            top:Math.min(shiftPicker.y,window.innerHeight-200),
+            background:'var(--surface)',
+            border:'2px solid var(--blue)',
+            borderRadius:'var(--r)',
+            boxShadow:'0 8px 32px rgba(0,0,0,.18)',
+            padding:'10px',
+            minWidth:200,zIndex:1000,
+          }}
+          onClick={e=>e.stopPropagation()}>
+            <div style={{fontSize:11,fontWeight:800,marginBottom:8,color:'var(--fg)'}}>
+              Welche Schicht?
+            </div>
+            {shiftPicker.candidates.map((sh,i)=>{
+              const c=shiftColors[shiftList.findIndex(s=>s.value===sh.value)%shiftColors.length];
+              return(
+                <div key={i}
+                  onClick={()=>{
+                    if(shiftPicker.src){
+                      const[srcEid,srcDs]=shiftPicker.src.split('|');
+                      if(srcEid!==shiftPicker.empId||srcDs!==shiftPicker.ds){
+                        const u2={...plan};
+                        delete u2['s_'+srcEid+'_'+srcDs];
+                        SLOTS.forEach((_,si2)=>delete u2['i_'+srcEid+'_'+srcDs+'_'+si2]);
+                        save(u2);
+                      }
+                    }
+                    setEntry(shiftPicker.empId,shiftPicker.ds,sh);
+                    setShiftPicker(null);
+                  }}
+                  style={{
+                    display:'flex',alignItems:'center',gap:10,
+                    padding:'8px 10px',borderRadius:'var(--r)',
+                    cursor:'pointer',marginBottom:4,
+                    background:c+'15',border:'1.5px solid '+c,
+                    transition:'background .1s',
+                  }}
+                  onMouseEnter={e=>e.currentTarget.style.background=c+'30'}
+                  onMouseLeave={e=>e.currentTarget.style.background=c+'15'}>
+                  <div style={{width:10,height:10,borderRadius:'50%',background:c,flexShrink:0}}/>
+                  <div>
+                    <div style={{fontWeight:800,fontSize:12,color:c}}>{sh.label}</div>
+                    <div style={{fontSize:10,color:'var(--muted)'}}>{sh.value} · {sh.net}h netto</div>
+                  </div>
+                </div>
+              );
+            })}
+            <div style={{fontSize:10,color:'var(--dim)',marginTop:6,textAlign:'center'}}>
+              ESC oder außen klicken zum Abbrechen
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ════ BLOCK MENU POPUP ════ */}
+      {blockMenu&&(()=>{
+        const bEmp=planEmps.find(e=>e.id===blockMenu.empId);
+        const bEntry=getEntry(blockMenu.empId,blockMenu.ds);
+        if(!bEntry||!bEmp) return null;
+        const c=shiftColors[getShifts().findIndex(s=>s.value===bEntry.shift)%shiftColors.length]||'#6b7280';
+        return(
+          <div style={{position:'fixed',inset:0,zIndex:999}}
+            onClick={()=>setBlockMenu(null)}>
+            <div style={{
+              position:'fixed',
+              left:Math.min(blockMenu.x,window.innerWidth-220),
+              top:Math.min(blockMenu.y,window.innerHeight-180),
+              background:'var(--surface)',
+              border:'2px solid '+c,
+              borderRadius:'var(--r)',
+              boxShadow:'0 8px 32px rgba(0,0,0,.18)',
+              padding:'10px',minWidth:190,zIndex:1000,
+            }}
+            onClick={e=>e.stopPropagation()}>
+              <div style={{fontSize:11,fontWeight:800,marginBottom:2,color:c}}>
+                {bEmp.first_name} {bEmp.last_name}
+              </div>
+              <div style={{fontSize:10,color:'var(--muted)',marginBottom:10}}>
+                {bEntry.shift} · {bEntry.net}h netto
+              </div>
+              {/* Change shift options */}
+              <div style={{fontSize:10,fontWeight:700,color:'var(--muted)',marginBottom:4}}>
+                Schicht wechseln:
+              </div>
+              {getShifts().filter(s=>s.value&&s.value!==bEntry.shift).map((sh,i)=>{
+                const ep=(bEmp.shift_earliest||'08:00').split(':').map(Number);
+                const lp=(bEmp.shift_latest||'22:00').split(':').map(Number);
+                const earliest2=ep[0]*60+(ep[1]||0);
+                const latest2=lp[0]*60+(lp[1]||0);
+                const t2=sh.value.match(/(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})/);
+                const allowed=t2?parseInt(t2[1])*60+parseInt(t2[2])>=earliest2&&parseInt(t2[3])*60+parseInt(t2[4])<=latest2:false;
+                const c2=shiftColors[getShifts().findIndex(s2=>s2.value===sh.value)%shiftColors.length];
+                return(
+                  <div key={i}
+                    onClick={()=>{
+                      if(!allowed) return;
+                      setEntry(bEmp.id,blockMenu.ds,sh);
+                      setBlockMenu(null);
+                    }}
+                    style={{
+                      display:'flex',alignItems:'center',gap:8,
+                      padding:'5px 8px',borderRadius:4,
+                      cursor:allowed?'pointer':'not-allowed',
+                      marginBottom:3,
+                      opacity:allowed?1:0.4,
+                      background:allowed?c2+'12':'transparent',
+                      border:'1px solid '+(allowed?c2:'var(--border)'),
+                    }}>
+                    <div style={{width:8,height:8,borderRadius:'50%',background:c2,flexShrink:0}}/>
+                    <span style={{fontSize:11,fontWeight:700,color:allowed?c2:'var(--dim)'}}>
+                      {sh.label} {sh.value}
+                    </span>
+                    {!allowed&&<span style={{fontSize:9,color:'#ef4444'}}>🚫</span>}
+                  </div>
+                );
+              })}
+              <div style={{borderTop:'1px solid var(--border)',marginTop:8,paddingTop:8}}>
+                <div
+                  onClick={()=>{setEntry(bEmp.id,blockMenu.ds,null);setBlockMenu(null);}}
+                  style={{display:'flex',alignItems:'center',gap:6,
+                    padding:'6px 8px',borderRadius:4,cursor:'pointer',
+                    background:'#fee2e2',border:'1px solid #ef4444',color:'#dc2626',
+                    fontWeight:700,fontSize:11}}>
+                  ✕ Schicht entfernen
+                </div>
               </div>
             </div>
           </div>
