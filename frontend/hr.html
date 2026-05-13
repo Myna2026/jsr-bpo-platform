@@ -7931,184 +7931,402 @@ Antworte NUR mit validem JSON in diesem Format:
         </div>
       )}
 
-      {/* ════ DRAG & DROP PLANUNG ════ */}
+      {/* ════ DRAG & DROP PLANUNG (Timeline) ════ */}
       {projId&&planEmps.length>0&&mode==='dragdrop'&&(()=>{
-        const ddDays=mdays();
         const shiftList=getShifts();
+        // Time axis: 08:00 to 22:30 = 14.5h = 870 min
+        const AXIS_START=8*60;   // 480 min
+        const AXIS_END=22*60+30; // 1350 min
+        const AXIS_MIN=AXIS_END-AXIS_START; // 870 min total
+        const PX_PER_MIN=1.6; // pixels per minute → 870*1.6 = 1392px wide
+        const ROW_H=44;
+        const LABEL_W=150;
 
-        function canAssign(emp,ds,sh){
-          if(absent(emp,ds)) return 'absent';
-          const dow=new Date(ds+'T12:00:00').getDay();
-          if(dow===0&&!emp.work_weekend) return 'weekend';
-          if(dow===6&&!emp.work_weekend) return 'weekend';
+        function minToX(m){ return Math.round((m-AXIS_START)*PX_PER_MIN); }
+        function xToMin(x){ return Math.round(x/PX_PER_MIN)+AXIS_START; }
+        function minToTime(m){
+          const h=Math.floor(m/60);
+          const mi=m%60;
+          return String(h).padStart(2,'0')+':'+String(mi).padStart(2,'0');
+        }
+        function parseShiftMin(val){
+          if(!val) return null;
+          const m=val.match(/(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})/);
+          if(!m) return null;
+          return{start:parseInt(m[1])*60+parseInt(m[2]),end:parseInt(m[3])*60+parseInt(m[4])};
+        }
+
+        const ddDays=mdays();
+        const selDayObj=day?new Date(day+'T12:00:00'):new Date(iso(today)+'T12:00:00');
+        const ddDs=day||iso(today);
+        const isPastDay=ddDs<iso(today);
+
+        // Hour markers for time axis
+        const hours=[];
+        for(let h=8;h<=22;h++) hours.push(h);
+
+        const shiftColors=['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#84cc16','#f97316'];
+
+        function getShiftColor(shiftVal){
+          const idx=shiftList.findIndex(s=>s.value===shiftVal);
+          return idx>=0?shiftColors[idx%shiftColors.length]:'#6b7280';
+        }
+
+        function canEmpUseShift(emp,sh){
           if(!sh||!sh.value) return 'ok';
           const ep=(emp.shift_earliest||'08:00').split(':').map(Number);
           const lp=(emp.shift_latest||'22:00').split(':').map(Number);
           const earliest=ep[0]*60+(ep[1]||0);
           const latest=lp[0]*60+(lp[1]||0);
-          const sm=parseInt(sh.value)*60+(parseInt(sh.value.split(':')[1])||0);
-          const em2val=sh.value.match(/-(\d{1,2}):(\d{2})$/);
-          const em2=em2val?parseInt(em2val[1])*60+parseInt(em2val[2]):1440;
-          if(sm<earliest||em2>latest) return 'restricted';
+          const t=parseShiftMin(sh.value);
+          if(!t) return 'ok';
+          if(t.start<earliest||t.end>latest) return 'restricted';
           return 'ok';
         }
 
-        const shiftColors=[
-          '#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#84cc16','#f97316'
-        ];
-
         return(
           <div>
-            {/* Schicht-Legende */}
-            <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:12,padding:'8px 12px',
-              background:'var(--surface-2)',borderRadius:'var(--r)',border:'1px solid var(--border)'}}>
-              <span style={{fontSize:11,fontWeight:700,color:'var(--muted)',alignSelf:'center'}}>Schichten:</span>
-              {shiftList.map((sh,i)=>(
-                <div key={sh.id||i}
-                  draggable
-                  onDragStart={e=>e.dataTransfer.setData('shift',JSON.stringify(sh))}
-                  style={{padding:'4px 10px',borderRadius:20,fontSize:11,fontWeight:700,
-                    background:shiftColors[i%shiftColors.length]+'22',
-                    color:shiftColors[i%shiftColors.length],
-                    border:'1.5px solid '+shiftColors[i%shiftColors.length],
-                    cursor:'grab',userSelect:'none'}}>
-                  {sh.label} {sh.value}
+            {/* Day selector strip */}
+            <div style={{display:'flex',gap:4,flexWrap:'wrap',marginBottom:14}}>
+              {ddDays.map(d=>{
+                const ds=iso(d);
+                const fc=Math.round((dfc[ds]||0)*10)/10;
+                const we=d.getDay()===0||d.getDay()===6;
+                const isTd=ds===iso(today);
+                const isPast2=ds<iso(today);
+                const sel=ddDs===ds;
+                return(
+                  <button key={ds} onClick={()=>setDay(ds)}
+                    style={{padding:'4px 7px',border:sel?'2px solid var(--blue)':'1px solid var(--border)',
+                      borderRadius:'var(--r)',fontSize:10,fontWeight:sel?800:600,cursor:'pointer',
+                      fontFamily:'var(--font)',textAlign:'center',minWidth:42,
+                      opacity:isPast2?0.5:1,
+                      background:sel?'var(--blue-bg)':isTd?'#eff6ff':we?'var(--surface-3)':'var(--surface-2)',
+                      color:sel?'var(--blue)':we?'var(--muted)':'var(--fg)'}}>
+                    <div>{WDAYS[d.getDay()===0?6:d.getDay()-1]} {d.getDate()}</div>
+                    <div style={{fontSize:8,color:fc>0?'var(--blue)':'var(--dim)'}}>{fc>0?fc+'h':'—'}</div>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Day header */}
+            <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:10}}>
+              <div style={{fontWeight:800,fontSize:15}}>
+                {WDAYS[selDayObj.getDay()===0?6:selDayObj.getDay()-1]}{' '}
+                {selDayObj.toLocaleDateString('de-DE',{day:'2-digit',month:'long',year:'numeric'})}
+              </div>
+              {dfc[ddDs]>0&&<div style={{fontSize:12,color:'var(--muted)'}}>FC: <b style={{color:'var(--blue)'}}>{Math.round(dfc[ddDs]*10)/10}h</b></div>}
+              {isPastDay&&<div style={{fontSize:11,color:'#92400e',fontWeight:700,padding:'3px 10px',background:'#fef9c3',borderRadius:20}}>📅 Vergangener Tag — schreibgeschützt</div>}
+              {!isPastDay&&(
+                <div style={{fontSize:11,color:'var(--muted)'}}>
+                  Schicht auf MA ziehen · Auf Block klicken = entfernen
                 </div>
-              ))}
-              <div draggable onDragStart={e=>e.dataTransfer.setData('shift',JSON.stringify({id:'frei',label:'Frei',value:'',hours:0,net:0}))}
-                style={{padding:'4px 10px',borderRadius:20,fontSize:11,fontWeight:700,
-                  background:'#f3f4f6',color:'#6b7280',border:'1.5px solid #d1d5db',
-                  cursor:'grab',userSelect:'none'}}>
-                ✕ Frei
+              )}
+            </div>
+
+            {/* Shift palette to drag from */}
+            <div style={{display:'flex',gap:6,flexWrap:'wrap',marginBottom:12,padding:'10px 14px',
+              background:'var(--surface-2)',borderRadius:'var(--r)',border:'1px solid var(--border)'}}>
+              <span style={{fontSize:11,fontWeight:700,color:'var(--muted)',alignSelf:'center',marginRight:4}}>
+                Schichten (ziehen):
+              </span>
+              {shiftList.map((sh,i)=>{
+                const t=parseShiftMin(sh.value);
+                const w2=t?Math.round((t.end-t.start)*PX_PER_MIN):80;
+                return(
+                  <div key={sh.id||i}
+                    draggable
+                    onDragStart={e=>{
+                      e.dataTransfer.setData('shiftJson',JSON.stringify(sh));
+                      e.dataTransfer.effectAllowed='copy';
+                    }}
+                    title={sh.label+': '+sh.value+' ('+sh.hours+'h / '+sh.net+'h netto)'}
+                    style={{
+                      display:'flex',alignItems:'center',gap:6,
+                      padding:'5px 12px',borderRadius:6,cursor:'grab',
+                      background:shiftColors[i%shiftColors.length]+'18',
+                      border:'1.5px solid '+shiftColors[i%shiftColors.length],
+                      color:shiftColors[i%shiftColors.length],
+                      fontWeight:700,fontSize:11,userSelect:'none',
+                    }}>
+                    <span>{sh.label}</span>
+                    <span style={{fontSize:9,opacity:.8}}>{sh.value}</span>
+                    <span style={{fontSize:9,background:shiftColors[i%shiftColors.length]+'30',
+                      borderRadius:4,padding:'1px 5px'}}>{sh.net}h</span>
+                  </div>
+                );
+              })}
+              <div draggable onDragStart={e=>{e.dataTransfer.setData('shiftJson',JSON.stringify({id:'frei',label:'Frei',value:'',hours:0,net:0}));e.dataTransfer.effectAllowed='copy';}}
+                style={{padding:'5px 12px',borderRadius:6,cursor:'grab',fontWeight:700,fontSize:11,
+                  background:'#f3f4f6',color:'#6b7280',border:'1.5px solid #d1d5db',userSelect:'none'}}>
+                ✕ Schicht entfernen
               </div>
             </div>
 
-            {/* Gantt Grid */}
-            <div style={{overflowX:'auto'}}>
-              <table style={{borderCollapse:'collapse',minWidth:900,width:'100%',fontSize:11}}>
-                <thead>
-                  <tr style={{background:'var(--surface-2)'}}>
-                    <th style={{padding:'8px 12px',textAlign:'left',fontWeight:700,minWidth:140,
-                      position:'sticky',left:0,zIndex:2,background:'var(--surface-2)',
-                      borderBottom:'2px solid var(--border)'}}>
-                      Mitarbeiter
-                    </th>
-                    {ddDays.map(d=>{
-                      const ds=iso(d);
-                      const we=d.getDay()===0||d.getDay()===6;
-                      const isToday=ds===iso(today);
-                      const isPast2=ds<iso(today);
+            {/* Timeline grid */}
+            <div style={{overflowX:'auto',userSelect:'none'}}>
+              <div style={{minWidth:LABEL_W+AXIS_MIN*PX_PER_MIN+40}}>
+
+                {/* Time axis header */}
+                <div style={{display:'flex',marginLeft:LABEL_W,marginBottom:4,position:'relative',
+                  height:24,background:'var(--surface-2)',borderRadius:'4px 4px 0 0',
+                  border:'1px solid var(--border)',borderBottom:'none'}}>
+                  {hours.map(h=>(
+                    <div key={h} style={{
+                      position:'absolute',
+                      left:minToX(h*60),
+                      top:0,height:'100%',
+                      display:'flex',alignItems:'center',
+                      borderLeft:'1px solid var(--border)',
+                      paddingLeft:4,fontSize:9,fontWeight:700,
+                      color:'var(--muted)',whiteSpace:'nowrap'}}>
+                      {String(h).padStart(2,'0')}:00
+                    </div>
+                  ))}
+                  {/* 30min ticks */}
+                  {hours.slice(0,-1).map(h=>(
+                    <div key={h+'h30'} style={{
+                      position:'absolute',
+                      left:minToX(h*60+30),
+                      top:'60%',height:'40%',
+                      borderLeft:'1px dashed var(--border)'}}/>
+                  ))}
+                </div>
+
+                {/* FC demand background bars */}
+                {dfc[ddDs]>0&&(
+                  <div style={{marginLeft:LABEL_W,position:'relative',height:20,
+                    background:'var(--surface-2)',marginBottom:2,
+                    border:'1px solid var(--border)',borderTop:'none',borderBottom:'none'}}>
+                    <div style={{position:'absolute',left:0,top:2,fontSize:9,fontWeight:700,
+                      color:'#f59e0b',paddingLeft:4}}>FC</div>
+                    {(ifc[ddDs]||[]).map((h,si)=>{
+                      if(!h) return null;
+                      const slotStart=8*60+si*30;
+                      const need=Math.round(h/0.5);
+                      const maxNeed=Math.max(...(ifc[ddDs]||[]).map(v=>Math.round(v/0.5)),1);
                       return(
-                        <th key={ds} style={{padding:'3px 1px',textAlign:'center',
-                          minWidth:32,maxWidth:44,fontSize:9,
-                          borderBottom:'2px solid var(--border)',
-                          borderLeft:'1px solid var(--border)',
-                          background:isToday?'var(--blue-bg)':we?'var(--surface-3)':isPast2?'var(--surface-3)':'var(--surface-2)',
-                          color:isPast2?'var(--dim)':we?'var(--muted)':'var(--fg)',
-                          opacity:isPast2?0.5:1,
-                          fontWeight:isToday?800:600}}>
-                          <div>{WDAYS[d.getDay()===0?6:d.getDay()-1]}</div>
-                          <div style={{fontWeight:400}}>{d.getDate()}</div>
-                        </th>
+                        <div key={si} style={{
+                          position:'absolute',
+                          left:minToX(slotStart),
+                          width:Math.round(30*PX_PER_MIN)-1,
+                          bottom:0,
+                          height:Math.max(3,Math.round((need/maxNeed)*16)),
+                          background:'#f59e0b',
+                          opacity:.6,
+                          borderRadius:'2px 2px 0 0',
+                        }}
+                        title={minToTime(slotStart)+': '+h+'h FC / '+need+' MA benötigt'}
+                        />
                       );
                     })}
-                  </tr>
-                </thead>
-                <tbody>
-                  {planEmps.map((emp,ei)=>(
-                    <tr key={emp.id} style={{borderBottom:'1px solid var(--border)',
-                      background:ei%2?'var(--surface-2)':'transparent'}}>
-                      <td style={{padding:'4px 12px',fontWeight:600,position:'sticky',left:0,zIndex:1,
-                        background:ei%2?'var(--surface-2)':'var(--surface)',
-                        borderRight:'1px solid var(--border)'}}>
-                        <div style={{fontSize:11}}>{emp.first_name} {emp.last_name}</div>
-                        <div style={{fontSize:9,color:'var(--muted)'}}>{emp.project_skill} · {emp.work_hours}h</div>
-                        {emp.shift_latest&&emp.shift_latest!=='22:00'&&(
-                          <div style={{fontSize:8,color:'#f59e0b'}}>bis {emp.shift_latest}</div>
-                        )}
-                      </td>
-                      {ddDays.map((d,di)=>{
-                        const ds=iso(d);
-                        const isPast2=ds<iso(today);
-                        const ab=absent(emp,ds);
-                        const entry=getEntry(emp.id,ds);
-                        const we=d.getDay()===0||d.getDay()===6;
-                        const shIdx=entry?shiftList.findIndex(s=>s.value===entry.shift):-1;
-                        const shColor=shIdx>=0?shiftColors[shIdx%shiftColors.length]:'var(--blue)';
+                  </div>
+                )}
 
+                {/* Employee rows */}
+                {planEmps.map((emp,ei)=>{
+                  const ab=absent(emp,ddDs);
+                  const entry=getEntry(emp.id,ddDs);
+                  const t=entry?parseShiftMin(entry.shift):null;
+                  const dow=selDayObj.getDay();
+                  const blockedWeekend=!emp.work_weekend&&(dow===0||dow===6);
+                  const rowBg=ab?'#fef9c3':ei%2?'var(--surface-2)':'transparent';
+
+                  return(
+                    <div key={emp.id} style={{display:'flex',height:ROW_H,
+                      borderBottom:'1px solid var(--border)',alignItems:'center',
+                      background:rowBg}}>
+
+                      {/* Employee label */}
+                      <div style={{width:LABEL_W,flexShrink:0,padding:'0 10px',
+                        borderRight:'1px solid var(--border)',height:'100%',
+                        display:'flex',flexDirection:'column',justifyContent:'center'}}>
+                        <div style={{fontWeight:700,fontSize:11,
+                          color:ab||blockedWeekend?'#92400e':'var(--fg)'}}>
+                          {emp.first_name} {emp.last_name}
+                        </div>
+                        <div style={{fontSize:9,color:'var(--muted)'}}>
+                          {emp.project_skill} · {emp.work_hours}h
+                          {emp.shift_latest&&emp.shift_latest!=='22:00'&&
+                            <span style={{color:'#f59e0b'}}> bis {emp.shift_latest}</span>}
+                        </div>
+                        {ab&&<div style={{fontSize:9,color:'#92400e',fontWeight:700}}>
+                          {ab.type==='vacation'?'🏖 Urlaub':ab.type==='sick'?'🤒 Krank':'❌ Abw.'}
+                        </div>}
+                        {blockedWeekend&&!ab&&<div style={{fontSize:9,color:'#92400e'}}>kein WE</div>}
+                      </div>
+
+                      {/* Timeline area */}
+                      <div
+                        style={{
+                          position:'relative',
+                          flex:1,
+                          height:'100%',
+                          overflow:'hidden',
+                          cursor:isPastDay||ab||blockedWeekend?'not-allowed':'crosshair',
+                          background:ab||blockedWeekend?'repeating-linear-gradient(45deg,transparent,transparent 4px,rgba(0,0,0,.04) 4px,rgba(0,0,0,.04) 8px)':'transparent',
+                        }}
+                        onDragOver={e=>{if(!isPastDay&&!ab&&!blockedWeekend) e.preventDefault();}}
+                        onDrop={e=>{
+                          if(isPastDay||ab||blockedWeekend) return;
+                          e.preventDefault();
+                          const shData=e.dataTransfer.getData('shiftJson');
+                          if(!shData) return;
+                          const sh=JSON.parse(shData);
+                          // Check constraint
+                          const check=canEmpUseShift(emp,sh);
+                          if(check==='restricted'){
+                            alert(emp.first_name+' '+emp.last_name+' kann nicht '+sh.value+' arbeiten.\nEinschränkung: '+emp.shift_earliest+' – '+emp.shift_latest);
+                            return;
+                          }
+                          setEntry(emp.id,ddDs,sh.value?sh:null);
+                        }}>
+
+                        {/* Hour grid lines */}
+                        {hours.map(h=>(
+                          <div key={h} style={{
+                            position:'absolute',left:minToX(h*60)-AXIS_START*0,
+                            top:0,bottom:0,
+                            borderLeft:'1px solid var(--border)',
+                            opacity:.4,
+                            pointerEvents:'none'}}/>
+                        ))}
+
+                        {/* Employee earliest/latest constraint overlay */}
+                        {(() => {
+                          const ep=(emp.shift_earliest||'08:00').split(':').map(Number);
+                          const lp=(emp.shift_latest||'22:00').split(':').map(Number);
+                          const earliest=ep[0]*60+(ep[1]||0);
+                          const latest=lp[0]*60+(lp[1]||0);
+                          return(
+                            <>
+                              {earliest>AXIS_START&&(
+                                <div style={{position:'absolute',left:0,top:0,bottom:0,
+                                  width:minToX(earliest),
+                                  background:'rgba(239,68,68,.08)',
+                                  borderRight:'2px solid #ef4444',
+                                  pointerEvents:'none'}}
+                                  title={'Vor '+minToTime(earliest)+' nicht planbar'}/>
+                              )}
+                              {latest<AXIS_END&&(
+                                <div style={{position:'absolute',right:0,top:0,bottom:0,
+                                  left:minToX(latest),
+                                  background:'rgba(239,68,68,.08)',
+                                  borderLeft:'2px solid #ef4444',
+                                  pointerEvents:'none'}}
+                                  title={'Nach '+minToTime(latest)+' nicht planbar'}/>
+                              )}
+                            </>
+                          );
+                        })()}
+
+                        {/* Shift block */}
+                        {t&&entry&&(()=>{
+                          const blockW=Math.max(40,(t.end-t.start)*PX_PER_MIN-2);
+                          const blockX=minToX(t.start);
+                          const col=getShiftColor(entry.shift);
+                          return(
+                            <div
+                              draggable={!isPastDay}
+                              onDragStart={e=>{
+                                e.dataTransfer.setData('shiftJson',JSON.stringify({
+                                  id:'existing',label:entry.label||entry.shift,
+                                  value:entry.shift,hours:entry.hours,net:entry.net
+                                }));
+                                e.dataTransfer.setData('removeSource',emp.id+'|'+ddDs);
+                              }}
+                              onClick={()=>{
+                                if(isPastDay) return;
+                                if(window.confirm('Schicht '+entry.shift+' von '+emp.first_name+' entfernen?'))
+                                  setEntry(emp.id,ddDs,null);
+                              }}
+                              style={{
+                                position:'absolute',
+                                left:blockX+1,
+                                top:4,
+                                width:blockW,
+                                height:ROW_H-8,
+                                background:col+'22',
+                                border:'2px solid '+col,
+                                borderRadius:6,
+                                cursor:isPastDay?'default':'grab',
+                                display:'flex',flexDirection:'column',
+                                justifyContent:'center',
+                                padding:'2px 8px',
+                                overflow:'hidden',
+                                boxShadow:'0 1px 3px rgba(0,0,0,.1)',
+                                zIndex:1,
+                              }}>
+                              <div style={{fontWeight:800,fontSize:11,color:col,whiteSpace:'nowrap'}}>
+                                {entry.label||entry.shift}
+                              </div>
+                              <div style={{fontSize:9,color:col,opacity:.8,whiteSpace:'nowrap'}}>
+                                {entry.shift} · {entry.net}h netto
+                                {!isPastDay&&<span style={{opacity:.5}}> · klicken=entfernen</span>}
+                              </div>
+                            </div>
+                          );
+                        })()}
+
+                        {/* No shift placeholder */}
+                        {!t&&!ab&&!blockedWeekend&&(
+                          <div style={{position:'absolute',inset:0,display:'flex',
+                            alignItems:'center',justifyContent:'center',
+                            fontSize:11,color:'var(--dim)',pointerEvents:'none'}}>
+                            {isPastDay?'—':'Schicht hierher ziehen'}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {/* Coverage summary row */}
+                {dfc[ddDs]>0&&(
+                  <div style={{display:'flex',marginTop:4,borderTop:'2px solid var(--border)'}}>
+                    <div style={{width:LABEL_W,flexShrink:0,padding:'4px 10px',
+                      fontSize:10,fontWeight:700,color:'var(--muted)',
+                      borderRight:'1px solid var(--border)'}}>
+                      Deckung vs FC
+                    </div>
+                    <div style={{position:'relative',flex:1,height:32}}>
+                      {(ifc[ddDs]||[]).map((fcH,si)=>{
+                        if(!fcH) return null;
+                        const slotStart=8*60+si*30;
+                        const need=Math.round(fcH/0.5);
+                        let actual=0;
+                        planEmps.forEach(emp=>{
+                          if(absent(emp,ddDs)) return;
+                          if(getCell(emp.id,ddDs,si)==='1') actual++;
+                        });
+                        const diff=actual-need;
+                        const bg=diff>=0?'#dcfce7':diff>=-1?'#fef9c3':'#fee2e2';
+                        const col=diff>=0?'#166534':diff>=-1?'#92400e':'#991b1b';
                         return(
-                          <td key={di}
-                            onDragOver={e=>{if(!isPast2&&!ab) e.preventDefault();}}
-                            onDrop={e=>{
-                              if(isPast2||ab) return;
-                              e.preventDefault();
-                              const shData=e.dataTransfer.getData('shift');
-                              if(!shData) return;
-                              const sh=JSON.parse(shData);
-                              const check=canAssign(emp,ds,sh);
-                              if(check==='restricted'){
-                                alert(emp.first_name+' kann nicht '+sh.value+' arbeiten (Einschränkung: '+emp.shift_earliest+'-'+emp.shift_latest+')');
-                                return;
-                              }
-                              if(check==='weekend'){
-                                alert(emp.first_name+' arbeitet nicht am Wochenende.');
-                                return;
-                              }
-                              setEntry(emp.id,ds,sh.value?sh:null);
-                            }}
-                            style={{padding:'2px 1px',textAlign:'center',minWidth:32,
-                              borderLeft:'1px solid var(--border)',
-                              background:we?'var(--surface-3)':isPast2?'var(--surface-3)':'transparent',
-                              opacity:isPast2?0.5:1,
-                              cursor:isPast2||ab?'not-allowed':'copy'}}>
-                            {ab?(
-                              <div style={{fontSize:9,padding:'2px',color:'#92400e',
-                                background:'#fef9c3',borderRadius:2,margin:'1px'}}>
-                                {ab.type==='vacation'?'🏖':ab.type==='sick'?'🤒':'❌'}
-                              </div>
-                            ):entry&&entry.value!==''?(
-                              <div
-                                draggable={!isPast2}
-                                onDragStart={e=>{
-                                  if(isPast2) return;
-                                  e.dataTransfer.setData('shift',JSON.stringify(entry));
-                                  e.dataTransfer.setData('source',emp.id+'|'+ds);
-                                }}
-                                onDragEnd={e=>{
-                                  // If dropped elsewhere, handled by target
-                                }}
-                                style={{
-                                  fontSize:9,fontWeight:700,padding:'2px 1px',
-                                  background:shColor+'22',color:shColor,
-                                  border:'1px solid '+shColor,
-                                  borderRadius:2,margin:'1px',cursor:isPast2?'default':'grab',
-                                  whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'
-                                }}
-                                title={entry.shift+' ('+entry.hours+'h/'+entry.net+'h netto)'}>
-                                {entry.label||entry.shift||'✓'}
-                              </div>
-                            ):(
-                              <div style={{height:20,background:'transparent'}}/>
-                            )}
-                          </td>
+                          <div key={si} style={{
+                            position:'absolute',
+                            left:minToX(slotStart),
+                            width:Math.round(30*PX_PER_MIN)-1,
+                            top:2,height:28,
+                            background:bg,
+                            borderRadius:2,
+                            display:'flex',alignItems:'center',justifyContent:'center',
+                            fontSize:9,fontWeight:700,color:col,
+                          }}
+                          title={minToTime(slotStart)+': '+actual+' MA / '+need+' benötigt'}>
+                            {diff>=0?'+':''}{diff}
+                          </div>
                         );
                       })}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-
-            {/* Legend */}
-            <div style={{marginTop:10,display:'flex',gap:16,flexWrap:'wrap',fontSize:11,color:'var(--muted)'}}>
-              <span>💡 Schicht aus Legende auf Zelle ziehen · Schicht in Zelle auf andere Zelle ziehen</span>
-              <span style={{color:'#dc2626'}}>Rote Meldung = Einschränkung aktiv</span>
-              <span style={{color:'#92400e'}}>🏖/🤒/❌ = Abwesenheit, nicht planbar</span>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         );
       })()}
-
 
       {/* ════ KI PLANUNG MODAL ════ */}
       {aiModal&&(
