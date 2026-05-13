@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"><title>[v1778683162] JSR BPO Intelligence Platform</title><script src="https://unpkg.com/react@18/umd/react.development.js"></script><script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script><script src="https://unpkg.com/@babel/standalone/babel.min.js"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script><style>
+<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"><title>[v1778683715] JSR BPO Intelligence Platform</title><script src="https://unpkg.com/react@18/umd/react.development.js"></script><script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script><script src="https://unpkg.com/@babel/standalone/babel.min.js"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script><style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
   --bg:#f4f5f7;--surface:#ffffff;--surface-2:#f9fafb;--card:#ffffff;
@@ -7204,9 +7204,9 @@ function WorkforcePlanningView({employees,projects,showToast}){
     const u={...plan};
     const todayIso=iso(today);
 
-    // Pre-compute monthly target and already-planned per employee
-    const empPlanned={};
-    const empTarget={};
+    // ── 1. Build employee state ───────────────────────────────────
+    const empPlanned={};   // already planned net hours this month
+    const empTarget={};    // monthly net target
     planEmps.forEach(emp=>{
       let net=0;
       mdays().forEach(d=>{const e=u['s_'+emp.id+'_'+iso(d)];if(e) net+=e.net||0;});
@@ -7214,7 +7214,7 @@ function WorkforcePlanningView({employees,projects,showToast}){
       empTarget[emp.id]=calcEmpTarget(emp).net;
     });
 
-    // Build valid shifts per employee (respects constraints)
+    // ── 2. Build valid shifts per employee ────────────────────────
     const empShifts={};
     planEmps.forEach(emp=>{
       const ep=(emp.shift_earliest||'08:00').split(':').map(Number);
@@ -7235,54 +7235,83 @@ function WorkforcePlanningView({employees,projects,showToast}){
       });
     });
 
-    // ── MAIN LOOP: for each future day, fill to FC demand ────────
-    mdays().forEach(d=>{
+    // ── 3. Collect all future workdays ────────────────────────────
+    const futureDays=mdays().filter(d=>iso(d)>=todayIso);
+
+    // Pre-calculate: for each employee, how many available days remain?
+    const empRemainingDays={};
+    planEmps.forEach(emp=>{
+      const canSat=emp.work_saturday===true||emp.work_saturday==='yes'||emp.work_weekend===true||emp.work_weekend==='yes';
+      const canSun=emp.work_sunday===true||emp.work_sunday==='yes'||emp.work_weekend===true||emp.work_weekend==='yes';
+      let cnt=0;
+      futureDays.forEach(d=>{
+        if(absent(emp,iso(d))) return;
+        const dow=d.getDay();
+        if(dow===6&&!canSat) return;
+        if(dow===0&&!canSun) return;
+        cnt++;
+      });
+      empRemainingDays[emp.id]=Math.max(1,cnt);
+    });
+
+    // ── 4. For each future day: fill to FC demand ─────────────────
+    futureDays.forEach(d=>{
       const ds=iso(d);
-      if(ds<todayIso) return; // never touch past
-
       const daySlots=ifc[ds]||[];
-      const totalFcNet=daySlots.reduce((s,v)=>s+(parseFloat(v)||0),0);
-      if(totalFcNet<0.5) return; // no FC for this day, skip
 
-      // How many net hours are currently covered on this day?
-      let coveredNet=0;
+      // Total FC demand for this day in agent-hours
+      // Each slot value = hours of work needed in that 30-min interval
+      const totalFcH=daySlots.reduce((s,v)=>s+(parseFloat(v)||0),0);
+      if(totalFcH<0.5) return; // no demand → skip
+
+      // Already covered
+      let coveredH=0;
       planEmps.forEach(emp=>{
         const e=u['s_'+emp.id+'_'+ds];
-        if(e) coveredNet+=e.net||0;
+        if(e) coveredH+=e.net||0;
       });
-
-      if(coveredNet>=totalFcNet) return; // already covered
+      if(coveredH>=totalFcH-0.25) return; // already covered
 
       const dow=d.getDay();
 
-      // Employees available for this day, sorted by most remaining hours first
+      // ── KEY: Sort employees by urgency ──────────────────────────
+      // Urgency = remaining hours / remaining days
+      // Higher rate = more behind schedule = assign first
+      // This ensures even distribution: employees with many hours left
+      // and few remaining days are prioritized → they get used before
+      // employees who still have plenty of time
       const available=planEmps
         .filter(emp=>{
-          if(u['s_'+emp.id+'_'+ds]) return false; // already planned
+          if(u['s_'+emp.id+'_'+ds]) return false; // already planned today
           if(absent(emp,ds)) return false;
           const canSat=emp.work_saturday===true||emp.work_saturday==='yes'||emp.work_weekend===true||emp.work_weekend==='yes';
           const canSun=emp.work_sunday===true||emp.work_sunday==='yes'||emp.work_weekend===true||emp.work_weekend==='yes';
           if(dow===6&&!canSat) return false;
           if(dow===0&&!canSun) return false;
           if(!empShifts[emp.id]||!empShifts[emp.id].length) return false;
-          // Still has hours left in monthly target
-          if(empPlanned[emp.id]>=empTarget[emp.id]-0.25) return false;
+          // Still has meaningful hours left
+          const remaining=empTarget[emp.id]-empPlanned[emp.id];
+          if(remaining<0.5) return false;
           return true;
         })
         .sort((a,b)=>{
+          // Sort by: remaining hours / remaining days DESC
+          // = who is most urgently behind schedule?
           const remA=empTarget[a.id]-empPlanned[a.id];
           const remB=empTarget[b.id]-empPlanned[b.id];
-          return remB-remA; // most remaining hours first
+          const rateA=remA/empRemainingDays[a.id];
+          const rateB=remB/empRemainingDays[b.id];
+          return rateB-rateA;
         });
 
-      // Fill day until FC demand is met
+      // Assign employees until daily FC demand is met
       for(const emp of available){
-        if(coveredNet>=totalFcNet) break; // demand met
+        if(coveredH>=totalFcH-0.25) break;
 
         // Pick best shift: maximize coverage of unmet FC slots
         const need=daySlots.map(fc=>fc>0?Math.round(fc/0.5):0);
+        // Current slot coverage from already-planned employees
         const cov=new Array(SLOTS.length).fill(0);
-        // Count existing coverage from already-planned employees
         planEmps.forEach(oe=>{
           if(oe.id===emp.id||absent(oe,ds)) return;
           const oe_e=u['s_'+oe.id+'_'+ds];
@@ -7295,20 +7324,31 @@ function WorkforcePlanningView({employees,projects,showToast}){
         let bestSh=null,bestScore=-1;
         empShifts[emp.id].forEach(s=>{
           const idxs=slotIdxs(s.value)||[];
+          if(!idxs.length) return;
+          // Score = unmet slots covered + small bonus for net hours
           const unmet=idxs.reduce((sum,i)=>sum+Math.max(0,(need[i]||0)-(cov[i]||0)),0);
-          const score=unmet*1000+(s.net||0);
+          const score=unmet*100+(s.net||0);
           if(score>bestScore){bestScore=score;bestSh=s;}
         });
 
         if(!bestSh) continue;
 
-        // Monthly cap check
-        if(empPlanned[emp.id]+(bestSh.net||0)>empTarget[emp.id]+0.25) continue;
+        // Hard cap: don't exceed monthly target
+        const remaining=empTarget[emp.id]-empPlanned[emp.id];
+        if(remaining<(bestSh.net||0)*0.5) continue; // skip if less than half a shift left
 
         // Assign
-        u['s_'+emp.id+'_'+ds]={shift:bestSh.value,hours:bestSh.hours,net:bestSh.net,label:bestSh.label};
+        u['s_'+emp.id+'_'+ds]={
+          shift:bestSh.value,
+          hours:bestSh.hours,
+          net:bestSh.net,
+          label:bestSh.label
+        };
         empPlanned[emp.id]+=(bestSh.net||0);
-        coveredNet+=(bestSh.net||0);
+        coveredH+=(bestSh.net||0);
+
+        // Update remaining days (this day is now used)
+        empRemainingDays[emp.id]=Math.max(1,empRemainingDays[emp.id]-1);
 
         // Mark interval cells
         const sl=slotIdxs(bestSh.value)||[];
@@ -7650,6 +7690,25 @@ Antworte NUR mit validem JSON in diesem Format:
           </>
         )}
       </div>
+      {projId&&hasFc&&(()=>{
+        const tStr=iso(today);
+        let fcB=0;
+        mdays().forEach(d=>{const ds=iso(d);if(ds<tStr)return;(ifc[ds]||[]).forEach(v=>{fcB+=parseFloat(v)||0;});});
+        let teamK=0;
+        planEmps.forEach(emp=>{let g=0;mdays().forEach(d=>{const e=getEntry(emp.id,iso(d));if(e)g+=e.net||0;});teamK+=Math.max(0,calcEmpTarget(emp).net-g);});
+        const delta=Math.round((teamK-fcB)*10)/10;
+        const pct=fcB>0?Math.round(teamK/fcB*100):0;
+        const ok=delta>=0;
+        return(
+          <div style={{marginBottom:10,padding:'8px 14px',background:ok?'#f0fdf4':'#fff7ed',border:'1px solid '+(ok?'#86efac':'#fdba74'),borderRadius:'var(--r)',display:'flex',gap:20,flexWrap:'wrap',alignItems:'center'}}>
+            <span style={{fontSize:11}}><b>📊 FC-Bedarf Rest:</b> {Math.round(fcB*10)/10}h</span>
+            <span style={{fontSize:11}}><b>👥 Team offen:</b> {Math.round(teamK*10)/10}h</span>
+            <span style={{fontSize:13,fontWeight:900,color:ok?'#16a34a':'#dc2626',marginLeft:'auto'}}>
+              Delta: {ok?'+':''}{delta}h ({pct}%) {ok?'✅ Deckbar':'⚠ Nicht vollständig deckbar'}
+            </span>
+          </div>
+        );
+      })()}
 
       {!projId&&(
         <div style={{padding:48,textAlign:'center',color:'var(--muted)',
