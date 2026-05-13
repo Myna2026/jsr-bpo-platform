@@ -6820,7 +6820,10 @@ function WorkforcePlanningView({employees,projects,showToast}){
     try{setPlan(JSON.parse(localStorage.getItem('wfp_plan_'+k)||'{}'));}catch(e){setPlan({});}
     try{setIfc(JSON.parse(localStorage.getItem('wfp_ifc_'+k)||'{}'));}catch(e){setIfc({});}
     try{setDfc(JSON.parse(localStorage.getItem('wfp_dfc_'+k)||'{}'));}catch(e){setDfc({});}
-    setDay('');
+    // Default: select today if in current month, else first day
+    const todayIso=iso(today);
+    const inMonth=today.getFullYear()===year&&today.getMonth()+1===month;
+    setDay(inMonth?todayIso:'');
   },[projId,skill,year,month]);
 
   function save(data){
@@ -6976,10 +6979,18 @@ function WorkforcePlanningView({employees,projects,showToast}){
   function confirmImport(){
     if(!preview) return;
     const k=pkey();
-    localStorage.setItem('wfp_ifc_'+k,JSON.stringify(preview.newIfc));
-    localStorage.setItem('wfp_dfc_'+k,JSON.stringify(preview.newDfc));
-    setIfc({...preview.newIfc});
-    setDfc({...preview.newDfc});
+    const todayStr=iso(today);
+    // Only import FC for today and future - preserve past FC data
+    const existingIfc=ifc;
+    const existingDfc=dfc;
+    const mergedIfc={...existingIfc};
+    const mergedDfc={...existingDfc};
+    Object.entries(preview.newIfc).forEach(([d,v])=>{if(d>=todayStr) mergedIfc[d]=v;});
+    Object.entries(preview.newDfc).forEach(([d,v])=>{if(d>=todayStr) mergedDfc[d]=v;});
+    localStorage.setItem('wfp_ifc_'+k,JSON.stringify(mergedIfc));
+    localStorage.setItem('wfp_dfc_'+k,JSON.stringify(mergedDfc));
+    setIfc({...mergedIfc});
+    setDfc({...mergedDfc});
     const snap=preview;
     setPreview(null);
     setModal('');
@@ -7025,73 +7036,63 @@ function WorkforcePlanningView({employees,projects,showToast}){
       return m?parseInt(m[1])*60+parseInt(m[2]):0;
     }
 
+    const todayIso=iso(today);
     mdays().forEach(d=>{
       const ds=iso(d),dow=d.getDay();
+      // Never overwrite or plan past days (before today)
+      if(ds<iso(today)) return;
+      if(ds<todayIso) return; // PAYROLL LOCK: never overwrite past days
       const daySlots=ifc[ds];
       if(!daySlots||!daySlots.some(v=>v>0)) return;
 
+      const covSoFar=new Array(SLOTS.length).fill(0);
       planEmps.forEach(emp=>{
-        // 1. Already planned this day -> skip
-        if(u['s_'+emp.id+'_'+ds]) return;
-
-        // 2. Absence (vacation, sick, etc.) -> skip
         if(absent(emp,ds)) return;
-
-        // 3. Weekend constraints
-        if(dow===0&&!emp.work_weekend) return; // Sunday
-        if(dow===6&&!emp.work_weekend) return; // Saturday
-
-        // 4. Monthly net hours already reached -> skip
-        if(empNetPlanned[emp.id]>=(empNetTarget[emp.id]||0)) return;
-
-        // 5. Employee shift time constraints
-        // emp.shift_earliest: earliest start in minutes (e.g. '08:00' -> 480)
-        // emp.shift_latest:   latest end   in minutes (e.g. '20:00' -> 1200)
-        const earliest=emp.shift_earliest
-          ?emp.shift_earliest.split(':').reduce((h,m,i)=>h+(i===0?parseInt(m)*60:parseInt(m)),0)
-          :0;
-        const latest=emp.shift_latest
-          ?emp.shift_latest.split(':').reduce((h,m,i)=>h+(i===0?parseInt(m)*60:parseInt(m)),0)
-          :1440;
-
-        // 6. Filter allowed shifts
+        const entry=u['s_'+emp.id+'_'+ds];
+        if(!entry) return;
+        slotIdxs(entry.shift).forEach(si=>{if(u['i_'+emp.id+'_'+ds+'_'+si]==='1') covSoFar[si]++;});
+      });
+      const slotNeed=daySlots.map(fc=>fc>0?Math.round(fc/0.5):0);
+      planEmps.forEach(emp=>{
+        if(u['s_'+emp.id+'_'+ds]) return;
+        if(absent(emp,ds)) return;
+        if(dow===0&&!emp.work_weekend) return;
+        if(dow===6&&!emp.work_weekend) return;
+        if((empNetPlanned[emp.id]||0)>=(empNetTarget[emp.id]||0)) return;
+        const ep=(emp.shift_earliest||'08:00').split(':').map(Number);
+        const lp=(emp.shift_latest||'22:00').split(':').map(Number);
+        const earliest=ep[0]*60+(ep[1]||0);
+        const latest=lp[0]*60+(lp[1]||0);
         const allowed=sh.filter(s=>{
           if(!s.value) return false;
-          const start=shiftStartMin(s.value);
-          const end=shiftEndMin(s.value);
-          if(earliest>0&&start<earliest) return false;
-          if(latest<1440&&end>latest) return false;
+          const sm=shiftStartMin(s.value);
+          const em2=shiftEndMin(s.value);
+          if(sm<earliest||em2>latest) return false;
           return true;
         });
         if(!allowed.length) return;
-
-        // 7. Best shift = max FC coverage among allowed shifts
         let best=null,bestScore=-1;
         allowed.forEach(s=>{
-          const sc=slotIdxs(s.value).reduce((sum,i)=>sum+(parseFloat(daySlots[i])||0),0);
-          if(sc>bestScore){bestScore=sc;best=s;}
+          const idxs=slotIdxs(s.value);
+          const unmet=idxs.reduce((sum,i)=>sum+Math.max(0,slotNeed[i]-(covSoFar[i]||0)),0);
+          const fc=idxs.reduce((sum,i)=>sum+(parseFloat(daySlots[i])||0),0);
+          const score=unmet*1000+fc;
+          if(score>bestScore){bestScore=score;best=s;}
         });
-
-        if(!best||bestScore<=0) return;
-
-        // 8. Check if adding this shift would exceed monthly target
+        if(!best||Math.floor(bestScore/1000)<=0) return;
         const netAfter=(empNetPlanned[emp.id]||0)+(best.net||0);
-        // Allow slight overage (max 0.5h over target) rather than leaving gaps
         if(netAfter>(empNetTarget[emp.id]||0)+0.5) return;
-
-        // 9. Assign shift
         u['s_'+emp.id+'_'+ds]={shift:best.value,hours:best.hours,net:best.net,label:best.label};
         empNetPlanned[emp.id]=(empNetPlanned[emp.id]||0)+(best.net||0);
-
-        // 10. Populate interval cells
         const sl=slotIdxs(best.value);
         sl.forEach((i,pos)=>{
           const mid=Math.floor(sl.length/2);
-          u['i_'+emp.id+'_'+ds+'_'+i]=sl.length>6&&pos===mid&&pos>=4?'p':'1';
+          const isPause=sl.length>6&&pos===mid&&pos>=4;
+          u['i_'+emp.id+'_'+ds+'_'+i]=isPause?'p':'1';
+          if(!isPause) covSoFar[i]=(covSoFar[i]||0)+1;
         });
       });
     });
-
     save(u);
     // Summary
     const planned=planEmps.map(emp=>{
@@ -7187,7 +7188,7 @@ function WorkforcePlanningView({employees,projects,showToast}){
         {projId&&(
           <>
             <div style={{display:'flex',border:'1.5px solid var(--border)',borderRadius:'var(--r)',overflow:'hidden'}}>
-              {[['schicht','📋 Schicht'],['intervall','🕐 Intervall']].map(([v,l])=>(
+              {[['schicht','📋 Schicht'],['intervall','🕐 Intervall'],['dragdrop','👥 Drag & Drop'],['stunden','📊 Stunden']].map(([v,l])=>(
                 <button key={v} onClick={()=>setMode(v)}
                   style={{padding:'5px 12px',fontSize:12,fontWeight:700,border:'none',
                     fontFamily:'var(--font)',cursor:'pointer',
@@ -7295,8 +7296,8 @@ function WorkforcePlanningView({employees,projects,showToast}){
                           <th key={di} style={{padding:'4px 2px',textAlign:'center',fontSize:10,
                             borderBottom:'3px solid '+borderColor,
                             borderLeft:'1px solid var(--border)',
-                            background:td?'var(--blue-bg)':we?'var(--surface-3)':'var(--surface-2)',
-                            color:!inm?'var(--dim)':we?'var(--muted)':'var(--fg)',fontWeight:td?800:600}}>
+                            background:td?'var(--blue-bg)':we?'var(--surface-3)':iso(d)<iso(today)?'var(--surface-3)':'var(--surface-2)',
+                            color:!inm?'var(--dim)':iso(d)<iso(today)?'var(--dim)':we?'var(--muted)':'var(--fg)',fontWeight:td?800:600}}>
                             <div>{WDAYS[di]}</div>
                             <div style={{fontWeight:400,fontSize:9}}>{d.toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit'})}</div>
                           </th>
@@ -7324,7 +7325,7 @@ function WorkforcePlanningView({employees,projects,showToast}){
                               <td key={di} style={{padding:'2px',textAlign:'center',
                                 borderLeft:'1px solid var(--border)',
                                 background:di>=5?'var(--surface-3)':ab?'#fef9c3':'transparent',
-                                opacity:inm?1:0.4}}>
+                                opacity:inm?(ds<iso(today)?0.5:1):0.4}}>
                                 {ab?(
                                   <div style={{fontSize:9,color:'#92400e',fontWeight:700,padding:'4px 1px'}}>
                                     {ab.type==='vacation'?'🏖':ab.type==='sick'?'🤒':'❌'}
@@ -7428,13 +7429,15 @@ function WorkforcePlanningView({employees,projects,showToast}){
               const we=d.getDay()===0||d.getDay()===6;
               const sel=day===ds;
               const dotC=stColor(st.status);
+              const isPast=ds<iso(today);
               return(
                 <button key={ds} onClick={()=>setDay(ds)}
                   title={stLabel(st.status,st.pct,st.underSlots)}
                   style={{padding:'4px 6px',
-                    border:sel?'2px solid var(--blue)':'1px solid '+(f>0&&!sel?stColor(st.status):'var(--border)'),
+                    border:sel?'2px solid var(--blue)':'1px solid '+(f>0&&!sel&&!isPast?stColor(st.status):'var(--border)'),
                     borderRadius:'var(--r)',fontSize:10,fontWeight:sel?800:500,cursor:'pointer',
                     fontFamily:'var(--font)',textAlign:'center',minWidth:44,
+                    opacity:isPast?0.4:1,
                     background:sel?'var(--blue-bg)':we?'var(--surface-3)':'var(--surface-2)',
                     color:sel?'var(--blue)':we?'var(--muted)':'var(--fg)'}}>
                   <div style={{fontSize:9,fontWeight:700}}>{d.toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit'})}</div>
@@ -7647,7 +7650,293 @@ function WorkforcePlanningView({employees,projects,showToast}){
         </div>
       )}
 
-      {/* ════ FC IMPORT MODAL ════ */}
+      
+      {/* ════ STUNDEN ÜBERSICHT ════ */}
+      {projId&&planEmps.length>0&&mode==='stunden'&&(
+        <div>
+          <div style={{marginBottom:16,padding:'12px 16px',background:'var(--surface-2)',
+            borderRadius:'var(--r)',border:'1px solid var(--border)',fontSize:12,color:'var(--muted)'}}>
+            Übersicht für <b style={{color:'var(--fg)'}}>{selProj?.name}{skill?' / '+skill:''}</b> · {MNAMES[month-1]} {year}
+          </div>
+          <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+            <thead>
+              <tr style={{background:'var(--surface-2)',borderBottom:'2px solid var(--border)'}}>
+                {['Mitarbeiter','Skill','Modell','Arbeitstage','Soll Brutto','Soll Netto','Geplant Brutto','Geplant Netto','Offen','Status'].map(h=>(
+                  <th key={h} style={{padding:'8px 10px',textAlign:h==='Mitarbeiter'?'left':'center',fontWeight:700,fontSize:11}}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {planEmps.map((emp,i)=>{
+                const workH=parseFloat(emp.work_hours||8);
+                // Count actual work days (no weekends if not allowed, no absences)
+                const workDays=mdays().filter(d=>{
+                  const dow=d.getDay();
+                  if(dow===0&&!emp.work_weekend) return false;
+                  if(dow===6&&!emp.work_weekend) return false;
+                  if(absent(emp,iso(d))) return false;
+                  return true;
+                }).length;
+                const sollBrutto=Math.round(workDays*workH*10)/10;
+                const sollNetto=Math.round(workDays*(workH-0.5)*10)/10;
+                // Planned this month
+                let plannedBrutto=0,plannedNetto=0;
+                mdays().forEach(d=>{
+                  const e=getEntry(emp.id,iso(d));
+                  if(e){plannedBrutto+=e.hours||0;plannedNetto+=e.net||0;}
+                });
+                plannedBrutto=Math.round(plannedBrutto*10)/10;
+                plannedNetto=Math.round(plannedNetto*10)/10;
+                const offen=Math.round((sollNetto-plannedNetto)*10)/10;
+                const isOver=plannedNetto>sollNetto+0.5;
+                const isOk=Math.abs(offen)<0.5;
+                const statusColor=isOver?'#dc2626':isOk?'#16a34a':'#d97706';
+                const statusLabel=isOver?'🔴 Überstunden':isOk?'✅ Vollständig':'⚠ Offen';
+                return(
+                  <tr key={emp.id} style={{borderBottom:'1px solid var(--border)',
+                    background:i%2?'var(--surface-2)':'transparent'}}>
+                    <td style={{padding:'8px 10px',fontWeight:600}}>
+                      {emp.first_name} {emp.last_name}
+                    </td>
+                    <td style={{padding:'8px',textAlign:'center'}}>
+                      <span style={{background:'var(--blue-bg)',color:'var(--blue)',
+                        borderRadius:4,padding:'2px 7px',fontSize:10,fontWeight:700}}>
+                        {emp.project_skill||'—'}
+                      </span>
+                    </td>
+                    <td style={{padding:'8px',textAlign:'center',fontSize:11,color:'var(--muted)'}}>
+                      {emp.work_model==='part_time'?'Teilzeit':'Vollzeit'}
+                      {emp.work_model==='part_time'&&<div style={{fontSize:9}}>{workH}h/Tag</div>}
+                    </td>
+                    <td style={{padding:'8px',textAlign:'center',fontWeight:600}}>{workDays}</td>
+                    <td style={{padding:'8px',textAlign:'center',color:'var(--muted)'}}>{sollBrutto}h</td>
+                    <td style={{padding:'8px',textAlign:'center',color:'var(--muted)'}}>{sollNetto}h</td>
+                    <td style={{padding:'8px',textAlign:'center',fontWeight:700}}>{plannedBrutto}h</td>
+                    <td style={{padding:'8px',textAlign:'center',fontWeight:700,color:'var(--blue)'}}>{plannedNetto}h</td>
+                    <td style={{padding:'8px',textAlign:'center',fontWeight:700,
+                      color:offen>0?'#d97706':offen<-0.5?'#dc2626':'#16a34a'}}>
+                      {offen>0?'+'+offen+'h':offen+'h'}
+                    </td>
+                    <td style={{padding:'8px',textAlign:'center',fontWeight:700,fontSize:11,color:statusColor}}>
+                      {statusLabel}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+            <tfoot>
+              <tr style={{background:'var(--surface-2)',borderTop:'2px solid var(--border)',fontWeight:700}}>
+                <td colSpan={4} style={{padding:'8px 10px',fontSize:12}}>Σ Team</td>
+                <td style={{padding:'8px',textAlign:'center'}}>
+                  {Math.round(planEmps.reduce((s,emp)=>{
+                    const workH=parseFloat(emp.work_hours||8);
+                    const wd=mdays().filter(d=>{const dow=d.getDay();if(dow===0&&!emp.work_weekend)return false;if(dow===6&&!emp.work_weekend)return false;if(absent(emp,iso(d)))return false;return true;}).length;
+                    return s+wd*workH;
+                  },0)*10)/10}h
+                </td>
+                <td style={{padding:'8px',textAlign:'center'}}>
+                  {Math.round(planEmps.reduce((s,emp)=>{
+                    const workH=parseFloat(emp.work_hours||8);
+                    const wd=mdays().filter(d=>{const dow=d.getDay();if(dow===0&&!emp.work_weekend)return false;if(dow===6&&!emp.work_weekend)return false;if(absent(emp,iso(d)))return false;return true;}).length;
+                    return s+wd*(workH-0.5);
+                  },0)*10)/10}h
+                </td>
+                <td style={{padding:'8px',textAlign:'center'}}>
+                  {Math.round(planEmps.reduce((s,emp)=>{
+                    let b=0;mdays().forEach(d=>{const e=getEntry(emp.id,iso(d));if(e) b+=e.hours||0;});return s+b;
+                  },0)*10)/10}h
+                </td>
+                <td style={{padding:'8px',textAlign:'center',color:'var(--blue)'}}>
+                  {Math.round(planEmps.reduce((s,emp)=>{
+                    let n=0;mdays().forEach(d=>{const e=getEntry(emp.id,iso(d));if(e) n+=e.net||0;});return s+n;
+                  },0)*10)/10}h
+                </td>
+                <td colSpan={2}/>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      )}
+
+      {/* ════ DRAG & DROP PLANUNG ════ */}
+      {projId&&planEmps.length>0&&mode==='dragdrop'&&(()=>{
+        const ddDays=mdays();
+        const shiftList=getShifts();
+
+        function canAssign(emp,ds,sh){
+          if(absent(emp,ds)) return 'absent';
+          const dow=new Date(ds+'T12:00:00').getDay();
+          if(dow===0&&!emp.work_weekend) return 'weekend';
+          if(dow===6&&!emp.work_weekend) return 'weekend';
+          if(!sh||!sh.value) return 'ok';
+          const ep=(emp.shift_earliest||'08:00').split(':').map(Number);
+          const lp=(emp.shift_latest||'22:00').split(':').map(Number);
+          const earliest=ep[0]*60+(ep[1]||0);
+          const latest=lp[0]*60+(lp[1]||0);
+          const sm=parseInt(sh.value)*60+(parseInt(sh.value.split(':')[1])||0);
+          const em2val=sh.value.match(/-(\d{1,2}):(\d{2})$/);
+          const em2=em2val?parseInt(em2val[1])*60+parseInt(em2val[2]):1440;
+          if(sm<earliest||em2>latest) return 'restricted';
+          return 'ok';
+        }
+
+        const shiftColors=[
+          '#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#84cc16','#f97316'
+        ];
+
+        return(
+          <div>
+            {/* Schicht-Legende */}
+            <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:12,padding:'8px 12px',
+              background:'var(--surface-2)',borderRadius:'var(--r)',border:'1px solid var(--border)'}}>
+              <span style={{fontSize:11,fontWeight:700,color:'var(--muted)',alignSelf:'center'}}>Schichten:</span>
+              {shiftList.map((sh,i)=>(
+                <div key={sh.id||i}
+                  draggable
+                  onDragStart={e=>e.dataTransfer.setData('shift',JSON.stringify(sh))}
+                  style={{padding:'4px 10px',borderRadius:20,fontSize:11,fontWeight:700,
+                    background:shiftColors[i%shiftColors.length]+'22',
+                    color:shiftColors[i%shiftColors.length],
+                    border:'1.5px solid '+shiftColors[i%shiftColors.length],
+                    cursor:'grab',userSelect:'none'}}>
+                  {sh.label} {sh.value}
+                </div>
+              ))}
+              <div draggable onDragStart={e=>e.dataTransfer.setData('shift',JSON.stringify({id:'frei',label:'Frei',value:'',hours:0,net:0}))}
+                style={{padding:'4px 10px',borderRadius:20,fontSize:11,fontWeight:700,
+                  background:'#f3f4f6',color:'#6b7280',border:'1.5px solid #d1d5db',
+                  cursor:'grab',userSelect:'none'}}>
+                ✕ Frei
+              </div>
+            </div>
+
+            {/* Gantt Grid */}
+            <div style={{overflowX:'auto'}}>
+              <table style={{borderCollapse:'collapse',minWidth:900,width:'100%',fontSize:11}}>
+                <thead>
+                  <tr style={{background:'var(--surface-2)'}}>
+                    <th style={{padding:'8px 12px',textAlign:'left',fontWeight:700,minWidth:140,
+                      position:'sticky',left:0,zIndex:2,background:'var(--surface-2)',
+                      borderBottom:'2px solid var(--border)'}}>
+                      Mitarbeiter
+                    </th>
+                    {ddDays.map(d=>{
+                      const ds=iso(d);
+                      const we=d.getDay()===0||d.getDay()===6;
+                      const isToday=ds===iso(today);
+                      const isPast2=ds<iso(today);
+                      return(
+                        <th key={ds} style={{padding:'3px 1px',textAlign:'center',
+                          minWidth:32,maxWidth:44,fontSize:9,
+                          borderBottom:'2px solid var(--border)',
+                          borderLeft:'1px solid var(--border)',
+                          background:isToday?'var(--blue-bg)':we?'var(--surface-3)':isPast2?'var(--surface-3)':'var(--surface-2)',
+                          color:isPast2?'var(--dim)':we?'var(--muted)':'var(--fg)',
+                          opacity:isPast2?0.5:1,
+                          fontWeight:isToday?800:600}}>
+                          <div>{WDAYS[d.getDay()===0?6:d.getDay()-1]}</div>
+                          <div style={{fontWeight:400}}>{d.getDate()}</div>
+                        </th>
+                      );
+                    })}
+                  </tr>
+                </thead>
+                <tbody>
+                  {planEmps.map((emp,ei)=>(
+                    <tr key={emp.id} style={{borderBottom:'1px solid var(--border)',
+                      background:ei%2?'var(--surface-2)':'transparent'}}>
+                      <td style={{padding:'4px 12px',fontWeight:600,position:'sticky',left:0,zIndex:1,
+                        background:ei%2?'var(--surface-2)':'var(--surface)',
+                        borderRight:'1px solid var(--border)'}}>
+                        <div style={{fontSize:11}}>{emp.first_name} {emp.last_name}</div>
+                        <div style={{fontSize:9,color:'var(--muted)'}}>{emp.project_skill} · {emp.work_hours}h</div>
+                        {emp.shift_latest&&emp.shift_latest!=='22:00'&&(
+                          <div style={{fontSize:8,color:'#f59e0b'}}>bis {emp.shift_latest}</div>
+                        )}
+                      </td>
+                      {ddDays.map((d,di)=>{
+                        const ds=iso(d);
+                        const isPast2=ds<iso(today);
+                        const ab=absent(emp,ds);
+                        const entry=getEntry(emp.id,ds);
+                        const we=d.getDay()===0||d.getDay()===6;
+                        const shIdx=entry?shiftList.findIndex(s=>s.value===entry.shift):-1;
+                        const shColor=shIdx>=0?shiftColors[shIdx%shiftColors.length]:'var(--blue)';
+
+                        return(
+                          <td key={di}
+                            onDragOver={e=>{if(!isPast2&&!ab) e.preventDefault();}}
+                            onDrop={e=>{
+                              if(isPast2||ab) return;
+                              e.preventDefault();
+                              const shData=e.dataTransfer.getData('shift');
+                              if(!shData) return;
+                              const sh=JSON.parse(shData);
+                              const check=canAssign(emp,ds,sh);
+                              if(check==='restricted'){
+                                alert(emp.first_name+' kann nicht '+sh.value+' arbeiten (Einschränkung: '+emp.shift_earliest+'-'+emp.shift_latest+')');
+                                return;
+                              }
+                              if(check==='weekend'){
+                                alert(emp.first_name+' arbeitet nicht am Wochenende.');
+                                return;
+                              }
+                              setEntry(emp.id,ds,sh.value?sh:null);
+                            }}
+                            style={{padding:'2px 1px',textAlign:'center',minWidth:32,
+                              borderLeft:'1px solid var(--border)',
+                              background:we?'var(--surface-3)':isPast2?'var(--surface-3)':'transparent',
+                              opacity:isPast2?0.5:1,
+                              cursor:isPast2||ab?'not-allowed':'copy'}}>
+                            {ab?(
+                              <div style={{fontSize:9,padding:'2px',color:'#92400e',
+                                background:'#fef9c3',borderRadius:2,margin:'1px'}}>
+                                {ab.type==='vacation'?'🏖':ab.type==='sick'?'🤒':'❌'}
+                              </div>
+                            ):entry&&entry.value!==''?(
+                              <div
+                                draggable={!isPast2}
+                                onDragStart={e=>{
+                                  if(isPast2) return;
+                                  e.dataTransfer.setData('shift',JSON.stringify(entry));
+                                  e.dataTransfer.setData('source',emp.id+'|'+ds);
+                                }}
+                                onDragEnd={e=>{
+                                  // If dropped elsewhere, handled by target
+                                }}
+                                style={{
+                                  fontSize:9,fontWeight:700,padding:'2px 1px',
+                                  background:shColor+'22',color:shColor,
+                                  border:'1px solid '+shColor,
+                                  borderRadius:2,margin:'1px',cursor:isPast2?'default':'grab',
+                                  whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'
+                                }}
+                                title={entry.shift+' ('+entry.hours+'h/'+entry.net+'h netto)'}>
+                                {entry.label||entry.shift||'✓'}
+                              </div>
+                            ):(
+                              <div style={{height:20,background:'transparent'}}/>
+                            )}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Legend */}
+            <div style={{marginTop:10,display:'flex',gap:16,flexWrap:'wrap',fontSize:11,color:'var(--muted)'}}>
+              <span>💡 Schicht aus Legende auf Zelle ziehen · Schicht in Zelle auf andere Zelle ziehen</span>
+              <span style={{color:'#dc2626'}}>Rote Meldung = Einschränkung aktiv</span>
+              <span style={{color:'#92400e'}}>🏖/🤒/❌ = Abwesenheit, nicht planbar</span>
+            </div>
+          </div>
+        );
+      })()}
+
+{/* ════ FC IMPORT MODAL ════ */}
       {modal==='import'&&(
         <div className="modal-overlay">
           <div className="modal" style={{width:500}}>
