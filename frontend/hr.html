@@ -7199,14 +7199,13 @@ function WorkforcePlanningView({employees,projects,showToast}){
     const u={...plan};
     const todayIso=iso(today);
 
-    // ── 1. Pre-compute targets & already-planned per employee ──────────
+    // ── 1. Pre-compute targets & state per employee ──────────────────
     const empState={};
     planEmps.forEach(emp=>{
       const t=calcEmpTarget(emp);
       let plannedNet=0;
       mdays().forEach(d=>{const e=u['s_'+emp.id+'_'+iso(d)];if(e) plannedNet+=e.net||0;});
       const workH=parseFloat(emp.work_hours||8);
-      const shiftNetH=workH-0.5;
       const canSat=emp.work_saturday===true||emp.work_saturday==='yes'||emp.work_weekend===true||emp.work_weekend==='yes';
       const canSun=emp.work_sunday===true||emp.work_sunday==='yes'||emp.work_weekend===true||emp.work_weekend==='yes';
       const ep=(emp.shift_earliest||'08:00').split(':').map(Number);
@@ -7214,7 +7213,6 @@ function WorkforcePlanningView({employees,projects,showToast}){
       const earliest=ep[0]*60+(ep[1]||0);
       const latest=lp[0]*60+(lp[1]||0);
       const allowedShifts=emp.allowed_shifts||[];
-      // Filter valid shifts once
       const validShifts=sh.filter(s=>{
         if(!s.value) return false;
         const sm=s.value.match(/^(\d{1,2}):(\d{2})/);
@@ -7226,90 +7224,97 @@ function WorkforcePlanningView({employees,projects,showToast}){
         if(allowedShifts.length>0&&!allowedShifts.includes(s.value)) return false;
         return true;
       });
-      empState[emp.id]={t,plannedNet,shiftNetH,canSat,canSun,validShifts,workH};
+      // Count future available workdays
+      let futureWorkdays=0;
+      mdays().forEach(d=>{
+        const ds=iso(d);
+        if(ds<todayIso) return;
+        if(u['s_'+emp.id+'_'+ds]) return; // already planned
+        const dow=d.getDay();
+        if(dow===6&&!canSat) return;
+        if(dow===0&&!canSun) return;
+        if(absent(emp,ds)) return;
+        futureWorkdays++;
+      });
+      empState[emp.id]={t,plannedNet,workH,canSat,canSun,validShifts,futureWorkdays};
     });
 
-    // ── 2. Group future workdays by ISO week ───────────────────────────
-    // For each week: plan each employee proportionally
+    // ── 2. Group future days by ISO week ────────────────────────────
     const weekMap={};
+    const dayWeek={};
     mdays().forEach(d=>{
       const ds=iso(d);
       if(ds<todayIso) return;
       const dow=d.getDay();
-      // ISO week number
-      const tmp=new Date(d);
-      tmp.setHours(0,0,0,0);
+      const tmp=new Date(d);tmp.setHours(0,0,0,0);
       tmp.setDate(tmp.getDate()+3-(((dow||7)-1)%7));
-      const yearStart=new Date(tmp.getFullYear(),0,4);
-      const wk=1+Math.round(((tmp-yearStart)/86400000-3+(((yearStart.getDay()||7)-1)))/7);
-      const wkey=tmp.getFullYear()+'W'+String(wk).padStart(2,'0');
+      const yr=tmp.getFullYear();
+      const ys=new Date(yr,0,4);
+      const wk=1+Math.round(((tmp-ys)/86400000-3+(((ys.getDay()||7)-1)))/7);
+      const wkey=yr+'W'+String(wk).padStart(2,'0');
       if(!weekMap[wkey]) weekMap[wkey]=[];
       weekMap[wkey].push(d);
+      dayWeek[ds]=wkey;
     });
-
     const weeks=Object.keys(weekMap).sort();
-    const totalFutureWeeks=weeks.length||1;
+    const nWeeks=weeks.length||1;
 
-    // ── 3. Per week, per employee: assign shifts ──────────────────────
-    // Each employee should work ~(remainingNet / remainingWeeks) per week
+    // ── 3. Per week: plan ALL employees who still need hours ─────────
     weeks.forEach((wkey,wi)=>{
       const weekDays=weekMap[wkey];
-      const remainingWeeks=totalFutureWeeks-wi;
+      const remainingWeeks=nWeeks-wi;
 
-      // For each day in this week, track coverage
-      const weekCov={}; // ds -> covSoFar array
+      // Build daily coverage map for this week (from already-planned)
+      const weekCov={};
       weekDays.forEach(d=>{
         const ds=iso(d);
         const cov=new Array(SLOTS.length).fill(0);
-        // Count already-planned employees for this day
         planEmps.forEach(emp=>{
           if(absent(emp,ds)) return;
           const e=u['s_'+emp.id+'_'+ds];
-          if(!e) return;
-          slotIdxs(e.shift||'').forEach(si=>{
+          if(!e||!e.shift) return;
+          slotIdxs(e.shift).forEach(si=>{
             if(u['i_'+emp.id+'_'+ds+'_'+si]==='1') cov[si]++;
           });
         });
         weekCov[ds]=cov;
       });
 
-      // For each employee, decide how many days to work this week
+      // For each employee, calculate target days this week
       planEmps.forEach(emp=>{
         const st=empState[emp.id];
         if(!st.validShifts.length) return;
 
-        // How many net hours still needed?
         const remainingNet=Math.max(0,st.t.net-st.plannedNet);
-        if(remainingNet<0.25) return; // already at target
+        if(remainingNet<0.25) return; // fully planned
 
-        // Target hours this week = remaining / remaining weeks
-        // Minimum 1 day per week if still has hours to plan
-        const weekTargetNet=remainingNet/remainingWeeks;
-        const daysThisWeek=Math.max(1,Math.min(
-          Math.round(weekTargetNet/st.shiftNetH),
+        const shiftNetH=st.workH-0.5;
+        // How many days should this employee work this week?
+        // = ceil(remainingNet / remainingWeeks / shiftNetH) but min 1, max weekDays
+        const weekNetTarget=remainingNet/remainingWeeks;
+        const daysNeeded=Math.max(1,Math.min(
+          Math.ceil(weekNetTarget/shiftNetH),
           weekDays.length
         ));
 
-        // Sort week days by FC need (highest unmet need first)
+        // Find available days this week for this employee
         const availDays=weekDays.filter(d=>{
           const ds=iso(d);
           const dow=d.getDay();
-          if(u['s_'+emp.id+'_'+ds]) return false; // already planned
+          if(u['s_'+emp.id+'_'+ds]) return false;
           if(absent(emp,ds)) return false;
           if(dow===6&&!st.canSat) return false;
           if(dow===0&&!st.canSun) return false;
           return true;
         });
-
         if(!availDays.length) return;
 
-        // Score each available day by total FC need
-        const scoredDays=availDays.map(d=>{
+        // Score each available day: pick shift with most unmet need
+        const scored=availDays.map(d=>{
           const ds=iso(d);
           const daySlots=ifc[ds]||[];
           const cov=weekCov[ds]||new Array(SLOTS.length).fill(0);
           const need=daySlots.map(fc=>fc>0?Math.round(fc/0.5):0);
-          // Best shift for this day
           let bestSh=null,bestScore=-1;
           st.validShifts.forEach(s=>{
             const idxs=slotIdxs(s.value);
@@ -7321,40 +7326,42 @@ function WorkforcePlanningView({employees,projects,showToast}){
           return{d,ds,bestSh,score:bestScore};
         }).sort((a,b)=>b.score-a.score);
 
-        // Assign up to daysThisWeek days
         let assigned=0;
-        for(const {d,ds,bestSh} of scoredDays){
-          if(assigned>=daysThisWeek) break;
+        for(const {d,ds,bestSh,score} of scored){
+          if(assigned>=daysNeeded) break;
           if(!bestSh) continue;
-          // Cap check: don't exceed monthly target
+          // Hard cap: never exceed monthly target
           if(st.plannedNet+(bestSh.net||0)>st.t.net+0.25) continue;
 
+          // Assign
           u['s_'+emp.id+'_'+ds]={shift:bestSh.value,hours:bestSh.hours,net:bestSh.net,label:bestSh.label};
           st.plannedNet+=(bestSh.net||0);
           assigned++;
 
-          // Update weekly coverage
+          // Update coverage
           const cov=weekCov[ds];
-          slotIdxs(bestSh.value).forEach((i,pos)=>{
-            const mid=Math.floor(slotIdxs(bestSh.value).length/2);
-            const isPause=slotIdxs(bestSh.value).length>6&&pos===mid&&pos>=4;
+          const sl=slotIdxs(bestSh.value);
+          sl.forEach((i,pos)=>{
+            const mid=Math.floor(sl.length/2);
+            const isPause=sl.length>6&&pos===mid&&pos>=4;
             u['i_'+emp.id+'_'+ds+'_'+i]=isPause?'p':'1';
-            if(!isPause) cov[i]=(cov[i]||0)+1;
+            if(!isPause&&cov) cov[i]=(cov[i]||0)+1;
           });
         }
       });
     });
 
-    // ── 4. Summary toast ─────────────────────────────────────────────
-    const summary=planEmps.map(emp=>{
+    // ── 4. Save & report ─────────────────────────────────────────────
+    save(u);
+    const lines=planEmps.map(emp=>{
       const st=empState[emp.id];
       let final=0;
       mdays().forEach(d=>{const e=u['s_'+emp.id+'_'+iso(d)];if(e) final+=e.net||0;});
-      return emp.first_name+': '+Math.round(final*10)/10+'h/'+st.t.net+'h';
-    }).join(' · ');
-    save(u);
-    showToast&&showToast('Vorplanung abgeschlossen','success');
-    console.log('Autoplan:',summary);
+      const pct=st.t.net>0?Math.round(final/st.t.net*100):0;
+      return emp.first_name+' '+emp.last_name+': '+Math.round(final*10)/10+'h/'+st.t.net+'h ('+pct+'%)';
+    });
+    showToast&&showToast('Vorplanung: '+planEmps.length+' MA, '+weeks.length+' Wochen','success');
+    console.log('Autoplan v3:\n'+lines.join('\n'));
   }
 
 
