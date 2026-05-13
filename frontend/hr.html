@@ -8072,51 +8072,195 @@ Antworte NUR mit validem JSON in diesem Format:
       {projId&&planEmps.length>0&&mode==='stunden'&&(
         <div>
           {(()=>{
-            const overEmps=planEmps.filter(emp=>{
-              let net=0;mdays().forEach(d=>{const e=getEntry(emp.id,iso(d));if(e)net+=e.net||0;});
-              return net>calcEmpTarget(emp).net+0.5;
+            // Analyze each employee's balance
+            const balances=planEmps.map(emp=>{
+              let planned=0;
+              mdays().forEach(d=>{const e=getEntry(emp.id,iso(d));if(e) planned+=e.net||0;});
+              const t=calcEmpTarget(emp);
+              const diff=Math.round((planned-t.net)*10)/10;
+              return{emp,planned,target:t.net,diff,workDays:t.workDays};
             });
-            if(!overEmps.length) return null;
+            const overEmps=balances.filter(b=>b.diff>0.5);
+            const underEmps=balances.filter(b=>b.diff<-0.5);
+            if(!overEmps.length&&!underEmps.length) return null;
+
             return(
-              <div style={{marginBottom:12,padding:'10px 14px',background:'#fee2e2',
-                borderRadius:'var(--r)',border:'1px solid #ef4444',
-                display:'flex',alignItems:'center',gap:12,flexWrap:'wrap'}}>
-                <div style={{fontSize:12,fontWeight:700,color:'#dc2626'}}>
-                  ⚠ {overEmps.length} MA mit Überstunden
+              <div style={{marginBottom:14,borderRadius:'var(--r)',
+                border:'1.5px solid #f59e0b',overflow:'hidden'}}>
+                {/* Header */}
+                <div style={{padding:'10px 14px',background:'#fffbeb',
+                  display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',
+                  borderBottom:'1px solid #f59e0b'}}>
+                  <span style={{fontSize:12,fontWeight:800,color:'#92400e'}}>
+                    ⚖ Stunden-Ungleichgewicht
+                  </span>
+                  {overEmps.length>0&&(
+                    <span style={{fontSize:11,color:'#dc2626',fontWeight:700}}>
+                      Überstunden: {overEmps.map(b=>b.emp.first_name+' +'+b.diff+'h').join(' · ')}
+                    </span>
+                  )}
+                  {underEmps.length>0&&(
+                    <span style={{fontSize:11,color:'#2563eb',fontWeight:700}}>
+                      Fehlstunden: {underEmps.map(b=>b.emp.first_name+' '+b.diff+'h').join(' · ')}
+                    </span>
+                  )}
+                  <button className="btn btn-sm" onClick={()=>{
+                    const u={...plan};
+                    const todayStr=iso(today);
+                    const sh=getShifts();
+
+                    // SMART REDISTRIBUTION ALGORITHM
+                    // 1. Collect all future planned shifts per employee with surplus
+                    // 2. For employees with deficit: find free days and assign
+                    // 3. Balance hours so everyone hits their target
+
+                    balances.forEach(b=>{
+                      const emp=b.emp;
+                      const target=b.target;
+                      let planned=b.planned;
+                      const workH=parseFloat(emp.work_hours||8);
+                      const shiftNet=workH-0.5;
+
+                      if(planned<=target+0.25) return; // already ok or under
+
+                      // Remove excess future shifts (latest first, keep today)
+                      const futurePlanned=mdays()
+                        .filter(d=>iso(d)>todayStr&&u['s_'+emp.id+'_'+iso(d)])
+                        .reverse();
+                      for(const d of futurePlanned){
+                        if(planned<=target+0.25) break;
+                        const e=u['s_'+emp.id+'_'+iso(d)];
+                        planned-=e.net||0;
+                        delete u['s_'+emp.id+'_'+iso(d)];
+                        SLOTS.forEach((_,si)=>delete u['i_'+emp.id+'_'+iso(d)+'_'+si]);
+                      }
+                    });
+
+                    // Now fill gaps for under-planned employees
+                    const ep=(emp)=>(emp.shift_earliest||'08:00').split(':').map(Number);
+                    const lp=(emp)=>(emp.shift_latest||'22:00').split(':').map(Number);
+
+                    balances.forEach(b=>{
+                      const emp=b.emp;
+                      const target=calcEmpTarget(emp).net;
+                      // Re-count after removals
+                      let planned=0;
+                      mdays().forEach(d=>{const e=u['s_'+emp.id+'_'+iso(d)];if(e)planned+=e.net||0;});
+                      if(planned>=target-0.25) return;
+
+                      const earliest=(ep(emp)[0]||8)*60+(ep(emp)[1]||0);
+                      const latest=(lp(emp)[0]||22)*60+(lp(emp)[1]||0);
+                      const allowedShifts=emp.allowed_shifts||[];
+                      const canSat=emp.work_saturday===true||emp.work_saturday==='yes'||emp.work_weekend===true||emp.work_weekend==='yes';
+                      const canSun=emp.work_sunday===true||emp.work_sunday==='yes'||emp.work_weekend===true||emp.work_weekend==='yes';
+
+                      // Filter shifts this employee can work
+                      const empShifts=sh.filter(s=>{
+                        if(!s.value) return false;
+                        const sm=s.value.match(/^(\d{1,2}):(\d{2})/);
+                        const em2=s.value.match(/-(\d{1,2}):(\d{2})$/);
+                        if(!sm||!em2) return false;
+                        const sMin=parseInt(sm[1])*60+parseInt(sm[2]);
+                        const eMin=parseInt(em2[1])*60+parseInt(em2[2]);
+                        if(sMin<earliest||eMin>latest) return false;
+                        if(allowedShifts.length>0&&!allowedShifts.includes(s.value)) return false;
+                        return true;
+                      });
+                      if(!empShifts.length) return;
+
+                      // Get coverage for each day to pick shift with most unmet need
+                      mdays().forEach(d=>{
+                        if(planned>=target-0.25) return;
+                        const ds=iso(d);
+                        if(ds<todayStr) return;
+                        if(u['s_'+emp.id+'_'+ds]) return;
+                        const dow=d.getDay();
+                        if(dow===6&&!canSat) return;
+                        if(dow===0&&!canSun) return;
+                        if(absent(emp,ds)) return;
+
+                        const daySlots=ifc[ds];
+
+                        // Pick best shift by unmet coverage
+                        let best=null,bestScore=-1;
+                        empShifts.forEach(s=>{
+                          const idxs=slotIdxs(s.value);
+                          let score=0;
+                          if(daySlots){
+                            // Count unmet need
+                            const covNow=new Array(SLOTS.length).fill(0);
+                            planEmps.forEach(oe=>{
+                              if(oe.id===emp.id) return;
+                              if(absent(oe,ds)) return;
+                              const oe_e=u['s_'+oe.id+'_'+ds];
+                              if(!oe_e) return;
+                              slotIdxs(oe_e.shift).forEach(si=>{
+                                if(u['i_'+oe.id+'_'+ds+'_'+si]==='1') covNow[si]++;
+                              });
+                            });
+                            const need=daySlots.map(fc=>fc>0?Math.round(fc/0.5):0);
+                            score=idxs.reduce((sum,i)=>sum+Math.max(0,(need[i]||0)-(covNow[i]||0)),0)*1000;
+                          }
+                          score+=s.net||0;
+                          if(score>bestScore){bestScore=score;best=s;}
+                        });
+
+                        if(!best) return;
+                        // Check if adding this would still overshoot
+                        if(planned+(best.net||0)>target+0.25) return;
+
+                        u['s_'+emp.id+'_'+ds]={shift:best.value,hours:best.hours,net:best.net,label:best.label};
+                        planned+=(best.net||0);
+                        const sl=slotIdxs(best.value);
+                        sl.forEach((i,pos)=>{
+                          const mid=Math.floor(sl.length/2);
+                          const isPause=sl.length>6&&pos===mid&&pos>=4;
+                          u['i_'+emp.id+'_'+ds+'_'+i]=isPause?'p':'1';
+                        });
+                      });
+                    });
+
+                    save(u);
+                    showToast&&showToast('Stunden neu verteilt','success');
+                  }}
+                  style={{background:'#f59e0b',color:'#fff',border:'none',
+                    fontWeight:700,marginLeft:'auto',padding:'6px 14px'}}>
+                    ⚖ Stunden neu verteilen
+                  </button>
                 </div>
-                <div style={{fontSize:11,color:'#dc2626'}}>
-                  {overEmps.map(e=>{
-                    let net=0;mdays().forEach(d=>{const en=getEntry(e.id,iso(d));if(en)net+=en.net||0;});
-                    const over=Math.round((net-calcEmpTarget(e).net)*10)/10;
-                    return e.first_name+' '+e.last_name+': +'+over+'h';
-                  }).join(' · ')}
+
+                {/* Balance bars per employee */}
+                <div style={{padding:'10px 14px',background:'var(--surface)',
+                  display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(180px,1fr))',gap:8}}>
+                  {balances.map(({emp,planned,target,diff})=>{
+                    const pct=target>0?Math.min(Math.round(planned/target*100),130):0;
+                    const isOver=diff>0.5;
+                    const isUnder=diff<-0.5;
+                    const barColor=isOver?'#ef4444':isUnder?'#3b82f6':'#22c55e';
+                    return(
+                      <div key={emp.id} style={{padding:'8px 10px',borderRadius:'var(--r)',
+                        background:'var(--surface-2)',border:'1px solid var(--border)'}}>
+                        <div style={{fontSize:11,fontWeight:700,marginBottom:4}}>
+                          {emp.first_name} {emp.last_name}
+                        </div>
+                        <div style={{height:6,background:'var(--border)',borderRadius:3,marginBottom:4,overflow:'hidden'}}>
+                          <div style={{height:'100%',width:Math.min(pct,100)+'%',
+                            background:barColor,borderRadius:3,transition:'width .3s'}}/>
+                        </div>
+                        <div style={{display:'flex',justifyContent:'space-between',fontSize:10}}>
+                          <span style={{color:'var(--muted)'}}>{Math.round(planned*10)/10}h / {target}h</span>
+                          <span style={{fontWeight:800,color:barColor}}>
+                            {diff>0?'+':''}{diff}h
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
-                <button className="btn btn-sm" onClick={()=>{
-                  const u={...plan};
-                  overEmps.forEach(emp=>{
-                    const target=calcEmpTarget(emp);
-                    // Remove future planned days until within target
-                    let planned=0;
-                    mdays().forEach(d=>{const e=u['s_'+emp.id+'_'+iso(d)];if(e)planned+=e.net||0;});
-                    // Remove excess from future days (latest first)
-                    const futureDays=[...mdays()].filter(d=>iso(d)>=iso(today)&&u['s_'+emp.id+'_'+iso(d)]).reverse();
-                    for(const d of futureDays){
-                      if(planned<=target.net+0.25) break;
-                      const e=u['s_'+emp.id+'_'+iso(d)];
-                      planned-=e.net||0;
-                      delete u['s_'+emp.id+'_'+iso(d)];
-                      SLOTS.forEach((_,si)=>delete u['i_'+emp.id+'_'+iso(d)+'_'+si]);
-                    }
-                  });
-                  save(u);
-                  showToast&&showToast('Überstunden bereinigt','success');
-                }}
-                style={{background:'#dc2626',color:'#fff',border:'none',fontWeight:700,marginLeft:'auto'}}>
-                  ✕ Überstunden entfernen
-                </button>
               </div>
             );
           })()}
+
           <div style={{marginBottom:16,padding:'12px 16px',background:'var(--surface-2)',
             borderRadius:'var(--r)',border:'1px solid var(--border)',fontSize:12,color:'var(--muted)'}}>
             Übersicht für <b style={{color:'var(--fg)'}}>{selProj?.name}{skill?' / '+skill:''}</b> · {MNAMES[month-1]} {year}
