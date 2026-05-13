@@ -6912,7 +6912,7 @@ function WorkforcePlanningView({employees,projects,showToast}){
       delete u['s_'+eid+'_'+ds];
       SLOTS.forEach((_,i)=>delete u['i_'+eid+'_'+ds+'_'+i]);
     }else{
-      u['s_'+eid+'_'+ds]={shift:sh.value,hours:sh.hours,net:sh.net,label:sh.label};
+      u['s_'+eid+'_'+ds]={shift:sh.value,hours:sh.hours,net:sh.net,label:sh.label,...(sh.isSplit?{isSplit:true,split_morning:sh.split_morning,split_afternoon:sh.split_afternoon}:{})};
       const sl=slotIdxs(sh.value);
       SLOTS.forEach((_,i)=>{
         if(sl.includes(i)){
@@ -8232,11 +8232,36 @@ Antworte NUR mit validem JSON in diesem Format:
                           e.currentTarget.removeAttribute('data-snap-blocked');
                         }}
                         onDoubleClick={e=>{
-                          if(isPastDay||ab||blockedWE||!hasSplit||t) return;
-                          // Assign both split shifts
-                          const morn=shiftList.find(s=>s.value===emp.split_morning);
-                          const aftn=shiftList.find(s=>s.value===emp.split_afternoon);
-                          if(morn) setEntry(emp.id,ddDs,morn);
+                          if(isPastDay||ab||blockedWE||!hasSplit) return;
+                          if(t) {
+                            // Already has a shift - clear it first
+                            setEntry(emp.id,ddDs,null);
+                            return;
+                          }
+                          // Assign split - store as special split entry
+                          const u2={...plan};
+                          const sm=emp.split_morning;
+                          const sa=emp.split_afternoon;
+                          const tmorn=parseShift(sm);
+                          const taftn=parseShift(sa);
+                          if(!tmorn||!taftn) return;
+                          const totalH=Math.round(((tmorn.end-tmorn.start)+(taftn.end-taftn.start))/60*10)/10;
+                          const netH=Math.round((totalH-0.5)*10)/10;
+                          u2['s_'+emp.id+'_'+ddDs]={
+                            shift:sm+'|'+sa,
+                            hours:totalH,net:netH,
+                            label:'Split',
+                            isSplit:true,
+                            split_morning:sm,split_afternoon:sa
+                          };
+                          // Mark interval slots for both blocks
+                          SLOTS.forEach((_,si2)=>{
+                            const slotMin=8*60+si2*30;
+                            const inMorn=tmorn&&slotMin>=tmorn.start&&slotMin<tmorn.end;
+                            const inAftn=taftn&&slotMin>=taftn.start&&slotMin<taftn.end;
+                            if(inMorn||inAftn) u2['i_'+emp.id+'_'+ddDs+'_'+si2]='1';
+                          });
+                          save(u2);
                         }}
                         onDrop={e=>{
                           if(isPastDay||ab||blockedWE) return;
@@ -8363,8 +8388,50 @@ Antworte NUR mit validem JSON in diesem Format:
                           );
                         })}
 
-                        {/* Current shift block */}
-                        {t&&entry&&(
+                        {/* Current shift block - normal OR split */}
+                        {entry&&(entry.isSplit?(()=>{
+                          // SPLIT: render two blocks
+                          const blocks=[
+                            {val:entry.split_morning,label:'Morgen'},
+                            {val:entry.split_afternoon,label:'Nach.'}
+                          ];
+                          return blocks.map((blk,bi)=>{
+                            const tb=parseShift(blk.val);
+                            if(!tb) return null;
+                            const cb='#8b5cf6';
+                            return(
+                              <div key={bi}
+                                onClick={e=>{
+                                  if(isPastDay) return;
+                                  e.stopPropagation();
+                                  setBlockMenu({empId:emp.id,ds:ddDs,x:e.clientX,y:e.clientY});
+                                }}
+                                style={{
+                                  position:'absolute',
+                                  left:minToX(tb.start)+1,
+                                  width:Math.max(30,(tb.end-tb.start)*PX_MIN-2),
+                                  top:4,height:ROW_H-8,
+                                  background:cb+'22',
+                                  border:'2.5px solid '+cb,
+                                  borderRadius:6,
+                                  cursor:isPastDay?'default':'pointer',
+                                  display:'flex',flexDirection:'column',
+                                  justifyContent:'center',padding:'2px 6px',
+                                  overflow:'hidden',
+                                  boxShadow:'0 2px 6px '+cb+'35',
+                                  zIndex:2,
+                                }}>
+                                <div style={{fontWeight:800,fontSize:10,color:cb,whiteSpace:'nowrap'}}>
+                                  ✂ {blk.label}
+                                </div>
+                                <div style={{fontSize:8,color:cb,opacity:.8,whiteSpace:'nowrap'}}>
+                                  {blk.val}
+                                </div>
+                              </div>
+                            );
+                          });
+                        })()
+                        :t&&(
                           <div
                             draggable={!isPastDay}
                             onDragStart={e=>{
@@ -8399,9 +8466,9 @@ Antworte NUR mit validem JSON in diesem Format:
                             <div style={{fontSize:9,color:col,opacity:.8,whiteSpace:'nowrap'}}>
                               {entry.shift} · {entry.net}h netto
                             </div>
-                            {!isPastDay&&<div style={{fontSize:8,color:col,opacity:.5}}>ziehen zum verschieben</div>}
+                            {!isPastDay&&<div style={{fontSize:8,color:col,opacity:.5}}>ziehen=verschieben · klicken=Menü</div>}
                           </div>
-                        )}
+                        ))}
 
                         {/* Split shift blocks */}
                         {!t&&!ab&&!blockedWE&&hasSplit&&!isPastDay&&(
@@ -8430,11 +8497,16 @@ Antworte NUR mit validem JSON in diesem Format:
                           </div>
                         )}
 
-                        {!t&&!ab&&!blockedWE&&!hasSplit&&!isPastDay&&(
+                        {!entry&&!ab&&!blockedWE&&!isPastDay&&(
                           <div style={{position:'absolute',inset:0,display:'flex',
-                            alignItems:'center',justifyContent:'center',
-                            fontSize:11,color:'var(--dim)',pointerEvents:'none'}}>
-                            Schicht hierher ziehen (rastet ein)
+                            alignItems:'center',justifyContent:'center',gap:8,
+                            fontSize:10,color:'var(--dim)',pointerEvents:'none'}}>
+                            <span>Schicht ziehen (rastet ein)</span>
+                            {hasSplit&&<span style={{color:'#8b5cf6',fontWeight:700,
+                              background:'#8b5cf615',border:'1px dashed #8b5cf6',
+                              borderRadius:4,padding:'1px 6px',fontSize:9}}>
+                              ✂ Doppelklick = Split
+                            </span>}
                           </div>
                         )}
                       </div>
