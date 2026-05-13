@@ -7193,181 +7193,170 @@ function WorkforcePlanningView({employees,projects,showToast}){
     return{brutto:Math.round(cappedBrutto*10)/10,net,workDays};
   }
 
-    function autoplan(){
+      function autoplan(){
     const sh=getShifts();
     if(!Object.keys(ifc).length){alert('Bitte zuerst FC importieren.');return;}
     const u={...plan};
-
-    // Pre-compute targets using central calcEmpTarget
-    const empNetPlanned={};
-    const empNetTarget={};
-    const empRemainingDays={};
-    const todayStr=iso(today);
-    planEmps.forEach(emp=>{
-      // Already planned net hours (including past)
-      let alreadyNet=0;
-      mdays().forEach(d=>{
-        const e=u['s_'+emp.id+'_'+iso(d)];
-        if(e) alreadyNet+=e.net||0;
-      });
-      empNetPlanned[emp.id]=alreadyNet;
-      // Use central target function
-      const t=calcEmpTarget(emp);
-      empNetTarget[emp.id]=t.net;
-      // Remaining unplanned future days
-      let rem=0;
-      mdays().forEach(d=>{
-        const ds=iso(d);
-        if(ds<todayStr) return;
-        if(u['s_'+emp.id+'_'+ds]) return;
-        const dow=d.getDay();
-        const canSat=emp.work_saturday===true||emp.work_saturday==='yes'||emp.work_weekend===true||emp.work_weekend==='yes';
-        const canSun=emp.work_sunday===true||emp.work_sunday==='yes'||emp.work_weekend===true||emp.work_weekend==='yes';
-        if(dow===6&&!canSat) return;
-        if(dow===0&&!canSun) return;
-        if(absent(emp,ds)) return;
-        rem++;
-      });
-      empRemainingDays[emp.id]=rem;
-    });
-
-    // Helper: parse shift time to minutes
-    function shiftStartMin(val){
-      const m=val.match(/^(\d{1,2}):(\d{2})/);
-      return m?parseInt(m[1])*60+parseInt(m[2]):0;
-    }
-    function shiftEndMin(val){
-      const m=val.match(/-(\d{1,2}):(\d{2})$/);
-      return m?parseInt(m[1])*60+parseInt(m[2]):0;
-    }
-
     const todayIso=iso(today);
-    mdays().forEach(d=>{
-      const ds=iso(d),dow=d.getDay();
-      // Never overwrite or plan past days (before today)
-      if(ds<iso(today)) return;
-      if(ds<todayIso) return; // PAYROLL LOCK: never overwrite past days
-      const daySlots=ifc[ds];
-      if(!daySlots||!daySlots.some(v=>v>0)) return;
 
-      const covSoFar=new Array(SLOTS.length).fill(0);
-      planEmps.forEach(emp=>{
-        if(absent(emp,ds)) return;
-        const entry=u['s_'+emp.id+'_'+ds];
-        if(!entry) return;
-        slotIdxs(entry.shift).forEach(si=>{if(u['i_'+emp.id+'_'+ds+'_'+si]==='1') covSoFar[si]++;});
-      });
-      const slotNeed=daySlots.map(fc=>fc>0?Math.round(fc/0.5):0);
-      planEmps.forEach(emp=>{
-        if(u['s_'+emp.id+'_'+ds]) return;
-        if(absent(emp,ds)) return;
-        if(dow===6&&!(emp.work_saturday===true||emp.work_saturday==='yes'||emp.work_weekend===true||emp.work_weekend==='yes')) return;
-        if(dow===0&&!(emp.work_sunday===true||emp.work_sunday==='yes'||emp.work_weekend===true||emp.work_weekend==='yes')) return;
-        if((empNetPlanned[emp.id]||0)>=(empNetTarget[emp.id]||0)) return;
-        const ep=(emp.shift_earliest||'08:00').split(':').map(Number);
-        const lp=(emp.shift_latest||'22:00').split(':').map(Number);
-        const earliest=ep[0]*60+(ep[1]||0);
-        const latest=lp[0]*60+(lp[1]||0);
-        const allowed=sh.filter(s=>{
-          if(!s.value) return false;
-          const sm=shiftStartMin(s.value);
-          const em2=shiftEndMin(s.value);
-          if(sm<earliest||em2>latest) return false;
-          if(allowedShifts.length>0&&!allowedShifts.includes(s.value)) return false;
-          return true;
-        });
-        if(!allowed.length) return;
-        let best=null,bestScore=-1;
-        allowed.forEach(s=>{
-          const idxs=slotIdxs(s.value);
-          const unmet=idxs.reduce((sum,i)=>sum+Math.max(0,slotNeed[i]-(covSoFar[i]||0)),0);
-          const fc=idxs.reduce((sum,i)=>sum+(parseFloat(daySlots[i])||0),0);
-          const score=unmet*1000+fc;
-          if(score>bestScore){bestScore=score;best=s;}
-        });
-        if(!best||Math.floor(bestScore/1000)<=0) return;
-        const netAfter=(empNetPlanned[emp.id]||0)+(best.net||0);
-        // Hard cap: never exceed target. If overshoot > 0.25h, skip this shift
-        if(netAfter>(empNetTarget[emp.id]||0)+0.25) return;
-        u['s_'+emp.id+'_'+ds]={shift:best.value,hours:best.hours,net:best.net,label:best.label};
-        empNetPlanned[emp.id]=(empNetPlanned[emp.id]||0)+(best.net||0);
-        const sl=slotIdxs(best.value);
-        sl.forEach((i,pos)=>{
-          const mid=Math.floor(sl.length/2);
-          const isPause=sl.length>6&&pos===mid&&pos>=4;
-          u['i_'+emp.id+'_'+ds+'_'+i]=isPause?'p':'1';
-          if(!isPause) covSoFar[i]=(covSoFar[i]||0)+1;
-        });
-      });
-    });
-    save(u);
-    // Summary
-    const planned=planEmps.map(emp=>{
-      const days=mdays().filter(d=>u['s_'+emp.id+'_'+iso(d)]).length;
-      const net=Math.round((empNetPlanned[emp.id]||0)*10)/10;
-      return emp.first_name+' '+emp.last_name+': '+days+'T / '+net+'h Netto';
-    }).join('\n');
-    showToast&&showToast('Vorplanung abgeschlossen','success');
-    console.log('Autoplan summary: '+planned);
-  }
-
-  // ── Coverage ───────────────────────────────────────────────
-  function slotCoverage(ds){
-    const c=new Array(SLOTS.length).fill(0);
+    // ── 1. Pre-compute targets & already-planned per employee ──────────
+    const empState={};
     planEmps.forEach(emp=>{
-      if(absent(emp,ds)) return;
-      SLOTS.forEach((_,i)=>{if(getCell(emp.id,ds,i)==='1') c[i]++;});
+      const t=calcEmpTarget(emp);
+      let plannedNet=0;
+      mdays().forEach(d=>{const e=u['s_'+emp.id+'_'+iso(d)];if(e) plannedNet+=e.net||0;});
+      const workH=parseFloat(emp.work_hours||8);
+      const shiftNetH=workH-0.5;
+      const canSat=emp.work_saturday===true||emp.work_saturday==='yes'||emp.work_weekend===true||emp.work_weekend==='yes';
+      const canSun=emp.work_sunday===true||emp.work_sunday==='yes'||emp.work_weekend===true||emp.work_weekend==='yes';
+      const ep=(emp.shift_earliest||'08:00').split(':').map(Number);
+      const lp=(emp.shift_latest||'22:00').split(':').map(Number);
+      const earliest=ep[0]*60+(ep[1]||0);
+      const latest=lp[0]*60+(lp[1]||0);
+      const allowedShifts=emp.allowed_shifts||[];
+      // Filter valid shifts once
+      const validShifts=sh.filter(s=>{
+        if(!s.value) return false;
+        const sm=s.value.match(/^(\d{1,2}):(\d{2})/);
+        const em2=s.value.match(/-(\d{1,2}):(\d{2})$/);
+        if(!sm||!em2) return false;
+        const sMin=parseInt(sm[1])*60+parseInt(sm[2]);
+        const eMin=parseInt(em2[1])*60+parseInt(em2[2]);
+        if(sMin<earliest||eMin>latest) return false;
+        if(allowedShifts.length>0&&!allowedShifts.includes(s.value)) return false;
+        return true;
+      });
+      empState[emp.id]={t,plannedNet,shiftNetH,canSat,canSun,validShifts,workH};
     });
-    return c;
-  }
 
-  function dayCovStatus(ds){
-    const fcS=ifc[ds]||[];
-    if(!fcS.some(v=>v>0)) return{status:'nofc',pct:0,underSlots:0,firstUnder:-1};
-    const cov=slotCoverage(ds);
-    let needTotal=0,covTotal=0,underSlots=0,firstUnder=-1;
-    fcS.forEach((fc,si)=>{
-      const need=fc>0?Math.round(fc/0.5):0;
-      needTotal+=need;
-      covTotal+=Math.min(cov[si],need);
-      if(need>0&&cov[si]<need){underSlots++;if(firstUnder<0) firstUnder=si;}
-    });
-    const planned=planEmps.some(e=>!absent(e,ds)&&getEntry(e.id,ds));
-    const pct=needTotal>0?Math.round(covTotal/needTotal*100):100;
-    const status=!planned?'noplan':pct>=95?'ok':pct>=70?'warn':'under';
-    return{status,pct,underSlots,firstUnder};
-  }
-
-  function stColor(st){return st==='ok'?'#16a34a':st==='warn'?'#d97706':st==='under'?'#dc2626':'#9ca3af';}
-  function stBg(st){return st==='ok'?'#dcfce7':st==='warn'?'#fef3c7':st==='under'?'#fee2e2':'#f3f4f6';}
-  function stLabel(st,pct,us){
-    if(st==='ok') return '✅ Gedeckt ('+pct+'%)';
-    if(st==='warn') return '⚠ Teildeckung ('+pct+'%)';
-    if(st==='under') return '🔴 Unterdeckung ('+pct+'%, '+us+' Slots)';
-    if(st==='noplan') return '⬜ Ungeplant';
-    return '—';
-  }
-
-  function stats(emp){
-    let planned=0,net=0,absD=0;
+    // ── 2. Group future workdays by ISO week ───────────────────────────
+    // For each week: plan each employee proportionally
+    const weekMap={};
     mdays().forEach(d=>{
       const ds=iso(d);
-      if(absent(emp,ds)){absD++;return;}
-      const e=getEntry(emp.id,ds);
-      if(e){planned++;net+=e.net||0;}
+      if(ds<todayIso) return;
+      const dow=d.getDay();
+      // ISO week number
+      const tmp=new Date(d);
+      tmp.setHours(0,0,0,0);
+      tmp.setDate(tmp.getDate()+3-(((dow||7)-1)%7));
+      const yearStart=new Date(tmp.getFullYear(),0,4);
+      const wk=1+Math.round(((tmp-yearStart)/86400000-3+(((yearStart.getDay()||7)-1)))/7);
+      const wkey=tmp.getFullYear()+'W'+String(wk).padStart(2,'0');
+      if(!weekMap[wkey]) weekMap[wkey]=[];
+      weekMap[wkey].push(d);
     });
-    const t=calcEmpTarget(emp);
-    return{planned,net:Math.round(net*10)/10,absD,
-      target:t.net,workDays:t.workDays,brutto:t.brutto,
-      diff:Math.round((net-t.net)*10)/10};
+
+    const weeks=Object.keys(weekMap).sort();
+    const totalFutureWeeks=weeks.length||1;
+
+    // ── 3. Per week, per employee: assign shifts ──────────────────────
+    // Each employee should work ~(remainingNet / remainingWeeks) per week
+    weeks.forEach((wkey,wi)=>{
+      const weekDays=weekMap[wkey];
+      const remainingWeeks=totalFutureWeeks-wi;
+
+      // For each day in this week, track coverage
+      const weekCov={}; // ds -> covSoFar array
+      weekDays.forEach(d=>{
+        const ds=iso(d);
+        const cov=new Array(SLOTS.length).fill(0);
+        // Count already-planned employees for this day
+        planEmps.forEach(emp=>{
+          if(absent(emp,ds)) return;
+          const e=u['s_'+emp.id+'_'+ds];
+          if(!e) return;
+          slotIdxs(e.shift||'').forEach(si=>{
+            if(u['i_'+emp.id+'_'+ds+'_'+si]==='1') cov[si]++;
+          });
+        });
+        weekCov[ds]=cov;
+      });
+
+      // For each employee, decide how many days to work this week
+      planEmps.forEach(emp=>{
+        const st=empState[emp.id];
+        if(!st.validShifts.length) return;
+
+        // How many net hours still needed?
+        const remainingNet=Math.max(0,st.t.net-st.plannedNet);
+        if(remainingNet<0.25) return; // already at target
+
+        // Target hours this week = remaining / remaining weeks
+        // Minimum 1 day per week if still has hours to plan
+        const weekTargetNet=remainingNet/remainingWeeks;
+        const daysThisWeek=Math.max(1,Math.min(
+          Math.round(weekTargetNet/st.shiftNetH),
+          weekDays.length
+        ));
+
+        // Sort week days by FC need (highest unmet need first)
+        const availDays=weekDays.filter(d=>{
+          const ds=iso(d);
+          const dow=d.getDay();
+          if(u['s_'+emp.id+'_'+ds]) return false; // already planned
+          if(absent(emp,ds)) return false;
+          if(dow===6&&!st.canSat) return false;
+          if(dow===0&&!st.canSun) return false;
+          return true;
+        });
+
+        if(!availDays.length) return;
+
+        // Score each available day by total FC need
+        const scoredDays=availDays.map(d=>{
+          const ds=iso(d);
+          const daySlots=ifc[ds]||[];
+          const cov=weekCov[ds]||new Array(SLOTS.length).fill(0);
+          const need=daySlots.map(fc=>fc>0?Math.round(fc/0.5):0);
+          // Best shift for this day
+          let bestSh=null,bestScore=-1;
+          st.validShifts.forEach(s=>{
+            const idxs=slotIdxs(s.value);
+            const unmet=idxs.reduce((sum,i)=>sum+Math.max(0,(need[i]||0)-(cov[i]||0)),0);
+            const fc=idxs.reduce((sum,i)=>sum+(parseFloat(daySlots[i])||0),0);
+            const score=unmet*1000+fc;
+            if(score>bestScore){bestScore=score;bestSh=s;}
+          });
+          return{d,ds,bestSh,score:bestScore};
+        }).sort((a,b)=>b.score-a.score);
+
+        // Assign up to daysThisWeek days
+        let assigned=0;
+        for(const {d,ds,bestSh} of scoredDays){
+          if(assigned>=daysThisWeek) break;
+          if(!bestSh) continue;
+          // Cap check: don't exceed monthly target
+          if(st.plannedNet+(bestSh.net||0)>st.t.net+0.25) continue;
+
+          u['s_'+emp.id+'_'+ds]={shift:bestSh.value,hours:bestSh.hours,net:bestSh.net,label:bestSh.label};
+          st.plannedNet+=(bestSh.net||0);
+          assigned++;
+
+          // Update weekly coverage
+          const cov=weekCov[ds];
+          slotIdxs(bestSh.value).forEach((i,pos)=>{
+            const mid=Math.floor(slotIdxs(bestSh.value).length/2);
+            const isPause=slotIdxs(bestSh.value).length>6&&pos===mid&&pos>=4;
+            u['i_'+emp.id+'_'+ds+'_'+i]=isPause?'p':'1';
+            if(!isPause) cov[i]=(cov[i]||0)+1;
+          });
+        }
+      });
+    });
+
+    // ── 4. Summary toast ─────────────────────────────────────────────
+    const summary=planEmps.map(emp=>{
+      const st=empState[emp.id];
+      let final=0;
+      mdays().forEach(d=>{const e=u['s_'+emp.id+'_'+iso(d)];if(e) final+=e.net||0;});
+      return emp.first_name+': '+Math.round(final*10)/10+'h/'+st.t.net+'h';
+    }).join(' · ');
+    save(u);
+    showToast&&showToast('Vorplanung abgeschlossen','success');
+    console.log('Autoplan:',summary);
   }
 
-  // ── Derived ────────────────────────────────────────────────
-  const selProj=(projects||[]).find(p=>p.id===projId);
-  const planEmps=(employees||[]).filter(e=>
-    e.status==='active'&&e.project_id===projId&&(!skill||e.project_skill===skill));
-  const hasFc=Object.keys(ifc).length>0;
-  const shifts=getShifts();
 
   // ── KI-Planung ────────────────────────────────────────────────────
   const SHIFT_COLORS=['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#84cc16','#f97316'];
