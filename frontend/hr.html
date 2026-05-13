@@ -7934,60 +7934,70 @@ Antworte NUR mit validem JSON in diesem Format:
       {/* ════ DRAG & DROP PLANUNG (Timeline) ════ */}
       {projId&&planEmps.length>0&&mode==='dragdrop'&&(()=>{
         const shiftList=getShifts();
-        // Time axis: 08:00 to 22:30 = 14.5h = 870 min
-        const AXIS_START=8*60;   // 480 min
-        const AXIS_END=22*60+30; // 1350 min
-        const AXIS_MIN=AXIS_END-AXIS_START; // 870 min total
-        const PX_PER_MIN=1.6; // pixels per minute → 870*1.6 = 1392px wide
-        const ROW_H=44;
-        const LABEL_W=150;
+        const AXIS_START=8*60;
+        const AXIS_END=22*60+30;
+        const AXIS_MIN=AXIS_END-AXIS_START;
+        const PX_MIN=1.8;
+        const ROW_H=48;
+        const LABEL_W=148;
+        const TOTAL_W=Math.round(AXIS_MIN*PX_MIN);
 
-        function minToX(m){ return Math.round((m-AXIS_START)*PX_PER_MIN); }
-        function xToMin(x){ return Math.round(x/PX_PER_MIN)+AXIS_START; }
+        function minToX(m){return Math.round((m-AXIS_START)*PX_MIN);}
+        function xToMin(x){return Math.round(x/PX_MIN)+AXIS_START;}
         function minToTime(m){
-          const h=Math.floor(m/60);
-          const mi=m%60;
+          const h=Math.floor(m/60),mi=m%60;
           return String(h).padStart(2,'0')+':'+String(mi).padStart(2,'0');
         }
-        function parseShiftMin(val){
+        function parseShift(val){
           if(!val) return null;
           const m=val.match(/(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})/);
           if(!m) return null;
           return{start:parseInt(m[1])*60+parseInt(m[2]),end:parseInt(m[3])*60+parseInt(m[4])};
         }
 
-        const ddDays=mdays();
-        const selDayObj=day?new Date(day+'T12:00:00'):new Date(iso(today)+'T12:00:00');
-        const ddDs=day||iso(today);
-        const isPastDay=ddDs<iso(today);
-
-        // Hour markers for time axis
-        const hours=[];
-        for(let h=8;h<=22;h++) hours.push(h);
-
-        const shiftColors=['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#84cc16','#f97316'];
-
-        function getShiftColor(shiftVal){
-          const idx=shiftList.findIndex(s=>s.value===shiftVal);
-          return idx>=0?shiftColors[idx%shiftColors.length]:'#6b7280';
-        }
-
-        function canEmpUseShift(emp,sh){
-          if(!sh||!sh.value) return 'ok';
+        // Find nearest shift to a given start minute for an employee
+        function snapToShift(emp,dropMin){
           const ep=(emp.shift_earliest||'08:00').split(':').map(Number);
           const lp=(emp.shift_latest||'22:00').split(':').map(Number);
           const earliest=ep[0]*60+(ep[1]||0);
           const latest=lp[0]*60+(lp[1]||0);
-          const t=parseShiftMin(sh.value);
-          if(!t) return 'ok';
-          if(t.start<earliest||t.end>latest) return 'restricted';
-          return 'ok';
+
+          // Score each shift by distance of its start to dropMin
+          const candidates=shiftList
+            .filter(s=>s.value)
+            .map(s=>{
+              const t=parseShift(s.value);
+              if(!t) return null;
+              const dist=Math.abs(t.start-dropMin);
+              const allowed=t.start>=earliest&&t.end<=latest;
+              return{...s,t,dist,allowed};
+            })
+            .filter(Boolean)
+            .sort((a,b)=>a.dist-b.dist);
+
+          // Return closest allowed, or closest blocked
+          const allowed=candidates.find(s=>s.allowed);
+          const closest=candidates[0];
+          return{best:allowed||closest,isBlocked:!allowed&&!!closest};
         }
+
+        const ddDs=day||iso(today);
+        const isPastDay=ddDs<iso(today);
+        const selDayObj=new Date(ddDs+'T12:00:00');
+        const ddDays=mdays();
+        const shiftColors=['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#84cc16','#f97316'];
+        function shiftColor(val){
+          const i=shiftList.findIndex(s=>s.value===val);
+          return i>=0?shiftColors[i%shiftColors.length]:'#6b7280';
+        }
+
+        const hours=[];
+        for(let h=8;h<=22;h++) hours.push(h);
 
         return(
           <div>
-            {/* Day selector strip */}
-            <div style={{display:'flex',gap:4,flexWrap:'wrap',marginBottom:14}}>
+            {/* Day selector */}
+            <div style={{display:'flex',gap:3,flexWrap:'wrap',marginBottom:12}}>
               {ddDays.map(d=>{
                 const ds=iso(d);
                 const fc=Math.round((dfc[ds]||0)*10)/10;
@@ -7997,128 +8007,74 @@ Antworte NUR mit validem JSON in diesem Format:
                 const sel=ddDs===ds;
                 return(
                   <button key={ds} onClick={()=>setDay(ds)}
-                    style={{padding:'4px 7px',border:sel?'2px solid var(--blue)':'1px solid var(--border)',
-                      borderRadius:'var(--r)',fontSize:10,fontWeight:sel?800:600,cursor:'pointer',
-                      fontFamily:'var(--font)',textAlign:'center',minWidth:42,
+                    style={{padding:'3px 6px',
+                      border:sel?'2px solid var(--blue)':'1px solid var(--border)',
+                      borderRadius:'var(--r)',fontSize:10,fontWeight:sel?800:600,
+                      cursor:'pointer',fontFamily:'var(--font)',textAlign:'center',minWidth:38,
                       opacity:isPast2?0.5:1,
                       background:sel?'var(--blue-bg)':isTd?'#eff6ff':we?'var(--surface-3)':'var(--surface-2)',
                       color:sel?'var(--blue)':we?'var(--muted)':'var(--fg)'}}>
-                    <div>{WDAYS[d.getDay()===0?6:d.getDay()-1]} {d.getDate()}</div>
+                    <div style={{fontSize:9}}>{WDAYS[d.getDay()===0?6:d.getDay()-1]} {d.getDate()}</div>
                     <div style={{fontSize:8,color:fc>0?'var(--blue)':'var(--dim)'}}>{fc>0?fc+'h':'—'}</div>
                   </button>
                 );
               })}
             </div>
 
-            {/* Day header */}
-            <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:10}}>
-              <div style={{fontWeight:800,fontSize:15}}>
+            {/* Day title */}
+            <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10,flexWrap:'wrap'}}>
+              <span style={{fontWeight:800,fontSize:14}}>
                 {WDAYS[selDayObj.getDay()===0?6:selDayObj.getDay()-1]}{' '}
                 {selDayObj.toLocaleDateString('de-DE',{day:'2-digit',month:'long',year:'numeric'})}
-              </div>
-              {dfc[ddDs]>0&&<div style={{fontSize:12,color:'var(--muted)'}}>FC: <b style={{color:'var(--blue)'}}>{Math.round(dfc[ddDs]*10)/10}h</b></div>}
-              {isPastDay&&<div style={{fontSize:11,color:'#92400e',fontWeight:700,padding:'3px 10px',background:'#fef9c3',borderRadius:20}}>📅 Vergangener Tag — schreibgeschützt</div>}
-              {!isPastDay&&(
-                <div style={{fontSize:11,color:'var(--muted)'}}>
-                  Schicht auf MA ziehen · Auf Block klicken = entfernen
-                </div>
-              )}
-            </div>
-
-            {/* Shift palette to drag from */}
-            <div style={{display:'flex',gap:6,flexWrap:'wrap',marginBottom:12,padding:'10px 14px',
-              background:'var(--surface-2)',borderRadius:'var(--r)',border:'1px solid var(--border)'}}>
-              <span style={{fontSize:11,fontWeight:700,color:'var(--muted)',alignSelf:'center',marginRight:4}}>
-                Schichten (ziehen):
               </span>
-              {shiftList.map((sh,i)=>{
-                const t=parseShiftMin(sh.value);
-                const w2=t?Math.round((t.end-t.start)*PX_PER_MIN):80;
-                return(
-                  <div key={sh.id||i}
-                    draggable
-                    onDragStart={e=>{
-                      e.dataTransfer.setData('shiftJson',JSON.stringify(sh));
-                      e.dataTransfer.effectAllowed='copy';
-                    }}
-                    title={sh.label+': '+sh.value+' ('+sh.hours+'h / '+sh.net+'h netto)'}
-                    style={{
-                      display:'flex',alignItems:'center',gap:6,
-                      padding:'5px 12px',borderRadius:6,cursor:'grab',
-                      background:shiftColors[i%shiftColors.length]+'18',
-                      border:'1.5px solid '+shiftColors[i%shiftColors.length],
-                      color:shiftColors[i%shiftColors.length],
-                      fontWeight:700,fontSize:11,userSelect:'none',
-                    }}>
-                    <span>{sh.label}</span>
-                    <span style={{fontSize:9,opacity:.8}}>{sh.value}</span>
-                    <span style={{fontSize:9,background:shiftColors[i%shiftColors.length]+'30',
-                      borderRadius:4,padding:'1px 5px'}}>{sh.net}h</span>
-                  </div>
-                );
-              })}
-              <div draggable onDragStart={e=>{e.dataTransfer.setData('shiftJson',JSON.stringify({id:'frei',label:'Frei',value:'',hours:0,net:0}));e.dataTransfer.effectAllowed='copy';}}
-                style={{padding:'5px 12px',borderRadius:6,cursor:'grab',fontWeight:700,fontSize:11,
-                  background:'#f3f4f6',color:'#6b7280',border:'1.5px solid #d1d5db',userSelect:'none'}}>
-                ✕ Schicht entfernen
-              </div>
+              {dfc[ddDs]>0&&<span style={{fontSize:12,color:'var(--muted)'}}>FC: <b style={{color:'var(--blue)'}}>{Math.round(dfc[ddDs]*10)/10}h</b></span>}
+              {isPastDay&&<span style={{fontSize:11,color:'#92400e',fontWeight:700,padding:'2px 10px',background:'#fef9c3',borderRadius:20}}>📅 Schreibgeschützt</span>}
+              {!isPastDay&&<span style={{fontSize:11,color:'var(--muted)'}}>
+                🔵 Block ziehen = nächste passende Schicht · 🔴 = gesperrt für MA
+              </span>}
             </div>
 
-            {/* Timeline grid */}
-            <div style={{overflowX:'auto',userSelect:'none'}}>
-              <div style={{minWidth:LABEL_W+AXIS_MIN*PX_PER_MIN+40}}>
+            {/* Timeline */}
+            <div style={{overflowX:'auto'}}>
+              <div style={{minWidth:LABEL_W+TOTAL_W+20}}>
 
-                {/* Time axis header */}
-                <div style={{display:'flex',marginLeft:LABEL_W,marginBottom:4,position:'relative',
-                  height:24,background:'var(--surface-2)',borderRadius:'4px 4px 0 0',
-                  border:'1px solid var(--border)',borderBottom:'none'}}>
+                {/* Time axis */}
+                <div style={{display:'flex',height:22,marginLeft:LABEL_W,
+                  background:'var(--surface-2)',border:'1px solid var(--border)',
+                  borderBottom:'none',borderRadius:'4px 4px 0 0',position:'relative'}}>
                   {hours.map(h=>(
-                    <div key={h} style={{
-                      position:'absolute',
-                      left:minToX(h*60),
-                      top:0,height:'100%',
-                      display:'flex',alignItems:'center',
-                      borderLeft:'1px solid var(--border)',
-                      paddingLeft:4,fontSize:9,fontWeight:700,
-                      color:'var(--muted)',whiteSpace:'nowrap'}}>
+                    <div key={h} style={{position:'absolute',left:minToX(h*60),
+                      height:'100%',borderLeft:'1px solid var(--border)',
+                      display:'flex',alignItems:'center',paddingLeft:3,
+                      fontSize:9,fontWeight:700,color:'var(--muted)',whiteSpace:'nowrap'}}>
                       {String(h).padStart(2,'0')}:00
                     </div>
                   ))}
-                  {/* 30min ticks */}
                   {hours.slice(0,-1).map(h=>(
-                    <div key={h+'h30'} style={{
-                      position:'absolute',
-                      left:minToX(h*60+30),
-                      top:'60%',height:'40%',
-                      borderLeft:'1px dashed var(--border)'}}/>
+                    <div key={h+'_30'} style={{position:'absolute',left:minToX(h*60+30),
+                      top:'50%',height:'50%',borderLeft:'1px dashed var(--border)',opacity:.5}}/>
                   ))}
                 </div>
 
-                {/* FC demand background bars */}
+                {/* FC demand bars */}
                 {dfc[ddDs]>0&&(
-                  <div style={{marginLeft:LABEL_W,position:'relative',height:20,
-                    background:'var(--surface-2)',marginBottom:2,
-                    border:'1px solid var(--border)',borderTop:'none',borderBottom:'none'}}>
-                    <div style={{position:'absolute',left:0,top:2,fontSize:9,fontWeight:700,
-                      color:'#f59e0b',paddingLeft:4}}>FC</div>
-                    {(ifc[ddDs]||[]).map((h,si)=>{
-                      if(!h) return null;
-                      const slotStart=8*60+si*30;
-                      const need=Math.round(h/0.5);
-                      const maxNeed=Math.max(...(ifc[ddDs]||[]).map(v=>Math.round(v/0.5)),1);
+                  <div style={{height:20,marginLeft:LABEL_W,position:'relative',
+                    background:'var(--surface-2)',border:'1px solid var(--border)',
+                    borderTop:'none',borderBottom:'none'}}>
+                    <div style={{position:'absolute',left:2,top:3,fontSize:8,
+                      fontWeight:700,color:'#f59e0b',zIndex:1}}>FC▼</div>
+                    {(ifc[ddDs]||[]).map((h2,si)=>{
+                      if(!h2) return null;
+                      const slotMin=8*60+si*30;
+                      const need=Math.round(h2/0.5);
+                      const maxN=Math.max(...(ifc[ddDs]||[]).map(v=>Math.round(v/0.5)),1);
                       return(
                         <div key={si} style={{
-                          position:'absolute',
-                          left:minToX(slotStart),
-                          width:Math.round(30*PX_PER_MIN)-1,
-                          bottom:0,
-                          height:Math.max(3,Math.round((need/maxNeed)*16)),
-                          background:'#f59e0b',
-                          opacity:.6,
-                          borderRadius:'2px 2px 0 0',
-                        }}
-                        title={minToTime(slotStart)+': '+h+'h FC / '+need+' MA benötigt'}
-                        />
+                          position:'absolute',left:minToX(slotMin),
+                          width:Math.round(30*PX_MIN)-1,bottom:0,
+                          height:Math.max(3,Math.round(need/maxN*16)),
+                          background:'#f59e0b',opacity:.5,borderRadius:'2px 2px 0 0'}}
+                          title={minToTime(slotMin)+' → '+need+' MA'}/>
                       );
                     })}
                   </div>
@@ -8128,153 +8084,225 @@ Antworte NUR mit validem JSON in diesem Format:
                 {planEmps.map((emp,ei)=>{
                   const ab=absent(emp,ddDs);
                   const entry=getEntry(emp.id,ddDs);
-                  const t=entry?parseShiftMin(entry.shift):null;
+                  const t=entry?parseShift(entry.shift):null;
                   const dow=selDayObj.getDay();
-                  const blockedWeekend=!emp.work_weekend&&(dow===0||dow===6);
-                  const rowBg=ab?'#fef9c3':ei%2?'var(--surface-2)':'transparent';
+                  const blockedWE=!emp.work_weekend&&(dow===0||dow===6);
+                  const ep=(emp.shift_earliest||'08:00').split(':').map(Number);
+                  const lp=(emp.shift_latest||'22:00').split(':').map(Number);
+                  const earliest=ep[0]*60+(ep[1]||0);
+                  const latest=lp[0]*60+(lp[1]||0);
+                  const col=t?shiftColor(entry.shift):'#6b7280';
+                  const hasSplit=emp.work_split&&emp.split_morning&&emp.split_afternoon;
 
                   return(
-                    <div key={emp.id} style={{display:'flex',height:ROW_H,
-                      borderBottom:'1px solid var(--border)',alignItems:'center',
-                      background:rowBg}}>
+                    <div key={emp.id}
+                      style={{display:'flex',height:ROW_H,
+                        borderBottom:'1px solid var(--border)',
+                        background:ab?'#fef9c3':blockedWE?'var(--surface-3)':ei%2?'var(--surface-2)':'transparent'}}>
 
-                      {/* Employee label */}
-                      <div style={{width:LABEL_W,flexShrink:0,padding:'0 10px',
-                        borderRight:'1px solid var(--border)',height:'100%',
-                        display:'flex',flexDirection:'column',justifyContent:'center'}}>
-                        <div style={{fontWeight:700,fontSize:11,
-                          color:ab||blockedWeekend?'#92400e':'var(--fg)'}}>
-                          {emp.first_name} {emp.last_name}
-                        </div>
+                      {/* Label */}
+                      <div style={{width:LABEL_W,flexShrink:0,padding:'0 8px',
+                        borderRight:'2px solid var(--border)',height:'100%',
+                        display:'flex',flexDirection:'column',justifyContent:'center',
+                        gap:1}}>
+                        <div style={{fontWeight:700,fontSize:11}}>{emp.first_name} {emp.last_name}</div>
                         <div style={{fontSize:9,color:'var(--muted)'}}>
-                          {emp.project_skill} · {emp.work_hours}h
-                          {emp.shift_latest&&emp.shift_latest!=='22:00'&&
-                            <span style={{color:'#f59e0b'}}> bis {emp.shift_latest}</span>}
+                          {emp.project_skill} · {emp.work_hours}h/Tag
                         </div>
-                        {ab&&<div style={{fontSize:9,color:'#92400e',fontWeight:700}}>
-                          {ab.type==='vacation'?'🏖 Urlaub':ab.type==='sick'?'🤒 Krank':'❌ Abw.'}
-                        </div>}
-                        {blockedWeekend&&!ab&&<div style={{fontSize:9,color:'#92400e'}}>kein WE</div>}
+                        {(earliest>AXIS_START||latest<AXIS_END)&&(
+                          <div style={{fontSize:8,color:'#f59e0b',fontWeight:700}}>
+                            ⏰ {minToTime(earliest)}–{minToTime(latest)}
+                          </div>
+                        )}
+                        {hasSplit&&<div style={{fontSize:8,color:'#8b5cf6',fontWeight:700}}>✂ Split möglich</div>}
+                        {ab&&<div style={{fontSize:9,color:'#92400e',fontWeight:700}}>{ab.type==='vacation'?'🏖':ab.type==='sick'?'🤒':'❌'} {ab.type}</div>}
+                        {blockedWE&&!ab&&<div style={{fontSize:9,color:'#92400e'}}>🚫 kein WE</div>}
                       </div>
 
-                      {/* Timeline area */}
+                      {/* Timeline drop zone */}
                       <div
-                        style={{
-                          position:'relative',
-                          flex:1,
-                          height:'100%',
+                        style={{position:'relative',flex:1,height:'100%',
+                          cursor:isPastDay||ab||blockedWE?'not-allowed':'copy',
                           overflow:'hidden',
-                          cursor:isPastDay||ab||blockedWeekend?'not-allowed':'crosshair',
-                          background:ab||blockedWeekend?'repeating-linear-gradient(45deg,transparent,transparent 4px,rgba(0,0,0,.04) 4px,rgba(0,0,0,.04) 8px)':'transparent',
-                        }}
-                        onDragOver={e=>{if(!isPastDay&&!ab&&!blockedWeekend) e.preventDefault();}}
-                        onDrop={e=>{
-                          if(isPastDay||ab||blockedWeekend) return;
+                          background:ab||blockedWE
+                            ?'repeating-linear-gradient(45deg,transparent,transparent 5px,rgba(0,0,0,.04) 5px,rgba(0,0,0,.04) 10px)'
+                            :'transparent'}}
+                        onDragOver={e=>{
+                          if(isPastDay||ab||blockedWE) return;
                           e.preventDefault();
-                          const shData=e.dataTransfer.getData('shiftJson');
-                          if(!shData) return;
-                          const sh=JSON.parse(shData);
-                          // Check constraint
-                          const check=canEmpUseShift(emp,sh);
-                          if(check==='restricted'){
-                            alert(emp.first_name+' '+emp.last_name+' kann nicht '+sh.value+' arbeiten.\nEinschränkung: '+emp.shift_earliest+' – '+emp.shift_latest);
+                          // Show snap preview
+                          const rect=e.currentTarget.getBoundingClientRect();
+                          const x=e.clientX-rect.left;
+                          const dropMin=xToMin(x);
+                          const snap=snapToShift(emp,dropMin);
+                          e.currentTarget.setAttribute('data-snap-shift',snap.best?.id||'');
+                          e.currentTarget.setAttribute('data-snap-blocked',snap.isBlocked?'1':'0');
+                          e.currentTarget.style.outline=snap.isBlocked?'2px solid #ef4444':'2px solid #3b82f6';
+                        }}
+                        onDragLeave={e=>{
+                          e.currentTarget.style.outline='none';
+                          e.currentTarget.removeAttribute('data-snap-shift');
+                          e.currentTarget.removeAttribute('data-snap-blocked');
+                        }}
+                        onDrop={e=>{
+                          if(isPastDay||ab||blockedWE) return;
+                          e.preventDefault();
+                          e.currentTarget.style.outline='none';
+                          const rect=e.currentTarget.getBoundingClientRect();
+                          const x=e.clientX-rect.left;
+                          const dropMin=xToMin(x);
+                          const snap=snapToShift(emp,dropMin);
+                          if(!snap.best) return;
+                          if(snap.isBlocked){
+                            alert(
+                              '🚫 Schicht '+snap.best.value+' ist für '+emp.first_name+' gesperrt!\n'+
+                              'Erlaubt: '+minToTime(earliest)+' – '+minToTime(latest)+'\n'+
+                              'Bitte weiter in eine erlaubte Schicht ziehen.'
+                            );
                             return;
                           }
-                          setEntry(emp.id,ddDs,sh.value?sh:null);
+                          // Remove source if dragging existing block
+                          const src=e.dataTransfer.getData('removeSource');
+                          if(src){
+                            const[srcEid,srcDs]=src.split('|');
+                            if(srcEid!==emp.id||srcDs!==ddDs){
+                              const u2={...plan};
+                              delete u2['s_'+srcEid+'_'+srcDs];
+                              SLOTS.forEach((_,si)=>delete u2['i_'+srcEid+'_'+srcDs+'_'+si]);
+                              save(u2);
+                            }
+                          }
+                          setEntry(emp.id,ddDs,snap.best);
                         }}>
 
-                        {/* Hour grid lines */}
+                        {/* Hour grid */}
                         {hours.map(h=>(
-                          <div key={h} style={{
-                            position:'absolute',left:minToX(h*60)-AXIS_START*0,
-                            top:0,bottom:0,
-                            borderLeft:'1px solid var(--border)',
-                            opacity:.4,
-                            pointerEvents:'none'}}/>
+                          <div key={h} style={{position:'absolute',left:minToX(h*60),
+                            top:0,bottom:0,borderLeft:'1px solid var(--border)',
+                            opacity:.3,pointerEvents:'none'}}/>
+                        ))}
+                        {hours.slice(0,-1).map(h=>(
+                          <div key={h+'_30'} style={{position:'absolute',left:minToX(h*60+30),
+                            top:'50%',bottom:0,borderLeft:'1px dashed var(--border)',
+                            opacity:.2,pointerEvents:'none'}}/>
                         ))}
 
-                        {/* Employee earliest/latest constraint overlay */}
-                        {(() => {
-                          const ep=(emp.shift_earliest||'08:00').split(':').map(Number);
-                          const lp=(emp.shift_latest||'22:00').split(':').map(Number);
-                          const earliest=ep[0]*60+(ep[1]||0);
-                          const latest=lp[0]*60+(lp[1]||0);
-                          return(
-                            <>
-                              {earliest>AXIS_START&&(
-                                <div style={{position:'absolute',left:0,top:0,bottom:0,
-                                  width:minToX(earliest),
-                                  background:'rgba(239,68,68,.08)',
-                                  borderRight:'2px solid #ef4444',
-                                  pointerEvents:'none'}}
-                                  title={'Vor '+minToTime(earliest)+' nicht planbar'}/>
-                              )}
-                              {latest<AXIS_END&&(
-                                <div style={{position:'absolute',right:0,top:0,bottom:0,
-                                  left:minToX(latest),
-                                  background:'rgba(239,68,68,.08)',
-                                  borderLeft:'2px solid #ef4444',
-                                  pointerEvents:'none'}}
-                                  title={'Nach '+minToTime(latest)+' nicht planbar'}/>
-                              )}
-                            </>
-                          );
-                        })()}
+                        {/* Blocked zones (earliest/latest) */}
+                        {earliest>AXIS_START&&(
+                          <div style={{position:'absolute',left:0,top:0,bottom:0,
+                            width:minToX(earliest),
+                            background:'rgba(239,68,68,.1)',
+                            borderRight:'2px dashed #ef4444',
+                            pointerEvents:'none'}}
+                            title={'Gesperrt vor '+minToTime(earliest)}/>
+                        )}
+                        {latest<AXIS_END&&(
+                          <div style={{position:'absolute',top:0,bottom:0,
+                            left:minToX(latest),right:0,
+                            background:'rgba(239,68,68,.1)',
+                            borderLeft:'2px dashed #ef4444',
+                            pointerEvents:'none'}}
+                            title={'Gesperrt nach '+minToTime(latest)}/>
+                        )}
 
-                        {/* Shift block */}
-                        {t&&entry&&(()=>{
-                          const blockW=Math.max(40,(t.end-t.start)*PX_PER_MIN-2);
-                          const blockX=minToX(t.start);
-                          const col=getShiftColor(entry.shift);
+                        {/* All shift options as faint background guides */}
+                        {!t&&!ab&&!blockedWE&&!isPastDay&&shiftList.map((sh,si)=>{
+                          const st=parseShift(sh.value);
+                          if(!st) return null;
+                          const allowed=st.start>=earliest&&st.end<=latest;
+                          if(!allowed) return null;
+                          const c=shiftColors[si%shiftColors.length];
                           return(
-                            <div
-                              draggable={!isPastDay}
-                              onDragStart={e=>{
-                                e.dataTransfer.setData('shiftJson',JSON.stringify({
-                                  id:'existing',label:entry.label||entry.shift,
-                                  value:entry.shift,hours:entry.hours,net:entry.net
-                                }));
-                                e.dataTransfer.setData('removeSource',emp.id+'|'+ddDs);
-                              }}
-                              onClick={()=>{
-                                if(isPastDay) return;
-                                if(window.confirm('Schicht '+entry.shift+' von '+emp.first_name+' entfernen?'))
-                                  setEntry(emp.id,ddDs,null);
-                              }}
-                              style={{
-                                position:'absolute',
-                                left:blockX+1,
-                                top:4,
-                                width:blockW,
-                                height:ROW_H-8,
-                                background:col+'22',
-                                border:'2px solid '+col,
-                                borderRadius:6,
-                                cursor:isPastDay?'default':'grab',
-                                display:'flex',flexDirection:'column',
-                                justifyContent:'center',
-                                padding:'2px 8px',
-                                overflow:'hidden',
-                                boxShadow:'0 1px 3px rgba(0,0,0,.1)',
-                                zIndex:1,
-                              }}>
-                              <div style={{fontWeight:800,fontSize:11,color:col,whiteSpace:'nowrap'}}>
-                                {entry.label||entry.shift}
-                              </div>
-                              <div style={{fontSize:9,color:col,opacity:.8,whiteSpace:'nowrap'}}>
-                                {entry.shift} · {entry.net}h netto
-                                {!isPastDay&&<span style={{opacity:.5}}> · klicken=entfernen</span>}
-                              </div>
+                            <div key={si} style={{
+                              position:'absolute',
+                              left:minToX(st.start)+1,
+                              width:Math.max(2,(st.end-st.start)*PX_MIN-2),
+                              top:ROW_H/2-8,height:16,
+                              background:c+'15',
+                              border:'1px dashed '+c+'60',
+                              borderRadius:4,
+                              pointerEvents:'none',
+                              display:'flex',alignItems:'center',justifyContent:'center',
+                              fontSize:8,color:c+'99',fontWeight:600,
+                              overflow:'hidden',whiteSpace:'nowrap'
+                            }}>
+                              {sh.label}
                             </div>
                           );
-                        })()}
+                        })}
 
-                        {/* No shift placeholder */}
-                        {!t&&!ab&&!blockedWeekend&&(
+                        {/* Current shift block */}
+                        {t&&entry&&(
+                          <div
+                            draggable={!isPastDay}
+                            onDragStart={e=>{
+                              if(isPastDay) return;
+                              e.dataTransfer.setData('shiftEntry',JSON.stringify(entry));
+                              e.dataTransfer.setData('removeSource',emp.id+'|'+ddDs);
+                              e.dataTransfer.effectAllowed='move';
+                            }}
+                            onClick={()=>{
+                              if(isPastDay) return;
+                              if(window.confirm('Schicht '+entry.shift+' von '+emp.first_name+' entfernen?'))
+                                setEntry(emp.id,ddDs,null);
+                            }}
+                            style={{
+                              position:'absolute',
+                              left:minToX(t.start)+1,
+                              width:Math.max(40,(t.end-t.start)*PX_MIN-2),
+                              top:4,height:ROW_H-8,
+                              background:col+'25',
+                              border:'2.5px solid '+col,
+                              borderRadius:7,
+                              cursor:isPastDay?'default':'grab',
+                              display:'flex',flexDirection:'column',
+                              justifyContent:'center',padding:'2px 8px',
+                              overflow:'hidden',
+                              boxShadow:'0 2px 6px '+col+'40',
+                              zIndex:2,
+                            }}>
+                            <div style={{fontWeight:800,fontSize:11,color:col,whiteSpace:'nowrap'}}>
+                              {entry.label||entry.shift}
+                            </div>
+                            <div style={{fontSize:9,color:col,opacity:.8,whiteSpace:'nowrap'}}>
+                              {entry.shift} · {entry.net}h netto
+                            </div>
+                            {!isPastDay&&<div style={{fontSize:8,color:col,opacity:.5}}>ziehen zum verschieben</div>}
+                          </div>
+                        )}
+
+                        {/* Split shift blocks */}
+                        {!t&&!ab&&!blockedWE&&hasSplit&&!isPastDay&&(
+                          <div style={{position:'absolute',inset:0,display:'flex',
+                            alignItems:'center',justifyContent:'center',gap:8,
+                            pointerEvents:'none'}}>
+                            {[emp.split_morning,emp.split_afternoon].map((sv,si2)=>{
+                              const st2=parseShift(sv);
+                              if(!st2) return null;
+                              return(
+                                <div key={si2} style={{
+                                  position:'absolute',
+                                  left:minToX(st2.start)+1,
+                                  width:Math.max(30,(st2.end-st2.start)*PX_MIN-2),
+                                  top:6,height:ROW_H-12,
+                                  background:'#8b5cf622',
+                                  border:'1.5px dashed #8b5cf6',
+                                  borderRadius:5,
+                                  display:'flex',alignItems:'center',justifyContent:'center',
+                                  fontSize:9,color:'#8b5cf6',fontWeight:700,
+                                }}>
+                                  Split {si2===0?'M':'N'}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+
+                        {!t&&!ab&&!blockedWE&&!hasSplit&&!isPastDay&&(
                           <div style={{position:'absolute',inset:0,display:'flex',
                             alignItems:'center',justifyContent:'center',
                             fontSize:11,color:'var(--dim)',pointerEvents:'none'}}>
-                            {isPastDay?'—':'Schicht hierher ziehen'}
+                            Schicht hierher ziehen (rastet ein)
                           </div>
                         )}
                       </div>
@@ -8282,18 +8310,18 @@ Antworte NUR mit validem JSON in diesem Format:
                   );
                 })}
 
-                {/* Coverage summary row */}
+                {/* Coverage row */}
                 {dfc[ddDs]>0&&(
-                  <div style={{display:'flex',marginTop:4,borderTop:'2px solid var(--border)'}}>
-                    <div style={{width:LABEL_W,flexShrink:0,padding:'4px 10px',
+                  <div style={{display:'flex',borderTop:'2px solid var(--border)'}}>
+                    <div style={{width:LABEL_W,flexShrink:0,padding:'4px 8px',
                       fontSize:10,fontWeight:700,color:'var(--muted)',
-                      borderRight:'1px solid var(--border)'}}>
-                      Deckung vs FC
+                      borderRight:'2px solid var(--border)'}}>
+                      Δ Deckung
                     </div>
-                    <div style={{position:'relative',flex:1,height:32}}>
+                    <div style={{position:'relative',flex:1,height:28}}>
                       {(ifc[ddDs]||[]).map((fcH,si)=>{
                         if(!fcH) return null;
-                        const slotStart=8*60+si*30;
+                        const slotMin=8*60+si*30;
                         const need=Math.round(fcH/0.5);
                         let actual=0;
                         planEmps.forEach(emp=>{
@@ -8302,19 +8330,14 @@ Antworte NUR mit validem JSON in diesem Format:
                         });
                         const diff=actual-need;
                         const bg=diff>=0?'#dcfce7':diff>=-1?'#fef9c3':'#fee2e2';
-                        const col=diff>=0?'#166534':diff>=-1?'#92400e':'#991b1b';
+                        const tc=diff>=0?'#166534':diff>=-1?'#92400e':'#991b1b';
                         return(
-                          <div key={si} style={{
-                            position:'absolute',
-                            left:minToX(slotStart),
-                            width:Math.round(30*PX_PER_MIN)-1,
-                            top:2,height:28,
-                            background:bg,
-                            borderRadius:2,
-                            display:'flex',alignItems:'center',justifyContent:'center',
-                            fontSize:9,fontWeight:700,color:col,
-                          }}
-                          title={minToTime(slotStart)+': '+actual+' MA / '+need+' benötigt'}>
+                          <div key={si} title={minToTime(slotMin)+': '+actual+' IST / '+need+' Bedarf'}
+                            style={{position:'absolute',left:minToX(slotMin),
+                              width:Math.round(30*PX_MIN)-1,
+                              top:2,height:24,background:bg,borderRadius:2,
+                              display:'flex',alignItems:'center',justifyContent:'center',
+                              fontSize:9,fontWeight:800,color:tc}}>
                             {diff>=0?'+':''}{diff}
                           </div>
                         );
