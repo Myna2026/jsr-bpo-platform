@@ -6811,6 +6811,9 @@ function WorkforcePlanningView({employees,projects,showToast}){
   const [preview,setPreview]=useState(null);
   const [shiftCtx,setShiftCtx]=useState(null);
   const [cellCtx,setCellCtx]=useState(null);
+  const [aiLoading,setAiLoading]=useState(false);
+  const [aiModal,setAiModal]=useState(false);
+  const [aiResult,setAiResult]=useState(null);
 
   const pkey=()=>projId+'_'+(skill||'all')+'_'+year+'_'+String(month).padStart(2,'0');
 
@@ -7160,6 +7163,175 @@ function WorkforcePlanningView({employees,projects,showToast}){
   const hasFc=Object.keys(ifc).length>0;
   const shifts=getShifts();
 
+  // ── KI-Planung ────────────────────────────────────────────────────
+  async function runAiPlanning(){
+    const apiKey=localStorage.getItem('jsr_anthropic_key');
+    if(!apiKey){alert('Bitte zuerst den Anthropic API-Key in den Einstellungen hinterlegen.');return;}
+    if(!Object.keys(ifc).length){alert('Bitte zuerst FC-Dokument importieren.');return;}
+    if(!planEmps.length){alert('Keine Mitarbeiter für dieses Projekt/Skill gefunden.');return;}
+
+    setAiLoading(true);
+    setAiModal(true);
+    setAiResult(null);
+
+    try{
+      // Build context for Claude
+      const todayStr=iso(today);
+      const futureDays=mdays().filter(d=>iso(d)>=todayStr);
+
+      // FC summary per day (only future)
+      const fcSummary=futureDays.map(d=>{
+        const ds=iso(d);
+        const daySlots=ifc[ds]||[];
+        const totalH=Math.round((dfc[ds]||0)*10)/10;
+        const peakIdx=daySlots.reduce((mx,v,i)=>v>daySlots[mx]?i:mx,0);
+        const peakTime=SLOTS[peakIdx]||'—';
+        const peakNeed=Math.round((daySlots[peakIdx]||0)/0.5);
+        const dow=WDAYS[d.getDay()===0?6:d.getDay()-1];
+        return{date:ds,dow,totalH,peakTime,peakNeed,
+          slots:daySlots.map((h,i)=>h>0?{t:SLOTS[i],h:Math.round(h*10)/10}:null).filter(Boolean)};
+      }).filter(d=>d.totalH>0);
+
+      // Employee profiles
+      const empProfiles=planEmps.map(emp=>{
+        const absenceDays=(emp.absences||[]).flatMap(a=>{
+          const days=[];
+          let d=new Date(a.from);
+          while(iso(d)<=a.to){days.push(iso(d));d.setDate(d.getDate()+1);}
+          return days;
+        }).filter(ds=>ds>=todayStr);
+        const alreadyPlanned=futureDays.filter(d=>getEntry(emp.id,iso(d))).map(d=>({
+          date:iso(d),shift:getEntry(emp.id,iso(d))?.shift
+        }));
+        const workH=parseFloat(emp.work_hours||8);
+        const workDays=futureDays.filter(d=>{
+          const dow=d.getDay();
+          if(dow===0&&!emp.work_weekend) return false;
+          if(dow===6&&!emp.work_weekend) return false;
+          if(absenceDays.includes(iso(d))) return false;
+          return true;
+        }).length;
+        let plannedNet=0;
+        mdays().forEach(d=>{const e=getEntry(emp.id,iso(d));if(e) plannedNet+=e.net||0;});
+        const targetNet=Math.round(mdays().filter(d=>{
+          const dow=d.getDay();
+          if(dow===0&&!emp.work_weekend)return false;
+          if(dow===6&&!emp.work_weekend)return false;
+          if((emp.absences||[]).some(a=>iso(d)>=a.from&&iso(d)<=a.to))return false;
+          return true;
+        }).length*(workH-0.5)*10)/10;
+        const remainingNet=Math.round((targetNet-plannedNet)*10)/10;
+        return{
+          id:emp.id,
+          name:emp.first_name+' '+emp.last_name,
+          skill:emp.project_skill,
+          model:emp.work_model,
+          hoursPerDay:workH,
+          weekend:emp.work_weekend,
+          earliest:emp.shift_earliest||'08:00',
+          latest:emp.shift_latest||'22:00',
+          split:emp.work_split||false,
+          absences:absenceDays,
+          alreadyPlanned,
+          remainingNetH:remainingNet,
+          availableDays:workDays,
+        };
+      });
+
+      // Available shifts
+      const shiftOptions=getShifts().map(s=>({
+        id:s.id,label:s.label,value:s.value,hours:s.hours,net:s.net
+      }));
+
+      const prompt=`Du bist ein erfahrener Workforce-Planer für ein BPO-Callcenter. 
+
+AUFGABE: Erstelle einen optimierten Schichtplan für ${MNAMES[month-1]} ${year}.
+
+PROJEKT: ${selProj?.name||projId}${skill?' / Skill: '+skill:''}
+
+FORECAST (Stundenbedarf je Tag, nur Zukunft ab ${todayStr}):
+${JSON.stringify(fcSummary,null,2)}
+
+MITARBEITER-PROFILE:
+${JSON.stringify(empProfiles,null,2)}
+
+VERFÜGBARE SCHICHTEN:
+${JSON.stringify(shiftOptions,null,2)}
+
+PLANUNGSREGELN:
+1. Jeden Mitarbeiter NUR auf Schichten planen die zwischen seiner Earliest (${empProfiles.map(e=>e.name+':'+e.earliest+'-'+e.latest).join(', ')}) liegen
+2. Mitarbeiter mit work_split:true können als Split geplant werden (Morgen + Nachmittag)
+3. Urlaub/Abwesenheit NICHT besetzen
+4. Kein Wochenende wenn weekend:false
+5. Jeder Mitarbeiter soll auf seine remainingNetH kommen, nicht mehr (Ausnahme: Bedarf)
+6. Ziel: Unterdeckung vermeiden, Überdeckung minimieren
+7. Schichten fair verteilen - nicht alle zur gleichen Zeit
+8. Bereits geplante Tage (alreadyPlanned) NICHT überschreiben
+
+Antworte NUR mit validem JSON in diesem Format:
+{
+  "plan": [
+    {"empId":"emp_001","date":"2026-05-14","shiftId":"s1","reason":"Peak 10-16 Uhr abdecken"}
+  ],
+  "summary": "Kurze Zusammenfassung der Planungsstrategie",
+  "warnings": ["Eventuelle Hinweise auf Unterdeckung oder Probleme"]
+}`;
+
+      const resp=await fetch('https://api.anthropic.com/v1/messages',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({
+          model:'claude-sonnet-4-20250514',
+          max_tokens:4000,
+          messages:[{role:'user',content:prompt}]
+        })
+      });
+
+      const data=await resp.json();
+      const text=data.content?.[0]?.text||'';
+      // Parse JSON from response
+      const jsonMatch=text.match(/\{[\s\S]*\}/);
+      if(!jsonMatch) throw new Error('Keine valide JSON-Antwort erhalten:\n'+text.slice(0,200));
+      const result=JSON.parse(jsonMatch[0]);
+      setAiResult(result);
+
+    }catch(err){
+      setAiResult({error:err.message,plan:[],summary:'Fehler bei KI-Planung',warnings:[]});
+    }
+    setAiLoading(false);
+  }
+
+  function applyAiPlan(result){
+    if(!result?.plan?.length) return;
+    const u={...plan};
+    let applied=0,skipped=0;
+    result.plan.forEach(item=>{
+      const {empId,date,shiftId}=item;
+      if(!empId||!date) return;
+      // Don't overwrite existing entries or past days
+      if(u['s_'+empId+'_'+date]) {skipped++;return;}
+      if(date<iso(today)) {skipped++;return;}
+      // Find shift
+      const sh=shiftId?getShifts().find(s=>s.id===shiftId||s.value===shiftId):null;
+      if(!sh&&shiftId!=='frei'&&shiftId!=='') {skipped++;return;}
+      if(sh){
+        u['s_'+empId+'_'+date]={shift:sh.value,hours:sh.hours,net:sh.net,label:sh.label};
+        const sl=slotIdxs(sh.value);
+        sl.forEach((i,pos)=>{
+          const mid=Math.floor(sl.length/2);
+          const isPause=sl.length>6&&pos===mid&&pos>=4;
+          u['i_'+empId+'_'+date+'_'+i]=isPause?'p':'1';
+        });
+        applied++;
+      }
+    });
+    save(u);
+    setAiModal(false);
+    setAiResult(null);
+    showToast&&showToast('KI-Plan angewendet: '+applied+' Schichten ('+skipped+' übersprungen)','success');
+  }
+
+
   return(
     <div style={{padding:16}}>
 
@@ -7204,6 +7376,7 @@ function WorkforcePlanningView({employees,projects,showToast}){
               📥 FC importieren
             </button>
             {hasFc&&<button className="btn btn-sm btn-primary" onClick={autoplan}>⚡ Vorplanen</button>}
+            {hasFc&&<button className="btn btn-sm" onClick={runAiPlanning} disabled={aiLoading} style={{background:"#7c3aed",color:"#fff",border:"none",fontWeight:700,opacity:aiLoading?.7:1}}>{aiLoading?"🤖 Berechne...":"🤖 KI-Planung"}</button>}
             <span style={{marginLeft:'auto',fontSize:11,fontWeight:700,color:hasFc?'var(--green)':'var(--muted)'}}>
               {hasFc?'✅ FC: '+Object.keys(ifc).length+' Tage':'⚠ Kein FC'}
               {' · '}{planEmps.length} MA{shifts.length?' · '+shifts.length+' Schichten':''}
@@ -7935,6 +8108,125 @@ function WorkforcePlanningView({employees,projects,showToast}){
           </div>
         );
       })()}
+
+
+      {/* ════ KI PLANUNG MODAL ════ */}
+      {aiModal&&(
+        <div className="modal-overlay">
+          <div className="modal" style={{width:620,maxHeight:'80vh',display:'flex',flexDirection:'column'}}>
+            <div className="modal-header">
+              <span className="modal-title">🤖 KI-Schichtplanung — {selProj?.name}{skill?' / '+skill:''} · {MNAMES[month-1]} {year}</span>
+              <button className="btn" onClick={()=>{setAiModal(false);setAiResult(null);}}>×</button>
+            </div>
+            <div className="modal-body" style={{overflowY:'auto',flex:1}}>
+              {aiLoading&&(
+                <div style={{textAlign:'center',padding:48}}>
+                  <div style={{fontSize:32,marginBottom:12}}>🤖</div>
+                  <div style={{fontSize:14,fontWeight:700,marginBottom:8}}>KI analysiert FC und plant Schichten...</div>
+                  <div style={{fontSize:12,color:'var(--muted)'}}>
+                    {planEmps.length} Mitarbeiter · {Object.keys(ifc).filter(d=>d>=iso(today)).length} Tage · {getShifts().length} Schichten
+                  </div>
+                  <div style={{marginTop:16,height:4,background:'var(--border)',borderRadius:2,overflow:'hidden'}}>
+                    <div style={{height:'100%',background:'var(--blue)',borderRadius:2,
+                      animation:'progress 2s ease-in-out infinite',width:'60%'}}/>
+                  </div>
+                </div>
+              )}
+
+              {aiResult&&!aiResult.error&&(
+                <div>
+                  {/* Summary */}
+                  <div style={{padding:'12px 16px',background:'var(--blue-bg)',borderRadius:'var(--r)',
+                    marginBottom:16,border:'1px solid var(--blue)'}}>
+                    <div style={{fontWeight:700,fontSize:13,color:'var(--blue)',marginBottom:6}}>
+                      🤖 KI-Analyse
+                    </div>
+                    <div style={{fontSize:12,lineHeight:1.6}}>{aiResult.summary}</div>
+                  </div>
+
+                  {/* Warnings */}
+                  {aiResult.warnings?.length>0&&(
+                    <div style={{marginBottom:16}}>
+                      {aiResult.warnings.map((w,i)=>(
+                        <div key={i} style={{padding:'8px 12px',background:'#fef3c7',
+                          borderRadius:'var(--r)',marginBottom:6,fontSize:12,color:'#92400e'}}>
+                          ⚠ {w}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Plan preview */}
+                  <div style={{fontSize:12,fontWeight:700,marginBottom:8,color:'var(--muted)'}}>
+                    {aiResult.plan?.length} Schichten geplant:
+                  </div>
+                  <div style={{maxHeight:300,overflowY:'auto',border:'1px solid var(--border)',borderRadius:'var(--r)'}}>
+                    <table style={{width:'100%',borderCollapse:'collapse',fontSize:11}}>
+                      <thead>
+                        <tr style={{background:'var(--surface-2)',position:'sticky',top:0}}>
+                          <th style={{padding:'6px 10px',textAlign:'left'}}>Mitarbeiter</th>
+                          <th style={{padding:'6px 10px',textAlign:'center'}}>Datum</th>
+                          <th style={{padding:'6px 10px',textAlign:'center'}}>Schicht</th>
+                          <th style={{padding:'6px 10px',textAlign:'left'}}>Begründung</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(aiResult.plan||[]).map((item,i)=>{
+                          const emp=planEmps.find(e=>e.id===item.empId);
+                          const sh=getShifts().find(s=>s.id===item.shiftId||s.value===item.shiftId);
+                          const already=!!getEntry(item.empId,item.date);
+                          const past=item.date<iso(today);
+                          return(
+                            <tr key={i} style={{borderBottom:'1px solid var(--border)',
+                              background:already||past?'#fef9c3':'transparent',
+                              opacity:already||past?0.6:1}}>
+                              <td style={{padding:'5px 10px',fontWeight:600}}>
+                                {emp?emp.first_name+' '+emp.last_name:item.empId}
+                              </td>
+                              <td style={{padding:'5px 10px',textAlign:'center'}}>
+                                {item.date}
+                                {already&&<span style={{fontSize:9,color:'#92400e',marginLeft:4}}>(bereits geplant)</span>}
+                                {past&&<span style={{fontSize:9,color:'#92400e',marginLeft:4}}>(Vergangenheit)</span>}
+                              </td>
+                              <td style={{padding:'5px 10px',textAlign:'center'}}>
+                                {sh?(
+                                  <span style={{background:'var(--blue-bg)',color:'var(--blue)',
+                                    borderRadius:4,padding:'2px 8px',fontWeight:700}}>
+                                    {sh.label} {sh.value}
+                                  </span>
+                                ):item.shiftId}
+                              </td>
+                              <td style={{padding:'5px 10px',color:'var(--muted)',fontSize:10}}>
+                                {item.reason}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {aiResult?.error&&(
+                <div style={{padding:'16px',background:'#fee2e2',borderRadius:'var(--r)',color:'#dc2626'}}>
+                  <div style={{fontWeight:700,marginBottom:8}}>⚠ Fehler</div>
+                  <div style={{fontSize:12,fontFamily:'monospace'}}>{aiResult.error}</div>
+                </div>
+              )}
+            </div>
+
+            {aiResult&&!aiResult.error&&(
+              <div className="modal-footer">
+                <button className="btn" onClick={()=>{setAiModal(false);setAiResult(null);}}>Verwerfen</button>
+                <button className="btn btn-primary" onClick={()=>applyAiPlan(aiResult)}>
+                  ✅ Plan übernehmen ({(aiResult.plan||[]).filter(p=>!getEntry(p.empId,p.date)&&p.date>=iso(today)).length} neue Schichten)
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
 {/* ════ FC IMPORT MODAL ════ */}
       {modal==='import'&&(
