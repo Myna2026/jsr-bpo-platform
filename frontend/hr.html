@@ -7041,24 +7041,38 @@ function WorkforcePlanningView({employees,projects,showToast}){
     // Pre-compute monthly net target and already planned net per employee
     const empNetPlanned={};
     const empNetTarget={};
+    const empRemainingDays={}; // how many unplanned workdays remain
     planEmps.forEach(emp=>{
       // Count already planned net hours this month (existing plan)
-      let net=0;
+      let alreadyNet=0;
       mdays().forEach(d=>{
         const e=u['s_'+emp.id+'_'+iso(d)];
-        if(e) net+=e.net||0;
+        if(e) alreadyNet+=e.net||0;
       });
-      empNetPlanned[emp.id]=net;
-      // Monthly net target: work_hours * work_days_in_month (excl weekends, absence)
+      empNetPlanned[emp.id]=alreadyNet;
+
       const workH=parseFloat(emp.work_hours||8);
-      let workDays=0;
+      const shiftNetH=workH-0.5; // net per shift (brutto minus pause)
+
+      // Count actual available work days this month
+      // respecting weekend flag, absences
+      let totalWorkDays=0;
+      let remainingWorkDays=0;
+      const todayStr=iso(today);
       mdays().forEach(d=>{
+        const ds=iso(d);
         const dow=d.getDay();
-        if(dow===0||dow===6) return; // skip weekends by default
-        if(!absent(emp,iso(d))) workDays++;
+        if(dow===6&&!emp.work_weekend) return;
+        if(dow===0&&!emp.work_weekend) return;
+        if(absent(emp,ds)) return;
+        totalWorkDays++;
+        if(ds>=todayStr&&!u['s_'+emp.id+'_'+ds]) remainingWorkDays++;
       });
-      // Netto = Brutto minus average pause (0.5h per shift)
-      empNetTarget[emp.id]=Math.round(workDays*(workH-0.5)*10)/10;
+
+      // Monthly net target = total work days * net hours per shift
+      const target=Math.round(totalWorkDays*shiftNetH*10)/10;
+      empNetTarget[emp.id]=target;
+      empRemainingDays[emp.id]=remainingWorkDays;
     });
 
     // Helper: parse shift time to minutes
@@ -7116,7 +7130,8 @@ function WorkforcePlanningView({employees,projects,showToast}){
         });
         if(!best||Math.floor(bestScore/1000)<=0) return;
         const netAfter=(empNetPlanned[emp.id]||0)+(best.net||0);
-        if(netAfter>(empNetTarget[emp.id]||0)+0.5) return;
+        // Hard cap: never exceed target. If overshoot > 0.25h, skip this shift
+        if(netAfter>(empNetTarget[emp.id]||0)+0.25) return;
         u['s_'+emp.id+'_'+ds]={shift:best.value,hours:best.hours,net:best.net,label:best.label};
         empNetPlanned[emp.id]=(empNetPlanned[emp.id]||0)+(best.net||0);
         const sl=slotIdxs(best.value);
@@ -7247,23 +7262,30 @@ function WorkforcePlanningView({employees,projects,showToast}){
           date:iso(d),shift:getEntry(emp.id,iso(d))?.shift
         }));
         const workH=parseFloat(emp.work_hours||8);
+        // Total work days this month (all days, not just future)
+        const allWorkDays=mdays().filter(d=>{
+          const dow=d.getDay();
+          if(dow===0&&!emp.work_weekend) return false;
+          if(dow===6&&!emp.work_weekend) return false;
+          if((emp.absences||[]).some(a=>iso(d)>=a.from&&iso(d)<=a.to)) return false;
+          return true;
+        }).length;
+        // Future unplanned work days
         const workDays=futureDays.filter(d=>{
           const dow=d.getDay();
           if(dow===0&&!emp.work_weekend) return false;
           if(dow===6&&!emp.work_weekend) return false;
           if(absenceDays.includes(iso(d))) return false;
+          if(getEntry(emp.id,iso(d))) return false; // already planned
           return true;
         }).length;
+        // Already planned this month
         let plannedNet=0;
         mdays().forEach(d=>{const e=getEntry(emp.id,iso(d));if(e) plannedNet+=e.net||0;});
-        const targetNet=Math.round(mdays().filter(d=>{
-          const dow=d.getDay();
-          if(dow===0&&!emp.work_weekend)return false;
-          if(dow===6&&!emp.work_weekend)return false;
-          if((emp.absences||[]).some(a=>iso(d)>=a.from&&iso(d)<=a.to))return false;
-          return true;
-        }).length*(workH-0.5)*10)/10;
-        const remainingNet=Math.round((targetNet-plannedNet)*10)/10;
+        // Hard monthly target
+        const targetNet=Math.round(allWorkDays*(workH-0.5)*10)/10;
+        // Remaining = target minus already planned (never negative)
+        const remainingNet=Math.max(0,Math.round((targetNet-plannedNet)*10)/10);
         return{
           id:emp.id,
           name:emp.first_name+' '+emp.last_name,
@@ -7301,15 +7323,17 @@ ${JSON.stringify(empProfiles,null,2)}
 VERFÜGBARE SCHICHTEN:
 ${JSON.stringify(shiftOptions,null,2)}
 
-PLANUNGSREGELN:
-1. Jeden Mitarbeiter NUR auf Schichten planen die zwischen seiner Earliest (${empProfiles.map(e=>e.name+':'+e.earliest+'-'+e.latest).join(', ')}) liegen
-2. Mitarbeiter mit work_split:true können als Split geplant werden (Morgen + Nachmittag)
-3. Urlaub/Abwesenheit NICHT besetzen
-4. Kein Wochenende wenn weekend:false
-5. Jeder Mitarbeiter soll auf seine remainingNetH kommen, nicht mehr (Ausnahme: Bedarf)
-6. Ziel: Unterdeckung vermeiden, Überdeckung minimieren
-7. Schichten fair verteilen - nicht alle zur gleichen Zeit
-8. Bereits geplante Tage (alreadyPlanned) NICHT überschreiben
+PLANUNGSREGELN (STRIKT):
+1. Schichtzeiten: NUR Schichten innerhalb earliest-latest des MA planen
+2. Split: work_split:true MAs können beide Split-Slots bekommen
+3. Abwesenheit: absences-Tage NIEMALS planen
+4. Wochenende: weekend:false = kein Sa/So
+5. STUNDEN-HARD-CAP: remainingNetH ist das Maximum. Niemals überschreiten. Lieber einen Tag weniger planen als Überstunden erzeugen.
+6. Stunden-Minimum: Jeden MA so nah wie möglich an remainingNetH bringen (keine negativen Restwerte wenn vermeidbar)
+7. Coverage: Unterdeckung vermeiden - wenn Bedarf > verfügbare MAs, priorisiere Peak-Zeiten
+8. Fairness: Schichten gleichmäßig über den Monat verteilen, nicht alles auf Wochenbeginn
+9. Vergangene Tage / alreadyPlanned: NICHT überschreiben
+10. Wenn ein MA 0 remainingNetH hat: NICHT mehr planen
 
 Antworte NUR mit validem JSON in diesem Format:
 {
@@ -7348,17 +7372,37 @@ Antworte NUR mit validem JSON in diesem Format:
     if(!result?.plan?.length) return;
     const u={...plan};
     let applied=0,skipped=0;
+    // Pre-compute planned net per employee for cap enforcement
+    const netSoFar={};
+    planEmps.forEach(emp=>{
+      let n=0;
+      mdays().forEach(d=>{const e=u['s_'+emp.id+'_'+iso(d)];if(e) n+=e.net||0;});
+      netSoFar[emp.id]=n;
+    });
     result.plan.forEach(item=>{
       const {empId,date,shiftId}=item;
       if(!empId||!date) return;
-      // Don't overwrite existing entries or past days
       if(u['s_'+empId+'_'+date]) {skipped++;return;}
       if(date<iso(today)) {skipped++;return;}
-      // Find shift
       const sh=shiftId?getShifts().find(s=>s.id===shiftId||s.value===shiftId):null;
       if(!sh&&shiftId!=='frei'&&shiftId!=='') {skipped++;return;}
       if(sh){
+        // Enforce monthly target cap
+        const emp=planEmps.find(e=>e.id===empId);
+        if(emp){
+          const workH=parseFloat(emp.work_hours||8);
+          const allWD=mdays().filter(d=>{
+            const dow=d.getDay();
+            if(dow===0&&!emp.work_weekend) return false;
+            if(dow===6&&!emp.work_weekend) return false;
+            if(absent(emp,iso(d))) return false;
+            return true;
+          }).length;
+          const cap=Math.round(allWD*(workH-0.5)*10)/10;
+          if((netSoFar[empId]||0)+(sh.net||0)>cap+0.25){skipped++;return;}
+        }
         u['s_'+empId+'_'+date]={shift:sh.value,hours:sh.hours,net:sh.net,label:sh.label};
+        netSoFar[empId]=(netSoFar[empId]||0)+(sh.net||0);
         const sl=slotIdxs(sh.value);
         sl.forEach((i,pos)=>{
           const mid=Math.floor(sl.length/2);
