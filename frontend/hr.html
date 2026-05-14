@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"><title>[v1778740143] JSR BPO Intelligence Platform</title><script src="https://unpkg.com/react@18/umd/react.development.js"></script><script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script><script src="https://unpkg.com/@babel/standalone/babel.min.js"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script><style>
+<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"><title>[v1778742836] JSR BPO Intelligence Platform</title><script src="https://unpkg.com/react@18/umd/react.development.js"></script><script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script><script src="https://unpkg.com/@babel/standalone/babel.min.js"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script><style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
   --bg:#f4f5f7;--surface:#ffffff;--surface-2:#f9fafb;--card:#ffffff;
@@ -7217,29 +7217,29 @@ function WorkforcePlanningView({employees,projects,showToast}){
 
       function autoplan(){
     const sh=getShifts();
-    if(!sh.length){alert('Bitte zuerst Schichten konfigurieren.');return;}
-    if(!Object.keys(ifc).length){alert('Bitte zuerst FC importieren.');return;}
+    if(!sh.length){alert('Bitte Schichten konfigurieren.');return;}
+    if(!Object.keys(ifc).length){alert('Bitte FC importieren.');return;}
     const u={...plan};
     const todayIso=iso(today);
 
-    // ── 1. Monatssoll & geplante Stunden pro MA ──────────────────
-    const empTarget={};  // Monatssoll netto
-    const empPlanned={}; // bereits geplant netto
+    // ── MA-State ──────────────────────────────────────────────────
+    // Monatssoll = Richtwert für gleichmäßige Verteilung
+    // KEIN hartes Cap — Bedarf geht vor
+    const empTarget={};   // Monatssoll als Richtwert
+    const empPlanned={};  // bereits geplant
     planEmps.forEach(emp=>{
       empTarget[emp.id]=calcEmpTarget(emp).net;
       let net=0;
-      mdays().forEach(d=>{const e=u['s_'+emp.id+'_'+iso(d)];if(e) net+=e.net||0;});
+      mdays().forEach(d=>{const e=u['s_'+emp.id+'_'+iso(d)];if(e)net+=e.net||0;});
       empPlanned[emp.id]=net;
     });
 
-    // ── 2. Gültige Schichten pro MA berechnen ────────────────────
-    // NUR aktiv gesetzte Einschränkungen blockieren
-    const empValidShifts={};
+    // Gültige Schichten pro MA — nur aktiv gesetzte Einschränkungen
+    const empShifts={};
     planEmps.forEach(emp=>{
       const al=emp.allowed_shifts||[];
-      empValidShifts[emp.id]=sh.filter(s=>{
+      empShifts[emp.id]=sh.filter(s=>{
         if(!s.value) return false;
-        // Zeitfenster nur prüfen wenn aktiv gesetzt
         if(emp.shift_earliest&&emp.shift_earliest!=='00:00'){
           const ep=emp.shift_earliest.split(':').map(Number);
           const sm=s.value.match(/^(\d{1,2}):(\d{2})/);
@@ -7250,165 +7250,180 @@ function WorkforcePlanningView({employees,projects,showToast}){
           const em2=s.value.match(/-(\d{1,2}):(\d{2})$/);
           if(em2&&parseInt(em2[1])*60+parseInt(em2[2])>lp[0]*60+(lp[1]||0)) return false;
         }
-        // Erlaubte Schichten nur wenn explizit gesetzt
         if(al.length>0&&!al.includes(s.value)) return false;
         return true;
       });
     });
 
-    // ── 3. Verfügbare Arbeitstage pro MA (für Dringlichkeitsberechnung) ──
-    const futureDays=mdays().filter(d=>iso(d)>=todayIso);
-    const empFutureDays={};
-    planEmps.forEach(emp=>{
-      const canSat=emp.work_saturday===true||emp.work_saturday==='yes'||emp.work_weekend===true||emp.work_weekend==='yes';
-      const canSun=emp.work_sunday===true||emp.work_sunday==='yes'||emp.work_weekend===true||emp.work_weekend==='yes';
-      empFutureDays[emp.id]=futureDays.filter(d=>{
-        const dow=d.getDay();
-        if(dow===6&&!canSat) return false;
-        if(dow===0&&!canSun) return false;
-        if(absent(emp,iso(d))) return false;
-        return true;
-      }).length||1;
-    });
+    // Kann MA an diesem Tag arbeiten? (Constraints: WE, Urlaub)
+    function canWork(emp,ds){
+      if(u['s_'+emp.id+'_'+ds]) return false;
+      if(absent(emp,ds)) return false;
+      const d=new Date(ds);const dow=d.getDay();
+      const cS=emp.work_saturday===true||emp.work_saturday==='yes'||emp.work_weekend===true||emp.work_weekend==='yes';
+      const cSu=emp.work_sunday===true||emp.work_sunday==='yes'||emp.work_weekend===true||emp.work_weekend==='yes';
+      if(dow===6&&!cS) return false;
+      if(dow===0&&!cSu) return false;
+      if(!empShifts[emp.id]||!empShifts[emp.id].length) return false;
+      return true;
+    }
 
-    // ── 4. Hauptschleife: jeden Tag befüllen ─────────────────────
-    futureDays.forEach(d=>{
+    // ── Zukünftige Tage nach KW gruppieren ───────────────────────
+    const weekMap={};
+    mdays().forEach(d=>{
       const ds=iso(d);
+      if(ds<todayIso) return;
       const dow=d.getDay();
-      const daySlots=ifc[ds]||[];
+      const tmp=new Date(d);tmp.setHours(0,0,0,0);
+      tmp.setDate(tmp.getDate()+3-(((dow||7)-1)%7));
+      const yr=tmp.getFullYear();
+      const ys=new Date(yr,0,4);
+      const wk=1+Math.round(((tmp-ys)/86400000-3+(((ys.getDay()||7)-1)))/7);
+      const wkey=yr+'W'+String(wk).padStart(2,'0');
+      if(!weekMap[wkey]) weekMap[wkey]=[];
+      weekMap[wkey].push(ds);
+    });
+    const weeks=Object.keys(weekMap).sort();
+    const nWeeks=weeks.length||1;
 
-      // FC-Bedarf dieses Tages aus Intervallplanung (Spalte D)
-      const fcBySlot=daySlots.map(v=>parseFloat(v)||0);
+    // ── Pro KW: Tage befüllen ────────────────────────────────────
+    weeks.forEach((wkey,wi)=>{
+      const wDays=weekMap[wkey];
+      const remWeeks=nWeeks-wi;
 
-      // Aktive Slots = wo laut FC Bedarf > 0 ist
-      const activeSlots=fcBySlot.map((v,i)=>v>0?i:-1).filter(i=>i>=0);
-      if(!activeSlots.length) return; // kein FC-Bedarf heute
-
-      // Tagesbedarf in Stunden:
-      // dfc[ds] = ceil(Spalte E) wenn importiert, sonst ceil(Summe D)
-      const dayTargetH=dfc[ds]||Math.ceil(fcBySlot.reduce((s,v)=>s+v,0));
-      if(dayTargetH<=0) return;
-
-      // Aktuell geplante Stunden und Slot-Coverage für diesen Tag
-      let coveredH=0;
-      const slotCov=new Array(SLOTS.length).fill(0); // wie viele MAs pro Slot
-      planEmps.forEach(emp=>{
-        const e=u['s_'+emp.id+'_'+ds];
-        if(!e||!e.shift) return;
-        coveredH+=e.net||0;
-        (slotIdxs(e.shift)||[]).forEach(si=>{
-          if(u['i_'+emp.id+'_'+ds+'_'+si]==='1') slotCov[si]++;
+      // Tages-Info aufbauen
+      const dayInfo=wDays.map(ds=>{
+        const fcBySlot=(ifc[ds]||[]).map(v=>parseFloat(v)||0);
+        const activeSlots=fcBySlot.reduce((a,v,i)=>v>0?[...a,i]:a,[]);
+        // Tagesbedarf: dfc[ds]=ceil(Spalte E) wenn importiert, sonst ceil(Summe D)
+        const targetH=dfc[ds]||Math.ceil(fcBySlot.reduce((s,v)=>s+v,0));
+        let coveredH=0;
+        const slotCov=new Array(SLOTS.length).fill(0);
+        planEmps.forEach(emp=>{
+          const e=u['s_'+emp.id+'_'+ds];if(!e||!e.shift)return;
+          coveredH+=e.net||0;
+          (slotIdxs(e.shift)||[]).forEach(si=>{
+            if(u['i_'+emp.id+'_'+ds+'_'+si]==='1')slotCov[si]++;
+          });
         });
-      });
+        return{ds,fcBySlot,activeSlots,targetH,coveredH,slotCov};
+      }).filter(di=>di.activeSlots.length>0);
 
-      if(coveredH>=dayTargetH-0.25) return; // Tagesbedarf bereits gedeckt
+      if(!dayInfo.length) return;
 
-      // ── MA nach Dringlichkeit sortieren ─────────────────────────
-      // Dringlichkeit = offene Monatsstunden / verbleibende Arbeitstage
-      const available=planEmps
-        .filter(emp=>{
-          if(u['s_'+emp.id+'_'+ds]) return false; // heute bereits geplant
-          if(absent(emp,ds)) return false;
-          const canSat=emp.work_saturday===true||emp.work_saturday==='yes'||emp.work_weekend===true||emp.work_weekend==='yes';
-          const canSun=emp.work_sunday===true||emp.work_sunday==='yes'||emp.work_weekend===true||emp.work_weekend==='yes';
-          if(dow===6&&!canSat) return false;
-          if(dow===0&&!canSun) return false;
-          if(empTarget[emp.id]-empPlanned[emp.id]<0.5) return false; // Soll erreicht
-          if(!empValidShifts[emp.id]||!empValidShifts[emp.id].length) return false;
-          return true;
-        })
-        .sort((a,b)=>{
-          // Höhere Dringlichkeit = mehr offene Stunden pro verbleibendem Tag
-          const dA=(empTarget[a.id]-empPlanned[a.id])/empFutureDays[a.id];
-          const dB=(empTarget[b.id]-empPlanned[b.id])/empFutureDays[b.id];
-          return dB-dA;
-        });
+      // MA-Sortierung: wer ist am weitesten unter seinem Wochenanteil?
+      // Wochenanteil = Monatssoll / nWeeks (als Richtwert für gleichmäßige Verteilung)
+      // MAs die noch weit unter ihrem Wochenanteil sind kommen zuerst
+      // → sorgt für gleichmäßige Monatsverteilung ohne hartes Cap
+      const getUrgency=(emp)=>{
+        const weekTarget=empTarget[emp.id]/nWeeks; // Richtwert pro Woche
+        const weekPlanned=empPlanned[emp.id]/Math.max(1,wi+1)*1; // bisherige Auslastung pro Woche
+        return weekTarget-weekPlanned; // positiv = noch unter Soll
+      };
 
-      // ── Pro MA: beste Schicht wählen ─────────────────────────────
-      for(const emp of available){
-        if(coveredH>=dayTargetH-0.25) break; // Tagesbedarf gedeckt
+      // Mehrere Durchläufe bis alle Tage gedeckt
+      let anyChange=true;
+      let pass=0;
+      while(anyChange&&pass<20){
+        anyChange=false;
+        pass++;
 
-        const remaining=empTarget[emp.id]-empPlanned[emp.id];
-        if(remaining<0.5) continue;
+        // Tage nach ungedecktem Bedarf sortieren (höchster Bedarf zuerst)
+        dayInfo.sort((a,b)=>Math.max(0,b.targetH-b.coveredH)-Math.max(0,a.targetH-a.coveredH));
 
-        // Beste Schicht = maximale Abdeckung der aktiven Slots mit noch ungedecktem Bedarf
-        // Priorität: Slots die noch 0 Coverage haben (HARTES ZIEL: alle aktiven Slots besetzen)
-        // Sekundär: Slots wo Bedarf > aktuelle Coverage
-        let bestSh=null, bestScore=-1;
+        dayInfo.forEach(di=>{
+          if(di.coveredH>=di.targetH-0.25) return; // gedeckt — STOP
 
-        empValidShifts[emp.id].forEach(s=>{
-          const idxs=slotIdxs(s.value)||[];
-          if(!idxs.length) return;
+          // MAs sortieren: erst die die noch unter Wochensoll, dann alle anderen
+          // Kein hartes Cap — Bedarf muss gedeckt werden
+          const avail=planEmps
+            .filter(emp=>canWork(emp,di.ds))
+            .sort((a,b)=>{
+              // Primär: wer ist am meisten "im Rückstand" (gleichmäßige Verteilung)
+              const ua=getUrgency(a);
+              const ub=getUrgency(b);
+              // Bonus für MAs die noch unter Monatssoll
+              const bonusA=empPlanned[a.id]<empTarget[a.id]?1000:0;
+              const bonusB=empPlanned[b.id]<empTarget[b.id]?1000:0;
+              return (ub+bonusB)-(ua+bonusA);
+            });
 
-          // Nur Schichten die aktive Slots abdecken
-          const activeOverlap=idxs.filter(i=>activeSlots.includes(i));
-          if(!activeOverlap.length) return; // Schicht deckt keine FC-Slots ab
+          for(const emp of avail){
+            if(di.coveredH>=di.targetH-0.25) break; // Tag gedeckt
 
-          // Score Komponenten:
-          // 1. Unbesetzte aktive Slots die diese Schicht abdeckt (höchste Priorität)
-          const uncoveredSlots=activeOverlap.filter(i=>slotCov[i]===0).length;
-          // 2. Noch ungedeckter Stunden-Bedarf den diese Schicht deckt
-          const unmetH=activeOverlap.reduce((sum,i)=>sum+Math.max(0,fcBySlot[i]-slotCov[i]*0.5),0);
-          // 3. Schicht-Nettostunden (sekundär)
-          const netH=s.net||0;
+            // Beste Schicht: maximale Coverage aktiver unbesetzter Slots
+            let bestSh=null,bestScore=-1;
+            empShifts[emp.id].forEach(s=>{
+              const idxs=slotIdxs(s.value)||[];
+              const activeOverlap=idxs.filter(i=>di.activeSlots.includes(i));
+              if(!activeOverlap.length) return;
+              // Score: unbesetzte Slots höchste Prio, dann ungedeckte Stunden
+              const uncov=activeOverlap.filter(i=>di.slotCov[i]===0).length;
+              const unmetH=activeOverlap.reduce((sm,i)=>sm+Math.max(0,di.fcBySlot[i]-di.slotCov[i]*0.5),0);
+              const score=uncov*100000+unmetH*1000+(s.net||0);
+              if(score>bestScore){bestScore=score;bestSh=s;}
+            });
 
-          const score=uncoveredSlots*100000 + unmetH*100 + netH;
-          if(score>bestScore){bestScore=score;bestSh=s;}
-        });
+            if(!bestSh) continue;
 
-        if(!bestSh) continue;
+            // Einplanen — kein hartes Monatssoll-Cap
+            // (Überstunden entstehen wenn Bedarf es erfordert)
+            u['s_'+emp.id+'_'+di.ds]={shift:bestSh.value,hours:bestSh.hours,net:bestSh.net,label:bestSh.label};
+            empPlanned[emp.id]+=(bestSh.net||0);
+            di.coveredH+=(bestSh.net||0);
+            anyChange=true;
 
-        // Monatssoll nicht überschreiten (max 15min Toleranz)
-        if(empPlanned[emp.id]+(bestSh.net||0)>empTarget[emp.id]+0.25) continue;
-
-        // Schicht zuweisen
-        u['s_'+emp.id+'_'+ds]={
-          shift:bestSh.value,
-          hours:bestSh.hours,
-          net:bestSh.net,
-          label:bestSh.label
-        };
-        empPlanned[emp.id]+=(bestSh.net||0);
-        coveredH+=(bestSh.net||0);
-
-        // Verbleibende Tage aktualisieren
-        empFutureDays[emp.id]=Math.max(1,empFutureDays[emp.id]-1);
-
-        // Slot-Coverage aktualisieren
-        const sl=slotIdxs(bestSh.value)||[];
-        sl.forEach((i,pos)=>{
-          const mid=Math.floor(sl.length/2);
-          const isPause=sl.length>6&&pos===mid&&pos>=4;
-          u['i_'+emp.id+'_'+ds+'_'+i]=isPause?'p':'1';
-          if(!isPause) slotCov[i]++;
+            const sl=slotIdxs(bestSh.value)||[];
+            sl.forEach((si,pos)=>{
+              const mid=Math.floor(sl.length/2);
+              const isPause=sl.length>6&&pos===mid&&pos>=4;
+              u['i_'+emp.id+'_'+di.ds+'_'+si]=isPause?'p':'1';
+              if(!isPause)di.slotCov[si]++;
+            });
+          }
         });
       }
     });
 
-    // ── 5. Speichern und Report ───────────────────────────────────
+    // ── Speichern + Report ────────────────────────────────────────
     save(u);
 
-    // Wie gut haben wir das Tagesziel getroffen?
-    let daysOk=0,daysShort=0,totalPlanned=0,totalTarget=0;
-    futureDays.forEach(({ds}={ds:iso(d)})=>{
-    });
+    // Auswertung: Wie gut ist Bedarf gedeckt? Wer hat Überstunden?
+    let daysOk=0,daysShort=0,totalDemand=0,totalPlanned=0;
+    let totalOvertime=0,totalUnder=0;
+
     mdays().filter(d=>iso(d)>=todayIso).forEach(d=>{
       const ds=iso(d);
-      const tgt=dfc[ds]||0;
-      if(!tgt) return;
-      let planned=0;
-      planEmps.forEach(emp=>{const e=u['s_'+emp.id+'_'+ds];if(e)planned+=e.net||0;});
-      totalPlanned+=planned;totalTarget+=tgt;
-      if(planned>=tgt-0.5) daysOk++;else daysShort++;
+      const tgt=dfc[ds]||0;if(!tgt)return;
+      let p=0;planEmps.forEach(emp=>{const e=u['s_'+emp.id+'_'+ds];if(e)p+=e.net||0;});
+      totalDemand+=tgt;totalPlanned+=p;
+      if(p>=tgt-0.5)daysOk++;else daysShort++;
     });
-    const pct=totalTarget>0?Math.round(totalPlanned/totalTarget*100):0;
-    showToast&&showToast(
-      daysShort===0
-        ? `✅ Vorplanung: ${daysOk} Tage gedeckt (${pct}% Stunden)`
-        : `⚠ Vorplanung: ${daysOk} Tage gedeckt, ${daysShort} Tage unterdeckt (${pct}%)`,
-      daysShort===0?'success':'info'
-    );
-    console.log(`Autoplan v8: ${daysOk} OK, ${daysShort} kurz, ${Math.round(totalPlanned)}/${Math.round(totalTarget)}h (${pct}%)`);
+
+    planEmps.forEach(emp=>{
+      const over=empPlanned[emp.id]-empTarget[emp.id];
+      if(over>0)totalOvertime+=over;
+      else totalUnder+=Math.abs(over);
+    });
+
+    const pct=totalDemand>0?Math.round(totalPlanned/totalDemand*100):0;
+    const otH=Math.round(totalOvertime*10)/10;
+    const unH=Math.round(totalUnder*10)/10;
+
+    let msg='';
+    if(daysShort===0){
+      msg=`✅ Alle ${daysOk} Tage gedeckt (${pct}%)`;
+      if(otH>0) msg+=` · ${otH}h Überstunden im Team`;
+      if(unH>0) msg+=` · ${unH}h ungenutzte Kapazität`;
+    } else {
+      msg=`⚠ ${daysShort} Tage unterdeckt · Bedarf: ${Math.round(totalDemand)}h · Geplant: ${Math.round(totalPlanned)}h · ${Math.round(totalDemand-totalPlanned)}h Lücke`;
+    }
+
+    showToast&&showToast(msg, daysShort===0?'success':'error');
+    console.log('Autoplan v10:',msg);
+    if(daysShort>0){
+      alert(`⚠ ${daysShort} Tage können nicht vollständig gedeckt werden.\nBedarf: ${Math.round(totalDemand)}h · Team-Kapazität: ${Math.round(totalPlanned)}h\nLücke: ${Math.round(totalDemand-totalPlanned)}h\n\n→ Weitere Mitarbeiter dem Team hinzufügen.`);
+    }
   }
 
 
