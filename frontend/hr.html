@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"><!DOCTYPE html><html lang="de"><head><meta charset<title>[v1778749409] JSR BPO Intelligence Platform</title><script src="https://unpkg.com/react@18/umd/react.development.js"></script><script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script><script src="https://unpkg.com/@babel/standalone/babel.min.js"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script><style>
+<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"><!DOCTYPE html><html lang="de"><head><meta charset<title>[v1778751282] JSR BPO Intelligence Platform</title><script src="https://unpkg.com/react@18/umd/react.development.js"></script><script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script><script src="https://unpkg.com/@babel/standalone/babel.min.js"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script><style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
   --bg:#f4f5f7;--surface:#ffffff;--surface-2:#f9fafb;--card:#ffffff;
@@ -7140,12 +7140,16 @@ function WorkforcePlanningView({employees,projects,showToast}){
             let tds='';
             if(rv2 instanceof Date){
               tds=rv2.getUTCFullYear()+'-'+String(rv2.getUTCMonth()+1).padStart(2,'0')+'-'+String(rv2.getUTCDate()).padStart(2,'0');
+            }else if(typeof rv2==='number'){
+              // Excel serial date → JS Date
+              const d=new Date(Math.round((rv2-25569)*86400*1000));
+              tds=d.getUTCFullYear()+'-'+String(d.getUTCMonth()+1).padStart(2,'0')+'-'+String(d.getUTCDate()).padStart(2,'0');
             }else if(typeof rv2==='string'){
               const tm=rv2.trim().match(/(\d{1,2})\.(\d{1,2})\.(\d{2,4})/);
               if(tm){const ty=parseInt(tm[3]);tds=(ty<100?2000+ty:ty)+'-'+String(parseInt(tm[2])).padStart(2,'0')+'-'+String(parseInt(tm[1])).padStart(2,'0');}
             }
             const g=parseFloat(gv)||0;
-            if(tds&&g>0&&newIfc[tds]) newDfc[tds]=Math.ceil(g);
+            if(tds&&g>0) newDfc[tds]=Math.ceil(g); // ceil(Spalte F) immer schreiben
           });
         }
         const days=Object.keys(newIfc).length;
@@ -7236,7 +7240,7 @@ function WorkforcePlanningView({employees,projects,showToast}){
     const empShifts={};
     planEmps.forEach(emp=>{
       const al=emp.allowed_shifts||[];
-      empShifts[emp.id]=sh.filter(s=>{
+      const validSh=sh.filter(s=>{
         if(!s.value) return false;
         if(emp.shift_earliest&&emp.shift_earliest!=='00:00'){
           const ep=emp.shift_earliest.split(':').map(Number);
@@ -7251,9 +7255,24 @@ function WorkforcePlanningView({employees,projects,showToast}){
         if(al.length>0&&!al.includes(s.value)) return false;
         return true;
       });
+      // Split-Schicht aus Profil hinzufügen wenn work_split=true
+      if(emp.work_split===true||emp.work_split==='yes'){
+        const spM=emp.split_morning||'08:00-12:00';
+        const spA=emp.split_afternoon||'14:00-18:00';
+        const calcNet=t=>{const p=t.match(/(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})/);return p?(parseInt(p[3])*60+parseInt(p[4])-parseInt(p[1])*60-parseInt(p[2]))/60:4;};
+        validSh.push({value:spM+'|'+spA,label:'Split',hours:calcNet(spM)+calcNet(spA)+2,net:calcNet(spM)+calcNet(spA),isSplit:true,splitMorning:spM,splitAfternoon:spA});
+      }
+      empShifts[emp.id]=validSh;
     });
 
     // Kann MA physisch an diesem Tag arbeiten?
+    function isHoliday(emp,ds){
+      const loc=emp.location||emp.city||'';
+      const locKey=Object.keys(HOLIDAYS).find(k=>loc.toLowerCase().includes(k.toLowerCase()));
+      if(!locKey) return false;
+      return (HOLIDAYS[locKey]||[]).some(h=>h.date===ds);
+    }
+
     function canWork(emp,ds){
       if(u['s_'+emp.id+'_'+ds]) return false;
       if(absent(emp,ds)) return false;
@@ -7262,6 +7281,9 @@ function WorkforcePlanningView({employees,projects,showToast}){
       const cSu=emp.work_sunday===true||emp.work_sunday==='yes'||emp.work_weekend===true||emp.work_weekend==='yes';
       if(dow===6&&!cS) return false;
       if(dow===0&&!cSu) return false;
+      // Feiertag: wenn work_holidays nicht explizit true → kein Einsatz
+      const canHoliday=emp.work_holidays===true||emp.work_holidays==='yes';
+      if(!canHoliday&&isHoliday(emp,ds)) return false;
       return empShifts[emp.id]&&empShifts[emp.id].length>0;
     }
 
@@ -7279,12 +7301,13 @@ function WorkforcePlanningView({employees,projects,showToast}){
         : Math.ceil(fcBySlot.reduce((s,v)=>s+v,0));
       if(targetH<=0) return;
 
-      // Bereits geplante Coverage
+      // Bereits geplante Coverage — sicher gegen undefined net
       let coveredH=0;
       const slotCov=new Array(SLOTS.length).fill(0);
       planEmps.forEach(emp=>{
         const e=u['s_'+emp.id+'_'+ds];if(!e||!e.shift)return;
-        coveredH+=e.net||0;
+        const eNet=parseFloat(e.net)||parseFloat(e.hours)-0.5||7.5;
+        coveredH+=eNet;
         (slotIdxs(e.shift)||[]).forEach(si=>{
           if(u['i_'+emp.id+'_'+ds+'_'+si]==='1')slotCov[si]++;
         });
@@ -7326,9 +7349,10 @@ function WorkforcePlanningView({employees,projects,showToast}){
         if(!bestSh) continue;
 
         // Einplanen
-        u['s_'+emp.id+'_'+ds]={shift:bestSh.value,hours:bestSh.hours,net:bestSh.net,label:bestSh.label};
-        empPlanned[emp.id]+=(bestSh.net||0);
-        coveredH+=(bestSh.net||0);
+        const shiftNet=parseFloat(bestSh.net)||parseFloat(bestSh.hours)-0.5||7.5; // sicher nicht undefined
+        u['s_'+emp.id+'_'+ds]={shift:bestSh.value,hours:bestSh.hours,net:shiftNet,label:bestSh.label};
+        empPlanned[emp.id]+=shiftNet;
+        coveredH+=shiftNet;
 
         // Slots markieren
         const sl=slotIdxs(bestSh.value)||[];
@@ -7717,8 +7741,9 @@ Antworte NUR mit validem JSON in diesem Format:
                   geplant+=e.net||0;
                   return e.label||e.shift;
                 });
+                const empName=(emp.first_name||'')+' '+(emp.last_name||emp.name||emp.id||'');
                 const diff=Math.round((geplant-tgt)*10)/10;
-                rows.push([emp.name||emp.id,tgt,Math.round(geplant*10)/10,(diff>=0?'+':'')+diff,...dayCols]);
+                rows.push([empName.trim()||emp.id,tgt,Math.round(geplant*10)/10,(diff>=0?'+':'')+diff,...dayCols]);
               });
               // Tages-Coverage Zeile
               const covRow=['Coverage','','','',...days.map(d=>{
