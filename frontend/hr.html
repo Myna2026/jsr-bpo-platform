@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"><!DOCTYPE html><html lang="de"><head><meta charset<title>[v1778759906] JSR BPO Intelligence Platform</title><script src="https://unpkg.com/react@18/umd/react.development.js"></script><script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script><script src="https://unpkg.com/@babel/standalone/babel.min.js"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script><style>
+<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"><!DOCTYPE html><html lang="de"><head><meta charset<title>[v1778792184] JSR BPO Intelligence Platform</title><script src="https://unpkg.com/react@18/umd/react.development.js"></script><script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script><script src="https://unpkg.com/@babel/standalone/babel.min.js"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script><style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
   --bg:#f4f5f7;--surface:#ffffff;--surface-2:#f9fafb;--card:#ffffff;
@@ -7086,6 +7086,7 @@ function WorkforcePlanningView({employees,projects,showToast}){
       });
     }
     save(u);
+    recalculateAfterChange();
   }
 
   function getCell(eid,ds,i){return plan['i_'+eid+'_'+ds+'_'+i]||'0';}
@@ -7203,52 +7204,76 @@ function WorkforcePlanningView({employees,projects,showToast}){
     // Net = brutto minus 0.5h pause per work day, capped by actual days available
     const maxBrutto=workDays*workH;
     const cappedBrutto=Math.min(brutto,maxBrutto);
-    const net=Math.max(0,Math.round((cappedBrutto-workDays*0.5)*10)/10);
-    return{brutto:Math.round(cappedBrutto*10)/10,net,workDays};
+    // productive_pct: Anteil tatsächlich produktiver Zeit (z.B. 92% = Meetings, Einarbeitung etc.)
+    const prodPct=parseFloat(emp.productive_pct)||100;
+    const net=Math.max(0,Math.round((cappedBrutto*(prodPct/100)-workDays*0.5)*10)/10);
+    return{brutto:Math.round(cappedBrutto*10)/10,net,workDays,prodPct};
   }
 
       function autoplan(){
     const sh=getShifts();
     if(!sh.length){alert('Bitte Schichten konfigurieren.');return;}
     if(!Object.keys(ifc).length){alert('Bitte FC importieren.');return;}
-    // ── SELBST-RESET: Alle Zukunft-Schichten löschen vor Neuplanung ──
-    const u={};
+
+    // ── SELBST-RESET: Zukunft leeren, Vergangenheit behalten ─────
     const todayIso=iso(today);
-    // Vergangenheit behalten, Zukunft komplett leeren
-    // Key-Format: s_emp_001_2026-05-14 oder i_emp_001_2026-05-14_5
-    // Datum steht immer am Ende (letzter 10-Zeichen YYYY-MM-DD Block)
+    const u={};
     Object.keys(plan).forEach(k=>{
-      const m=k.match(/_([0-9]{4}-[0-9]{2}-[0-9]{2})(?:_\d+)?$/);
+      const m=k.match(/_(\d{4}-\d{2}-\d{2})(?:_\d+)?$/);
       if(m){if(m[1]<todayIso)u[k]=plan[k];}
       else u[k]=plan[k];
     });
 
-    // ── Monatssoll & bereits geplant ─────────────────────────────
-    const empTarget={};
-    const empPlanned={};
-    planEmps.forEach(emp=>{
-      empTarget[emp.id]=calcEmpTarget(emp).net;
-      let net=0;
-      mdays().forEach(d=>{
-        const e=u['s_'+emp.id+'_'+iso(d)];
-        if(!e) return;
-        // Robust: alte Einträge können net=0 oder net=undefined haben
-        const n=parseFloat(e.net)||parseFloat(e.hours)-0.5||7.5;
-        net+=n;
-      });
-      empPlanned[emp.id]=net;
-    });
+    // ── HILFSFUNKTION: Netto-Stunden einer Schicht (sicher) ──────
+    function shiftNet(s){
+      return parseFloat(s.net)||((parseFloat(s.hours)||8.5)-0.5)||7.5;
+    }
 
-    // ── Gültige Schichten pro MA ──────────────────────────────────
-    const empShifts={};
-    planEmps.forEach(emp=>{
+    // ── HILFSFUNKTION: Kann MA an diesem Tag mit dieser Schicht? ─
+    function canWork(emp,ds,shiftVal){
+      if(u['s_'+emp.id+'_'+ds]) return false;
+      if(absent(emp,ds)) return false;
+      const d=new Date(ds);const dow=d.getDay();
+      const canSat=emp.work_saturday===true||emp.work_saturday==='yes'||emp.work_weekend===true||emp.work_weekend==='yes';
+      const canSun=emp.work_sunday===true||emp.work_sunday==='yes'||emp.work_weekend===true||emp.work_weekend==='yes';
+      if(dow===6&&!canSat) return false;
+      if(dow===0&&!canSun) return false;
+      if(!(emp.work_holidays===true||emp.work_holidays==='yes')){
+        const loc=(emp.location||emp.city||'').toLowerCase();
+        // Finde passenden HOLIDAYS-Key, Fallback auf ersten Key (Standard-Feiertage)
+        const locKey=Object.keys(HOLIDAYS).find(k=>loc.includes(k.toLowerCase()))||Object.keys(HOLIDAYS)[0];
+        if(locKey&&(HOLIDAYS[locKey]||[]).some(hd=>hd.date===ds)) return false;
+      }
+      if(shiftVal){
+        if(emp.shift_earliest&&emp.shift_earliest!=='00:00'){
+          const ep=emp.shift_earliest.split(':').map(Number);
+          const sm2=shiftVal.match(/^(\d{1,2}):(\d{2})/);
+          if(sm2&&parseInt(sm2[1])*60+parseInt(sm2[2])<ep[0]*60+(ep[1]||0)) return false;
+        }
+        if(emp.shift_latest&&emp.shift_latest!=='23:59'){
+          const lp=emp.shift_latest.split(':').map(Number);
+          const em2=shiftVal.match(/-(\d{1,2}):(\d{2})$/);
+          if(em2&&parseInt(em2[1])*60+parseInt(em2[2])>lp[0]*60+(lp[1]||0)) return false;
+        }
+        const al=emp.allowed_shifts||[];
+        if(al.length>0&&!al.includes(shiftVal)) return false;
+      }
+      // Split-Schicht-Prüfung: wenn shiftVal ein Split ist, muss work_split erlaubt sein
+      if(shiftVal&&shiftVal.includes('|')){
+        if(!(emp.work_split===true||emp.work_split==='yes')) return false;
+      }
+      return true;
+    }
+
+    // ── HILFSFUNKTION: Gültige Schichten pro MA ──────────────────
+    function validShifts(emp){
       const al=emp.allowed_shifts||[];
-      const validSh=sh.filter(s=>{
+      const result=sh.filter(s=>{
         if(!s.value) return false;
         if(emp.shift_earliest&&emp.shift_earliest!=='00:00'){
           const ep=emp.shift_earliest.split(':').map(Number);
-          const sm=s.value.match(/^(\d{1,2}):(\d{2})/);
-          if(sm&&parseInt(sm[1])*60+parseInt(sm[2])<ep[0]*60+(ep[1]||0)) return false;
+          const sm2=s.value.match(/^(\d{1,2}):(\d{2})/);
+          if(sm2&&parseInt(sm2[1])*60+parseInt(sm2[2])<ep[0]*60+(ep[1]||0)) return false;
         }
         if(emp.shift_latest&&emp.shift_latest!=='23:59'){
           const lp=emp.shift_latest.split(':').map(Number);
@@ -7258,155 +7283,193 @@ function WorkforcePlanningView({employees,projects,showToast}){
         if(al.length>0&&!al.includes(s.value)) return false;
         return true;
       });
-      // Split-Schicht aus Profil hinzufügen wenn work_split=true
+      // Split-Schicht hinzufügen wenn erlaubt
       if(emp.work_split===true||emp.work_split==='yes'){
-        const spM=emp.split_morning||'08:00-12:00';
-        const spA=emp.split_afternoon||'14:00-18:00';
-        const calcNet=t=>{const p=t.match(/(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})/);return p?(parseInt(p[3])*60+parseInt(p[4])-parseInt(p[1])*60-parseInt(p[2]))/60:4;};
-        validSh.push({value:spM+'|'+spA,label:'Split',hours:calcNet(spM)+calcNet(spA)+2,net:calcNet(spM)+calcNet(spA),isSplit:true,splitMorning:spM,splitAfternoon:spA});
+        const sm3=emp.split_morning||'08:00-12:00';
+        const sa=emp.split_afternoon||'14:00-18:00';
+        const calcN=t=>{const p=t.match(/(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})/);return p?(parseInt(p[3])*60+parseInt(p[4])-parseInt(p[1])*60-parseInt(p[2]))/60:4;};
+        result.push({value:sm3+'|'+sa,label:'Split',hours:calcN(sm3)+calcN(sa)+2,net:calcN(sm3)+calcN(sa),isSplit:true});
       }
-      empShifts[emp.id]=validSh;
+      return result;
+    }
+
+    // ── 1. MONATSSOLL & BEREITS GEPLANT ──────────────────────────
+    const empTarget={};
+    const empPlanned={};
+    planEmps.forEach(emp=>{
+      empTarget[emp.id]=calcEmpTarget(emp).net;
+      let net=0;
+      mdays().forEach(d=>{
+        const e=u['s_'+emp.id+'_'+iso(d)];
+        if(!e) return;
+        net+=parseFloat(e.net)||parseFloat(e.hours)-0.5||7.5;
+      });
+      empPlanned[emp.id]=net;
     });
 
-    // Kann MA physisch an diesem Tag arbeiten?
-    function isHoliday(emp,ds){
-      const loc=emp.location||emp.city||'';
-      const locKey=Object.keys(HOLIDAYS).find(k=>loc.toLowerCase().includes(k.toLowerCase()));
-      if(!locKey) return false;
-      return (HOLIDAYS[locKey]||[]).some(h=>h.date===ds);
-    }
+    // ── 2. ZUKÜNFTIGE TAGE MIT FC-BEDARF ─────────────────────────
+    const futureDays=mdays().filter(d=>iso(d)>=todayIso);
 
-    function canWork(emp,ds){
-      if(u['s_'+emp.id+'_'+ds]) return false;
-      if(absent(emp,ds)) return false;
-      const d=new Date(ds);const dow=d.getDay();
-      const cS=emp.work_saturday===true||emp.work_saturday==='yes'||emp.work_weekend===true||emp.work_weekend==='yes';
-      const cSu=emp.work_sunday===true||emp.work_sunday==='yes'||emp.work_weekend===true||emp.work_weekend==='yes';
-      if(dow===6&&!cS) return false;
-      if(dow===0&&!cSu) return false;
-      // Feiertag: wenn work_holidays nicht explizit true → kein Einsatz
-      const canHoliday=emp.work_holidays===true||emp.work_holidays==='yes';
-      if(!canHoliday&&isHoliday(emp,ds)) return false;
-      return empShifts[emp.id]&&empShifts[emp.id].length>0;
-    }
+    // ── 3. HAUPTSCHLEIFE: PRO TAG ─────────────────────────────────
+    // PRIORITÄT 1: Tagesbedarf decken
+    // PRIORITÄT 2: Monatsbedarf gleichmäßig verteilen
+    // PRIORITÄT 3: Intervalle treffen
+    // PRIORITÄT 4: Nicht mehr einplanen als nötig (HARD STOP)
 
-    // ── Jeden zukünftigen Tag befüllen ───────────────────────────
-    mdays().filter(d=>iso(d)>=todayIso).forEach(d=>{
+    futureDays.forEach(d=>{
       const ds=iso(d);
-      const fcBySlot=(ifc[ds]||[]).map(v=>parseFloat(v)||0);
-      const activeSlots=fcBySlot.reduce((a,v,i)=>v>0?[...a,i]:a,[]);
-      if(!activeSlots.length) return; // kein FC-Bedarf
+      const dow=d.getDay();
+      // PRIORITÄT 3: Intervall-Rohdaten mit Peak-Glättung
+      const fcRaw=(ifc[ds]||[]).map(v=>parseFloat(v)||0);
+      const fcBySlot=smoothIntervals(fcRaw); // Kurze Peaks glätten
 
-      // Tagesbedarf: dfc[ds] = ceil(Spalte F) wenn importiert
-      // Fallback: ceil(Summe Spalte D)
+      // Aktive Slots = Zeitfenster mit FC-Bedarf > 0
+      const activeSlots=fcBySlot.reduce((a,v,i)=>v>0?[...a,i]:a,[]);
+      if(!activeSlots.length) return; // kein Bedarf heute
+
+      // PRIORITÄT 1: Tagesbedarf (in ganzen Stunden)
       const targetH=dfc[ds]>0
         ? dfc[ds]
         : Math.ceil(fcBySlot.reduce((s,v)=>s+v,0));
       if(targetH<=0) return;
 
-      // Bereits geplante Coverage — sicher gegen undefined net
+      // Bereits geplante Stunden (von manuell oder vorherigen Runs)
       let coveredH=0;
       const slotCov=new Array(SLOTS.length).fill(0);
       planEmps.forEach(emp=>{
-        const e=u['s_'+emp.id+'_'+ds];if(!e||!e.shift)return;
-        const eNet=parseFloat(e.net)||parseFloat(e.hours)-0.5||7.5;
-        coveredH+=eNet;
+        const e=u['s_'+emp.id+'_'+ds];
+        if(!e||!e.shift) return;
+        const n=parseFloat(e.net)||parseFloat(e.hours)-0.5||7.5;
+        coveredH+=n;
         (slotIdxs(e.shift)||[]).forEach(si=>{
-          if(u['i_'+emp.id+'_'+ds+'_'+si]==='1')slotCov[si]++;
+          if(u['i_'+emp.id+'_'+ds+'_'+si]==='1') slotCov[si]++;
         });
       });
 
-      // ── HARD STOP: Bedarf bereits gedeckt ────────────────────
+      // PRIORITÄT 4: Tagesbedarf bereits gedeckt → STOP
       if(coveredH>=targetH-0.25) return;
 
-      // ── MAs sortieren: wer am meisten hinter Monatssoll ─────
-      // Das sorgt automatisch für gleichmäßige Monatsverteilung:
-      // wer wenig gearbeitet hat → hohe Dringlichkeit → zuerst
-      // wer viel gearbeitet hat → niedrige Dringlichkeit → später
-      const avail=planEmps
-        .filter(emp=>canWork(emp,ds))
+      // PRIORITÄT 2: MAs sortieren nach Dringlichkeit
+      // Wer am weitesten hinter seinem Monatssoll → kommt zuerst
+      // Das sorgt für gleichmäßige Monatsverteilung ohne hartes Cap
+      const availMAs=planEmps
+        .filter(emp=>canWork(emp,ds,null)&&validShifts(emp).length>0)
         .sort((a,b)=>{
-          // Offene Stunden DESC = wer am meisten hinter Soll
           const remA=empTarget[a.id]-empPlanned[a.id];
           const remB=empTarget[b.id]-empPlanned[b.id];
-          return remB-remA;
+          return remB-remA; // meiste offene Stunden zuerst
         });
 
-      // ── MAs zuweisen bis Bedarf gedeckt ──────────────────────
-      for(const emp of avail){
-        // HARD STOP sobald Tagesbedarf gedeckt
+      // MAs zuweisen bis Tagesbedarf gedeckt
+      for(const emp of availMAs){
+        // PRIORITÄT 4: Tagesbedarf erreicht → SOFORTIGER STOP
         if(coveredH>=targetH-0.25) break;
 
-        // Beste Schicht: deckt möglichst viele unbesetzte aktive Slots
-        let bestSh=null,bestScore=-1;
-        empShifts[emp.id].forEach(s=>{
+        const empShifts=validShifts(emp).filter(s=>canWork(emp,ds,s.value));
+        if(!empShifts.length) continue;
+
+        // PRIORITÄT 3: Beste Schicht wählen
+        // Score: 1. Unbesetzte aktive Slots abdecken (hart)
+        //        2. Ungedeckten Stunden-Bedarf maximieren (mittel)
+        //        3. Schicht-Netto-Stunden (weich - für Effizienz)
+        let bestShift=null,bestScore=-1;
+        empShifts.forEach(s=>{
           const idxs=slotIdxs(s.value)||[];
           const activeOverlap=idxs.filter(i=>activeSlots.includes(i));
           if(!activeOverlap.length) return; // Schicht deckt keine FC-Slots
-          const uncov=activeOverlap.filter(i=>slotCov[i]===0).length;
-          const unmetH=activeOverlap.reduce((sm,i)=>sm+Math.max(0,fcBySlot[i]-slotCov[i]*0.5),0);
-          const score=uncov*100000+unmetH*1000+(s.net||0);
-          if(score>bestScore){bestScore=score;bestSh=s;}
+
+          const uncoveredSlots=activeOverlap.filter(i=>slotCov[i]===0).length;
+          const unmetH=activeOverlap.reduce((sum,i)=>
+            sum+Math.max(0,fcBySlot[i]-(slotCov[i]*0.5)),0);
+          const netH=shiftNet(s);
+
+          // PRIORITÄT 4: Präferiere kleinere Schicht wenn Bedarf fast gedeckt
+          const remaining=targetH-coveredH;
+          const overShoot=Math.max(0,netH-remaining);
+
+          const score=uncoveredSlots*100000+unmetH*1000+netH*10-overShoot*5;
+          if(score>bestScore){bestScore=score;bestShift=s;}
         });
 
-        if(!bestSh) continue;
+        if(!bestShift) continue;
+
+        // PRIORITÄT 4: Dynamische Anpassung - kürzere Schicht wenn fast gedeckt
+        const adjustedShift=adjustShiftForDemand(bestShift.value,coveredH,targetH);
+        const finalShift=adjustedShift||bestShift;
 
         // Einplanen
-        const shiftNet=parseFloat(bestSh.net)||parseFloat(bestSh.hours)-0.5||7.5; // sicher nicht undefined
-        u['s_'+emp.id+'_'+ds]={shift:bestSh.value,hours:bestSh.hours,net:shiftNet,label:bestSh.label};
-        empPlanned[emp.id]+=shiftNet;
-        coveredH+=shiftNet;
+        const net=shiftNet(finalShift);
+        const pauseInfo=suggestBreak(bestShift.value,fcRaw);
+        u['s_'+emp.id+'_'+ds]={
+          shift:finalShift.value,
+          hours:finalShift.hours,
+          net,
+          label:finalShift.label,
+          pauseSuggestionStart:pauseInfo?pauseInfo.pauseSuggestionStart:null,
+          pauseSuggestionEnd:pauseInfo?pauseInfo.pauseSuggestionEnd:null,
+          pauseStatus:pauseInfo?'suggested':null,
+          forecastDemandForDay:targetH,
+          isSaturday:dow===6,
+          isSunday:dow===0
+        };
+        empPlanned[emp.id]+=net;
+        coveredH+=net;
 
-        // Slots markieren
-        const sl=slotIdxs(bestSh.value)||[];
+        // Slot-Coverage markieren
+        const sl=slotIdxs(finalShift.value)||[];
         sl.forEach((si,pos)=>{
           const mid=Math.floor(sl.length/2);
-          u['i_'+emp.id+'_'+ds+'_'+si]=(sl.length>6&&pos===mid&&pos>=4)?'p':'1';
-          slotCov[si]++;
+          const isPause=sl.length>6&&pos===mid&&pos>=4;
+          u['i_'+emp.id+'_'+ds+'_'+si]=isPause?'p':'1';
+          if(!isPause) slotCov[si]++;
         });
       }
     });
 
-    // ── Speichern + Report ────────────────────────────────────────
-    save(u);
+    // ── 4. SPEICHERN ─────────────────────────────────────────────
+    save(u);recalculateAfterChange();
 
+    // ── 5. REPORT ────────────────────────────────────────────────
     let daysOk=0,daysShort=0,daysOver=0;
-    let totalDemand=0,totalPlanned=0,totalOT=0,totalUnder=0;
+    let totalDemand=0,totalPlanned=0;
+    let totalOT=0,totalUnder=0;
 
-    mdays().filter(d=>iso(d)>=todayIso).forEach(d=>{
+    futureDays.forEach(d=>{
       const ds=iso(d);
       const tgt=dfc[ds]>0?dfc[ds]:Math.ceil((ifc[ds]||[]).reduce((s,v)=>s+(parseFloat(v)||0),0));
-      if(!tgt)return;
-      let p=0;planEmps.forEach(emp=>{const e=u['s_'+emp.id+'_'+ds];if(e)p+=e.net||0;});
+      if(!tgt) return;
+      let p=0;
+      planEmps.forEach(emp=>{
+        const e=u['s_'+emp.id+'_'+ds];
+        if(e) p+=parseFloat(e.net)||parseFloat(e.hours)-0.5||7.5;
+      });
       totalDemand+=tgt;totalPlanned+=p;
-      if(p>=tgt-0.5)daysOk++;
+      if(p>=tgt-0.5) daysOk++;
       else daysShort++;
-      if(p>tgt+0.5)daysOver++;
+      if(p>tgt+0.5) daysOver++;
     });
 
     planEmps.forEach(emp=>{
       const diff=empPlanned[emp.id]-empTarget[emp.id];
-      if(diff>0)totalOT+=diff;else totalUnder+=Math.abs(diff);
+      if(diff>0) totalOT+=diff;
+      else totalUnder+=Math.abs(diff);
     });
 
     const pct=totalDemand>0?Math.round(totalPlanned/totalDemand*100):0;
     let msg='';
     if(daysShort===0){
-      msg=`✅ Alle ${daysOk} Tage gedeckt (${pct}%)`;
-      if(daysOver>0) msg+=` · ${daysOver} Tage überdeckt`;
-      if(totalOT>0) msg+=` · ${Math.round(totalOT)}h Überstunden`;
-      if(totalUnder>0) msg+=` · ${Math.round(totalUnder)}h ungenutzt`;
+      msg=`✅ ${daysOk} Tage gedeckt (${pct}%)`;
+      if(daysOver>0) msg+=` · ⚠ ${daysOver} Tage überdeckt`;
+      if(totalOT>1) msg+=` · ${Math.round(totalOT)}h Überstunden`;
+      if(totalUnder>1) msg+=` · ${Math.round(totalUnder)}h ungenutzt`;
     } else {
-      const gap=Math.round(totalDemand-totalPlanned);
-      msg=`⚠ ${daysShort} Tage unterdeckt · ${gap}h Lücke → weitere MA nötig`;
-      alert(msg);
+      msg=`⚠ ${daysShort} Tage unterdeckt · ${Math.round(totalDemand-totalPlanned)}h Lücke`;
+      if(totalDemand-totalPlanned>10) alert(msg+'\n\nTeam-Kapazität reicht nicht — weitere Mitarbeiter nötig.');
     }
-    showToast&&showToast(msg,daysShort===0?'success':'error');
-    console.log('Autoplan v11:',msg);
+    showToast&&showToast(msg,daysShort===0&&daysOver===0?'success':'info');
+    console.log('Autoplan v12:',msg,`daysOK=${daysOk} short=${daysShort} over=${daysOver}`);
   }
 
-
-  const SHIFT_COLORS=['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#f97316','#84cc16','#ec4899'];
 
   function getShiftColor(val){
     const i=getShifts().findIndex(s=>s.value===val);
@@ -7504,10 +7567,10 @@ function WorkforcePlanningView({employees,projects,showToast}){
         id:s.id,label:s.label,value:s.value,hours:s.hours,net:s.net
       }));
 
-      const sysPrompt='Du bist ein intelligentes Workforce-Management- und Schichtplanungssystem.\n\nPLANUNGSHIERARCHIE:\n1. PRIORITÄT: Tagesbedarf erfüllen - JEDER Tag muss den FC-Bedarf decken\n2. PRIORITÄT: Monatsbedarf erfüllen\n3. PRIORITÄT: Intervallplanung bestmöglich treffen\n4. PRIORITÄT: Wirtschaftlich effizient - keine Überplanung\n\nREGELN:\n- Schichten müssen nicht exakt 8h sein (6h, 7h, 8h erlaubt)\n- Split-Schichten erlaubt wenn MA freigegeben\n- Nur so viele MAs einplanen wie nötig\n- Schichtfenster je MA beachten\n- Wochenend- und Feiertagsregeln beachten\n- Stunden gleichmäßig über Monat verteilen';
+      const sysPrompt='Du bist ein intelligentes Workforce-Management-System fuer ein BPO-Callcenter.\n\nPLANUNGSHIERARCHIE (strikt einhalten):\n1. PRIO: Tagesbedarf erfuellen - JEDER Tag MUSS FC-Bedarf decken. STOP wenn erreicht.\n2. PRIO: Monatsbedarf erfuellen - alle MAs sollen Monatssoll erreichen.\n3. PRIO: Intervall-Peaks abdecken - Schichten sollen Hauptlast-Zeiten treffen.\n4. PRIO: Wirtschaftlich - nicht mehr MAs als noetig, keine Ueberplanung.\n\nHARTE REGELN (niemals verletzen):\n- work_saturday=false: kein Samstag. work_sunday=false: kein Sonntag. work_holidays=false: kein Feiertag.\n- Schicht muss in Zeitfenster liegen (shift_earliest bis shift_latest).\n- work_split=false: keine Split-Schicht erlaubt.\n- Bei Urlaub/Abwesenheit (Urlaubstage>0 an dem Tag): nicht einplanen.\n- Vergangene Tage nicht veraendern.\n- Bereits geplante Schichten nicht ueberschreiben.\n- HARD STOP: wenn Tagesbedarf gedeckt, keinen weiteren MA einplanen.\n\nWEICHE REGELN (optimieren):\n- Schichten +/-1h anpassen wenn noetig (min 6h, max 9h).\n- Split-Schichten einsetzen wenn zwei Peaks mit Tal dazwischen.\n- Pausen in Tief-Intervalle legen, nicht in Peaks.\n- productive_pct: 92% = MA ist 92% seiner Schichtzeit produktiv. Bei Bedarfsdeckung einrechnen.\n- Wer am weitesten hinter Monatssoll ist, wird zuerst eingeplant (Fairness).\n- Stunden gleichmaessig ueber verbleibende Tage verteilen.\n- Ueberplanung aktiv vermeiden - lieber weniger als zu viele MAs.';
 const aiTodayStr=iso(today);
-const fcLines=Object.keys(dfc).filter(ds=>ds>=aiTodayStr).sort().map(ds=>ds+': '+dfc[ds]+'h').join('\n');
-const empLines=planEmps.map(e=>e.id+' '+e.first_name+' '+e.last_name+': '+(e.work_hours||8)+'h/Tag, Sa='+(e.work_saturday||e.work_weekend||false)+', So='+(e.work_sunday||e.work_weekend||false)+', Ftag='+(e.work_holidays||false)+', Split='+(e.work_split||false)+', Schicht '+(e.shift_earliest||'00:00')+'-'+(e.shift_latest||'23:59')+', Soll='+Math.round(calcEmpTarget(e).net)+'h').join('\n');
+const fcLines=Object.keys(dfc).filter(ds=>ds>=aiTodayStr).sort().map(ds=>{const sl=(ifc[ds]||[]).map((v,i)=>({v:parseFloat(v)||0,t:SLOTS[i]})).filter(x=>x.v>0).sort((a,b)=>b.v-a.v);const peaks=sl.slice(0,3).map(x=>x.t).join(',');return ds+': '+dfc[ds]+'h'+(peaks?' Peaks:'+peaks:'');}).join('\n');
+const empLines=planEmps.map(e=>{const tgt=calcEmpTarget(e);let alrH=0;mdays().forEach(d=>{if(iso(d)>=aiTodayStr)return;const en=getEntry(e.id,iso(d));if(en)alrH+=parseFloat(en.net)||7.5;});const vacD=mdays().filter(d=>absent(e,iso(d))).length;const prod=parseFloat(e.productive_pct)||100;return e.id+' '+e.first_name+' '+e.last_name+': '+(e.work_hours||8)+'h/Tag, Sa='+(e.work_saturday||e.work_weekend||false)+', So='+(e.work_sunday||e.work_weekend||false)+', Ftag='+(e.work_holidays||false)+', Split='+(e.work_split||false)+', Schicht '+(e.shift_earliest||'00:00')+'-'+(e.shift_latest||'23:59')+', Soll='+Math.round(tgt.net)+'h'+', GeplantBisher='+Math.round(alrH*10)/10+'h'+', NochOffen='+Math.round(Math.max(0,tgt.net-alrH)*10)/10+'h'+', Produktiv='+prod+'%'+(vacD>0?', Urlaub='+vacD+'d':'')+' ';}).join('\n');
 const shiftLines=getShifts().map(s=>s.value+' ('+s.label+', '+s.net+'h netto)').join('\n');
 const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projId)+(skill?' / Skill: '+skill:'')+'\nMONAT: '+MNAMES[month-1]+' '+year+'\n\nFC-TAGESBEDARF ab '+aiTodayStr+':\n'+fcLines+'\n\nMITARBEITER:\n'+empLines+'\n\nSCHICHTEN:\n'+shiftLines+'\n\nAUFGABE: Erstelle optimalen Schichtplan ab '+aiTodayStr+' bis Monatsende. Erfülle jeden Tag den FC-Bedarf. Plane effizient. Berücksichtige alle MA-Einschränkungen.\n\nAntworte NUR mit validem JSON: {"plan":[{"date":"YYYY-MM-DD","empId":"emp_001","shift":"08:00-16:30"},...]}'
 
@@ -7628,6 +7691,53 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
     const pct=totalNeed>0?Math.round(totalCov/totalNeed*100):100;
     return{status:totalNeed===0?'nofc':pct>=95?'ok':pct>=70?'warn':'under',firstUnder,pct};
   }
+  // ── GELEISTETE STUNDEN (vergangene Tage = geleistet, Basis Gehaltsabrechnung) ──
+  function getWorkedStats(emp){
+    const todayIso=iso(today);
+    let workedH=0,workedDays=0;
+    let satDays=0,sunDays=0,holidayDays=0,otH=0;
+    const HOLIDAYS_FLAT=Object.values(HOLIDAYS).flat().map(h=>h.date);
+    mdays().forEach(d=>{
+      const ds=iso(d);
+      if(ds>=todayIso) return; // nur Vergangenheit = geleistet
+      const e=getEntry(emp.id,ds);
+      if(!e||!e.shift) return;
+      const net=parseFloat(e.net)||parseFloat(e.hours)-0.5||7.5;
+      workedH+=net;
+      workedDays++;
+      const dow=d.getDay();
+      if(dow===6) satDays++;
+      if(dow===0) sunDays++;
+      if(HOLIDAYS_FLAT.includes(ds)) holidayDays++;
+    });
+    const target=calcEmpTarget(emp).net;
+    // Soll für vergangene Tage (anteilig): Arbeitstage vergangen / Arbeitstage gesamt
+    const totalWorkdays=mdays().filter(d=>{
+      const dow=d.getDay();
+      if(dow===6||dow===0) return false;
+      return !HOLIDAYS_FLAT.includes(iso(d));
+    }).length||1;
+    const passedWorkdays=mdays().filter(d=>{
+      const ds=iso(d);if(ds>=todayIso)return false;
+      const dow=d.getDay();
+      if(dow===6||dow===0) return false;
+      return !HOLIDAYS_FLAT.includes(ds);
+    }).length||0;
+    const targetSoFar=Math.round(target*passedWorkdays/totalWorkdays*10)/10;
+    otH=Math.max(0,Math.round((workedH-targetSoFar)*10)/10);
+    const minusH=Math.max(0,Math.round((targetSoFar-workedH)*10)/10);
+    // Noch offene Stunden bis Monatsende
+    let plannedFuture=0;
+    mdays().forEach(d=>{
+      const ds=iso(d);if(ds<todayIso)return;
+      const e=getEntry(emp.id,ds);
+      if(e)plannedFuture+=parseFloat(e.net)||7.5;
+    });
+    const remainingH=Math.max(0,Math.round((target-workedH-plannedFuture)*10)/10);
+    return{workedH:Math.round(workedH*10)/10,workedDays,satDays,sunDays,holidayDays,
+      otH,minusH,target,targetSoFar,remainingH,plannedFuture:Math.round(plannedFuture*10)/10};
+  }
+
   function stats(emp){
     let planned=0,net=0,absD=0;
     mdays().forEach(d=>{
@@ -7641,6 +7751,194 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
       target:t.net,workDays:t.workDays,brutto:t.brutto,
       diff:Math.round((net-t.net)*10)/10};
   }
+  // ═══════════════════════════════════════════════════════════════
+  // NEUE HELPER-FUNKTIONEN (Pflichtenheft-Implementierung)
+  // ═══════════════════════════════════════════════════════════════
+
+  // ── Peak-Glättung: Kurze Peaks glätten damit kein extra MA ────
+  function smoothIntervals(daySlots){
+    // Gibt geglättete Slots zurück: kurze Einzelpeaks werden nivelliert
+    const s=[...daySlots.map(v=>parseFloat(v)||0)];
+    for(let i=1;i<s.length-1;i++){
+      // Einzelner Peak (beide Nachbarn deutlich kleiner) → glätten
+      const avg=(s[i-1]+s[i+1])/2;
+      if(s[i]>avg*1.5&&s[i]-avg>0.3){
+        s[i]=avg+0.3; // Peak auf max 0.3h über Durchschnitt begrenzen
+      }
+    }
+    return s;
+  }
+
+  // ── Pausenvorschlag: In schwächstes Intervall der Schicht ─────
+  // Gibt {start, end, slotIndex} zurück
+  function suggestBreak(shiftValue,daySlots){
+    const idxs=slotIdxs(shiftValue)||[];
+    if(idxs.length<4) return null; // Schicht zu kurz für Pause
+    // Mittleres Drittel der Schicht für Pausensuche
+    const mid=Math.floor(idxs.length/2);
+    const searchStart=Math.max(1,mid-3);
+    const searchEnd=Math.min(idxs.length-2,mid+3);
+    // Schwächstes Intervall im mittleren Bereich
+    let minDemand=Infinity,minIdx=-1;
+    for(let p=searchStart;p<=searchEnd;p++){
+      const demand=parseFloat(daySlots[idxs[p]])||0;
+      if(demand<minDemand){minDemand=demand;minIdx=p;}
+    }
+    if(minIdx<0) return null;
+    const slotTime=SLOTS[idxs[minIdx]]; // z.B. "12:00"
+    const [h,m]=slotTime.split(':').map(Number);
+    const endMin=h*60+m+30;
+    return{
+      pauseSuggestionStart:slotTime,
+      pauseSuggestionEnd:String(Math.floor(endMin/60)).padStart(2,'0')+':'+String(endMin%60).padStart(2,'0'),
+      slotIndex:idxs[minIdx],
+      status:'suggested'
+    };
+  }
+
+  // ── Plan-Qualitätsscore: 0-100 ────────────────────────────────
+  function calcPlanQuality(){
+    const days=mdays();
+    let scoreSum=0,scoreCount=0;
+    let daysOk=0,daysTotal=0;
+    let totalOT=0,totalUnder=0;
+    let totalDemand=0,totalPlanned=0;
+
+    // Tagesbedarf-Score
+    days.forEach(d=>{
+      const ds=iso(d);
+      const tgt=dfc[ds]>0?dfc[ds]:Math.ceil((ifc[ds]||[]).reduce((s,v)=>s+(parseFloat(v)||0),0));
+      if(!tgt)return;
+      daysTotal++;
+      let p=0;
+      planEmps.forEach(emp=>{const e=getEntry(emp.id,ds);if(e)p+=parseFloat(e.net)||7.5;});
+      totalDemand+=tgt;totalPlanned+=p;
+      const pct=p/tgt;
+      if(pct>=0.95&&pct<=1.15){daysOk++;scoreSum+=100;}
+      else if(pct<0.95){scoreSum+=Math.round(pct*100);}
+      else{scoreSum+=Math.max(0,100-(pct-1.15)*200);} // Überplanung abziehen
+      scoreCount++;
+    });
+
+    // MA-Auslastung-Score
+    planEmps.forEach(emp=>{
+      const tgt=calcEmpTarget(emp).net;
+      let planned=0;
+      days.forEach(d=>{const e=getEntry(emp.id,iso(d));if(e)planned+=parseFloat(e.net)||7.5;});
+      const diff=planned-tgt;
+      if(diff>0)totalOT+=diff;else totalUnder+=Math.abs(diff);
+      const auslastung=planned/tgt;
+      scoreSum+=Math.round(Math.max(0,100-Math.abs(1-auslastung)*100));
+      scoreCount++;
+    });
+
+    // Intervall-Coverage-Score
+    let slotOk=0,slotTotal=0;
+    days.forEach(d=>{
+      const ds=iso(d);
+      const fcSlots=(ifc[ds]||[]).map(v=>parseFloat(v)||0);
+      const cov=slotCoverage(ds);
+      fcSlots.forEach((fc,i)=>{
+        if(fc<=0)return;slotTotal++;
+        if(cov[i]>0)slotOk++;
+      });
+    });
+    if(slotTotal>0){scoreSum+=Math.round(slotOk/slotTotal*100);scoreCount++;}
+
+    const totalScore=scoreCount>0?Math.round(scoreSum/scoreCount):0;
+    const coveragePct=totalDemand>0?Math.round(totalPlanned/totalDemand*100):0;
+    const daysPct=daysTotal>0?Math.round(daysOk/daysTotal*100):0;
+    const pv=planEmps.map(emp=>{let p=0;mdays().forEach(d=>{const e=getEntry(emp.id,iso(d));if(e)p+=parseFloat(e.net)||7.5;});return p;});
+    const avg=pv.reduce((s,v)=>s+v,0)/(pv.length||1);const stddev=Math.sqrt(pv.reduce((s,v)=>s+Math.pow(v-avg,2),0)/(pv.length||1));const fairnessScore=avg>0?Math.round(Math.max(0,100-stddev/avg*100)):100;
+    return{score:Math.round(totalScore*0.8+fairnessScore*0.2),coveragePct,daysPct,daysOk,daysTotal,totalOT:Math.round(totalOT*10)/10,totalUnder:Math.round(totalUnder*10)/10,fairnessScore};
+  }
+
+  // ── Live-Warnungen generieren ─────────────────────────────────
+  function generateWarnings(){
+    const warnings=[];
+    const days=mdays();
+    const todayIso=iso(today);
+
+    days.forEach(d=>{
+      const ds=iso(d);
+      if(ds<todayIso)return;
+      const tgt=dfc[ds]>0?dfc[ds]:Math.ceil((ifc[ds]||[]).reduce((s,v)=>s+(parseFloat(v)||0),0));
+      if(!tgt)return;
+      let p=0;
+      planEmps.forEach(emp=>{const e=getEntry(emp.id,ds);if(e)p+=parseFloat(e.net)||7.5;});
+      const pct=tgt>0?Math.round(p/tgt*100):0;
+      if(p<tgt*0.9) warnings.push({type:'under',level:'error',ds,msg:`${ds}: Unterdeckung ${p.toFixed(1)}h/${tgt}h (${pct}%)`});
+      else if(p>tgt*1.2) warnings.push({type:'over',level:'warn',ds,msg:`${ds}: Überdeckung ${p.toFixed(1)}h/${tgt}h (${pct}%)`});
+    });
+
+    // MA-Überstunden-Warnungen
+    planEmps.forEach(emp=>{
+      const tgt=calcEmpTarget(emp).net;
+      let planned=0;
+      days.forEach(d=>{const e=getEntry(emp.id,iso(d));if(e)planned+=parseFloat(e.net)||7.5;});
+      const ot=planned-tgt;
+      if(ot>20) warnings.push({type:'overtime',level:'warn',empId:emp.id,msg:`${emp.first_name} ${emp.last_name}: +${ot.toFixed(1)}h Überstunden`});
+      if(tgt-planned>30) warnings.push({type:'under_emp',level:'info',empId:emp.id,msg:`${emp.first_name} ${emp.last_name}: ${(tgt-planned).toFixed(1)}h noch unverplant`});
+    });
+
+    // Wochenend-Kapazität prüfen
+    days.forEach(d=>{
+      const ds=iso(d);if(ds<todayIso)return;
+      const dow=d.getDay();
+      if(dow!==0&&dow!==6)return;
+      const tgt=dfc[ds]>0?dfc[ds]:0;
+      if(!tgt)return;
+      const weCapacity=planEmps.filter(emp=>{
+        const canSat=emp.work_saturday===true||emp.work_saturday==='yes'||emp.work_weekend===true||emp.work_weekend==='yes';
+        const canSun=emp.work_sunday===true||emp.work_sunday==='yes'||emp.work_weekend===true||emp.work_weekend==='yes';
+        return dow===6?canSat:canSun;
+      }).length;
+      if(weCapacity===0) warnings.push({type:'no_we_staff',level:'error',ds,msg:`${ds}: Kein Personal für Wochenende verfügbar!`});
+      else if(weCapacity*8<tgt) warnings.push({type:'we_capacity',level:'warn',ds,msg:`${ds}: WE-Kapazität (${weCapacity}×8h=${weCapacity*8}h) < Bedarf (${tgt}h)`});
+    });
+
+    return warnings;
+  }
+
+  // ── recalculate: nach jeder manuellen Änderung aufrufen ───────
+  function recalculateAfterChange(){
+    // Tagesbedarf neu prüfen und Toast ausgeben
+    const warnings=generateWarnings().filter(w=>w.level==='error');
+    if(warnings.length>0){
+      showToast&&showToast(`⚠ ${warnings.length} Problem(e) nach Änderung`,  'error');
+    }
+    // Plan-Qualität neu berechnen (wird im Panel angezeigt)
+    // Das Panel re-rendert automatisch durch React state change
+  }
+
+  // ── Überstunden pro MA berechnen ─────────────────────────────
+  function calcOvertime(emp){
+    const tgt=calcEmpTarget(emp).net;
+    let planned=0;
+    mdays().forEach(d=>{
+      const e=getEntry(emp.id,iso(d));
+      if(e)planned+=parseFloat(e.net)||7.5;
+    });
+    return{planned:Math.round(planned*10)/10,target:tgt,overtime:Math.max(0,Math.round((planned-tgt)*10)/10),minus:Math.max(0,Math.round((tgt-planned)*10)/10)};
+  }
+
+  // ── Dynamische Schicht-Anpassung: Schicht kürzen wenn nötig ──
+  // Gibt angepasste Schicht zurück wenn Bedarf fast gedeckt
+  function adjustShiftForDemand(shiftValue,coveredH,targetH){
+    const remaining=targetH-coveredH;
+    if(remaining<=0)return null; // nicht einplanen
+    const fullNet=parseFloat((getShifts().find(s=>s.value===shiftValue)||{}).net)||7.5;
+    // Wenn Schicht deutlich mehr liefert als nötig → Hinweis auf kürzere Schicht
+    if(fullNet>remaining+1.5&&remaining>=4){
+      // Suche kürzere Schicht
+      const sh=getShifts();
+      const shorter=sh.filter(s=>parseFloat(s.net)||7.5<=remaining+0.5&&(parseFloat(s.net)||7.5)>=remaining-1);
+      if(shorter.length>0) return shorter.reduce((a,b)=>Math.abs((parseFloat(b.net)||7.5)-remaining)<Math.abs((parseFloat(a.net)||7.5)-remaining)?b:a);
+    }
+    return null; // keine Anpassung nötig
+  }
+
+
 
   return(
     <div style={{padding:16}}>
@@ -7747,7 +8045,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
             <span style={{marginLeft:'auto',fontSize:11,fontWeight:700,color:hasFc?'var(--green)':'var(--muted)'}}>
               {hasFc?'✅ FC: '+Object.keys(ifc).length+' Tage':'⚠ Kein FC'}
               {' · '}{planEmps.length} MA{shifts.length?' · '+shifts.length+' Schichten':''}
-              {' · '}<span style={{fontSize:9,color:'var(--muted)',opacity:.6}}>v1778759906</span>
+              {' · '}<span style={{fontSize:9,color:'var(--muted)',opacity:.6}}>v1778792184</span>
             </span>
           </>
         )}
@@ -7780,6 +8078,24 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
               <div style={{fontSize:10,color:'var(--muted)',marginBottom:2}}>📊 FC-Bedarf gesamt</div>
               <div style={{fontSize:18,fontWeight:800}}>{Math.round(fcGesamt*10)/10}h</div>
               <div style={{fontSize:10,color:'var(--muted)'}}>{Object.keys(dfc).length>0?'Aus Tagesplanung (ceil Telefonie/Spalte F)':'Aus Intervall-Forecast (Spalte D)'}</div>
+            </div>
+            {/* Plan-Qualitätsscore */}
+            {(()=>{const q=calcPlanQuality();return(
+              <div style={{flex:1,minWidth:140,padding:'4px 16px',borderLeft:'1px solid var(--border)'}}>
+                <div style={{fontSize:10,color:'var(--muted)',marginBottom:2}}>🎯 Plan-Qualität</div>
+                <div style={{fontSize:20,fontWeight:900,color:q.score>=85?'#16a34a':q.score>=70?'#d97706':'#dc2626'}}>{q.score}<span style={{fontSize:11}}>/100</span></div>
+                <div style={{fontSize:9,color:'var(--muted)'}}>{q.daysPct}% Tage ✓ · {q.coveragePct}% Stunden</div>
+                {q.totalOT>0&&<div style={{fontSize:9,color:'#d97706'}}>+{q.totalOT}h Überstunden</div>}<div style={{fontSize:9,color:'var(--muted)'}}>⚖ Fairness {q.fairnessScore}/100</div>
+                {q.totalUnder>5&&<div style={{fontSize:9,color:'var(--muted)'}}>{q.totalUnder}h unverplant</div>}
+              </div>
+            );})()}
+            {/* Live-Warnungen */}
+            {(()=>{const w=generateWarnings().filter(x=>x.level==='error');return w.length>0?(
+              <div style={{flex:'0 0 auto',padding:'4px 0 4px 16px',borderLeft:'1px solid var(--border)'}}>
+                <div style={{fontSize:10,color:'#dc2626',fontWeight:700,marginBottom:2}}>⚠ {w.length} Problem(e)</div>
+                {w.slice(0,3).map((x,i)=>(<div key={i} style={{fontSize:9,color:'#dc2626'}}>{x.msg}</div>))}
+              </div>
+            ):null;})()}
             </div>
             <div style={{flex:1,minWidth:140,padding:'4px 0 4px 16px',textAlign:'right'}}>
               <div style={{fontSize:10,color:'var(--muted)',marginBottom:2}}>Delta (Über/Unterdeckung)</div>
@@ -7920,7 +8236,12 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                                       color:en?'var(--blue)':'var(--dim)',
                                       fontWeight:en?700:400,minHeight:32,fontSize:9,
                                       border:en?'1px solid var(--blue-bg)':inm?'1px dashed var(--border)':'none'}}>
-                                    {en?(<><div>{en.shift}</div><div style={{fontSize:8,opacity:.8}}>{en.hours}/{en.net}h</div></>):(<div style={{fontSize:11,opacity:inm?.4:.1,letterSpacing:1}}>＋</div>)}
+                                    {en?(<>
+                                      <div>{en.label||en.shift}</div>
+                                      <div style={{fontSize:8,opacity:.8}}>{en.net}h netto</div>
+                                      {en.pauseSuggestionStart&&<div style={{fontSize:7,opacity:.6,color:'var(--muted)'}}>☕{en.pauseSuggestionStart}</div>}
+                                    </>):
+                                    (<div style={{fontSize:11,opacity:inm?.4:.1,letterSpacing:1}}>＋</div>)}
                                   </button>
                                 )}
                               </td>
@@ -8275,10 +8596,12 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
             // Analyze each employee's balance
             const balances=planEmps.map(emp=>{
               let planned=0;
-              mdays().forEach(d=>{const e=getEntry(emp.id,iso(d));if(e) planned+=e.net||0;});
+              mdays().forEach(d=>{const e=getEntry(emp.id,iso(d));if(e) planned+=parseFloat(e.net)||parseFloat(e.hours)-0.5||7.5;});
+              const ws=getWorkedStats(emp); // tagesaktuelle Geleistet-Statistik
               const t=calcEmpTarget(emp);
               const diff=Math.round((planned-t.net)*10)/10;
-              return{emp,planned,target:t.net,diff,workDays:t.workDays};
+              const ot=calcOvertime(emp);
+              return{emp,planned,target:t.net,diff,workDays:t.workDays,overtime:ot.overtime,minus:ot.minus};
             });
             const overEmps=balances.filter(b=>b.diff>0.5);
             const underEmps=balances.filter(b=>b.diff<-0.5);
@@ -8395,6 +8718,27 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                             {diff>0?'+':''}{diff}h
                           </span>
                         </div>
+                        {diff>0.5&&(<div style={{fontSize:9,background:'#fef2f2',color:'#dc2626',padding:'2px 6px',borderRadius:4,marginTop:4,fontWeight:700,display:'inline-block'}}>>⏱ +{Math.round(diff*10)/10}h Überstunden</div>)}
+                        {diff<-5&&(<div style={{fontSize:9,background:'#eff6ff',color:'#2563eb',padding:'2px 6px',borderRadius:4,marginTop:4,display:'inline-block'}}>>📋 {Math.round(Math.abs(diff)*10)/10}h offen</div>)}
+                        {(()=>{const ws=getWorkedStats(emp);return(
+                          <div style={{marginTop:6,padding:'6px 8px',background:'var(--surface)',borderRadius:4,
+                            borderTop:'1px solid var(--border)',fontSize:9,color:'var(--muted)'}}>
+                            <div style={{fontWeight:700,color:'var(--text)',marginBottom:3,fontSize:10}}>📊 Tagesaktuell</div>
+                            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'2px 8px'}}>
+                              <span>✅ <b>Geleistet:</b> {ws.workedH}h ({ws.workedDays} Tage)</span>
+                              <span>🎯 <b>Soll bisher:</b> {ws.targetSoFar}h</span>
+                              <span>🔮 <b>Noch geplant:</b> {ws.plannedFuture}h</span>
+                              {ws.remainingH>0
+                                ?<span style={{color:'#dc2626',fontWeight:700}}>❗ <b>Noch offen:</b> {ws.remainingH}h</span>
+                                :<span style={{color:'#16a34a'}}>✔ Monat vollständig geplant</span>}
+                              {ws.otH>0&&<span style={{color:'#d97706',fontWeight:700}}>⏱ <b>Überstunden:</b> +{ws.otH}h</span>}
+                              {ws.minusH>0&&<span style={{color:'#2563eb'}}>📉 <b>Minusstunden:</b> -{ws.minusH}h</span>}
+                              {(ws.satDays>0||ws.sunDays>0||ws.holidayDays>0)&&(
+                                <span>Sa:{ws.satDays}× So:{ws.sunDays}× FT:{ws.holidayDays}×</span>
+                              )}
+                            </div>
+                          </div>
+                        );})()}
                       </div>
                     );
                   })}
@@ -8410,7 +8754,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
           <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
             <thead>
               <tr style={{background:'var(--surface-2)',borderBottom:'2px solid var(--border)'}}>
-                {['Mitarbeiter','Skill','Modell','Arbeitstage','Soll Brutto','Soll Netto','Geplant Brutto','Geplant Netto','Offen','Status'].map(h=>(
+                {['Mitarbeiter','Skill','Modell','Arbeitstage','Soll Brutto','Soll Netto','Geplant Brutto','Geplant Netto','Überstunden','Minus','Offen','Status'].map(h=>(
                   <th key={h} style={{padding:'8px 10px',textAlign:h==='Mitarbeiter'?'left':'center',fontWeight:700,fontSize:11}}>{h}</th>
                 ))}
               </tr>
@@ -8458,6 +8802,12 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                     <td style={{padding:'8px',textAlign:'center',color:'var(--muted)'}}>{sollNetto}h</td>
                     <td style={{padding:'8px',textAlign:'center',fontWeight:700}}>{plannedBrutto}h</td>
                     <td style={{padding:'8px',textAlign:'center',fontWeight:700,color:'var(--blue)'}}>{plannedNetto}h</td>
+                    <td style={{padding:'8px',textAlign:'center',fontWeight:700,color:overtime>0.5?'#dc2626':'var(--muted)'}}>
+                      {overtime>0.5?('+'+overtime+'h'):'—'}
+                    </td>
+                    <td style={{padding:'8px',textAlign:'center',fontWeight:700,color:offen>0.5?'#2563eb':'var(--muted)'}}>
+                      {(offen>0.5)?(offen+'h'):'—'}
+                    </td>
                     <td style={{padding:'8px',textAlign:'center',fontWeight:700,
                       color:offen>0?'#d97706':offen<-0.5?'#dc2626':'#16a34a'}}>
                       {offen>0?'+'+offen+'h':offen+'h'}
@@ -20012,7 +20362,62 @@ function App(){
           {view==='cockpit'&&<Cockpit employees={employees} projects={projects} team={team} plans={plans} forecast={forecast} onAbsence={e=>setAbsenceModal(e)}/>}
           {view==='productivity'&&<ProductivityView employees={employees} projects={projects} setEmployees={setEmployees}/>}
       {view==='performance'&&<PerformanceView employees={employees} projects={projects}/>}
-          {view==='workforce'&&<WorkforcePlanningView employees={employees} projects={projects} showToast={showToast}/>}
+          {view==='workforce'&&(<div>
+          {/* Mitarbeiter-Stunden-Schnellübersicht */}
+          {emp&&(()=>{
+            const now=new Date();
+            const yr=now.getFullYear(),mo=now.getMonth()+1;
+            // Finde passende Plan-Keys in localStorage
+            const planKeys=Object.keys(localStorage).filter(k=>k.startsWith('wfp_plan_')&&k.includes('_'+yr+'_'+String(mo).padStart(2,'0')));
+            let workedH=0,workedDays=0,satDays=0,sunDays=0,plannedFuture=0;
+            const todayStr=now.toISOString().slice(0,10);
+            planKeys.forEach(pk=>{
+              try{
+                const planData=JSON.parse(localStorage.getItem(pk)||'{}');
+                const days=new Date(yr,mo,0).getDate();
+                for(let i=1;i<=days;i++){
+                  const ds=yr+'-'+String(mo).padStart(2,'0')+'-'+String(i).padStart(2,'0');
+                  const entry=planData['s_'+emp.id+'_'+ds];
+                  if(!entry||!entry.shift) continue;
+                  const net=parseFloat(entry.net)||parseFloat(entry.hours)-0.5||7.5;
+                  const d=new Date(ds);
+                  if(ds<todayStr){workedH+=net;workedDays++;if(d.getDay()===6)satDays++;if(d.getDay()===0)sunDays++;}
+                  else plannedFuture+=net;
+                }
+              }catch(e){}
+            });
+            const wkHrs=parseFloat(emp.work_hours||8);
+            const wkly=parseFloat(emp.weekly_hours||wkHrs*5)||wkHrs*5;
+            const target=Math.round(wkly*4.33*10)/10;
+            const otH=Math.max(0,Math.round((workedH-target*0.7)*10)/10);
+            const remainH=Math.max(0,Math.round((target-workedH-plannedFuture)*10)/10);
+            return(
+              <div style={{margin:'8px 16px',padding:'12px 16px',background:'var(--surface-2)',borderRadius:'var(--r)',border:'1px solid var(--border)'}}>
+                <div style={{fontWeight:700,fontSize:12,marginBottom:8}}>📊 {emp.first_name} — Aktueller Monat (Stand heute)</div>
+                <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:8,fontSize:11}}>
+                  <div style={{textAlign:'center',padding:'6px 8px',background:'var(--surface)',borderRadius:4}}>
+                    <div style={{fontSize:18,fontWeight:900,color:'#16a34a'}}>{Math.round(workedH*10)/10}h</div>
+                    <div style={{fontSize:9,color:'var(--muted)'}}>✅ Geleistet ({workedDays}d)</div>
+                  </div>
+                  <div style={{textAlign:'center',padding:'6px 8px',background:'var(--surface)',borderRadius:4}}>
+                    <div style={{fontSize:18,fontWeight:900,color:'#3b82f6'}}>{Math.round(plannedFuture*10)/10}h</div>
+                    <div style={{fontSize:9,color:'var(--muted)'}}>🔮 Noch geplant</div>
+                  </div>
+                  <div style={{textAlign:'center',padding:'6px 8px',background:remainH>0?'#fef2f2':'var(--surface)',borderRadius:4}}>
+                    <div style={{fontSize:18,fontWeight:900,color:remainH>0?'#dc2626':'#16a34a'}}>{remainH>0?remainH+'h':'✔'}</div>
+                    <div style={{fontSize:9,color:'var(--muted)'}}>{remainH>0?'❗ Noch offen':'Vollständig'}</div>
+                  </div>
+                  <div style={{textAlign:'center',padding:'6px 8px',background:otH>0?'#fffbeb':'var(--surface)',borderRadius:4}}>
+                    <div style={{fontSize:18,fontWeight:900,color:otH>0?'#d97706':'var(--muted)'}}>{otH>0?('+'+otH+'h'):'—'}</div>
+                    <div style={{fontSize:9,color:'var(--muted)'}}>⏱ Überstunden</div>
+                  </div>
+                </div>
+                {(satDays>0||sunDays>0)&&<div style={{marginTop:6,fontSize:10,color:'var(--muted)'}}>Sa: {satDays}× · So: {sunDays}× · Monatssoll: ~{target}h</div>}
+              </div>
+            );
+          })()}
+          <WorkforcePlanningView employees={employees} projects={projects} showToast={showToast}/>
+        </div>)}
           {view==='employees'&&<EmployeeList employees={employees} projects={projects} onEdit={e=>setModal(e)} onAdd={()=>setModal('add')} onAbsence={e=>setAbsenceModal(e)} onBonus={e=>setBonusModal(e)} onReferral={e=>setReferralModal(e)} onQuality={e=>setQualityModal(e)} onComm={e=>setCommModal([e])}/>}
           {view==='timetracking'&&(
             <div>
