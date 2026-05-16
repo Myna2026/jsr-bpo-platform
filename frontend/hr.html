@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"><!DOCTYPE html><html lang="de"><head><meta charset<title>[v1778956211] JSR BPO Intelligence Platform</title><script src="https://unpkg.com/react@18/umd/react.development.js"></script><script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script><script src="https://unpkg.com/@babel/standalone/babel.min.js"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script><style>
+<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"><!DOCTYPE html><html lang="de"><head><meta charset<title>[v1778964553] JSR BPO Intelligence Platform</title><script src="https://unpkg.com/react@18/umd/react.development.js"></script><script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script><script src="https://unpkg.com/@babel/standalone/babel.min.js"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script><style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
   --bg:#f4f5f7;--surface:#ffffff;--surface-2:#f9fafb;--card:#ffffff;
@@ -6967,6 +6967,267 @@ function PayrollView({employees, projects, showToast}){
   );
 }
 
+function MeinPlanView({employee, employees, projects}){
+  const today = new Date();
+  const [viewMode, setViewMode] = React.useState('month'); // month | week
+  const [selYear, setSelYear] = React.useState(today.getFullYear());
+  const [selMonth, setSelMonth] = React.useState(today.getMonth()+1);
+  const [selWeek, setSelWeek] = React.useState(()=>{
+    const d=new Date(today);
+    const dow=d.getDay()||7;
+    d.setDate(d.getDate()-(dow-1));
+    return d;
+  });
+
+  const emp = employee;
+  const planKey = `wfp_plan_${emp.project_id}_${emp.project_skill||'all'}_${selYear}_${String(selMonth).padStart(2,'0')}`;
+  const plan = React.useMemo(()=>{
+    try{return JSON.parse(localStorage.getItem(planKey)||'{}');}catch(e){return {};}
+  },[planKey]);
+
+  function iso(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
+  function getEntry(ds){return plan['s_'+emp.id+'_'+ds]||null;}
+  function getAbsence(ds){
+    const abs=(emp.absences||[]);
+    return abs.find(a=>a.start<=ds&&a.end>=ds)||null;
+  }
+  function kwNum(d){
+    const jan4=new Date(d.getFullYear(),0,4);
+    const startOfWeek1=new Date(jan4);
+    startOfWeek1.setDate(jan4.getDate()-(jan4.getDay()||7)+1);
+    return Math.floor((d-startOfWeek1)/(7*864e5))+1;
+  }
+
+  const monthDays = React.useMemo(()=>{
+    const days=[];
+    const d=new Date(selYear,selMonth-1,1);
+    while(d.getMonth()===selMonth-1){days.push(new Date(d));d.setDate(d.getDate()+1);}
+    return days;
+  },[selYear,selMonth]);
+
+  const weekDays = React.useMemo(()=>{
+    const base=new Date(selWeek);
+    const dow=base.getDay()||7;
+    const mon=new Date(base);mon.setDate(base.getDate()-(dow-1));
+    return Array.from({length:7},(_,i)=>{const d=new Date(mon);d.getDate();d.setDate(mon.getDate()+i);return d;});
+  },[selWeek]);
+
+  const days = viewMode==='month' ? monthDays : weekDays;
+
+  // Team: same project+skill
+  const teamEmps = (employees||[]).filter(e=>
+    e.status==='active' && e.project_id===emp.project_id &&
+    (!emp.project_skill||e.project_skill===emp.project_skill)
+  );
+
+  function ShiftCell({ds, e, compact=false}){
+    const ab=getAbsence(ds);
+    const isWE=new Date(ds).getDay()===0||new Date(ds).getDay()===6;
+    const isPast=ds<iso(today);
+    if(ab) return(
+      <div style={{background:'#fef3c7',borderRadius:6,padding:'4px 8px',fontSize:11,color:'#92400e',fontWeight:700}}>
+        {ab.type==='vacation'?'🏖 Urlaub':ab.type==='sick'?'🤒 Krank':'❌ Abwesend'}
+      </div>
+    );
+    if(!e||!e.shift) return(
+      <div style={{color:'var(--muted)',fontSize:11,textAlign:'center'}}>—</div>
+    );
+    const col=e.isSplit?'#7c3aed':'#2563eb';
+    return(
+      <div style={{background:col+'15',border:'1.5px solid '+col,borderRadius:6,padding:'4px 8px'}}>
+        <div style={{fontSize:compact?10:12,fontWeight:700,color:col}}>{e.shift}</div>
+        <div style={{fontSize:9,color:'var(--muted)'}}>{e.net}h netto</div>
+      </div>
+    );
+  }
+
+  const dowLabel=['So','Mo','Di','Mi','Do','Fr','Sa'];
+  const monthLabel=new Date(selYear,selMonth-1,1).toLocaleString('de-AT',{month:'long',year:'numeric'});
+  const weekLabel='KW '+kwNum(selWeek)+' · '+weekDays[0].getDate()+'.'+(weekDays[0].getMonth()+1)+'. – '+weekDays[6].getDate()+'.'+(weekDays[6].getMonth()+1)+'.';
+
+  // Print handler
+  function printPlan(forTeam=false){
+    const html=buildShiftPlanHTML(
+      viewMode==='month'?(forTeam?'month_team':'month_emp'):(forTeam?'week_team':'week_emp'),
+      forTeam?null:emp.id,
+      viewMode==='week'?selWeek:null
+    );
+    const w=window.open('','_blank','width=1100,height=800');
+    w.document.write(html);w.document.close();
+  }
+
+  return(
+    <div style={{padding:24,maxWidth:900,margin:'0 auto'}}>
+      {/* Header */}
+      <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:20,flexWrap:'wrap'}}>
+        <div>
+          <div style={{fontSize:22,fontWeight:800}}>👤 {emp.first_name} {emp.last_name}</div>
+          <div style={{fontSize:12,color:'var(--muted)'}}>{emp.project_skill||''} · {emp.project_id||''}</div>
+        </div>
+        <div style={{marginLeft:'auto',display:'flex',gap:8,flexWrap:'wrap'}}>
+          {['month','week'].map(m=>(
+            <button key={m} className="btn btn-sm"
+              style={{background:viewMode===m?'var(--blue)':'',color:viewMode===m?'#fff':''}}
+              onClick={()=>setViewMode(m)}>
+              {m==='month'?'Monatsplan':'Wochenplan'}
+            </button>
+          ))}
+          <button className="btn btn-sm" style={{background:'#0f172a',color:'#fff'}}
+            onClick={()=>printPlan(false)}>🖨 Mein Plan PDF</button>
+          <button className="btn btn-sm" style={{background:'#1e3a5f',color:'#fff'}}
+            onClick={()=>printPlan(true)}>🖨 Teamplan PDF</button>
+        </div>
+      </div>
+
+      {/* Period selector */}
+      <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:16}}>
+        {viewMode==='month'?(
+          <>
+            <button className="btn btn-sm" onClick={()=>{
+              let m=selMonth-1,y=selYear;
+              if(m<1){m=12;y--;}
+              setSelMonth(m);setSelYear(y);
+            }}>◀</button>
+            <span style={{fontWeight:700,fontSize:14,minWidth:160,textAlign:'center'}}>{monthLabel}</span>
+            <button className="btn btn-sm" onClick={()=>{
+              let m=selMonth+1,y=selYear;
+              if(m>12){m=1;y++;}
+              setSelMonth(m);setSelYear(y);
+            }}>▶</button>
+          </>
+        ):(
+          <>
+            <button className="btn btn-sm" onClick={()=>{
+              const d=new Date(selWeek);d.setDate(d.getDate()-7);setSelWeek(d);
+            }}>◀</button>
+            <span style={{fontWeight:700,fontSize:14,minWidth:220,textAlign:'center'}}>{weekLabel}</span>
+            <button className="btn btn-sm" onClick={()=>{
+              const d=new Date(selWeek);d.setDate(d.getDate()+7);setSelWeek(d);
+            }}>▶</button>
+          </>
+        )}
+      </div>
+
+      {/* ── MEIN SCHICHTPLAN ───────────────────────────────────── */}
+      <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:10,marginBottom:24,overflow:'hidden'}}>
+        <div style={{padding:'10px 16px',background:'#1e3a8a',color:'#fff',fontWeight:700,fontSize:13}}>
+          📋 Mein Schichtplan · {viewMode==='month'?monthLabel:weekLabel}
+        </div>
+        <div style={{padding:16}}>
+          {days.map(d=>{
+            const ds=iso(d);
+            const e=getEntry(ds);
+            const dow=d.getDay();
+            const isWE=dow===0||dow===6;
+            const isToday=ds===iso(today);
+            return(
+              <div key={ds} style={{
+                display:'flex',alignItems:'center',gap:12,
+                padding:'8px 0',
+                borderBottom:'1px solid var(--border)',
+                background:isToday?'#eff6ff':isWE?'var(--surface-2)':'',
+                borderRadius:isToday?6:0,
+                paddingLeft:isToday?8:0,
+              }}>
+                <div style={{width:100,flexShrink:0}}>
+                  <div style={{fontSize:12,fontWeight:isToday?800:600,color:isWE?'var(--muted)':'var(--text)'}}>
+                    {dowLabel[dow]}, {d.getDate()}.{d.getMonth()+1}.
+                  </div>
+                  {isToday&&<div style={{fontSize:9,color:'var(--blue)',fontWeight:700}}>HEUTE</div>}
+                </div>
+                <div style={{flex:1}}>
+                  <ShiftCell ds={ds} e={e}/>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* ── TEAMPLAN ───────────────────────────────────────────── */}
+      <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:10,overflow:'hidden'}}>
+        <div style={{padding:'10px 16px',background:'#065f46',color:'#fff',fontWeight:700,fontSize:13}}>
+          👥 Teamplan · {emp.project_skill||emp.project_id||'Team'} · {viewMode==='month'?monthLabel:weekLabel}
+        </div>
+        <div style={{overflowX:'auto'}}>
+          <table style={{width:'100%',borderCollapse:'collapse',fontSize:11}}>
+            <thead>
+              <tr style={{background:'var(--surface-2)'}}>
+                <th style={{padding:'8px 12px',textAlign:'left',borderBottom:'2px solid var(--border)',position:'sticky',left:0,background:'var(--surface-2)',minWidth:130}}>
+                  Mitarbeiter
+                </th>
+                {days.map(d=>{
+                  const dow=d.getDay();
+                  const isWE=dow===0||dow===6;
+                  const isToday=iso(d)===iso(today);
+                  return(
+                    <th key={iso(d)} style={{
+                      padding:'6px 4px',textAlign:'center',
+                      borderBottom:'2px solid var(--border)',
+                      minWidth:viewMode==='month'?50:90,
+                      background:isToday?'#dbeafe':isWE?'var(--surface-3)':'var(--surface-2)',
+                      fontSize:10,
+                    }}>
+                      <div>{dowLabel[dow]}</div>
+                      <div style={{fontSize:9,color:'var(--muted)'}}>{d.getDate()}.{d.getMonth()+1}.</div>
+                    </th>
+                  );
+                })}
+                <th style={{padding:'6px 8px',textAlign:'center',borderBottom:'2px solid var(--border)',fontSize:10,minWidth:50}}>Ist-h</th>
+              </tr>
+            </thead>
+            <tbody>
+              {teamEmps.map(te=>{
+                const tePlan=(()=>{
+                  try{return JSON.parse(localStorage.getItem('wfp_plan_'+te.project_id+'_'+(te.project_skill||'all')+'_'+selYear+'_'+String(selMonth).padStart(2,'0'))||'{}');}catch(e){return {};}
+                })();
+                let totalH=0;
+                const isMe=te.id===emp.id;
+                return(
+                  <tr key={te.id} style={{background:isMe?'#eff6ff':'',fontWeight:isMe?700:400}}>
+                    <td style={{padding:'6px 12px',borderBottom:'1px solid var(--border)',position:'sticky',left:0,background:isMe?'#dbeafe':'var(--surface)',whiteSpace:'nowrap'}}>
+                      {isMe?'👤 ':''}{te.first_name} {te.last_name}
+                    </td>
+                    {days.map(d=>{
+                      const ds=iso(d);
+                      const e=tePlan['s_'+te.id+'_'+ds];
+                      const ab=(te.absences||[]).find(a=>a.start<=ds&&a.end>=ds);
+                      const isWE=d.getDay()===0||d.getDay()===6;
+                      if(e) totalH+=parseFloat(e.net||0);
+                      return(
+                        <td key={ds} style={{
+                          padding:'4px 2px',borderBottom:'1px solid var(--border)',
+                          textAlign:'center',
+                          background:isWE?'var(--surface-2)':'',
+                        }}>
+                          {ab?(
+                            <span style={{fontSize:9,color:'#92400e'}}>
+                              {ab.type==='vacation'?'🏖':ab.type==='sick'?'🤒':'❌'}
+                            </span>
+                          ):e?(
+                            <div>
+                              <div style={{fontSize:viewMode==='month'?9:10,fontWeight:700,color:e.isSplit?'#7c3aed':'#2563eb'}}>
+                                {viewMode==='month'?e.net+'h':e.shift}
+                              </div>
+                            </div>
+                          ):<span style={{color:'var(--muted)',fontSize:9}}>—</span>}
+                        </td>
+                      );
+                    })}
+                    <td style={{padding:'6px 8px',borderBottom:'1px solid var(--border)',textAlign:'center',fontWeight:700,color:'#2563eb',fontSize:11}}>
+                      {Math.round(totalH*10)/10}h
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function WorkforcePlanningView({employees,projects,showToast}){
 
   const SLOTS=[];
@@ -8310,7 +8571,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
             <span style={{marginLeft:'auto',fontSize:11,fontWeight:700,color:hasFc?'var(--green)':'var(--muted)'}}>
               {hasFc?'✅ FC: '+Object.keys(ifc).length+' Tage':'⚠ Kein FC'}
               {' · '}{planEmps.length} MA{shifts.length?' · '+shifts.length+' Schichten':''}
-              {' · '}<span style={{fontSize:9,color:'var(--muted)',opacity:.6}}>v1778956211</span>
+              {' · '}<span style={{fontSize:9,color:'var(--muted)',opacity:.6}}>v1778964553</span>
             </span>
           </>
         )}
@@ -20118,6 +20379,7 @@ function SuperAdminView({employees, projects, setProjects}){
           access: role?.tabs ? Object.keys(role.tabs).filter(k=>role.tabs[k]) : 'all',
           must_change_pw: found.must_change_pw,
           account_id: found.id,
+          employee_id: found.employee_id||null,
         };
       }
     }catch(e){}
@@ -20590,7 +20852,7 @@ function App(){
   })();
 
   function handleLogin(user){
-    const session={name:user.name,icon:user.icon,access:user.access,ts:Date.now()};
+    const session={name:user.name,icon:user.icon,access:user.access,employee_id:user.employee_id||null,ts:Date.now()};
     sessionStorage.setItem('jsr_team', JSON.stringify(session));
     localStorage.setItem('jsr_session_v1', JSON.stringify(session));
     setLoggedIn(true);
@@ -20887,6 +21149,13 @@ function App(){
     ]},
   ];
 
+  // Employee portal: if logged-in user has linked employee
+  const isEmpUser = !!(team && team.employee_id);
+  const myEmployee = isEmpUser ? (employees||[]).find(e=>e.id===team.employee_id)||null : null;
+  const allNavSections = isEmpUser
+    ? [{sec:'Mein Bereich', items:[{key:'mein-plan',label:'Mein Schichtplan',icon:'📋'}]}, ...navSections]
+    : navSections;
+
   const viewLabels = {cockpit:'Cockpit',productivity:'Produktivität',employees:'Mitarbeiter',timetracking:'Zeiterfassung',orgchart:'Organigramm',skillmatrix:'Skill Matrix',kanban:'Recruiting',onboarding:'Onboarding',cvs:'CVs & Bewerber',test_preview:'Test Vorschau',test_editor:'Test Editor',training_plans:'Schulungsplanung',timeline:'Timeline',knowledge:'Wissensbasis',elearning:'E-Learning',projects:'Projekte',forecast:'Forecast',absences:'Abwesenheiten & Urlaub',profitability:'Wirtschaftlichkeit',payroll:'Lohnbuchhaltung',performance:'Performance & KPIs'};
 
   const active = employees.filter(e=>e.status==='active');
@@ -20912,7 +21181,7 @@ function App(){
           </div>
         </div>
         <div className="nav">
-          {navSections.map(({sec, items}) => (
+          {allNavSections.map(({sec, items}) => (
             <React.Fragment key={sec}>
               <div className="nav-section">{sec}</div>
               {items.filter(n=>hasAccess(n.key)).map(n=>(
@@ -20965,6 +21234,9 @@ function App(){
           {view==='cockpit'&&<Cockpit employees={employees} projects={projects} team={team} plans={plans} forecast={forecast} onAbsence={e=>setAbsenceModal(e)}/>}
           {view==='productivity'&&<ProductivityView employees={employees} projects={projects} setEmployees={setEmployees}/>}
       {view==='performance'&&<PerformanceView employees={employees} projects={projects}/>}
+          {view==='mein-plan'&&isEmpUser&&myEmployee&&(
+            <MeinPlanView employee={myEmployee} employees={employees} projects={projects}/>
+          )}
           {view==='workforce'&&(<div>
           {modal&&typeof modal==='object'&&<EmpHoursWidget emp={modal}/>}
           <WorkforcePlanningView employees={employees} projects={projects} showToast={showToast}/>
