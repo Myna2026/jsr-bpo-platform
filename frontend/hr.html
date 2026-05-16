@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"><!DOCTYPE html><html lang="de"><head><meta charset<title>[v1778878546] JSR BPO Intelligence Platform</title><script src="https://unpkg.com/react@18/umd/react.development.js"></script><script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script><script src="https://unpkg.com/@babel/standalone/babel.min.js"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script><style>
+<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"><!DOCTYPE html><html lang="de"><head><meta charset<title>[v1778919567] JSR BPO Intelligence Platform</title><script src="https://unpkg.com/react@18/umd/react.development.js"></script><script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script><script src="https://unpkg.com/@babel/standalone/babel.min.js"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script><style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
   --bg:#f4f5f7;--surface:#ffffff;--surface-2:#f9fafb;--card:#ffffff;
@@ -6959,6 +6959,35 @@ function WorkforcePlanningView({employees,projects,showToast}){
 
   const today=new Date();
   const [mode,setMode]=useState('schicht');
+
+  // ── PLANUNGS-PROFILE ─────────────────────────────────────────────────────
+  const DEFAULT_PROFILE = {
+    id:'default', name:'Standard', locked:true,
+    fcTolerance:15,        // % FC-Abweichung erlaubt (±)
+    hoursFlexMin:0,        // % weniger Stunden erlaubt (z.B. 20 = 6.4h statt 8h)
+    hoursFlexMax:0,        // % mehr Stunden erlaubt
+    daysFlex:0,            // ±Tage Spielraum wenn Stunden stimmen
+    fairnessWeight:50,     // 0=nur Abdeckung, 100=nur Fairness
+    coverageBuffer:0.25,   // Stunden-Puffer bei Tagesbedarf-Check
+    overShootPenalty:5,    // Score-Strafe für Überschuss
+  };
+  const loadProfiles=()=>{
+    try{
+      const raw=localStorage.getItem('jsr_plan_profiles');
+      const custom=raw?JSON.parse(raw):[];
+      return [DEFAULT_PROFILE,...custom];
+    }catch(e){return [DEFAULT_PROFILE];}
+  };
+  const saveProfiles=(profiles)=>{
+    const custom=profiles.filter(p=>!p.locked);
+    localStorage.setItem('jsr_plan_profiles',JSON.stringify(custom));
+  };
+  const [profiles,setProfiles]=useState(loadProfiles);
+  const [activeProfileId,setActiveProfileId]=useState('default');
+  const [profileModal,setProfileModal]=useState(null); // null|'select_vor'|'select_ki'|'manage'|'edit'
+  const [editingProfile,setEditingProfile]=useState(null);
+  const activeProfile=profiles.find(p=>p.id===activeProfileId)||DEFAULT_PROFILE;
+
   const [projId,setProjId]=useState('');
   const [skill,setSkill]=useState('');
   const [year,setYear]=useState(today.getFullYear());
@@ -7211,6 +7240,13 @@ function WorkforcePlanningView({employees,projects,showToast}){
   }
 
       function autoplan(){
+    const prof=activeProfile;
+    const coverBuf=prof.coverageBuffer||0.25;
+    const fairW=(prof.fairnessWeight||50)/100;
+    const overshootP=prof.overShootPenalty||5;
+    const hFlexMin=1-(prof.hoursFlexMin||0)/100;
+    const hFlexMax=1+(prof.hoursFlexMax||0)/100;
+
     const sh=getShifts();
     if(!sh.length){alert('Bitte Schichten konfigurieren.');return;}
     if(!Object.keys(ifc).length){alert('Bitte FC importieren.');return;}
@@ -7347,7 +7383,7 @@ function WorkforcePlanningView({employees,projects,showToast}){
       });
 
       // PRIORITÄT 4: Tagesbedarf bereits gedeckt → STOP
-      if(coveredH>=targetH-0.25) return;
+      if(coveredH>=targetH-coverBuf) return;
 
       // PRIORITÄT 2: MAs sortieren nach Dringlichkeit
       // Wer am weitesten hinter seinem Monatssoll → kommt zuerst
@@ -7363,7 +7399,7 @@ function WorkforcePlanningView({employees,projects,showToast}){
       // MAs zuweisen bis Tagesbedarf gedeckt
       for(const emp of availMAs){
         // PRIORITÄT 4: Tagesbedarf erreicht → SOFORTIGER STOP
-        if(coveredH>=targetH-0.25) break;
+        if(coveredH>=targetH-coverBuf) break;
 
         const empShifts=validShifts(emp).filter(s=>canWork(emp,ds,s.value));
         if(!empShifts.length) continue;
@@ -7387,7 +7423,7 @@ function WorkforcePlanningView({employees,projects,showToast}){
           const remaining=targetH-coveredH;
           const overShoot=Math.max(0,netH-remaining);
 
-          const score=uncoveredSlots*100000+unmetH*1000+netH*10-overShoot*5;
+          const score=uncoveredSlots*100000*(1-fairW*0.3)+unmetH*1000+netH*10*(1-fairW*0.5)-overShoot*overshootP+fairW*(empTarget[emp.id]-empPlanned[emp.id])*50;
           if(score>bestScore){bestScore=score;bestShift=s;}
         });
 
@@ -7444,7 +7480,7 @@ function WorkforcePlanningView({employees,projects,showToast}){
         if(e) p+=parseFloat(e.net)||parseFloat(e.hours)-0.5||7.5;
       });
       totalDemand+=tgt;totalPlanned+=p;
-      if(p>=tgt-0.5) daysOk++;
+      if(p>=tgt-coverBuf) daysOk++;
       else daysShort++;
       if(p>tgt+0.5) daysOver++;
     });
@@ -7984,7 +8020,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
               onClick={()=>{setPreview(null);setModal('import');}}>
               📥 FC importieren
             </button>
-            {hasFc&&<button className="btn btn-sm btn-primary" onClick={autoplan}>⚡ Vorplanen</button>}
+            {hasFc&&<button className="btn btn-sm btn-primary" onClick={()=>setProfileModal('select_vor')}>⚡ Vorplanen</button>}
             <button className="btn btn-sm" onClick={()=>{
               if(!window.confirm("Alle Schichten ab heute löschen und neu starten?")) return;
               const u={...plan};const ts=iso(today);
@@ -7995,7 +8031,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
             }} style={{fontSize:11,color:"var(--muted)",border:"1px solid var(--border)"}}>
               🔄 Reset Zukunft
             </button>
-            {hasFc&&<button className="btn btn-sm" onClick={runAiPlanning} disabled={aiLoading} style={{background:"#7c3aed",color:"#fff",border:"none",fontWeight:700,opacity:aiLoading?.7:1}}>{aiLoading?"🤖 Berechne...":"🤖 KI-Planung"}</button>}
+            {hasFc&&<button className="btn btn-sm" onClick={()=>setProfileModal('select_ki')} disabled={aiLoading} style={{background:"#7c3aed",color:"#fff",border:"none",fontWeight:700,opacity:aiLoading?.7:1}}>{aiLoading?"🤖 Berechne...":"🤖 KI-Planung"}</button>}
             {selProj&&<button className="btn btn-sm" style={{background:'#0891b2',color:'#fff',border:'none',fontWeight:700}} onClick={()=>{
               // CSV Export: Monatsplanung
               const days=mdays();
@@ -8046,7 +8082,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
             <span style={{marginLeft:'auto',fontSize:11,fontWeight:700,color:hasFc?'var(--green)':'var(--muted)'}}>
               {hasFc?'✅ FC: '+Object.keys(ifc).length+' Tage':'⚠ Kein FC'}
               {' · '}{planEmps.length} MA{shifts.length?' · '+shifts.length+' Schichten':''}
-              {' · '}<span style={{fontSize:9,color:'var(--muted)',opacity:.6}}>v1778878546</span>
+              {' · '}<span style={{fontSize:9,color:'var(--muted)',opacity:.6}}>v1778919567</span>
             </span>
           </>
         )}
@@ -9869,6 +9905,120 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                   </button>
                 ))}
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+
+      {/* ══ PLANUNGS-PROFIL MODAL ══════════════════════════════════════════ */}
+      {(profileModal==='select_vor'||profileModal==='select_ki')&&(
+        <div className="modal-overlay" onClick={()=>setProfileModal(null)}>
+          <div className="modal" style={{width:480,maxHeight:'80vh',overflowY:'auto'}} onClick={e=>e.stopPropagation()}>
+            <div className="modal-header">
+              <span className="modal-title">{profileModal==='select_vor'?'⚡ Vorplanung':'🤖 KI-Planung'} — Profil wählen</span>
+              <button className="btn btn-sm" onClick={()=>setProfileModal(null)}>✕</button>
+            </div>
+            <div className="modal-body" style={{padding:16}}>
+              <div style={{marginBottom:12,fontSize:13,color:'var(--muted)'}}>
+                Wähle ein Profil das die Planungs-Intelligenz steuert. Das Standard-Profil ist immer verfügbar und kann nicht verändert werden.
+              </div>
+              {profiles.map(p=>(
+                <div key={p.id} onClick={()=>setActiveProfileId(p.id)}
+                  style={{padding:'12px 16px',marginBottom:8,borderRadius:8,cursor:'pointer',
+                    border:`2px solid ${activeProfileId===p.id?'var(--blue)':'var(--border)'}`,
+                    background:activeProfileId===p.id?'var(--blue-50, #eff6ff)':'var(--surface-2)'}}>
+                  <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                    <div>
+                      <span style={{fontWeight:700,fontSize:14}}>{p.name}</span>
+                      {p.locked&&<span style={{marginLeft:6,fontSize:10,color:'var(--muted)',background:'var(--surface-3)',padding:'1px 6px',borderRadius:4}}>Standard</span>}
+                    </div>
+                    {!p.locked&&(
+                      <div style={{display:'flex',gap:4}}>
+                        <button className="btn btn-sm" onClick={e=>{e.stopPropagation();setEditingProfile({...p});setProfileModal('edit');}}>✏️</button>
+                        <button className="btn btn-sm" style={{color:'var(--red)'}} onClick={e=>{e.stopPropagation();if(window.confirm('Profil löschen?')){const np=profiles.filter(x=>x.id!==p.id);setProfiles(np);saveProfiles(np);if(activeProfileId===p.id)setActiveProfileId('default');}}}>🗑</button>
+                      </div>
+                    )}
+                  </div>
+                  <div style={{fontSize:11,color:'var(--muted)',marginTop:4,display:'flex',gap:12,flexWrap:'wrap'}}>
+                    <span title="Wie viel % darf die Abdeckung vom FC-Bedarf abweichen">FC-Tol: ±{p.fcTolerance}%</span>
+                    <span title="Um wie viel % darf das System weniger/mehr Stunden einplanen">Std-Flex: -{p.hoursFlexMin}%/+{p.hoursFlexMax}%</span>
+                    <span title="Wie viele Tage mehr/weniger darf ein MA haben wenn Stunden stimmen">Tage±{p.daysFlex}</span>
+                    <span title="0=reine Abdeckung · 100=maximale Gleichverteilung">Fairness: {p.fairnessWeight}%</span>
+                  </div>
+                  {p.locked&&(
+                    <div style={{fontSize:10,color:'var(--muted)',marginTop:6,padding:'6px 8px',background:'var(--surface-3)',borderRadius:4,lineHeight:1.5}}>
+                      ℹ️ <b>Standard-Logik:</b> Deckt den FC-Bedarf so genau wie möglich · Keine Stunden-Flexibilität · Striktes Monatssoll · Gleichgewicht zwischen Abdeckung und Fairness
+                    </div>
+                  )}
+                </div>
+              ))}
+              <button className="btn btn-sm btn-primary" style={{width:'100%',marginTop:8}}
+                onClick={()=>{
+                  setEditingProfile({
+                    id:'prof_'+Date.now(),name:'Neues Profil',locked:false,
+                    fcTolerance:15,hoursFlexMin:0,hoursFlexMax:0,
+                    daysFlex:0,fairnessWeight:50,coverageBuffer:0.25,overShootPenalty:5
+                  });
+                  setProfileModal('edit');
+                }}>+ Neues Profil anlegen</button>
+            </div>
+            <div className="modal-footer" style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
+              <button className="btn btn-sm" onClick={()=>setProfileModal(null)}>Abbrechen</button>
+              <button className="btn btn-sm btn-primary" onClick={()=>{
+                setProfileModal(null);
+                if(profileModal==='select_vor') autoplan();
+                else runAiPlanning();
+              }}>▶ Mit diesem Profil planen</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══ PROFIL BEARBEITEN ════════════════════════════════════════════════ */}
+      {profileModal==='edit'&&editingProfile&&(
+        <div className="modal-overlay" onClick={()=>setProfileModal(null)}>
+          <div className="modal" style={{width:520}} onClick={e=>e.stopPropagation()}>
+            <div className="modal-header">
+              <span className="modal-title">⚙️ Profil {editingProfile.id.startsWith('prof_')?'anlegen':'bearbeiten'}</span>
+              <button className="btn btn-sm" onClick={()=>setProfileModal(null)}>✕</button>
+            </div>
+            <div className="modal-body" style={{padding:20,display:'flex',flexDirection:'column',gap:16}}>
+              <div>
+                <label style={{fontSize:12,fontWeight:600,display:'block',marginBottom:4}}>Profilname</label>
+                <input className="form-control" value={editingProfile.name}
+                  onChange={e=>setEditingProfile(p=>({...p,name:e.target.value}))}
+                  placeholder="z.B. Sommer-Flex, Peak-Modus..."/>
+              </div>
+              {[
+                {key:'fcTolerance',label:'FC-Toleranz ±%',min:0,max:50,step:5,help:'Wie viel % darf die Abdeckung vom FC-Bedarf abweichen'},
+                {key:'hoursFlexMin',label:'Stunden-Flex Minimum -%',min:0,max:50,step:5,help:'Um wie viel % darf das System weniger Stunden einplanen (z.B. 25 = statt 8h nur 6h)'},
+                {key:'hoursFlexMax',label:'Stunden-Flex Maximum +%',min:0,max:30,step:5,help:'Um wie viel % darf das System mehr Stunden einplanen'},
+                {key:'daysFlex',label:'Tage-Flexibilität ±',min:0,max:5,step:1,help:'Wie viele Tage mehr/weniger darf ein MA haben wenn die Stunden stimmen'},
+                {key:'fairnessWeight',label:'Fairness-Gewichtung %',min:0,max:100,step:10,help:'0 = reine Abdeckungs-Optimierung · 100 = maximale Gleichverteilung'},
+                {key:'overShootPenalty',label:'Überdeckungs-Strafe',min:0,max:20,step:1,help:'Wie stark wird Überdeckung bestraft (höher = System plant lieber knapp)'},
+              ].map(({key,label,min,max,step,help})=>(
+                <div key={key}>
+                  <div style={{display:'flex',justifyContent:'space-between',marginBottom:4}}>
+                    <label style={{fontSize:12,fontWeight:600}}>{label}</label>
+                    <span style={{fontSize:13,fontWeight:700,color:'var(--blue)'}}>{editingProfile[key]}</span>
+                  </div>
+                  <input type="range" min={min} max={max} step={step}
+                    value={editingProfile[key]}
+                    onChange={e=>setEditingProfile(p=>({...p,[key]:parseFloat(e.target.value)}))}
+                    style={{width:'100%',accentColor:'var(--blue)'}}/>
+                  <div style={{fontSize:10,color:'var(--muted)',marginTop:2}}>{help}</div>
+                </div>
+              ))}
+            </div>
+            <div className="modal-footer" style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
+              <button className="btn btn-sm" onClick={()=>setProfileModal(null)}>Abbrechen</button>
+              <button className="btn btn-sm btn-primary" onClick={()=>{
+                const np=profiles.filter(p=>p.id!==editingProfile.id).concat(editingProfile);
+                setProfiles(np);saveProfiles(np);
+                setActiveProfileId(editingProfile.id);
+                setProfileModal(null);
+              }}>💾 Speichern</button>
             </div>
           </div>
         </div>
