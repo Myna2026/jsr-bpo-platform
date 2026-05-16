@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"><!DOCTYPE html><html lang="de"><head><meta charset<title>[v1778950285] JSR BPO Intelligence Platform</title><script src="https://unpkg.com/react@18/umd/react.development.js"></script><script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script><script src="https://unpkg.com/@babel/standalone/babel.min.js"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script><style>
+<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"><!DOCTYPE html><html lang="de"><head><meta charset<title>[v1778956211] JSR BPO Intelligence Platform</title><script src="https://unpkg.com/react@18/umd/react.development.js"></script><script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script><script src="https://unpkg.com/@babel/standalone/babel.min.js"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script><style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
   --bg:#f4f5f7;--surface:#ffffff;--surface-2:#f9fafb;--card:#ffffff;
@@ -6258,7 +6258,9 @@ function PayrollView({employees, projects, showToast}){
 
   function calcSalary(emp){
     const r=parseFloat(emp.hourly_rate||0),h=parseFloat(emp.work_hours||8);
-    const base=r>0?Math.round(r*workDays*h*100)/100:0;
+    // Use actual worked days from plan if available, fallback to contract
+    const actualDays=parseFloat(rec.work_days_actual||0)||workDays;
+    const base=r>0?Math.round(r*actualDays*h*100)/100:0;
     const rec=(salaryData[selMonth]||[]).find(x=>x.emp_id===emp.id)||{};
     const rb=parseFloat(rec.referral_bonus||0),tb=parseFloat(rec.target_bonus||0),sb=parseFloat(rec.special_bonus||0);
     // Zuschläge — Monatssoll entscheidet ob Überstunden vorliegen
@@ -6317,6 +6319,26 @@ function PayrollView({employees, projects, showToast}){
     if(!emp.hourly_rate){alert('Kein Stundenlohn im Vertrag für '+emp.first_name+'.');return;}
     const existing=getSlip(emp.id,selMonth);
     if(existing&&isLocked(existing)){alert('Abrechnung bereits überwiesen und gesperrt.');return;}
+    // ── AUTO-SYNC: Stunden aus Workforce-Plan in salaryData übertragen ──
+    const ws=getWorkedStats(emp);
+    const wh=parseFloat(emp.work_hours||8);
+    setSalaryData(prev=>{
+      const md=[...(prev[selMonth]||[])];
+      const idx=md.findIndex(r=>r.emp_id===emp.id);
+      const existing_rec=idx>=0?md[idx]:{emp_id:emp.id,month:selMonth};
+      const synced={
+        ...existing_rec,
+        total_worked_hours: Math.round(ws.workedH*10)/10,
+        work_days_actual:   ws.workedDays,
+        saturday_hours:     Math.round(ws.satDays*wh*10)/10,
+        sunday_hours:       Math.round(ws.sunDays*wh*10)/10,
+        holiday_hours:      Math.round(ws.holidayDays*wh*10)/10,
+        overtime_hours:     Math.max(0,Math.round((ws.workedH-ws.target)*10)/10),
+      };
+      if(idx>=0) md[idx]=synced; else md.push(synced);
+      localStorage.setItem('jsr_payroll_v1',JSON.stringify({...prev,[selMonth]:md}));
+      return{...prev,[selMonth]:md};
+    });
     const s=calcSalary(emp);
     const slip={
       id:'slip_'+emp.id+'_'+selMonth, emp_id:emp.id, month:selMonth,
@@ -7091,15 +7113,20 @@ function WorkforcePlanningView({employees,projects,showToast}){
 
   function slotIdxs(shiftVal){
     if(!shiftVal) return[];
-    const m=shiftVal.match(/(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})/);
-    if(!m) return[];
-    const s=parseInt(m[1])*60+parseInt(m[2]);
-    const e=parseInt(m[3])*60+parseInt(m[4]);
-    return SLOTS.reduce((a,t,i)=>{
-      const[h,mi]=t.split(':').map(Number);
-      if(h*60+mi>=s&&h*60+mi<e) a.push(i);
-      return a;
-    },[]);
+    const result=[];
+    // Handle split format: "HH:MM-HH:MM|HH:MM-HH:MM"
+    const blocks=shiftVal.split('|');
+    blocks.forEach(block=>{
+      const m=block.match(/(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})/);
+      if(!m) return;
+      const s=parseInt(m[1])*60+parseInt(m[2]);
+      const e=parseInt(m[3])*60+parseInt(m[4]);
+      SLOTS.forEach((t,i)=>{
+        const[h,mi]=t.split(':').map(Number);
+        if(h*60+mi>=s&&h*60+mi<e&&!result.includes(i)) result.push(i);
+      });
+    });
+    return result;
   }
 
   function getEntry(eid,ds){return plan['s_'+eid+'_'+ds]||null;}
@@ -7217,6 +7244,7 @@ function WorkforcePlanningView({employees,projects,showToast}){
   // Returns {brutto, net, workDays} based on contract
   function calcEmpTarget(emp){
     const workH=parseFloat(emp.work_hours||8);
+    const HFLAT=Object.values(DEFAULT_HOLIDAYS).flat().map(h=>h.date);
     // Count available work days this month
     const workDays=mdays().filter(d=>{
       const dow=d.getDay();
@@ -7225,6 +7253,12 @@ function WorkforcePlanningView({employees,projects,showToast}){
       if(dow===6&&!canSat) return false;
       if(dow===0&&!canSun) return false;
       if(absent(emp,iso(d))) return false;
+      // Exclude holidays if emp doesn't work holidays
+      if(!(emp.work_holidays===true||emp.work_holidays==='yes')){
+        const loc=(emp.location||emp.city||'').toLowerCase();
+        const locKey=Object.keys(DEFAULT_HOLIDAYS).find(k=>loc.includes(k.toLowerCase()))||Object.keys(DEFAULT_HOLIDAYS)[0];
+        if(locKey&&HFLAT.includes(iso(d))) return false;
+      }
       return true;
     }).length;
     // Contract brutto: monthly_hours > weekly_hours > daily*5*4.33
@@ -7675,15 +7709,8 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
           const cap=Math.round(allWD*(workH-0.5)*10)/10;
           if((netSoFar[empId]||0)+(sh.net||0)>cap+0.25){skipped++;return;}
         }
-        u['s_'+empId+'_'+date]={shift:sh.value,hours:sh.hours,net:sh.net,label:sh.label};
+        setEntry(empId,date,sh);
         netSoFar[empId]=(netSoFar[empId]||0)+(sh.net||0);
-        const sl=slotIdxs(sh.value)||[];
-        if(!sl.length) return;
-        sl.forEach((i,pos)=>{
-          const mid=Math.floor(sl.length/2);
-          const isPause=sl.length>6&&pos===mid&&pos>=4;
-          u['i_'+empId+'_'+date+'_'+i]=isPause?'p':'1';
-        });
         applied++;
       }
     });
@@ -8024,7 +8051,37 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
       </th>`;
     }).join('');
 
-    const rows = emps.map(emp=>{
+    // For individual MA: vertical layout (date as rows) - portrait friendly
+    // For team: horizontal layout (date as columns)
+    const isIndividual = filterEmpId && emps.length === 1;
+
+    const rows = isIndividual ? (() => {
+      // Vertical: one row per day
+      const emp = emps[0];
+      let totalH = 0;
+      const dayRows = days.map(d => {
+        const ds = iso(d);
+        const e = getEntry(emp.id, ds);
+        const ab = absent(emp, ds);
+        const dow = ['So','Mo','Di','Mi','Do','Fr','Sa'][d.getDay()];
+        const isWE = d.getDay()===0||d.getDay()===6;
+        const bg = isWE ? '#f8fafc' : '#fff';
+        const dateStr = dow+', '+d.getDate()+'.'+(d.getMonth()+1)+'.'+d.getFullYear();
+        if(ab){
+          const abLabel = ab.type==='vacation'?'🏖 Urlaub':ab.type==='sick'?'🤒 Krank':'❌ Abwesend';
+          return `<tr style="background:#fef9c3"><td style="padding:8px 12px;border:1px solid #e2e8f0;font-size:12px">${dateStr}</td><td colspan="2" style="padding:8px 12px;border:1px solid #e2e8f0;font-size:12px;color:#92400e;font-weight:700">${abLabel}</td></tr>`;
+        }
+        if(!e||!e.shift) return `<tr style="background:${bg}"><td style="padding:8px 12px;border:1px solid #e2e8f0;font-size:12px;color:#94a3b8">${dateStr}</td><td style="border:1px solid #e2e8f0;color:#94a3b8;text-align:center">—</td><td style="border:1px solid #e2e8f0"></td></tr>`;
+        totalH += parseFloat(e.net)||0;
+        const col = e.isSplit?'#7c3aed':'#1d4ed8';
+        return `<tr style="background:${bg}"><td style="padding:8px 12px;border:1px solid #e2e8f0;font-size:12px;font-weight:600">${dateStr}</td><td style="padding:8px 12px;border:1px solid #e2e8f0;font-size:13px;font-weight:700;color:${col};text-align:center">${e.shift}</td><td style="padding:8px 12px;border:1px solid #e2e8f0;font-size:12px;font-weight:600;text-align:center;color:#64748b">${e.net}h</td></tr>`;
+      }).join('');
+      const tgt = calcEmpTarget(emp).net;
+      const diff = Math.round((totalH-tgt)*10)/10;
+      const diffCol = diff<-1?'#dc2626':diff>1?'#d97706':'#16a34a';
+      const summary = `<tr style="background:#f1f5f9;font-weight:700"><td colspan="2" style="padding:10px 12px;border:1px solid #e2e8f0;font-size:12px">Gesamt · Soll: ${tgt}h</td><td style="padding:10px 12px;border:1px solid #e2e8f0;font-size:13px;text-align:center;color:${diffCol}">${totalH}h</td></tr>`;
+      return dayRows + summary;
+    })() : emps.map(emp=>{
       let totalH=0;
       const cells=days.map(d=>{
         const ds=iso(d);
@@ -8044,13 +8101,11 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
           <div style="font-size:9px;color:#64748b">${e.net}h</div>
         </td>`;
       }).join('');
-
       const tgt=calcEmpTarget(emp).net;
       const diff=Math.round((totalH-tgt)*10)/10;
       const diffCol=diff<-1?'#dc2626':diff>1?'#d97706':'#16a34a';
-
       return `<tr>
-        <td style="padding:6px 8px;font-size:11px;font-weight:700;white-space:nowrap;border:1px solid #e2e8f0;background:#f8fafc;position:sticky;left:0">
+        <td style="padding:6px 8px;font-size:11px;font-weight:700;white-space:nowrap;border:1px solid #e2e8f0;background:#f8fafc">
           ${emp.first_name} ${emp.last_name}
           <div style="font-size:9px;color:#64748b;font-weight:400">${emp.project_skill||''}</div>
         </td>
@@ -8070,7 +8125,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
         @media print{
           body{padding:10px}
           button{display:none!important}
-          @page{size:landscape;margin:10mm}
+          @page{size:portrait;margin:8mm}
         }
         .print-btn{background:#2563eb;color:#fff;border:none;padding:8px 20px;border-radius:6px;
           font-size:13px;font-weight:700;cursor:pointer;margin-bottom:16px}
@@ -8079,17 +8134,28 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
       <button class="print-btn" onclick="window.print()">🖨 PDF / Drucken</button>
       <h1>Schichtplan · ${title}</h1>
       <div class="meta">${periodLabel} · Erstellt: ${new Date().toLocaleDateString('de-AT')}</div>
-      <table>
+      ${isIndividual ? `
+      <table style="width:100%">
+        <thead>
+          <tr style="background:#1e293b;color:#fff">
+            <th style="padding:10px 12px;text-align:left;font-size:13px;width:45%">Datum</th>
+            <th style="padding:10px 12px;text-align:center;font-size:13px;width:35%">Schicht</th>
+            <th style="padding:10px 12px;text-align:center;font-size:13px;width:20%">Netto-h</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>` : `
+      <table style="width:100%;overflow-x:auto">
         <thead>
           <tr>
-            <th style="padding:6px 8px;text-align:left;border:1px solid #e2e8f0;background:#f1f5f9;min-width:140px;position:sticky;left:0">Mitarbeiter</th>
+            <th style="padding:6px 8px;text-align:left;border:1px solid #e2e8f0;background:#f1f5f9;min-width:140px">Mitarbeiter</th>
             <th style="padding:6px 4px;border:1px solid #e2e8f0;background:#f1f5f9;min-width:50px;text-align:center;font-size:10px">Soll-h</th>
             <th style="padding:6px 4px;border:1px solid #e2e8f0;background:#f1f5f9;min-width:50px;text-align:center;font-size:10px">Ist-h</th>
             ${dayHeaders}
           </tr>
         </thead>
         <tbody>${rows}</tbody>
-      </table>
+      </table>`}
     </body></html>`;
   }
 
@@ -8244,7 +8310,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
             <span style={{marginLeft:'auto',fontSize:11,fontWeight:700,color:hasFc?'var(--green)':'var(--muted)'}}>
               {hasFc?'✅ FC: '+Object.keys(ifc).length+' Tage':'⚠ Kein FC'}
               {' · '}{planEmps.length} MA{shifts.length?' · '+shifts.length+' Schichten':''}
-              {' · '}<span style={{fontSize:9,color:'var(--muted)',opacity:.6}}>v1778950285</span>
+              {' · '}<span style={{fontSize:9,color:'var(--muted)',opacity:.6}}>v1778956211</span>
             </span>
           </>
         )}
@@ -8678,11 +8744,46 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                                   const slotUnder=need>0&&cov[si]<need;
                                   return(
                                     <td key={si}
-                                      onClick={()=>{if(inSh){setCellCtx({eid:emp.id,ds:day,si,s});setModal('cell');}}}
+                                      onClick={()=>{
+                                        if(isPastDay||ab) return;
+                                        const firstSi=empSlots.length>0?empSlots[0]:-1;
+                                        const lastSi=empSlots.length>0?empSlots[empSlots.length-1]:-1;
+                                        const isFirst=si===firstSi;
+                                        const isLast=si===lastSi;
+                                        const isAdjacentBefore=si===firstSi-1;
+                                        const isAdjacentAfter=si===lastSi+1;
+                                        if(inSh&&isFirst&&empSlots.length>1){
+                                          // Remove first slot → shift start +30min
+                                          const newStart=(firstSi+1)*30+8*60;
+                                          const ts=String(Math.floor(newStart/60)).padStart(2,'0')+':'+String(newStart%60).padStart(2,'0');
+                                          const oldEnd=en.shift.match(/-(\d{1,2}):(\d{2})$/);
+                                          if(oldEnd){const newShift=ts+'-'+oldEnd[0].slice(1);const hh=(lastSi+1)*30+8*60-newStart;const net=Math.max(0,Math.round((hh/60-0.5)*2)/2);setEntry(emp.id,day,{value:newShift,hours:hh/60,net,label:newShift});}
+                                        } else if(inSh&&isLast&&empSlots.length>1){
+                                          // Remove last slot → shift end -30min
+                                          const newEnd=lastSi*30+8*60;
+                                          const te=String(Math.floor(newEnd/60)).padStart(2,'0')+':'+String(newEnd%60).padStart(2,'0');
+                                          const oldStart=en.shift.match(/^(\d{1,2}):(\d{2})/);
+                                          if(oldStart){const newShift=oldStart[0]+'-'+te;const hh=newEnd-(firstSi*30+8*60);const net=Math.max(0,Math.round((hh/60-0.5)*2)/2);setEntry(emp.id,day,{value:newShift,hours:hh/60,net,label:newShift});}
+                                        } else if(!inSh&&isAdjacentBefore&&en){
+                                          // Add slot before → shift start -30min
+                                          const newStart=si*30+8*60;
+                                          const ts=String(Math.floor(newStart/60)).padStart(2,'0')+':'+String(newStart%60).padStart(2,'0');
+                                          const oldEnd=en.shift.match(/-(\d{1,2}):(\d{2})$/);
+                                          if(oldEnd){const newShift=ts+'-'+oldEnd[0].slice(1);const hh=(lastSi+1)*30+8*60-newStart;const net=Math.max(0,Math.round((hh/60-0.5)*2)/2);setEntry(emp.id,day,{value:newShift,hours:hh/60,net,label:newShift});}
+                                        } else if(!inSh&&isAdjacentAfter&&en){
+                                          // Add slot after → shift end +30min
+                                          const newEnd=(si+1)*30+8*60;
+                                          const te=String(Math.floor(newEnd/60)).padStart(2,'0')+':'+String(newEnd%60).padStart(2,'0');
+                                          const oldStart=en.shift.match(/^(\d{1,2}):(\d{2})/);
+                                          if(oldStart){const newShift=oldStart[0]+'-'+te;const hh=newEnd-(firstSi*30+8*60);const net=Math.max(0,Math.round((hh/60-0.5)*2)/2);setEntry(emp.id,day,{value:newShift,hours:hh/60,net,label:newShift});}
+                                        } else if(inSh&&!isFirst&&!isLast){
+                                          setCellCtx({eid:emp.id,ds:day,si,s});setModal('cell');
+                                        }
+                                      }}
                                       style={{padding:0,textAlign:'center',height:24,
                                         borderLeft:s.endsWith(':00')?'2px solid var(--border)':'1px solid var(--border)',
-                                        cursor:inSh?'pointer':'default',
-                                        background:v==='p'?'#fef3c7':v==='1'?'var(--blue-bg)':inSh?'var(--surface-3)':slotUnder?'#fff1f2':'transparent'}}>
+                                        cursor:(inSh||si===empSlots[0]-1||si===empSlots[empSlots.length-1]+1)?'pointer':'default',
+                                        background:v==='p'?'#fef3c7':v==='1'?'var(--blue-bg)':inSh?'var(--surface-3)':(si===empSlots[0]-1||si===empSlots[empSlots.length-1]+1)?'#dcfce7':'var(--surface-3)':slotUnder?'#fff1f2':'transparent'}}>
                                       {v==='p'&&<span style={{fontSize:8,color:'#92400e',fontWeight:700}}>P</span>}
                                       {v==='1'&&<span style={{fontSize:9,color:'var(--blue)',fontWeight:700}}>●</span>}
                                     </td>
@@ -9893,6 +9994,35 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                     fontWeight:700,fontSize:11}}>
                   ✕ Schicht entfernen
                 </div>
+                {(()=>{
+                  const bEn=getEntry(bEmp&&bEmp.id,blockMenu&&blockMenu.ds);
+                  const canSplit=bEmp&&(bEmp.work_split===true||bEmp.work_split==='yes')&&bEn&&bEn.shift&&!bEn.shift.includes('|');
+                  if(!canSplit) return null;
+                  return(
+                    <div style={{display:'flex',alignItems:'center',gap:6,
+                      padding:'6px 8px',borderRadius:4,cursor:'pointer',marginTop:4,
+                      background:'#f3e8ff',border:'1px solid #a855f7',color:'#7c3aed',
+                      fontWeight:700,fontSize:11}}
+                      onClick={()=>{
+                        const sh=bEn.shift;
+                        const m=sh.match(/(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})/);
+                        if(!m) return;
+                        const startMin=parseInt(m[1])*60+parseInt(m[2]);
+                        const endMin=parseInt(m[3])*60+parseInt(m[4]);
+                        const midMin=Math.ceil((startMin+endMin)/2/30)*30;
+                        const breakEnd=midMin+30;
+                        const fmt=n=>String(Math.floor(n/60)).padStart(2,'0')+':'+String(n%60).padStart(2,'0');
+                        const splitShift=fmt(startMin)+'-'+fmt(midMin)+'|'+fmt(breakEnd)+'-'+fmt(endMin);
+                        const h1=(midMin-startMin)/60;
+                        const h2=(endMin-breakEnd)/60;
+                        const net=Math.round((h1+h2)*10)/10;
+                        setEntry(bEmp.id,blockMenu.ds,{value:splitShift,hours:h1+h2+0.5,net,label:'Split',isSplit:true});
+                        setBlockMenu(null);
+                      }}>
+                      ✂ Als Split-Schicht
+                    </div>
+                  );
+                })()}
               </div>
             </div>
           </div>
