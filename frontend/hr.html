@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"><!DOCTYPE html><html lang="de"><head><meta charset<title>[v1779002799] JSR BPO Intelligence Platform</title><script src="https://unpkg.com/react@18/umd/react.development.js"></script><script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script><script src="https://unpkg.com/@babel/standalone/babel.min.js"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script><style>
+<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"><!DOCTYPE html><html lang="de"><head><meta charset<title>[v1779003877] JSR BPO Intelligence Platform</title><script src="https://unpkg.com/react@18/umd/react.development.js"></script><script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script><script src="https://unpkg.com/@babel/standalone/babel.min.js"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script><style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
   --bg:#f4f5f7;--surface:#ffffff;--surface-2:#f9fafb;--card:#ffffff;
@@ -880,7 +880,7 @@ const PRESET_ROLES = [
   },
 ];
 
-const DEFAULT_POSITIONS = ['Agent','Senior Agent','Team Lead','Supervisor','Trainer','Quality Manager','Recruiter','HR Manager'];
+const DEFAULT_POSITIONS = ['Projektleiter','Teamleiter','Team Lead','Trainer','Quality Manager','Recruiter','HR Manager','Ansprechpartner']; // HR-Rollen — operative Job-Profile sind auf Projekt-Skills definiert
 
 const DEFAULT_HOLIDAYS = {
   Tirana:[
@@ -2652,9 +2652,32 @@ function EmployeeModal({emp, projects, onSave, onClose, initialTab}){
                 </div>
                 <div className="form-group">
                   <label className="form-label">Position / Rolle</label>
-                  <select className="form-select" value={form.position||''} onChange={e=>set('position',e.target.value)}>
-                    {(()=>{try{const ps=JSON.parse(localStorage.getItem('jsr_positions_v1')||'null');return ps?ps.filter(p=>p.active).map(p=><option key={p.id}>{p.name}</option>):null;}catch(e){return null;}})() || ['Agent','Senior Agent','Team Lead','Supervisor','Trainer','QM','Projektleiter'].map(p=><option key={p}>{p}</option>)}
-                  </select>
+                  {(()=>{
+                    // Use skill profiles if available, else system positions
+                    const selSkill=form.project_skill;
+                    const proj=(projects||[]).find(p=>p.id===form.project_id);
+                    const skillObj=proj&&selSkill?(proj.skills||[]).find(s=>s.key===selSkill):null;
+                    const skillProfiles=skillObj&&(skillObj.profiles||[]).length>0?skillObj.profiles:null;
+                    const projProfiles=proj&&(proj.project_profiles||[]).length>0?proj.project_profiles:null;
+                    const sysPosRaw=localStorage.getItem('jsr_positions_v1');
+                    const sysPos=sysPosRaw?JSON.parse(sysPosRaw).filter(p=>p.active):[];
+                    return(
+                      <select className="form-select" value={form.position||''} onChange={e=>set('position',e.target.value)} disabled={isTerminated}>
+                        <option value=''>— Position wählen —</option>
+                        {skillProfiles&&<optgroup label={'Skill: '+selSkill}>
+                          {skillProfiles.map((p,i)=><option key={i} value={p}>{p}</option>)}
+                        </optgroup>}
+                        {projProfiles&&<optgroup label="Projekt-übergreifend">
+                          {projProfiles.map((p,i)=><option key={'pp'+i} value={p}>{p}</option>)}
+                        </optgroup>}
+                        {!skillProfiles&&!projProfiles&&(
+                          sysPos.length>0?sysPos.map(p=><option key={p.id} value={p.name}>{p.name}</option>):(
+                            ['Agent','Senior Agent','Teamleiter','Trainer','QM','Projektleiter'].map(p=><option key={p} value={p}>{p}</option>)
+                          )
+                        )}
+                      </select>
+                    );
+                  })()}
                 </div>
               </div>
 
@@ -6021,49 +6044,91 @@ function OrgChart({projects, employees, orgCharts, setOrgCharts}){
   function autoBuild(){
     if(!proj) return;
     const skills = proj.skills||[];
-    const byRole = (roles) => projEmployees.filter(e=>roles.includes(e.position));
-    const leaders = byRole(['Projektleiter','Teamleiter','Team Lead']);
-    const trainers = byRole(['Trainer']);
-    const qms     = byRole(['QM']);
-    const agents  = projEmployees.filter(e=>!['Projektleiter','Teamleiter','Team Lead','Trainer','QM','Ansprechpartner'].includes(e.position));
 
+    // Project-level roles: no project_skill or position matches project_profiles
+    const projProfiles = proj.project_profiles||['Projektleiter'];
+    const projLeaders = projEmployees.filter(e=>
+      projProfiles.includes(e.position) || (!e.project_skill && e.position==='Projektleiter')
+    );
+
+    // Root node = project + Projektleiter
     const rootId = 'root_'+selProj;
     const nodes = [{
       id:rootId, title:proj.name, subtitle:'Projektleitung',
-      color:'#1d4ed8', employees:leaders.map(e=>e.id), children:[],
+      color:'#1d4ed8', employees:projLeaders.map(e=>e.id), children:[],
     }];
 
+    const assignedIds = new Set(projLeaders.map(e=>e.id));
+
+    // Per-skill nodes
     skills.forEach((sk, si)=>{
       const skillId = 'skill_'+sk.key+'_'+selProj;
-      const skillAgents = agents.filter(e=>e.project_skill===sk.key);
-      const tl = projEmployees.find(e=>e.project_skill===sk.key&&['Teamleiter','Team Lead'].includes(e.position));
-      const allEmps = tl ? [tl.id, ...skillAgents.map(e=>e.id)] : skillAgents.map(e=>e.id);
-      nodes.push({
+      const skProfiles = sk.profiles||[];
+
+      // Team Lead for this skill (first profile with 'Team Lead' or 'Teamleiter')
+      const tlProfiles = skProfiles.filter(p=>p.includes('Team Lead')||p.includes('Teamleiter'));
+      const teamLeads = projEmployees.filter(e=>
+        e.project_skill===sk.key && tlProfiles.includes(e.position) && !assignedIds.has(e.id)
+      );
+
+      // Trainer for this skill
+      const trainerProfiles = skProfiles.filter(p=>p.includes('Trainer'));
+      const trainers = projEmployees.filter(e=>
+        e.project_skill===sk.key && trainerProfiles.includes(e.position) && !assignedIds.has(e.id)
+      );
+
+      // QM for this skill
+      const qmProfiles = skProfiles.filter(p=>p.includes('QM'));
+      const qms = projEmployees.filter(e=>
+        e.project_skill===sk.key && qmProfiles.includes(e.position) && !assignedIds.has(e.id)
+      );
+
+      // Agents: all others in this skill
+      const specialIds = new Set([
+        ...teamLeads.map(e=>e.id),
+        ...trainers.map(e=>e.id),
+        ...qms.map(e=>e.id),
+      ]);
+      const agents = projEmployees.filter(e=>
+        e.project_skill===sk.key && !assignedIds.has(e.id) && !specialIds.has(e.id)
+      );
+
+      // Skill node employees: Team Lead first, then agents
+      const skillEmps = [...teamLeads, ...agents].map(e=>e.id);
+      teamLeads.forEach(e=>assignedIds.add(e.id));
+      trainers.forEach(e=>assignedIds.add(e.id));
+      qms.forEach(e=>assignedIds.add(e.id));
+      agents.forEach(e=>assignedIds.add(e.id));
+
+      const skillNode = {
         id:skillId, title:sk.label, subtitle:sk.key.toUpperCase(),
         color:NODE_PALETTE[(si+1)%NODE_PALETTE.length],
-        employees:allEmps, children:[],
-      });
+        employees:skillEmps, children:[],
+      };
+      nodes.push(skillNode);
       nodes[0].children.push(skillId);
+
+      // Trainer node per skill (beside Team Lead)
+      if(trainers.length){
+        const tId='trainer_'+sk.key+'_'+selProj;
+        nodes.push({id:tId,title:sk.label+' Training',subtitle:'TRAINER',
+          color:'#059669',employees:trainers.map(e=>e.id),children:[]});
+        nodes[0].children.push(tId);
+      }
+
+      // QM node per skill (beside Team Lead)
+      if(qms.length){
+        const qId='qm_'+sk.key+'_'+selProj;
+        nodes.push({id:qId,title:sk.label+' QM',subtitle:'QUALITY',
+          color:'#d97706',employees:qms.map(e=>e.id),children:[]});
+        nodes[0].children.push(qId);
+      }
     });
 
-    // Agents with no primary_skill go under first skill or root
-    const assignedIds = new Set(nodes.flatMap(n=>n.employees));
-    const unmatched = agents.filter(e=>!assignedIds.has(e.id));
-    if(unmatched.length && nodes.length>1){
-      nodes[1].employees = [...nodes[1].employees, ...unmatched.map(e=>e.id)];
-    } else if(unmatched.length){
+    // Unassigned employees → under root
+    const unmatched = projEmployees.filter(e=>!assignedIds.has(e.id));
+    if(unmatched.length){
       nodes[0].employees = [...nodes[0].employees, ...unmatched.map(e=>e.id)];
-    }
-
-    if(trainers.length){
-      const tId='trainer_'+selProj;
-      nodes.push({id:tId,title:'Training',subtitle:'TRAINER',color:'#059669',employees:trainers.map(e=>e.id),children:[]});
-      nodes[0].children.push(tId);
-    }
-    if(qms.length){
-      const qId='qm_'+selProj;
-      nodes.push({id:qId,title:'Quality',subtitle:'QM',color:'#d97706',employees:qms.map(e=>e.id),children:[]});
-      nodes[0].children.push(qId);
     }
 
     setOrgCharts(prev=>({...prev,[selProj]:{id:selProj,nodes,rootId,auto_built:new Date().toISOString().slice(0,10)}}));
@@ -8762,7 +8827,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
             <span style={{marginLeft:'auto',fontSize:11,fontWeight:700,color:hasFc?'var(--green)':'var(--muted)'}}>
               {hasFc?'✅ FC: '+Object.keys(ifc).length+' Tage':'⚠ Kein FC'}
               {' · '}{planEmps.length} MA{shifts.length?' · '+shifts.length+' Schichten':''}
-              {' · '}<span style={{fontSize:9,color:'var(--muted)',opacity:.6}}>v1779002799</span>
+              {' · '}<span style={{fontSize:9,color:'var(--muted)',opacity:.6}}>v1779003877</span>
             </span>
           </>
         )}
@@ -20165,6 +20230,48 @@ function ProjectEditModal({project, onSave, onClose}){
 
           {section==='skills'&&(
             <div>
+              {/* Project-level profiles */}
+              <div style={{marginBottom:16,padding:'10px 14px',background:'var(--surface-2)',borderRadius:8,border:'1px solid var(--border)'}}>
+                <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',marginBottom:8,textTransform:'uppercase'}}>
+                  Projekt-übergreifende Rollen (ohne Skill-Zuordnung)
+                </div>
+                <div style={{fontSize:11,color:'var(--muted)',marginBottom:8}}>
+                  z.B. Projektleiter — steht über allen Skills
+                </div>
+                <div style={{display:'flex',flexWrap:'wrap',gap:4,marginBottom:6}}>
+                  {(form.project_profiles||['Projektleiter']).map((p,pi)=>(
+                    <span key={pi} style={{display:'inline-flex',alignItems:'center',gap:3,
+                      background:'#1d4ed820',border:'1px solid #1d4ed8',
+                      borderRadius:20,padding:'2px 10px',fontSize:11,fontWeight:600,color:'#1d4ed8'}}>
+                      {p}
+                      <button type="button"
+                        onClick={()=>setF('project_profiles',(form.project_profiles||[]).filter((_,k)=>k!==pi))}
+                        style={{border:'none',background:'none',cursor:'pointer',color:'#dc2626',fontWeight:800,padding:'0 0 0 2px'}}>×</button>
+                    </span>
+                  ))}
+                </div>
+                <div style={{display:'flex',gap:6}}>
+                  <input id="proj_prof_input" className="form-input" style={{flex:1,fontSize:11,padding:'3px 8px'}}
+                    placeholder="z.B. Projektleiter — Enter zum Hinzufügen"
+                    onKeyDown={e=>{
+                      if(e.key==='Enter'&&e.target.value.trim()){
+                        e.preventDefault();
+                        const val=e.target.value.trim();
+                        setF('project_profiles',[...(form.project_profiles||[]),val]);
+                        e.target.value='';
+                      }
+                    }}/>
+                  <button type="button" className="btn btn-sm" style={{background:'#1d4ed8',color:'white'}}
+                    onClick={e=>{
+                      const inp=document.getElementById('proj_prof_input');
+                      if(inp&&inp.value.trim()){
+                        setF('project_profiles',[...(form.project_profiles||[]),inp.value.trim()]);
+                        inp.value='';
+                      }
+                    }}>+ Rolle</button>
+                </div>
+              </div>
+
               <div style={{fontSize:12,color:'var(--muted)',marginBottom:14,lineHeight:1.6}}>
                 Skills definieren welche Tätigkeiten in diesem Projekt verfügbar sind und zu welchem Stundensatz sie abgerechnet werden.
                 Mitarbeiter werden einem Skill zugewiesen. Der Stundensatz gilt für die Abrechnung gegenüber dem Kunden.
@@ -20193,8 +20300,52 @@ function ProjectEditModal({project, onSave, onClose}){
                   <button type="button" className="btn btn-sm" style={{color:'var(--red)',alignSelf:'flex-end',marginBottom:1}}
                     onClick={()=>setF('skills',(form.skills||[]).filter((_,j)=>j!==i))}>×</button>
                 </div>
+                </div>
+                {/* Job-Profile für diesen Skill */}
+                <div style={{marginLeft:0,marginTop:8,padding:'8px 12px',
+                  background:'var(--surface-2)',borderRadius:6,border:'1px dashed var(--border)'}}>
+                  <div style={{fontSize:10,fontWeight:700,color:'var(--muted)',marginBottom:6}}>
+                    JOB-PROFILE für {skill.label||'diesen Skill'}
+                  </div>
+                  <div style={{display:'flex',flexWrap:'wrap',gap:4,marginBottom:6,minHeight:24}}>
+                    {(skill.profiles||[]).length===0&&(
+                      <span style={{fontSize:10,color:'var(--muted)'}}>Noch keine Profile — per Enter oder + hinzufügen</span>
+                    )}
+                    {(skill.profiles||[]).map((p,pi)=>(
+                      <span key={pi} style={{display:'inline-flex',alignItems:'center',gap:3,
+                        background:'var(--surface)',border:'1px solid var(--border)',
+                        borderRadius:20,padding:'2px 10px',fontSize:11,fontWeight:600}}>
+                        {p}
+                        <button type="button"
+                          onClick={()=>setF('skills',(form.skills||[]).map((s,j)=>j===i?{...s,profiles:(s.profiles||[]).filter((_,k)=>k!==pi)}:s))}
+                          style={{border:'none',background:'none',cursor:'pointer',color:'var(--red)',fontWeight:800,padding:'0 0 0 2px',fontSize:12}}>×</button>
+                      </span>
+                    ))}
+                  </div>
+                  <div style={{display:'flex',gap:6}}>
+                    <input id={'prof_input_'+i} className="form-input" style={{flex:1,fontSize:11,padding:'3px 8px'}}
+                      placeholder="z.B. Sales Agent — Enter zum Hinzufügen"
+                      onKeyDown={e=>{
+                        if(e.key==='Enter'&&e.target.value.trim()){
+                          e.preventDefault();
+                          const val=e.target.value.trim();
+                          setF('skills',(form.skills||[]).map((s,j)=>j===i?{...s,profiles:[...(s.profiles||[]),val]}:s));
+                          e.target.value='';
+                        }
+                      }}/>
+                    <button type="button" className="btn btn-sm"
+                      style={{background:'var(--blue)',color:'white',whiteSpace:'nowrap'}}
+                      onClick={e=>{
+                        const inp=document.getElementById('prof_input_'+i);
+                        if(inp&&inp.value.trim()){
+                          const val=inp.value.trim();
+                          setF('skills',(form.skills||[]).map((s,j)=>j===i?{...s,profiles:[...(s.profiles||[]),val]}:s));
+                          inp.value='';
+                        }
+                      }}>+ Profil</button>
+                  </div>
+                </div>
               ))}
-              {/* Add skill button */}
               <button type="button" className="btn btn-sm" style={{background:'var(--blue)',color:'white',border:'none',marginTop:4}}
                 onClick={()=>setF('skills',[...(form.skills||[]),{key:'skill_'+(form.skills||[]).length,label:'',rate:0,rate_training:0}])}>
                 + Skill hinzufügen
@@ -21090,7 +21241,7 @@ function App(){
 
   useEffect(()=>{
     if(!localStorage.getItem('jsr_projects_v1')||JSON.parse(localStorage.getItem('jsr_projects_v1')||'[]').length===0){
-      localStorage.setItem('jsr_projects_v1',JSON.stringify([{id:'proj_hc',name:'Holidaycheck Support',status:'active',location:'al',skills:[{key:'support',label:'Support',rate:28,rate_training:18},{key:'sales',label:'Sales',rate:32,rate_training:20}]}]));
+      localStorage.setItem('jsr_projects_v1',JSON.stringify([{id:'proj_hc',name:'Holidaycheck Support',status:'active',location:'al',project_profiles:['Projektleiter'],skills:[{key:'support',label:'Support',rate:28,rate_training:18,profiles:['Support Agent','Senior Support Agent','Team Lead Support','Support Trainer','Support QM']},{key:'sales',label:'Sales',rate:32,rate_training:20,profiles:['Sales Agent','Senior Sales Agent','Team Lead Sales','Sales Trainer','Sales QM']}]}]));
     }
     if(!localStorage.getItem('jsr_kpi_cfg_v1')){
       localStorage.setItem('jsr_kpi_cfg_v1',JSON.stringify([
