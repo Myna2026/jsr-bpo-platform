@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"><!DOCTYPE html><html lang="de"><head><meta charset<title>[v1779001660] JSR BPO Intelligence Platform</title><script src="https://unpkg.com/react@18/umd/react.development.js"></script><script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script><script src="https://unpkg.com/@babel/standalone/babel.min.js"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script><style>
+<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"><!DOCTYPE html><html lang="de"><head><meta charset<title>[v1779002250] JSR BPO Intelligence Platform</title><script src="https://unpkg.com/react@18/umd/react.development.js"></script><script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script><script src="https://unpkg.com/@babel/standalone/babel.min.js"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script><style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
   --bg:#f4f5f7;--surface:#ffffff;--surface-2:#f9fafb;--card:#ffffff;
@@ -2425,7 +2425,105 @@ function TerminateModal({emp, onConfirm, onClose}){
 }
 
 // ── Productivity View ─────────────────────────────────────
-</script><script type="text/babel">function EmployeeModal({emp, projects, onSave, onClose, initialTab}){
+</script><script type="text/babel">
+function StundenkontoTab({emp}){
+  const today=new Date();
+  const months=[];
+  for(let i=0;i<12;i++){
+    const d=new Date(today.getFullYear(),today.getMonth()-i,1);
+    months.push({year:d.getFullYear(),month:d.getMonth()+1,
+      label:d.toLocaleString('de-AT',{month:'long',year:'numeric'})});
+  }
+  const [selIdx,setSelIdx]=React.useState(0);
+  const sel=months[selIdx];
+  const [stats,setStats]=React.useState(null);
+  React.useEffect(()=>{
+    if(!emp||!emp.id||!emp.project_id){setStats(null);return;}
+    const pad=n=>String(n).padStart(2,'0');
+    const planKey='wfp_plan_'+emp.project_id+'_'+(emp.project_skill||'all')+'_'+sel.year+'_'+pad(sel.month);
+    let monthPlan={};
+    try{monthPlan=JSON.parse(localStorage.getItem(planKey)||'{}');}catch(e){}
+    const todayIso=today.toISOString().slice(0,10);
+    const isCurrentMonth=(sel.year===today.getFullYear()&&sel.month===today.getMonth()+1);
+    const days=[];const d=new Date(sel.year,sel.month-1,1);
+    while(d.getMonth()===sel.month-1){days.push(new Date(d));d.setDate(d.getDate()+1);}
+    const DEFAULT_H=Object.values(DEFAULT_HOLIDAYS||{}).flat().map(h=>h.date);
+    let workedH=0,workedDays=0,satDays=0,sunDays=0,plannedFuture=0;
+    const workH=parseFloat(emp.work_hours||8);
+    const canSat=emp.work_saturday===true||emp.work_saturday==='yes';
+    const canSun=emp.work_sunday===true||emp.work_sunday==='yes';
+    days.forEach(d=>{
+      const ds=d.toISOString().slice(0,10);
+      const e=monthPlan['s_'+emp.id+'_'+ds];
+      if(!e||!e.shift)return;
+      const net=parseFloat(e.net)||0;
+      if(ds<todayIso){workedH+=net;workedDays++;if(d.getDay()===6)satDays++;if(d.getDay()===0)sunDays++;}
+      else plannedFuture+=net;
+    });
+    const workDays=days.filter(d=>{
+      const ds=d.toISOString().slice(0,10);const dow=d.getDay();
+      if(dow===6&&!canSat)return false;if(dow===0&&!canSun)return false;
+      const ab=(emp.absences||[]).find(a=>a.start<=ds&&a.end>=ds);if(ab)return false;
+      if(!(emp.work_holidays===true||emp.work_holidays==='yes')&&DEFAULT_H.includes(ds))return false;
+      return true;
+    }).length;
+    const target=Math.round(workDays*workH*10)/10;
+    const passedDays=isCurrentMonth?days.filter(d=>{
+      const ds=d.toISOString().slice(0,10);if(ds>=todayIso)return false;
+      const dow=d.getDay();if(dow===6&&!canSat)return false;if(dow===0&&!canSun)return false;
+      if(!(emp.work_holidays===true||emp.work_holidays==='yes')&&DEFAULT_H.includes(ds))return false;
+      return true;
+    }).length:workDays;
+    const targetSoFar=Math.round(target*(passedDays/Math.max(workDays,1))*10)/10;
+    const otH=Math.max(0,Math.round((workedH-targetSoFar)*10)/10);
+    const minusH=Math.max(0,Math.round((targetSoFar-workedH)*10)/10);
+    const remainingH=isCurrentMonth?Math.max(0,Math.round((target-workedH-plannedFuture)*10)/10):0;
+    setStats({workedH:Math.round(workedH*10)/10,workedDays,satDays,sunDays,
+      target,targetSoFar,otH,minusH,plannedFuture:Math.round(plannedFuture*10)/10,
+      remainingH,isCurrentMonth,workDays});
+  },[emp&&emp.id,sel.year,sel.month]);
+  const card=(label,value,sub,col)=>(
+    <div style={{background:'var(--surface-2)',borderRadius:8,padding:'12px 16px',flex:1,minWidth:110}}>
+      <div style={{fontSize:10,color:'var(--muted)',marginBottom:4}}>{label}</div>
+      <div style={{fontSize:22,fontWeight:800,color:col||'var(--fg)'}}>{value}</div>
+      {sub&&<div style={{fontSize:9,color:'var(--muted)',marginTop:2}}>{sub}</div>}
+    </div>
+  );
+  return(
+    <div style={{padding:16}}>
+      <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:16}}>
+        <span style={{fontWeight:700,fontSize:13}}>⏱ Stundenkonto</span>
+        <select value={selIdx} onChange={e=>setSelIdx(Number(e.target.value))}
+          style={{marginLeft:'auto',padding:'4px 8px',borderRadius:6,border:'1px solid var(--border)',fontSize:12}}>
+          {months.map((m,i)=>(
+            <option key={i} value={i}>{m.label}{i===0?' (aktuell)':''}</option>
+          ))}
+        </select>
+      </div>
+      {!stats&&<div style={{color:'var(--muted)',fontSize:12,padding:8}}>Keine Planungsdaten gefunden.</div>}
+      {stats&&(
+        <>
+          <div style={{display:'flex',gap:10,flexWrap:'wrap',marginBottom:16}}>
+            {card('Geleistet',stats.workedH+'h',stats.workedDays+' Tage','var(--blue)')}
+            {card('Soll anteilig',stats.targetSoFar+'h','Ziel: '+stats.target+'h')}
+            {stats.otH>0&&card('Überstunden','+'+stats.otH+'h','aufgebaut','#16a34a')}
+            {stats.minusH>0&&card('Minus','-'+stats.minusH+'h','Rückstand','#dc2626')}
+            {stats.isCurrentMonth&&stats.plannedFuture>0&&card('Geplant',stats.plannedFuture+'h','noch geplant','#7c3aed')}
+            {stats.isCurrentMonth&&stats.remainingH>0&&card('Offen',stats.remainingH+'h','ungeplant','#f59e0b')}
+          </div>
+          <div style={{fontSize:11,color:'var(--muted)',padding:'8px 12px',background:'var(--surface-2)',borderRadius:6}}>
+            {stats.isCurrentMonth
+              ?<span>Aktueller Stand · Soll anteilig: <b>{stats.targetSoFar}h</b> · {stats.otH>0?<b style={{color:'#16a34a'}}>+{stats.otH}h Überstunden</b>:stats.minusH>0?<b style={{color:'#dc2626'}}>−{stats.minusH}h Rückstand</b>:<b style={{color:'#16a34a'}}>Im Soll</b>}</span>
+              :<span>Abgeschlossen · Soll: <b>{stats.target}h</b> · Geleistet: <b>{stats.workedH}h</b> · {stats.otH>0?<b style={{color:'#16a34a'}}>+{stats.otH}h Überstunden</b>:stats.minusH>0?<b style={{color:'#dc2626'}}>−{stats.minusH}h Rückstand</b>:<b style={{color:'#16a34a'}}>Soll erfüllt</b>}</span>
+            }
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function EmployeeModal({emp, projects, onSave, onClose, initialTab}){
   const [form, setForm] = useState(emp||{
     first_name:'',last_name:'',staff_number:'',email:'',phone:'',
     city:'',location:'Tirana',position:'Agent',
@@ -2460,6 +2558,7 @@ function TerminateModal({emp, onConfirm, onClose}){
     {id:'bank',      label:'Bank',      icon:'🏦'},
     {id:'hr',        label:'HR',        icon:'📋'},
     {id:'hardware',   label:'Hardware',  icon:'🖥'},
+    {id:'stunden',    label:'Stunden',   icon:'⏱'},
   ];
 
   return(
@@ -3291,6 +3390,9 @@ function TerminateModal({emp, onConfirm, onClose}){
               })()}
             </div>
           )}
+          {tab==='stunden'&&(
+            <StundenkontoTab emp={form} />
+          )}
 
         <div className="modal-footer">
           <button className="btn" onClick={onClose}>Schließen</button>
@@ -3923,7 +4025,8 @@ function qualityColor(q){
   return 'var(--green)';
 }
 
-// ── Bonus Modal ────────────────────────────────────────────</script><script type="text/babel">function TrainingPlanModal({plan, projects, employees, onSave, onClose}){
+// ── Bonus Modal ────────────────────────────────────────────
+</script><script type="text/babel">function TrainingPlanModal({plan, projects, employees, onSave, onClose}){
   const [form, setForm]=useState(plan||{project_id:'p1',name:'',start_date:'',end_date:'',planned_count:8,mode:'Hybrid',skill_focus:'',confirmed_ids:[],notes:''});
   const set=(k,v)=>setForm(f=>({...f,[k]:v}));
   const toggleConf=id=>set('confirmed_ids',form.confirmed_ids.includes(id)?form.confirmed_ids.filter(x=>x!==id):[...form.confirmed_ids,id]);
@@ -7144,6 +7247,16 @@ function MeinPlanView({employee, employees, projects}){
         </div>
       </div>
 
+      {/* ── STUNDENKONTO ────────────────────────────────────────── */}
+      <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:10,marginBottom:24,overflow:'hidden'}}>
+        <div style={{padding:'10px 16px',background:'#1e293b',color:'#fff',fontWeight:700,fontSize:13}}>
+          ⏱ Stundenkonto
+        </div>
+        <div style={{padding:16}}>
+          <StundenkontoTab emp={employee}/>
+        </div>
+      </div>
+
       {/* ── TEAMPLAN ───────────────────────────────────────────── */}
       <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:10,overflow:'hidden'}}>
         <div style={{padding:'10px 16px',background:'#065f46',color:'#fff',fontWeight:700,fontSize:13}}>
@@ -8070,6 +8183,84 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
       otH,minusH,target,targetSoFar,remainingH,plannedFuture:Math.round(plannedFuture*10)/10};
   }
 
+  // Stundenkonto für beliebigen Monat (liest direkt aus localStorage)
+  function getWorkedStatsForMonth(emp, yr, mo){
+    const pad=n=>String(n).padStart(2,'0');
+    const monthStr=yr+'-'+pad(mo);
+    const todayIso=iso(today);
+    const isCurrentMonth=(yr===today.getFullYear()&&mo===today.getMonth()+1);
+    
+    // Load plan for this month from localStorage
+    const planKey='wfp_plan_'+emp.project_id+'_'+(emp.project_skill||'all')+'_'+yr+'_'+pad(mo);
+    let monthPlan={};
+    try{monthPlan=JSON.parse(localStorage.getItem(planKey)||'{}');}catch(e){}
+    
+    // Get all days of month
+    const days=[];
+    const d=new Date(yr,mo-1,1);
+    while(d.getMonth()===mo-1){days.push(new Date(d));d.setDate(d.getDate()+1);}
+    
+    const HFLAT=Object.values(DEFAULT_HOLIDAYS).flat().map(h=>h.date);
+    const loc=(emp.location||emp.city||'').toLowerCase();
+    const locKey=Object.keys(DEFAULT_HOLIDAYS).find(k=>loc.includes(k.toLowerCase()))||Object.keys(DEFAULT_HOLIDAYS)[0];
+    
+    let workedH=0,workedDays=0,satDays=0,sunDays=0,holidayDays=0,plannedFuture=0;
+    
+    days.forEach(d=>{
+      const ds=iso(d);
+      const e=monthPlan['s_'+emp.id+'_'+ds];
+      if(!e||!e.shift) return;
+      const net=parseFloat(e.net)||0;
+      const isPast=ds<todayIso;
+      const isFuture=ds>=todayIso;
+      if(isPast){
+        workedH+=net; workedDays++;
+        const dow=d.getDay();
+        if(dow===6) satDays++;
+        if(dow===0) sunDays++;
+        if(HFLAT.includes(ds)) holidayDays++;
+      } else if(isFuture){
+        plannedFuture+=net;
+      }
+    });
+    
+    // Target for this month
+    const canSat=emp.work_saturday===true||emp.work_saturday==='yes';
+    const canSun=emp.work_sunday===true||emp.work_sunday==='yes';
+    const workH=parseFloat(emp.work_hours||8);
+    const workDaysInMonth=days.filter(d=>{
+      const dow=d.getDay();
+      if(dow===6&&!canSat) return false;
+      if(dow===0&&!canSun) return false;
+      const ab=(emp.absences||[]).find(a=>a.start<=iso(d)&&a.end>=iso(d));
+      if(ab) return false;
+      const noHoliday=!(emp.work_holidays===true||emp.work_holidays==='yes');
+      if(noHoliday&&HFLAT.includes(iso(d))) return false;
+      return true;
+    }).length;
+    const target=Math.round(workDaysInMonth*workH*10)/10;
+    
+    // For current month: prorated target
+    const passedDays=isCurrentMonth?days.filter(d=>{
+      const ds=iso(d);if(ds>=todayIso)return false;
+      const dow=d.getDay();
+      if(dow===6&&!canSat)return false;
+      if(dow===0&&!canSun)return false;
+      const noH=!(emp.work_holidays===true||emp.work_holidays==='yes');
+      if(noH&&HFLAT.includes(ds))return false;
+      return true;
+    }).length:workDaysInMonth;
+    
+    const targetSoFar=Math.round(target*(passedDays/Math.max(workDaysInMonth,1))*10)/10;
+    const otH=Math.max(0,Math.round((workedH-targetSoFar)*10)/10);
+    const minusH=Math.max(0,Math.round((targetSoFar-workedH)*10)/10);
+    const remainingH=isCurrentMonth?Math.max(0,Math.round((target-workedH-plannedFuture)*10)/10):0;
+    
+    return{workedH:Math.round(workedH*10)/10,workedDays,satDays,sunDays,holidayDays,
+      target,targetSoFar,otH,minusH,plannedFuture:Math.round(plannedFuture*10)/10,
+      remainingH,isCurrentMonth,passedDays,workDaysInMonth};
+  }
+
   function stats(emp){
     let planned=0,net=0,absD=0;
     mdays().forEach(d=>{
@@ -8571,7 +8762,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
             <span style={{marginLeft:'auto',fontSize:11,fontWeight:700,color:hasFc?'var(--green)':'var(--muted)'}}>
               {hasFc?'✅ FC: '+Object.keys(ifc).length+' Tage':'⚠ Kein FC'}
               {' · '}{planEmps.length} MA{shifts.length?' · '+shifts.length+' Schichten':''}
-              {' · '}<span style={{fontSize:9,color:'var(--muted)',opacity:.6}}>v1779001660</span>
+              {' · '}<span style={{fontSize:9,color:'var(--muted)',opacity:.6}}>v1779002250</span>
             </span>
           </>
         )}
