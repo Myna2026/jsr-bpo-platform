@@ -2457,7 +2457,7 @@ function StundenkontoTab({emp}){
       const e=monthPlan['s_'+emp.id+'_'+ds];
       if(!e||!e.shift)return;
       const net=parseFloat(e.net)||0;
-      if(ds<todayIso){workedH+=net;workedDays++;if(d.getDay()===6)satDays++;if(d.getDay()===0)sunDays++;}
+      if(ds<todayIso||ds===todayIso){workedH+=net;workedDays++;if(d.getDay()===6)satDays++;if(d.getDay()===0)sunDays++;}
       else plannedFuture+=net;
     });
     const workDays=days.filter(d=>{
@@ -7711,6 +7711,7 @@ function WorkforcePlanningView({employees,projects,showToast}){
   const [blockMenu,setBlockMenu]=useState(null);     // {empId,ds,x,y}
   const [aiModal,setAiModal]=useState(false);
   const [aiResult,setAiResult]=useState(null);
+  const [partialModal,setPartialModal]=useState(null); // {empId,ds,entry}
 
   const pkey=()=>projId+'_'+(skill||'all')+'_'+year+'_'+String(month).padStart(2,'0');
 
@@ -7807,6 +7808,55 @@ function WorkforcePlanningView({employees,projects,showToast}){
   }
 
   function getEntry(eid,ds){return plan['s_'+eid+'_'+ds]||null;}
+
+  function setPartialAbsence(eid,ds,endTime,absType){
+    // endTime: 'HH:MM' when employee left, absType: 'sick'|'vacation'|'absent'
+    const u={...plan};
+    const entry=u['s_'+eid+'_'+ds];
+    if(!entry) return;
+    const m=entry.shift.match(/(\d{1,2}):(\d{2})/);
+    if(!m) return;
+    const startMin=parseInt(m[1])*60+parseInt(m[2]);
+    const em=endTime.match(/(\d{1,2}):(\d{2})/);
+    if(!em) return;
+    const endMin=parseInt(em[1])*60+parseInt(em[2]);
+    const workedH=Math.max(0,Math.round((endMin-startMin)/60*10)/10);
+    // Update plan entry with partial absence info
+    u['s_'+eid+'_'+ds]={...entry,
+      partial_absence:true,
+      partial_end:endTime,
+      absence_type:absType,
+      net:workedH,  // only worked hours count
+      hours:workedH,
+    };
+    // Also update interval slots - clear slots after endTime
+    const endSlotIdx=SLOTS.indexOf(endTime);
+    if(endSlotIdx>=0){
+      SLOTS.forEach((_,i)=>{if(i>=endSlotIdx) delete u['i_'+eid+'_'+ds+'_'+i];});
+    }
+    save(u);
+    // Write absence record to employee
+    const allEmps=JSON.parse(localStorage.getItem('jsr_employees_v1')||'[]');
+    const empIdx=allEmps.findIndex(e=>e.id===eid);
+    if(empIdx>=0){
+      const emp=allEmps[empIdx];
+      const absences=emp.absences||[];
+      // Remove any existing full-day absence for this date
+      const filtered=absences.filter(a=>!(a.start===ds&&a.end===ds&&a.partial));
+      filtered.push({
+        start:ds,end:ds,
+        type:absType,
+        partial:true,
+        partial_from:endTime,
+        note:'Partiell ab '+endTime+' ('+workedH+'h gearbeitet)',
+      });
+      allEmps[empIdx]={...emp,absences:filtered};
+      localStorage.setItem('jsr_employees_v1',JSON.stringify(allEmps));
+    }
+    recalculateAfterChange();
+    setPartialModal(null);
+    setBlockMenu(null);
+  }
 
   function setEntry(eid,ds,sh){
     const u={...plan};
@@ -9468,6 +9518,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                               <div style={{display:'flex',alignItems:'center',gap:4}}>
                                 <span>{emp.first_name} {emp.last_name}</span>
                                 {getEntry(emp.id,iso(day))&&(
+                                  <>
                                   <button title='Schicht entfernen' onClick={()=>{
                                     const u={...plan};
                                     delete u['s_'+emp.id+'_'+iso(day)];
@@ -9477,6 +9528,16 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                                     color:'#dc2626',border:'1px solid #fca5a5',borderRadius:3,cursor:'pointer',lineHeight:1}}>
                                     ✕
                                   </button>
+                                  {iso(day)===iso(today)&&(
+                                    <button title='Partiell krank/abwesend' onClick={()=>{
+                                      const en=getEntry(emp.id,iso(day));
+                                      if(en) setPartialModal({empId:emp.id,ds:iso(day),entry:en,absType:'sick'});
+                                    }} style={{fontSize:10,padding:'1px 5px',background:'#fef3c7',
+                                      color:'#d97706',border:'1px solid #fcd34d',borderRadius:3,cursor:'pointer',lineHeight:1}}>
+                                      ⚡
+                                    </button>
+                                  )}
+                                  </>
                                 )}
                                 {!getEntry(emp.id,iso(day))&&(
                                   <button title='Schicht hinzufügen' onClick={()=>{
@@ -10232,7 +10293,14 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                         borderRight:'2px solid var(--border)',height:'100%',
                         display:'flex',flexDirection:'column',justifyContent:'center',
                         gap:2,cursor:'default'}}>
-                        <div style={{fontWeight:700,fontSize:11,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{emp.first_name} {emp.last_name}</div>
+                        <div style={{display:'flex',alignItems:'center',gap:3}}>
+                          <span style={{fontWeight:700,fontSize:11,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{emp.first_name} {emp.last_name}</span>
+                          {entry&&ddDs===iso(today)&&(
+                            <button title='Partiell krank/abwesend' onClick={e=>{e.stopPropagation();setPartialModal({empId:emp.id,ds:ddDs,entry,absType:'sick'});}}
+                              style={{fontSize:9,padding:'1px 4px',background:'#fef3c7',color:'#d97706',
+                                border:'1px solid #fcd34d',borderRadius:3,cursor:'pointer',flexShrink:0,lineHeight:1}}>⚡</button>
+                          )}
+                        </div>
                         <div style={{fontSize:9,color:'var(--muted)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{emp.project_skill} · {emp.work_hours}h {ab?(ab.type==='vacation'?'🏖':ab.type==='sick'?'🤒':'❌'):''}{blockedWE&&!ab?'🚫':''}{hasSplit?'✂':''}{(earliest>AXIS_START||latest<AXIS_END)?'⏰':''}</div>
                       </div>
 
@@ -10432,7 +10500,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                             return(
                               <div key={bi}
                                 onClick={e=>{
-                                  if(isPastDay) return;
+                                  if(isPastDay&&ddDs!==iso(today)) return;
                                   e.stopPropagation();
                                   setBlockMenu({empId:emp.id,ds:ddDs,x:e.clientX,y:e.clientY});
                                 }}
@@ -10471,7 +10539,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                               e.dataTransfer.effectAllowed='move';
                             }}
                             onClick={e=>{
-                              if(isPastDay) return;
+                              if(isPastDay&&ddDs!==iso(today)) return;
                               e.stopPropagation();
                               setBlockMenu({empId:emp.id,ds:ddDs,x:e.clientX,y:e.clientY});
                             }}
@@ -10835,6 +10903,113 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                     </div>
                   );
                 })()}
+              </div>
+            </div>
+              {/* ── Partial absence – only today ── */}
+              {blockMenu&&blockMenu.ds===iso(today)&&bEntry&&bEntry.shift&&(()=>{
+                const shM2=(bEntry.shift||'').match(/(\d{1,2}):(\d{2})/);
+                if(!shM2) return null;
+                return(
+                  <div style={{borderTop:'1px solid var(--border)',marginTop:8,paddingTop:8}}>
+                    <div style={{fontSize:10,fontWeight:700,color:'var(--muted)',marginBottom:5}}>⚡ Heute partiell:</div>
+                    {[['sick','🤒 Krank ab…','#dc2626','#fee2e2'],
+                      ['absent','❌ Abwesend ab…','#d97706','#fef3c7'],
+                      ['vacation','🏖 Urlaub ab…','#2563eb','#eff6ff']].map(([type,label,col,bg])=>(
+                      <div key={type}
+                        onClick={()=>{setPartialModal({empId:bEmp.id,ds:blockMenu.ds,entry:bEntry,absType:type});setBlockMenu(null);}}
+                        style={{display:'flex',alignItems:'center',gap:6,
+                          padding:'6px 8px',borderRadius:4,cursor:'pointer',marginBottom:3,
+                          background:bg,border:'1px solid '+col,color:col,fontWeight:700,fontSize:11}}>
+                        {label}
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
+          </div>
+        );
+      })()}
+
+      {/* ════ PARTIAL ABSENCE MODAL ════ */}
+      {partialModal&&(()=>{
+        const pEmp=planEmpsDisplay.find(e=>e.id===partialModal.empId);
+        const pEntry=partialModal.entry;
+        const shM=(pEntry.shift||'').match(/(\d{1,2}):(\d{2})/);
+        const startStr=shM?shM[0]:'08:00';
+        const startMin=shM?parseInt(shM[1])*60+parseInt(shM[2]):480;
+        const absLabels={sick:'🤒 Krank',absent:'❌ Abwesend',vacation:'🏖 Urlaub'};
+        const absColors={sick:'#dc2626',absent:'#d97706',vacation:'#2563eb'};
+        const col=absColors[partialModal.absType]||'#6b7280';
+        const now=new Date();
+        const nowSlot=String(now.getHours()).padStart(2,'0')+':'+String(Math.floor(now.getMinutes()/30)*30).padStart(2,'0');
+        const [endTime,setEndTime]=React.useState(nowSlot);
+        const em=endTime.match(/(\d{1,2}):(\d{2})/);
+        const endMin=em?parseInt(em[1])*60+parseInt(em[2]):startMin+120;
+        const workedH=Math.max(0,Math.round((endMin-startMin)/60*10)/10);
+        return(
+          <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.55)',zIndex:2000,
+            display:'flex',alignItems:'center',justifyContent:'center'}}
+            onClick={()=>setPartialModal(null)}>
+            <div style={{background:'var(--surface)',borderRadius:14,padding:24,width:320,
+              boxShadow:'0 20px 60px rgba(0,0,0,.3)',border:'2px solid '+col}}
+              onClick={e=>e.stopPropagation()}>
+              <div style={{display:'flex',gap:6,marginBottom:12}}>
+                {[['sick','🤒 Krank','#dc2626'],['absent','❌ Abwesend','#d97706'],['vacation','🏖 Urlaub','#2563eb']].map(([t,l,c])=>(
+                  <button key={t} onClick={()=>setPartialModal(pm=>({...pm,absType:t}))}
+                    style={{flex:1,padding:'6px 4px',borderRadius:7,border:'2px solid '+(partialModal.absType===t?c:'var(--border)'),
+                      background:partialModal.absType===t?c+'18':'transparent',
+                      color:partialModal.absType===t?c:'var(--muted)',
+                      fontWeight:700,fontSize:10,cursor:'pointer',fontFamily:'inherit'}}>
+                    {l}
+                  </button>
+                ))}
+              </div>
+              <div style={{fontSize:15,fontWeight:800,marginBottom:4,color:col}}>
+                {absLabels[partialModal.absType]}
+              </div>
+              <div style={{fontSize:12,color:'var(--muted)',marginBottom:16}}>
+                {pEmp?pEmp.first_name+' '+pEmp.last_name:''} · {new Date(partialModal.ds+'T12:00').toLocaleDateString('de-AT')}
+              </div>
+              <div style={{background:'var(--surface-2)',borderRadius:8,padding:'10px 14px',
+                marginBottom:14,fontSize:12,border:'1px solid var(--border)'}}>
+                <div>Schichtbeginn: <strong>{startStr}</strong></div>
+                <div style={{fontSize:11,color:'var(--muted)',marginTop:2}}>
+                  Gearbeitete Stunden werden bis zur gewählten Uhrzeit erfasst
+                </div>
+              </div>
+              <label style={{display:'block',fontSize:12,fontWeight:700,marginBottom:6}}>
+                Mitarbeiter verlässt Arbeitsplatz um:
+              </label>
+              <select value={endTime} onChange={e=>setEndTime(e.target.value)}
+                style={{width:'100%',padding:'9px 12px',borderRadius:8,
+                  border:'2px solid '+col,fontSize:15,fontWeight:700,color:col,
+                  background:'var(--surface)',marginBottom:10,fontFamily:'inherit',outline:'none'}}>
+                {SLOTS.filter(s=>{
+                  const sm=s.match(/(\d{1,2}):(\d{2})/);
+                  return sm&&parseInt(sm[1])*60+parseInt(sm[2])>startMin+30;
+                }).map(s=><option key={s} value={s}>{s} Uhr</option>)}
+              </select>
+              <div style={{background:col+'15',border:'1px solid '+col+'40',borderRadius:8,
+                padding:'10px 14px',marginBottom:18,fontSize:13}}>
+                <strong style={{color:col}}>{workedH}h</strong>
+                <span style={{color:'var(--muted)',marginLeft:6}}>werden als Arbeitszeit gebucht</span>
+                <div style={{fontSize:11,color:'var(--muted)',marginTop:3}}>
+                  Rest der Schicht: {absLabels[partialModal.absType]}
+                </div>
+              </div>
+              <div style={{display:'flex',gap:10}}>
+                <button onClick={()=>setPartialModal(null)}
+                  style={{flex:1,padding:'10px',borderRadius:8,
+                    border:'1px solid var(--border)',background:'transparent',
+                    cursor:'pointer',fontSize:13,fontFamily:'inherit',color:'var(--text)'}}>
+                  Abbrechen
+                </button>
+                <button onClick={()=>setPartialAbsence(partialModal.empId,partialModal.ds,endTime,partialModal.absType)}
+                  style={{flex:2,padding:'10px',borderRadius:8,border:'none',
+                    background:col,color:'#fff',cursor:'pointer',
+                    fontSize:13,fontWeight:700,fontFamily:'inherit'}}>
+                  ✓ Bestätigen
+                </button>
               </div>
             </div>
           </div>
