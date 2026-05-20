@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"><!DOCTYPE html><html lang="de"><head><meta charset<title>[v1779093184] JSR BPO Intelligence Platform</title><script src="https://unpkg.com/react@18/umd/react.development.js"></script><script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script><script src="https://unpkg.com/@babel/standalone/babel.min.js"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script><style>
+<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"><!DOCTYPE html><html lang="de"><head><meta charset<title>[v1779185443] JSR BPO Intelligence Platform</title><script src="https://unpkg.com/react@18/umd/react.development.js"></script><script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script><script src="https://unpkg.com/@babel/standalone/babel.min.js"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script><style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
   --bg:#f4f5f7;--surface:#ffffff;--surface-2:#f9fafb;--card:#ffffff;
@@ -7157,6 +7157,146 @@ function PayrollView({employees, projects, showToast}){
   );
 }
 
+function StundenkontoDetail({emp, selYear, selMonth}){
+  const today=new Date();
+  const pad=n=>String(n).padStart(2,'0');
+  const todayIso=today.toISOString().slice(0,10);
+  const isCurrentMonth=selYear===today.getFullYear()&&selMonth===today.getMonth()+1;
+
+  const plan=React.useMemo(()=>{
+    try{
+      const k='wfp_plan_'+(emp.project_id||'')+'_'+(emp.project_skill||'all')+'_'+selYear+'_'+pad(selMonth);
+      return JSON.parse(localStorage.getItem(k)||'{}');
+    }catch(e){return {};}
+  },[emp.id,selYear,selMonth]);
+
+  const days=React.useMemo(()=>{
+    const d=new Date(selYear,selMonth-1,1);const arr=[];
+    while(d.getMonth()===selMonth-1){arr.push(new Date(d));d.setDate(d.getDate()+1);}
+    return arr;
+  },[selYear,selMonth]);
+
+  const HFLAT=React.useMemo(()=>{
+    try{const r=localStorage.getItem('jsr_holidays_v1');return Object.values(r?JSON.parse(r):DEFAULT_HOLIDAYS).flat().map(h=>h.date);}
+    catch(e){return [];}
+  },[]);
+
+  const canSat=emp.work_saturday===true||emp.work_saturday==='yes';
+  const canSun=emp.work_sunday===true||emp.work_sunday==='yes';
+  const workH=parseFloat(emp.work_hours||8);
+
+  const stats=React.useMemo(()=>{
+    let workedH=0,moFrH=0,saH=0,soH=0,ftH=0,plannedH=0,unpaidPauseH=0,workedDays=0;
+    days.forEach(d=>{
+      const ds=d.toISOString().slice(0,10);
+      const e=plan['s_'+emp.id+'_'+ds];
+      if(!e||!e.shift) return;
+      const net=parseFloat(e.net)||0;
+      const dow=d.getDay();
+      const isFt=HFLAT.includes(ds);
+      const isPast=ds<todayIso;
+      if(isPast){
+        workedH+=net; workedDays++;
+        if(dow===6) saH+=net;
+        else if(dow===0) soH+=net;
+        else if(isFt) ftH+=net;
+        else moFrH+=net;
+        if(e.pause_duration&&!e.pause_paid) unpaidPauseH+=parseFloat(e.pause_duration)||0;
+      } else {
+        plannedH+=net;
+      }
+    });
+    const workDays=days.filter(d=>{
+      const ds=d.toISOString().slice(0,10);const dow=d.getDay();
+      if(dow===6&&!canSat)return false;if(dow===0&&!canSun)return false;
+      if((emp.absences||[]).find(a=>a.start<=ds&&a.end>=ds))return false;
+      if(!(emp.work_holidays===true||emp.work_holidays==='yes')&&HFLAT.includes(ds))return false;
+      return true;
+    }).length;
+    const target=Math.round(workDays*workH*10)/10;
+    const passedDays=isCurrentMonth?days.filter(d=>{
+      const ds=d.toISOString().slice(0,10);if(ds>=todayIso)return false;
+      const dow=d.getDay();if(dow===6&&!canSat)return false;if(dow===0&&!canSun)return false;
+      if(!(emp.work_holidays===true||emp.work_holidays==='yes')&&HFLAT.includes(ds))return false;
+      return true;
+    }).length:workDays;
+    const targetSoFar=Math.round(target*passedDays/Math.max(workDays,1)*10)/10;
+    const delta=Math.round((workedH-targetSoFar)*10)/10;
+    const remainingH=isCurrentMonth?Math.max(0,Math.round((target-workedH-plannedH)*10)/10):0;
+    return{
+      workedH:Math.round(workedH*10)/10,
+      moFrH:Math.round(moFrH*10)/10,
+      saH:Math.round(saH*10)/10,
+      soH:Math.round(soH*10)/10,
+      ftH:Math.round(ftH*10)/10,
+      target,targetSoFar,delta,
+      plannedH:Math.round(plannedH*10)/10,
+      remainingH,unpaidPauseH:Math.round(unpaidPauseH*10)/10,workedDays,
+    };
+  },[plan,days,HFLAT,emp,todayIso]);
+
+  const s=stats;
+  const dc=s.delta>0?'#16a34a':s.delta<-0.5?'#dc2626':'#d97706';
+  const dl=s.delta>0?'+'+s.delta+'h Überstunden':s.delta<0?s.delta+'h Rückstand':'Im Soll';
+
+  const row=(lbl,val,col,sub)=>(
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',padding:'6px 0',borderBottom:'1px solid var(--border)'}}>
+      <span style={{fontSize:12,color:'var(--muted)'}}>{lbl}</span>
+      <span style={{display:'flex',alignItems:'baseline',gap:6}}>
+        <strong style={{fontSize:14,color:col||'var(--fg)'}}>{val}</strong>
+        {sub&&<span style={{fontSize:10,color:'var(--muted)'}}>{sub}</span>}
+      </span>
+    </div>
+  );
+
+  return(
+    <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:10,marginBottom:24,overflow:'hidden'}}>
+      <div style={{padding:'10px 16px',background:'#1e293b',color:'#fff',fontWeight:700,fontSize:13,display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+        <span>⏱ Stundenkonto</span>
+        <span style={{fontSize:11,fontWeight:400,opacity:.8}}>{new Date(selYear,selMonth-1,1).toLocaleString('de-AT',{month:'long',year:'numeric'})}</span>
+      </div>
+      <div style={{padding:16}}>
+        <div style={{padding:'10px 16px',borderRadius:8,marginBottom:16,
+          background:s.delta>0?'#dcfce7':s.delta<-0.5?'#fee2e2':'#fef9c3',
+          border:'1.5px solid '+dc}}>
+          <div style={{fontSize:16,fontWeight:800,color:dc}}>{dl}</div>
+          <div style={{fontSize:11,color:'var(--muted)',marginTop:2}}>
+            {s.workedH}h geleistet · {s.targetSoFar}h Soll bis heute · Ziel: {s.target}h
+          </div>
+        </div>
+        <div style={{marginBottom:16}}>
+          {row('Mo–Fr Normalstunden',s.moFrH+'h','#2563eb')}
+          {s.saH>0&&row('Samstags-Stunden',s.saH+'h','#7c3aed','+ Zuschlag')}
+          {s.soH>0&&row('Sonntags-Stunden',s.soH+'h','#7c3aed','+ Zuschlag')}
+          {s.ftH>0&&row('Feiertags-Stunden',s.ftH+'h','#7c3aed','+ Zuschlag')}
+          {s.unpaidPauseH>0&&row('Unbezahlte Pausen','−'+s.unpaidPauseH+'h','#dc2626','abgezogen')}
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',padding:'8px 0',marginTop:4,borderTop:'2px solid var(--border)'}}>
+            <span style={{fontSize:13,fontWeight:700}}>Gesamt geleistet</span>
+            <strong style={{fontSize:20,color:'#2563eb'}}>{s.workedH}h</strong>
+          </div>
+        </div>
+        {isCurrentMonth&&(s.plannedH>0||s.remainingH>0)&&(
+          <div style={{display:'flex',gap:8,marginBottom:8}}>
+            {s.plannedH>0&&(
+              <div style={{flex:1,padding:'8px 12px',background:'#ede9fe',borderRadius:8,textAlign:'center'}}>
+                <div style={{fontSize:10,color:'#7c3aed'}}>Noch geplant</div>
+                <div style={{fontSize:16,fontWeight:800,color:'#7c3aed'}}>{s.plannedH}h</div>
+              </div>
+            )}
+            {s.remainingH>0&&(
+              <div style={{flex:1,padding:'8px 12px',background:'#fef3c7',borderRadius:8,textAlign:'center'}}>
+                <div style={{fontSize:10,color:'#92400e'}}>Noch ungeplant</div>
+                <div style={{fontSize:16,fontWeight:800,color:'#d97706'}}>{s.remainingH}h</div>
+              </div>
+            )}
+          </div>
+        )}
+        <div style={{fontSize:10,color:'var(--muted)',textAlign:'right'}}>{s.workedDays} Arbeitstage erfasst</div>
+      </div>
+    </div>
+  );
+}
+
 function MeinPlanView({employee, employees, projects}){
   const today = new Date();
   const [viewMode, setViewMode] = React.useState('month'); // month | week
@@ -7334,16 +7474,7 @@ function MeinPlanView({employee, employees, projects}){
         </div>
       </div>
 
-      {/* ── STUNDENKONTO ────────────────────────────────────────── */}
-      <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:10,marginBottom:24,overflow:'hidden'}}>
-        <div style={{padding:'10px 16px',background:'#1e293b',color:'#fff',fontWeight:700,fontSize:13}}>
-          ⏱ Stundenkonto
-        </div>
-        <div style={{padding:16}}>
-          <StundenkontoTab emp={employee}/>
-        </div>
-      </div>
-
+      <StundenkontoDetail emp={employee} selYear={selYear} selMonth={selMonth}/>
       {/* ── TEAMPLAN ───────────────────────────────────────────── */}
       <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:10,overflow:'hidden'}}>
         <div style={{padding:'10px 16px',background:'#065f46',color:'#fff',fontWeight:700,fontSize:13}}>
@@ -7768,8 +7899,9 @@ function WorkforcePlanningView({employees,projects,showToast}){
     const existingDfc=dfc;
     const mergedIfc={...existingIfc};
     const mergedDfc={...existingDfc};
-    Object.entries(preview.newIfc).forEach(([d,v])=>{if(d>=todayStr) mergedIfc[d]=v;});
-    Object.entries(preview.newDfc).forEach(([d,v])=>{if(d>=todayStr) mergedDfc[d]=v;});
+    const moPrefix=year+'-'+String(month).padStart(2,'0');
+    Object.entries(preview.newIfc).forEach(([d,v])=>{mergedIfc[d]=v;});
+    Object.entries(preview.newDfc).forEach(([d,v])=>{mergedDfc[d]=v;});
     localStorage.setItem('wfp_ifc_'+k,JSON.stringify(mergedIfc));
     localStorage.setItem('wfp_dfc_'+k,JSON.stringify(mergedDfc));
     setIfc({...mergedIfc});
@@ -7782,7 +7914,9 @@ function WorkforcePlanningView({employees,projects,showToast}){
 
   // ── Vorplanung ─────────────────────────────────────────────
   const selProj=(projects||[]).find(p=>p.id===projId)||null;
-  const planEmps=(employees||[]).filter(e=>e.status==='active'&&e.project_id===projId&&(!skill||e.project_skill===skill));
+  const planEmps=(employees||[]).filter(e=>e.status==='active'&&e.project_id===projId&&(!skill||(e.project_skill||e.primary_skill||'all')===skill||(e.project_skill||e.primary_skill||'')===''));
+  const planEmpsAll=(employees||[]).filter(e=>e.status==='active'&&e.project_id===projId);
+  const planEmpsDisplay=planEmps.length>0?planEmps:planEmpsAll;
   const hasFc=Object.keys(ifc).some(k=>k.startsWith(year+'-'+String(month).padStart(2,'0')));
   const shifts=getShifts();
 
@@ -7920,7 +8054,7 @@ function WorkforcePlanningView({employees,projects,showToast}){
     // ── 1. MONATSSOLL & BEREITS GEPLANT ──────────────────────────
     const empTarget={};
     const empPlanned={};
-    planEmps.forEach(emp=>{
+    planEmpsDisplay.forEach(emp=>{
       empTarget[emp.id]=calcEmpTarget(emp).net;
       let net=0;
       mdays().forEach(d=>{
@@ -7960,7 +8094,7 @@ function WorkforcePlanningView({employees,projects,showToast}){
       // Bereits geplante Stunden (von manuell oder vorherigen Runs)
       let coveredH=0;
       const slotCov=new Array(SLOTS.length).fill(0);
-      planEmps.forEach(emp=>{
+      planEmpsDisplay.forEach(emp=>{
         const e=u['s_'+emp.id+'_'+ds];
         if(!e||!e.shift) return;
         const n=parseFloat(e.net)||parseFloat(e.hours)-0.5||7.5;
@@ -7976,7 +8110,7 @@ function WorkforcePlanningView({employees,projects,showToast}){
       // PRIORITÄT 2: MAs sortieren nach Dringlichkeit
       // Wer am weitesten hinter seinem Monatssoll → kommt zuerst
       // Das sorgt für gleichmäßige Monatsverteilung ohne hartes Cap
-      const availMAs=planEmps
+      const availMAs=planEmpsDisplay
         .filter(emp=>canWork(emp,ds,null)&&validShifts(emp).length>0)
         .sort((a,b)=>{
           const remA=empTarget[a.id]-empPlanned[a.id];
@@ -8063,7 +8197,7 @@ function WorkforcePlanningView({employees,projects,showToast}){
       const tgt=dfc[ds]>0?dfc[ds]:Math.ceil((ifc[ds]||[]).reduce((s,v)=>s+(parseFloat(v)||0),0));
       if(!tgt) return;
       let p=0;
-      planEmps.forEach(emp=>{
+      planEmpsDisplay.forEach(emp=>{
         const e=u['s_'+emp.id+'_'+ds];
         if(e) p+=parseFloat(e.net)||parseFloat(e.hours)-0.5||7.5;
       });
@@ -8073,7 +8207,7 @@ function WorkforcePlanningView({employees,projects,showToast}){
       if(p>tgt+0.5) daysOver++;
     });
 
-    planEmps.forEach(emp=>{
+    planEmpsDisplay.forEach(emp=>{
       const diff=empPlanned[emp.id]-empTarget[emp.id];
       if(diff>0) totalOT+=diff;
       else totalUnder+=Math.abs(diff);
@@ -8110,7 +8244,7 @@ function WorkforcePlanningView({employees,projects,showToast}){
     }
     const apiKeyFinal=localStorage.getItem('jsr_anthropic_key');
     if(!Object.keys(ifc).length){alert('Bitte zuerst FC-Dokument importieren.');return;}
-    if(!planEmps.length){alert('Keine Mitarbeiter für dieses Projekt/Skill gefunden.');return;}
+    if(!planEmpsDisplay.length){alert('Keine Mitarbeiter für dieses Projekt/Skill gefunden.');return;}
 
     setAiLoading(true);
     setAiModal(true);
@@ -8135,7 +8269,7 @@ function WorkforcePlanningView({employees,projects,showToast}){
       }).filter(d=>d.totalH>0);
 
       // Employee profiles
-      const empProfiles=planEmps.map(emp=>{
+      const empProfiles=planEmpsDisplay.map(emp=>{
         const absenceDays=(emp.absences||[]).flatMap(a=>{
           const days=[];
           let d=new Date(a.from);
@@ -8195,7 +8329,7 @@ function WorkforcePlanningView({employees,projects,showToast}){
       const sysPrompt='Du bist ein intelligentes Workforce-Management-System fuer ein BPO-Callcenter.\n\nPLANUNGSHIERARCHIE (strikt einhalten):\n1. PRIO: Tagesbedarf erfuellen - JEDER Tag MUSS FC-Bedarf decken. STOP wenn erreicht.\n2. PRIO: Monatsbedarf erfuellen - alle MAs sollen Monatssoll erreichen.\n3. PRIO: Intervall-Peaks abdecken - Schichten sollen Hauptlast-Zeiten treffen.\n4. PRIO: Wirtschaftlich - nicht mehr MAs als noetig, keine Ueberplanung.\n\nHARTE REGELN (niemals verletzen):\n- work_saturday=false: kein Samstag. work_sunday=false: kein Sonntag. work_holidays=false: kein Feiertag.\n- Schicht muss in Zeitfenster liegen (shift_earliest bis shift_latest).\n- work_split=false: keine Split-Schicht erlaubt.\n- Bei Urlaub/Abwesenheit (Urlaubstage>0 an dem Tag): nicht einplanen.\n- Vergangene Tage nicht veraendern.\n- Bereits geplante Schichten nicht ueberschreiben.\n- HARD STOP: wenn Tagesbedarf gedeckt, keinen weiteren MA einplanen.\n\nWEICHE REGELN (optimieren):\n- Schichten +/-1h anpassen wenn noetig (min 6h, max 9h).\n- Split-Schichten einsetzen wenn zwei Peaks mit Tal dazwischen.\n- Pausen in Tief-Intervalle legen, nicht in Peaks.\n- productive_pct: 92% = MA ist 92% seiner Schichtzeit produktiv. Bei Bedarfsdeckung einrechnen.\n- Wer am weitesten hinter Monatssoll ist, wird zuerst eingeplant (Fairness).\n- Stunden gleichmaessig ueber verbleibende Tage verteilen.\n- Ueberplanung aktiv vermeiden - lieber weniger als zu viele MAs.';
 const aiTodayStr=iso(today);
 const fcLines=Object.keys(dfc).filter(ds=>ds>=aiTodayStr).sort().map(ds=>{const sl=(ifc[ds]||[]).map((v,i)=>({v:parseFloat(v)||0,t:SLOTS[i]})).filter(x=>x.v>0).sort((a,b)=>b.v-a.v);const peaks=sl.slice(0,3).map(x=>x.t).join(',');return ds+': '+dfc[ds]+'h'+(peaks?' Peaks:'+peaks:'');}).join('\n');
-const empLines=planEmps.map(e=>{const tgt=calcEmpTarget(e);let alrH=0;mdays().forEach(d=>{if(iso(d)>=aiTodayStr)return;const en=getEntry(e.id,iso(d));if(en)alrH+=parseFloat(en.net)||7.5;});const vacD=mdays().filter(d=>absent(e,iso(d))).length;const prod=parseFloat(e.productive_pct)||100;return e.id+' '+e.first_name+' '+e.last_name+': '+(e.work_hours||8)+'h/Tag, Sa='+(e.work_saturday||e.work_weekend||false)+', So='+(e.work_sunday||e.work_weekend||false)+', Ftag='+(e.work_holidays||false)+', Split='+(e.work_split||false)+', Schicht '+(e.shift_earliest||'00:00')+'-'+(e.shift_latest||'23:59')+', Soll='+Math.round(tgt.net)+'h'+', GeplantBisher='+Math.round(alrH*10)/10+'h'+', NochOffen='+Math.round(Math.max(0,tgt.net-alrH)*10)/10+'h'+', Produktiv='+prod+'%'+(vacD>0?', Urlaub='+vacD+'d':'')+' ';}).join('\n');
+const empLines=planEmpsDisplay.map(e=>{const tgt=calcEmpTarget(e);let alrH=0;mdays().forEach(d=>{if(iso(d)>=aiTodayStr)return;const en=getEntry(e.id,iso(d));if(en)alrH+=parseFloat(en.net)||7.5;});const vacD=mdays().filter(d=>absent(e,iso(d))).length;const prod=parseFloat(e.productive_pct)||100;return e.id+' '+e.first_name+' '+e.last_name+': '+(e.work_hours||8)+'h/Tag, Sa='+(e.work_saturday||e.work_weekend||false)+', So='+(e.work_sunday||e.work_weekend||false)+', Ftag='+(e.work_holidays||false)+', Split='+(e.work_split||false)+', Schicht '+(e.shift_earliest||'00:00')+'-'+(e.shift_latest||'23:59')+', Soll='+Math.round(tgt.net)+'h'+', GeplantBisher='+Math.round(alrH*10)/10+'h'+', NochOffen='+Math.round(Math.max(0,tgt.net-alrH)*10)/10+'h'+', Produktiv='+prod+'%'+(vacD>0?', Urlaub='+vacD+'d':'')+' ';}).join('\n');
 const shiftLines=getShifts().map(s=>s.value+' ('+s.label+', '+s.net+'h netto)').join('\n');
 const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projId)+(skill?' / Skill: '+skill:'')+'\nMONAT: '+MNAMES[month-1]+' '+year+'\n\nFC-TAGESBEDARF ab '+aiTodayStr+':\n'+fcLines+'\n\nMITARBEITER:\n'+empLines+'\n\nSCHICHTEN:\n'+shiftLines+'\n\nAUFGABE: Erstelle optimalen Schichtplan ab '+aiTodayStr+' bis Monatsende. Erfülle jeden Tag den FC-Bedarf. Plane effizient. Berücksichtige alle MA-Einschränkungen.\n\nAntworte NUR mit validem JSON: {"plan":[{"date":"YYYY-MM-DD","empId":"emp_001","shift":"08:00-16:30"},...]}'
 
@@ -8229,7 +8363,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
     let applied=0,skipped=0;
     // Pre-compute planned net per employee for cap enforcement
     const netSoFar={};
-    planEmps.forEach(emp=>{
+    planEmpsDisplay.forEach(emp=>{
       let n=0;
       mdays().forEach(d=>{const e=u['s_'+emp.id+'_'+iso(d)];if(e) n+=e.net||0;});
       netSoFar[emp.id]=n;
@@ -8243,7 +8377,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
       if(!sh&&shiftId!=='frei'&&shiftId!=='') {skipped++;return;}
       if(sh){
         // Enforce monthly target cap
-        const emp=planEmps.find(e=>e.id===empId);
+        const emp=planEmpsDisplay.find(e=>e.id===empId);
         if(emp){
           const workH=parseFloat(emp.work_hours||8);
           const allWD=mdays().filter(d=>{
@@ -8270,7 +8404,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
 
   function slotCoverage(ds){
     const cov=new Array(SLOTS.length).fill(0);
-    (planEmps||[]).forEach(emp=>{
+    (planEmpsDisplay||[]).forEach(emp=>{
       if(absent(emp,ds)) return;
       const e=getEntry(emp.id,ds);
       if(!e||!e.shift) return;
@@ -8292,7 +8426,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
     if(!daySlots.some(v=>v>0)) return{status:'nofc',firstUnder:-1,pct:0};
     const need=daySlots.map(fc=>fc>0?Math.ceil(fc/0.5):0);
     const cov=new Array(SLOTS.length).fill(0);
-    (planEmps||[]).forEach(emp=>{
+    (planEmpsDisplay||[]).forEach(emp=>{
       if(absent(emp,ds)) return;
       const e=getEntry(emp.id,ds);
       if(!e||!e.shift) return;
@@ -8520,7 +8654,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
       if(!tgt)return;
       daysTotal++;
       let p=0;
-      planEmps.forEach(emp=>{const e=getEntry(emp.id,ds);if(e)p+=parseFloat(e.net)||7.5;});
+      planEmpsDisplay.forEach(emp=>{const e=getEntry(emp.id,ds);if(e)p+=parseFloat(e.net)||7.5;});
       totalDemand+=tgt;totalPlanned+=p;
       const pct=p/tgt;
       if(pct>=0.95&&pct<=1.15){daysOk++;scoreSum+=100;}
@@ -8530,7 +8664,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
     });
 
     // MA-Auslastung-Score
-    planEmps.forEach(emp=>{
+    planEmpsDisplay.forEach(emp=>{
       const tgt=calcEmpTarget(emp).net;
       let planned=0;
       days.forEach(d=>{const e=getEntry(emp.id,iso(d));if(e)planned+=parseFloat(e.net)||7.5;});
@@ -8557,7 +8691,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
     const totalScore=scoreCount>0?Math.round(scoreSum/scoreCount):0;
     const coveragePct=totalDemand>0?Math.round(totalPlanned/totalDemand*100):0;
     const daysPct=daysTotal>0?Math.round(daysOk/daysTotal*100):0;
-    const pv=planEmps.map(emp=>{let p=0;mdays().forEach(d=>{const e=getEntry(emp.id,iso(d));if(e)p+=parseFloat(e.net)||7.5;});return p;});
+    const pv=planEmpsDisplay.map(emp=>{let p=0;mdays().forEach(d=>{const e=getEntry(emp.id,iso(d));if(e)p+=parseFloat(e.net)||7.5;});return p;});
     const avg=pv.reduce((s,v)=>s+v,0)/(pv.length||1);const stddev=Math.sqrt(pv.reduce((s,v)=>s+Math.pow(v-avg,2),0)/(pv.length||1));const fairnessScore=avg>0?Math.round(Math.max(0,100-stddev/avg*100)):100;
     return{score:Math.round(totalScore*0.8+fairnessScore*0.2),coveragePct,daysPct,daysOk,daysTotal,totalOT:Math.round(totalOT*10)/10,totalUnder:Math.round(totalUnder*10)/10,fairnessScore};
   }
@@ -8574,14 +8708,14 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
       const tgt=dfc[ds]>0?dfc[ds]:Math.ceil((ifc[ds]||[]).reduce((s,v)=>s+(parseFloat(v)||0),0));
       if(!tgt)return;
       let p=0;
-      planEmps.forEach(emp=>{const e=getEntry(emp.id,ds);if(e)p+=parseFloat(e.net)||7.5;});
+      planEmpsDisplay.forEach(emp=>{const e=getEntry(emp.id,ds);if(e)p+=parseFloat(e.net)||7.5;});
       const pct=tgt>0?Math.round(p/tgt*100):0;
       if(p<tgt*0.9) warnings.push({type:'under',level:'error',ds,msg:`${ds}: Unterdeckung ${p.toFixed(1)}h/${tgt}h (${pct}%)`});
       else if(p>tgt*1.2) warnings.push({type:'over',level:'warn',ds,msg:`${ds}: Überdeckung ${p.toFixed(1)}h/${tgt}h (${pct}%)`});
     });
 
     // MA-Überstunden-Warnungen
-    planEmps.forEach(emp=>{
+    planEmpsDisplay.forEach(emp=>{
       const tgt=calcEmpTarget(emp).net;
       let planned=0;
       days.forEach(d=>{const e=getEntry(emp.id,iso(d));if(e)planned+=parseFloat(e.net)||7.5;});
@@ -8597,7 +8731,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
       if(dow!==0&&dow!==6)return;
       const tgt=dfc[ds]>0?dfc[ds]:0;
       if(!tgt)return;
-      const weCapacity=planEmps.filter(emp=>{
+      const weCapacity=planEmpsDisplay.filter(emp=>{
         const canSat=emp.work_saturday===true||emp.work_saturday==='yes'||emp.work_weekend===true||emp.work_weekend==='yes';
         const canSun=emp.work_sunday===true||emp.work_sunday==='yes'||emp.work_weekend===true||emp.work_weekend==='yes';
         return dow===6?canSat:canSun;
@@ -8661,8 +8795,8 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
     })() : mdays();
 
     const emps = filterEmpId
-      ? planEmps.filter(e=>e.id===filterEmpId)
-      : planEmps.filter(e=>!e.skill_filter||(skill?e.project_skill===skill:true));
+      ? planEmpsDisplay.filter(e=>e.id===filterEmpId)
+      : planEmpsDisplay.filter(e=>!e.skill_filter||(skill?e.project_skill===skill:true));
 
     const kwLabel = kwDate ? (()=>{
       const dow=kwDate.getDay()||7;
@@ -8852,7 +8986,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
               if(!window.confirm("Alle Schichten ab heute löschen und neu starten?")) return;
               const u={...plan};const ts=iso(today);
               mdays().forEach(d=>{const ds=iso(d);if(ds<ts) return;
-                planEmps.forEach(emp=>{delete u["s_"+emp.id+"_"+ds];
+                planEmpsDisplay.forEach(emp=>{delete u["s_"+emp.id+"_"+ds];
                 SLOTS.forEach((_,si)=>delete u["i_"+emp.id+"_"+ds+"_"+si]);});});
               save(u);showToast&&showToast("Zukunft zurückgesetzt","success");
             }} style={{fontSize:11,color:"var(--muted)",border:"1px solid var(--border)"}}>
@@ -8869,7 +9003,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
               const fcHdr=['FC-Bedarf','','','',...days.map(d=>{const ds=iso(d);const v=dfc[ds]||(ifc[ds]?Math.ceil((ifc[ds]||[]).reduce((s,v)=>s+(parseFloat(v)||0),0)):0);return v>0?v+'h':'–';})];
               const rows=[dateHdr,fcHdr];
               // Pro MA eine Zeile
-              planEmps.forEach(emp=>{
+              planEmpsDisplay.forEach(emp=>{
                 const tgt=Math.round(calcEmpTarget(emp).net*10)/10;
                 let geplant=0;
                 const dayCols=days.map(d=>{
@@ -8888,7 +9022,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                 const ds=iso(d);
                 const tgt=dfc[ds]>0?dfc[ds]:Math.ceil((ifc[ds]||[]).reduce((s,v)=>s+(parseFloat(v)||0),0));
                 if(!tgt)return'–';
-                let p=0;planEmps.forEach(emp=>{const e=plan['s_'+emp.id+'_'+ds];if(e)p+=e.net||0;});
+                let p=0;planEmpsDisplay.forEach(emp=>{const e=plan['s_'+emp.id+'_'+ds];if(e)p+=e.net||0;});
                 const pct=Math.round(p/tgt*100);
                 return Math.round(p*10)/10+'h/'+tgt+'h ('+pct+'%)';
               })];
@@ -8923,7 +9057,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                     onClick={()=>{openShiftPlan('month_team');setShiftPlanModal(false);}}>
                     👥 Teamplan (alle MA)
                   </button>
-                  {planEmps.map(emp=>(
+                  {planEmpsDisplay.map(emp=>(
                     <button key={emp.id} className="btn btn-sm" style={{width:'100%',textAlign:'left',marginBottom:2,fontSize:11}}
                       onClick={()=>{openShiftPlan('month_emp',emp.id);setShiftPlanModal(false);}}>
                       👤 {emp.first_name} {emp.last_name}
@@ -8936,7 +9070,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                     onClick={()=>{openShiftPlan('week_team',null,new Date(year,month-1,1));setShiftPlanModal(false);}}>
                     👥 Teamplan diese Woche
                   </button>
-                  {planEmps.map(emp=>(
+                  {planEmpsDisplay.map(emp=>(
                     <button key={emp.id+'w'} className="btn btn-sm" style={{width:'100%',textAlign:'left',marginBottom:2,fontSize:11}}
                       onClick={()=>{openShiftPlan('week_emp',emp.id,new Date(year,month-1,1));setShiftPlanModal(false);}}>
                       👤 {emp.first_name} {emp.last_name}
@@ -8947,8 +9081,8 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
             </div>
             <span style={{marginLeft:'auto',fontSize:11,fontWeight:700,color:hasFc?'var(--green)':'var(--muted)'}}>
               {hasFc?'✅ FC: '+Object.keys(ifc).length+' Tage':'⚠ Kein FC'}
-              {' · '}{planEmps.length} MA{shifts.length?' · '+shifts.length+' Schichten':''}
-              {' · '}<span style={{fontSize:9,color:'var(--muted)',opacity:.6}}>v1779093184</span>
+              {' · '}{planEmpsDisplay.length} MA{shifts.length?' · '+shifts.length+' Schichten':''}
+              {' · '}<span style={{fontSize:9,color:'var(--muted)',opacity:.6}}>v1779185443</span>
             </span>
           </>
         )}
@@ -8956,7 +9090,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
       {projId&&hasFc&&(()=>{
         // Gesamte Netto-Stunden des Teams im Monat
         let teamGesamt=0;
-        planEmps.forEach(emp=>{ teamGesamt+=calcEmpTarget(emp).net; });
+        planEmpsDisplay.forEach(emp=>{ teamGesamt+=calcEmpTarget(emp).net; });
         // FC-Bedarf gesamt: dfc[ds]=ceil(Spalte E Tel+BO), fallback Summe Spalte D
         let fcGesamt=0;
         mdays().forEach(d=>{
@@ -8975,7 +9109,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
             <div style={{flex:1,minWidth:140,padding:'4px 16px 4px 0',borderRight:'1px solid var(--border)'}}>
               <div style={{fontSize:10,color:'var(--muted)',marginBottom:2}}>👥 Team Netto gesamt</div>
               <div style={{fontSize:18,fontWeight:800}}>{Math.round(teamGesamt*10)/10}h</div>
-              <div style={{fontSize:10,color:'var(--muted)'}}>{planEmps.length} Mitarbeiter · {MNAMES[month-1]} {year}</div>
+              <div style={{fontSize:10,color:'var(--muted)'}}>{planEmpsDisplay.length} Mitarbeiter · {MNAMES[month-1]} {year}</div>
             </div>
             <div style={{flex:1,minWidth:140,padding:'4px 16px',borderRight:'1px solid var(--border)'}}>
               <div style={{fontSize:10,color:'var(--muted)',marginBottom:2}}>📊 FC-Bedarf gesamt</div>
@@ -9019,7 +9153,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
           Projekt wählen
         </div>
       )}
-      {projId&&!planEmps.length&&(
+      {projId&&!planEmpsDisplay.length&&(
         <div style={{padding:32,textAlign:'center',color:'var(--muted)',
           background:'var(--surface-2)',borderRadius:'var(--r)',border:'1px solid var(--border)'}}>
           Keine aktiven Mitarbeiter auf {selProj?.name}{skill?' / '+skill:''}
@@ -9027,7 +9161,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
       )}
 
       {/* ════ SCHICHTPLAN ════ */}
-      {projId&&planEmps.length>0&&mode==='schicht'&&(
+      {projId&&planEmpsDisplay.length>0&&mode==='schicht'&&(
         <div>
           {/* Legende */}
           <div style={{display:'flex',gap:16,marginBottom:10,fontSize:11,alignItems:'center',flexWrap:'wrap',
@@ -9049,7 +9183,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
             const ist={},fcRow={};
             WDAYS.forEach((dn,di)=>{
               const ds=iso(days[di]);
-              ist[dn]=Math.round(planEmps.reduce((s,e)=>s+(absent(e,ds)?0:(getEntry(e.id,ds)?.net||0)),0)*10)/10;
+              ist[dn]=Math.round(planEmpsDisplay.reduce((s,e)=>s+(absent(e,ds)?0:(getEntry(e.id,ds)?.net||0)),0)*10)/10;
               fcRow[dn]=Math.round((dfc[ds]||0)*10)/10;
             });
             return(
@@ -9109,7 +9243,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                     </tr>
                   </thead>
                   <tbody>
-                    {planEmps.map((emp,ei)=>{
+                    {planEmpsDisplay.map((emp,ei)=>{
                       let wb2=0,wn=0;
                       return(
                         <tr key={emp.id} style={{borderBottom:'1px solid var(--border)',background:ei%2?'var(--surface-2)':'transparent'}}>
@@ -9201,7 +9335,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                 </tr>
               </thead>
               <tbody>
-                {planEmps.map((emp,i)=>{
+                {planEmpsDisplay.map((emp,i)=>{
                   const s=stats(emp);
                   const dc=Math.abs(s.diff)<=0.5?'#16a34a':s.diff<0?'#dc2626':'#f59e0b';
                   return(
@@ -9225,7 +9359,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
       )}
 
       {/* ════ INTERVALLPLAN ════ */}
-      {projId&&planEmps.length>0&&mode==='intervall'&&(
+      {projId&&planEmpsDisplay.length>0&&mode==='intervall'&&(
         <div>
           {/* Tag-Selector mit Ampel */}
           <div style={{display:'flex',flexWrap:'wrap',gap:4,marginBottom:12}}>
@@ -9320,7 +9454,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                       </tr>
                     </thead>
                     <tbody>
-                      {planEmps.map((emp,ei)=>{
+                      {planEmpsDisplay.map((emp,ei)=>{
                         const ab=absent(emp,day);
                         const en=getEntry(emp.id,day);
                         const empSlots=slotIdxs(en?.shift||'');
@@ -9592,11 +9726,11 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
 
       
       {/* ════ STUNDEN ÜBERSICHT ════ */}
-      {projId&&planEmps.length>0&&mode==='stunden'&&(
+      {projId&&planEmpsDisplay.length>0&&mode==='stunden'&&(
         <div>
           {(()=>{
             // Analyze each employee's balance
-            const balances=planEmps.map(emp=>{
+            const balances=planEmpsDisplay.map(emp=>{
               let planned=0;
               mdays().forEach(d=>{const e=getEntry(emp.id,iso(d));if(e) planned+=parseFloat(e.net)||parseFloat(e.hours)-0.5||7.5;});
               const ws=getWorkedStats(emp); // tagesaktuelle Geleistet-Statistik
@@ -9632,7 +9766,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                   <button className="btn btn-sm" onClick={()=>{
                     const u={...plan};const tStr=iso(today);const sh=getShifts();
                     const eP={},eT={};
-                    planEmps.forEach(emp=>{
+                    planEmpsDisplay.forEach(emp=>{
                       eT[emp.id]=calcEmpTarget(emp).net;
                       let n=0;mdays().forEach(d=>{const e=u["s_"+emp.id+"_"+iso(d)];if(e)n+=e.net||0;});
                       eP[emp.id]=n;
@@ -9653,7 +9787,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                       const ds=iso(d),dow=d.getDay();
                       const dsl=ifc[ds]||[];
                       if(!dsl.some(v=>parseFloat(v)>0)) return;
-                      planEmps
+                      planEmpsDisplay
                         .filter(emp=>{
                           if(u["s_"+emp.id+"_"+ds]||absent(emp,ds)) return false;
                           const cS=emp.work_saturday===true||emp.work_saturday==="yes"||emp.work_weekend===true||emp.work_weekend==="yes";
@@ -9762,7 +9896,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
               </tr>
             </thead>
             <tbody>
-              {planEmps.map((emp,i)=>{
+              {planEmpsDisplay.map((emp,i)=>{
                 const workH=parseFloat(emp.work_hours||8);
                 // Use central target function for consistency
                 const empT=calcEmpTarget(emp);
@@ -9825,18 +9959,18 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
               <tr style={{background:'var(--surface-2)',borderTop:'2px solid var(--border)',fontWeight:700}}>
                 <td colSpan={4} style={{padding:'8px 10px',fontSize:12}}>Σ Team</td>
                 <td style={{padding:'8px',textAlign:'center'}}>
-                  {Math.round(planEmps.reduce((s,emp)=>s+calcEmpTarget(emp).brutto,0)*10)/10}h
+                  {Math.round(planEmpsDisplay.reduce((s,emp)=>s+calcEmpTarget(emp).brutto,0)*10)/10}h
                 </td>
                 <td style={{padding:'8px',textAlign:'center'}}>
-                  {Math.round(planEmps.reduce((s,emp)=>s+calcEmpTarget(emp).net,0)*10)/10}h
+                  {Math.round(planEmpsDisplay.reduce((s,emp)=>s+calcEmpTarget(emp).net,0)*10)/10}h
                 </td>
                 <td style={{padding:'8px',textAlign:'center'}}>
-                  {Math.round(planEmps.reduce((s,emp)=>{
+                  {Math.round(planEmpsDisplay.reduce((s,emp)=>{
                     let b=0;mdays().forEach(d=>{const e=getEntry(emp.id,iso(d));if(e) b+=e.hours||0;});return s+b;
                   },0)*10)/10}h
                 </td>
                 <td style={{padding:'8px',textAlign:'center',color:'var(--blue)'}}>
-                  {Math.round(planEmps.reduce((s,emp)=>{
+                  {Math.round(planEmpsDisplay.reduce((s,emp)=>{
                     let n=0;mdays().forEach(d=>{const e=getEntry(emp.id,iso(d));if(e) n+=e.net||0;});return s+n;
                   },0)*10)/10}h
                 </td>
@@ -9848,7 +9982,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
       )}
 
       {/* ════ DRAG & DROP PLANUNG (Timeline) ════ */}
-      {projId&&planEmps.length>0&&mode==='dragdrop'&&(()=>{
+      {projId&&planEmpsDisplay.length>0&&mode==='dragdrop'&&(()=>{
         const shiftList=getShifts();
         const AXIS_START=8*60;
         const AXIS_END=22*60+30;
@@ -10073,7 +10207,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                 )}
 
                 {/* Employee rows */}
-                {planEmps.map((emp,ei)=>{
+                {planEmpsDisplay.map((emp,ei)=>{
                   const ab=absent(emp,ddDs);
                   const entry=getEntry(emp.id,ddDs);
                   const t=entry?parseShift(entry.shift):null;
