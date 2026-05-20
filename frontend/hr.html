@@ -7712,6 +7712,7 @@ function WorkforcePlanningView({employees,projects,showToast}){
   const [aiModal,setAiModal]=useState(false);
   const [aiResult,setAiResult]=useState(null);
   const [partialModal,setPartialModal]=useState(null); // {empId,ds,entry}
+  const [partialEndTime,setPartialEndTime]=useState('');
 
   const pkey=()=>projId+'_'+(skill||'all')+'_'+year+'_'+String(month).padStart(2,'0');
 
@@ -7967,6 +7968,14 @@ function WorkforcePlanningView({employees,projects,showToast}){
   const planEmps=(employees||[]).filter(e=>e.status==='active'&&e.project_id===projId&&(!skill||(e.project_skill||e.primary_skill||'all')===skill||(e.project_skill||e.primary_skill||'')===''));
   const planEmpsAll=(employees||[]).filter(e=>e.status==='active'&&e.project_id===projId);
   const planEmpsDisplay=planEmps.length>0?planEmps:planEmpsAll;
+  // Overhead = Team Lead, Supervisor, QM, Trainer, Projektleiter etc (not agents)
+  const AGENT_ROLES=['agent','senior agent','call agent','junior agent'];
+  function isOverhead(emp){
+    const pos=(emp.position||emp.project_skill||'').toLowerCase();
+    return !AGENT_ROLES.some(r=>pos===r||pos.startsWith(r));
+  }
+  const agentEmps=planEmpsDisplay.filter(e=>!isOverhead(e));
+  const overheadEmps=planEmpsDisplay.filter(e=>isOverhead(e));
   const hasFc=Object.keys(ifc).some(k=>k.startsWith(year+'-'+String(month).padStart(2,'0')));
   const shifts=getShifts();
 
@@ -8319,7 +8328,7 @@ function WorkforcePlanningView({employees,projects,showToast}){
       }).filter(d=>d.totalH>0);
 
       // Employee profiles
-      const empProfiles=planEmpsDisplay.map(emp=>{
+      const empProfiles=agentEmps.map(emp=>{
         const absenceDays=(emp.absences||[]).flatMap(a=>{
           const days=[];
           let d=new Date(a.from);
@@ -9225,6 +9234,47 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
             ))}
           </div>
 
+          {/* Overhead section */}
+          {overheadEmps.length>0&&(
+            <div style={{marginBottom:14}}>
+              <div style={{display:'flex',alignItems:'center',gap:8,padding:'6px 12px',
+                background:'linear-gradient(90deg,#1e1b4b,#312e81)',borderRadius:'var(--r)',marginBottom:6}}>
+                <span style={{fontSize:13}}>👔</span>
+                <span style={{fontWeight:800,fontSize:11,color:'#c7d2fe'}}>OVERHEAD</span>
+                <span style={{fontSize:10,color:'rgba(199,210,254,.55)',marginLeft:4}}>— nicht in FC-Abdeckung</span>
+                <span style={{fontSize:10,color:'rgba(199,210,254,.4)',marginLeft:'auto'}}>{overheadEmps.length} Pers.</span>
+              </div>
+              {overheadEmps.map(emp=>{
+                const eTod=getEntry(emp.id,iso(today));
+                const abTod=absent(emp,iso(today));
+                return(
+                  <div key={emp.id} style={{display:'flex',alignItems:'center',gap:8,
+                    padding:'5px 10px',marginBottom:3,
+                    background:'rgba(99,102,241,.05)',border:'1px solid rgba(99,102,241,.12)',
+                    borderRadius:6}}>
+                    <div style={{width:7,height:7,borderRadius:'50%',
+                      background:eTod?'#6366f1':'#4b5563',flexShrink:0}}/>
+                    <span style={{fontWeight:700,fontSize:11}}>{emp.first_name} {emp.last_name}</span>
+                    <span style={{fontSize:10,color:'#818cf8'}}>{emp.position||emp.project_skill}</span>
+                    <span style={{fontSize:11,color:'#6366f1',marginLeft:'auto',fontWeight:600}}>
+                      {abTod?(abTod.type==='vacation'?'🏖 Urlaub':abTod.type==='sick'?'🤒 Krank':'❌ Abwesend'):eTod?eTod.shift+' · '+eTod.net+'h':'kein Dienst heute'}
+                    </span>
+                    {eTod&&!abTod&&(
+                      <button onClick={()=>{const _n=new Date();const _t=String(_n.getHours()).padStart(2,'0')+':'+String(Math.floor(_n.getMinutes()/30)*30).padStart(2,'0');setPartialEndTime(_t);setPartialModal({empId:emp.id,ds:iso(today),entry:eTod,absType:'sick'});}}
+                        style={{fontSize:9,padding:'2px 5px',background:'#fef3c7',color:'#d97706',
+                          border:'1px solid #fcd34d',borderRadius:3,cursor:'pointer',flexShrink:0}}>⚡</button>
+                    )}
+                  </div>
+                );
+              })}
+              <div style={{display:'flex',alignItems:'center',gap:8,padding:'4px 10px',marginTop:8}}>
+                <span style={{fontSize:12}}>👥</span>
+                <span style={{fontWeight:800,fontSize:11}}>AGENTEN — {agentEmps.length}</span>
+                <div style={{flex:1,height:1,background:'linear-gradient(90deg,var(--border),transparent)',marginLeft:8}}/>
+              </div>
+            </div>
+          )}
+
           {weeks().map(({kw:k,days})=>{
             const daySt={};
             WDAYS.forEach((dn,di)=>{
@@ -9503,8 +9553,37 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                           background:'var(--surface-2)'}}>Netto</th>
                       </tr>
                     </thead>
-                    <tbody>
-                      {planEmpsDisplay.map((emp,ei)=>{
+                    {overheadEmps.length>0&&day&&(
+                  <div style={{marginBottom:8}}>
+                    <div style={{display:'flex',alignItems:'center',gap:6,padding:'4px 8px',
+                      background:'linear-gradient(90deg,#1e1b4b,#312e81)',borderRadius:5,marginBottom:5}}>
+                      <span style={{fontSize:11}}>👔</span>
+                      <span style={{fontWeight:800,fontSize:10,color:'#c7d2fe'}}>OVERHEAD</span>
+                      <span style={{fontSize:9,color:'rgba(199,210,254,.5)',marginLeft:'auto'}}>nicht in Abdeckung</span>
+                    </div>
+                    <div style={{display:'flex',flexWrap:'wrap',gap:5,marginBottom:5}}>
+                      {overheadEmps.map(emp=>{
+                        const en=getEntry(emp.id,day);const ab=absent(emp,day);
+                        return(
+                          <div key={emp.id} style={{display:'flex',alignItems:'center',gap:5,
+                            padding:'3px 8px',borderRadius:20,fontSize:10,
+                            background:en?'rgba(99,102,241,.1)':'var(--surface-2)',
+                            border:'1px solid '+(en?'rgba(99,102,241,.25)':'var(--border)')}}>
+                            <span style={{fontWeight:700,color:en?'#6366f1':'var(--muted)'}}>{emp.first_name} {emp.last_name}</span>
+                            <span style={{color:'var(--muted)',fontSize:9}}>{ab?(ab.type==='vacation'?'🏖':ab.type==='sick'?'🤒':'❌'):en?en.shift:'—'}</span>
+                            {en&&day===iso(today)&&(
+                              <button onClick={()=>{const _n=new Date();const _t=String(_n.getHours()).padStart(2,'0')+':'+String(Math.floor(_n.getMinutes()/30)*30).padStart(2,'0');setPartialEndTime(_t);setPartialModal({empId:emp.id,ds:day,entry:en,absType:'sick'});}}
+                                style={{fontSize:8,padding:'1px 3px',background:'#fef3c7',color:'#d97706',border:'1px solid #fcd34d',borderRadius:3,cursor:'pointer'}}>⚡</button>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <div style={{fontSize:10,fontWeight:800,padding:'1px 4px',marginBottom:3}}>👥 AGENTEN</div>
+                  </div>
+                )}
+                <tbody>
+                      {agentEmps.map((emp,ei)=>{
                         const ab=absent(emp,day);
                         const en=getEntry(emp.id,day);
                         const empSlots=slotIdxs(en?.shift||'');
@@ -9531,7 +9610,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                                   {iso(day)===iso(today)&&(
                                     <button title='Partiell krank/abwesend' onClick={()=>{
                                       const en=getEntry(emp.id,iso(day));
-                                      if(en) setPartialModal({empId:emp.id,ds:iso(day),entry:en,absType:'sick'});
+                                      if(en){const _n=new Date();const _t=String(_n.getHours()).padStart(2,'0')+':'+String(Math.floor(_n.getMinutes()/30)*30).padStart(2,'0');setPartialEndTime(_t);setPartialModal({empId:emp.id,ds:iso(day),entry:en,absType:'sick'});}
                                     }} style={{fontSize:10,padding:'1px 5px',background:'#fef3c7',
                                       color:'#d97706',border:'1px solid #fcd34d',borderRadius:3,cursor:'pointer',lineHeight:1}}>
                                       ⚡
@@ -10268,7 +10347,48 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                 )}
 
                 {/* Employee rows */}
-                {planEmpsDisplay.map((emp,ei)=>{
+                {(()=>{
+                  // Overhead rows first (visually separated)
+                  const overRows=overheadEmps.map((emp,ei)=>{
+                    const ab=absent(emp,ddDs);
+                    const entry=getEntry(emp.id,ddDs);
+                    const t=entry?parseShift(entry.shift):null;
+                    const col=t?getShiftColor(entry.shift):'#6366f1';
+                    return(
+                      <div key={'oh_'+emp.id}
+                        style={{display:'flex',height:ROW_H,
+                          borderBottom:'1px solid rgba(99,102,241,.2)',
+                          background:'rgba(99,102,241,.04)'}}>
+                        <div style={{width:LABEL_W,flexShrink:0,padding:'0 6px',
+                          borderRight:'2px solid rgba(99,102,241,.2)',height:'100%',
+                          display:'flex',flexDirection:'column',justifyContent:'center',gap:2}}>
+                          <div style={{display:'flex',alignItems:'center',gap:3}}>
+                            <span style={{fontWeight:700,fontSize:10,color:'#6366f1',
+                              whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>
+                              {emp.first_name} {emp.last_name}
+                            </span>
+                            {entry&&ddDs===iso(today)&&(
+                              <button onClick={e=>{e.stopPropagation();const _n=new Date();const _t=String(_n.getHours()).padStart(2,'0')+':'+String(Math.floor(_n.getMinutes()/30)*30).padStart(2,'0');setPartialEndTime(_t);setPartialModal({empId:emp.id,ds:ddDs,entry,absType:'sick'});}}
+                                style={{fontSize:8,padding:'1px 3px',background:'#fef3c7',color:'#d97706',
+                                  border:'1px solid #fcd34d',borderRadius:3,cursor:'pointer',flexShrink:0}}>⚡</button>
+                            )}
+                          </div>
+                          <div style={{fontSize:9,color:'#818cf8'}}>{emp.position||emp.project_skill}</div>
+                        </div>
+                        <div style={{position:'relative',flex:1,height:'100%',background:'rgba(99,102,241,.03)'}}>
+                          {t&&<div style={{position:'absolute',left:minToX(t.start),
+                            width:Math.max(minToX(t.end)-minToX(t.start),8),
+                            top:8,height:ROW_H-16,background:'#6366f1',borderRadius:4,opacity:0.7,
+                            display:'flex',alignItems:'center',justifyContent:'center'}}>
+                            <span style={{fontSize:9,fontWeight:700,color:'#fff',userSelect:'none'}}>
+                              {entry.shift}
+                            </span>
+                          </div>}
+                        </div>
+                      </div>
+                    );
+                  });
+                  const agentRows=agentEmps.map((emp,ei)=>{
                   const ab=absent(emp,ddDs);
                   const entry=getEntry(emp.id,ddDs);
                   const t=entry?parseShift(entry.shift):null;
@@ -10699,7 +10819,17 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                       </div>
                     </div>
                   );
-                })}
+                });
+                  return(<>{overheadEmps.length>0&&(<>
+                    <div style={{display:'flex',alignItems:'center',gap:6,padding:'4px 8px 4px 6px',background:'linear-gradient(90deg,#1e1b4b,#312e81)',borderRadius:'4px 4px 0 0',borderBottom:'1px solid rgba(99,102,241,.3)'}}>
+                      <span style={{fontWeight:800,fontSize:10,color:'#c7d2fe'}}>👔 OVERHEAD</span><span style={{fontSize:9,color:'rgba(199,210,254,.5)',marginLeft:'auto'}}>nicht in Abdeckung</span>
+                    </div>
+                    {overRows}
+                    <div style={{display:'flex',alignItems:'center',gap:6,padding:'4px 8px',background:'var(--surface-2)',borderBottom:'1px solid var(--border)'}}>
+                      <span style={{fontWeight:800,fontSize:10}}>👥 AGENTEN</span>
+                    </div>
+                  </>)}{agentRows}</>);
+                })()}
 
                 {/* Coverage row */}
                 {dfc[ddDs]>0&&(
@@ -10916,7 +11046,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                       ['absent','❌ Abwesend ab…','#d97706','#fef3c7'],
                       ['vacation','🏖 Urlaub ab…','#2563eb','#eff6ff']].map(([type,label,col,bg])=>(
                       <div key={type}
-                        onClick={()=>{setPartialModal({empId:bEmp.id,ds:blockMenu.ds,entry:bEntry,absType:type});setBlockMenu(null);}}
+                        onClick={()=>{(()=>{const _n=new Date();const _t=String(_n.getHours()).padStart(2,'0')+':'+String(Math.floor(_n.getMinutes()/30)*30).padStart(2,'0');setPartialEndTime(_t);setPartialModal({empId:bEmp.id,ds:blockMenu.ds,entry:bEntry,absType:type});setBlockMenu(null);})();}}
                         style={{display:'flex',alignItems:'center',gap:6,
                           padding:'6px 8px',borderRadius:4,cursor:'pointer',marginBottom:3,
                           background:bg,border:'1px solid '+col,color:col,fontWeight:700,fontSize:11}}>
@@ -10934,15 +11064,14 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
       {partialModal&&(()=>{
         const pEmp=planEmpsDisplay.find(e=>e.id===partialModal.empId);
         const pEntry=partialModal.entry;
+        if(!pEntry||!pEntry.shift) return null;
         const shM=(pEntry.shift||'').match(/(\d{1,2}):(\d{2})/);
         const startStr=shM?shM[0]:'08:00';
         const startMin=shM?parseInt(shM[1])*60+parseInt(shM[2]):480;
         const absLabels={sick:'🤒 Krank',absent:'❌ Abwesend',vacation:'🏖 Urlaub'};
         const absColors={sick:'#dc2626',absent:'#d97706',vacation:'#2563eb'};
         const col=absColors[partialModal.absType]||'#6b7280';
-        const now=new Date();
-        const nowSlot=String(now.getHours()).padStart(2,'0')+':'+String(Math.floor(now.getMinutes()/30)*30).padStart(2,'0');
-        const [endTime,setEndTime]=React.useState(nowSlot);
+        const endTime=partialEndTime||startStr;
         const em=endTime.match(/(\d{1,2}):(\d{2})/);
         const endMin=em?parseInt(em[1])*60+parseInt(em[2]):startMin+120;
         const workedH=Math.max(0,Math.round((endMin-startMin)/60*10)/10);
@@ -10953,10 +11082,12 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
             <div style={{background:'var(--surface)',borderRadius:14,padding:24,width:320,
               boxShadow:'0 20px 60px rgba(0,0,0,.3)',border:'2px solid '+col}}
               onClick={e=>e.stopPropagation()}>
-              <div style={{display:'flex',gap:6,marginBottom:12}}>
+              {/* Type toggle */}
+              <div style={{display:'flex',gap:6,marginBottom:14}}>
                 {[['sick','🤒 Krank','#dc2626'],['absent','❌ Abwesend','#d97706'],['vacation','🏖 Urlaub','#2563eb']].map(([t,l,c])=>(
                   <button key={t} onClick={()=>setPartialModal(pm=>({...pm,absType:t}))}
-                    style={{flex:1,padding:'6px 4px',borderRadius:7,border:'2px solid '+(partialModal.absType===t?c:'var(--border)'),
+                    style={{flex:1,padding:'6px 3px',borderRadius:7,
+                      border:'2px solid '+(partialModal.absType===t?c:'var(--border)'),
                       background:partialModal.absType===t?c+'18':'transparent',
                       color:partialModal.absType===t?c:'var(--muted)',
                       fontWeight:700,fontSize:10,cursor:'pointer',fontFamily:'inherit'}}>
@@ -10967,20 +11098,20 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
               <div style={{fontSize:15,fontWeight:800,marginBottom:4,color:col}}>
                 {absLabels[partialModal.absType]}
               </div>
-              <div style={{fontSize:12,color:'var(--muted)',marginBottom:16}}>
+              <div style={{fontSize:12,color:'var(--muted)',marginBottom:14}}>
                 {pEmp?pEmp.first_name+' '+pEmp.last_name:''} · {new Date(partialModal.ds+'T12:00').toLocaleDateString('de-AT')}
               </div>
               <div style={{background:'var(--surface-2)',borderRadius:8,padding:'10px 14px',
                 marginBottom:14,fontSize:12,border:'1px solid var(--border)'}}>
                 <div>Schichtbeginn: <strong>{startStr}</strong></div>
                 <div style={{fontSize:11,color:'var(--muted)',marginTop:2}}>
-                  Gearbeitete Stunden werden bis zur gewählten Uhrzeit erfasst
+                  Arbeitsstunden werden bis zur gewählten Uhrzeit gezählt
                 </div>
               </div>
               <label style={{display:'block',fontSize:12,fontWeight:700,marginBottom:6}}>
                 Mitarbeiter verlässt Arbeitsplatz um:
               </label>
-              <select value={endTime} onChange={e=>setEndTime(e.target.value)}
+              <select value={endTime} onChange={e=>setPartialEndTime(e.target.value)}
                 style={{width:'100%',padding:'9px 12px',borderRadius:8,
                   border:'2px solid '+col,fontSize:15,fontWeight:700,color:col,
                   background:'var(--surface)',marginBottom:10,fontFamily:'inherit',outline:'none'}}>
@@ -10994,7 +11125,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                 <strong style={{color:col}}>{workedH}h</strong>
                 <span style={{color:'var(--muted)',marginLeft:6}}>werden als Arbeitszeit gebucht</span>
                 <div style={{fontSize:11,color:'var(--muted)',marginTop:3}}>
-                  Rest der Schicht: {absLabels[partialModal.absType]}
+                  Rest der Schicht → {absLabels[partialModal.absType]}
                 </div>
               </div>
               <div style={{display:'flex',gap:10}}>
