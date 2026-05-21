@@ -8816,6 +8816,96 @@ function WorkforcePlanningView({employees,projects,showToast}){
     }
     showToast&&showToast(msg,daysShort===0&&daysOver===0?'success':'info');
     console.log('Autoplan v12:',msg,`daysOK=${daysOk} short=${daysShort} over=${daysOver}`);
+
+    // ── 6. OVERHEAD AUTO-PLAN ─────────────────────────────────
+    const ohCfg=(()=>{try{return JSON.parse(localStorage.getItem('jsr_overhead_cfg_v1')||'{}');}catch(e){return{};}})();
+    const doAutoOH=ohCfg.auto_on_upload!==false;
+    if(doAutoOH&&overheadEmps.length>0){
+      const gapStart=(ohCfg.gap_start!=null?ohCfg.gap_start:60)/30; // in slots
+      const gapEnd=(ohCfg.gap_end!=null?ohCfg.gap_end:60)/30;
+      const coverPeak=ohCfg.cover_peak!==false;
+      
+      futureDays.forEach(d=>{
+        const ds=iso(d);
+        const fcSlots=ifc[ds]||[];
+        if(!fcSlots.length) return;
+        
+        // Finde Peak-Fenster (Slots mit FC > 0, ohne erste und letzte gapStart/gapEnd Slots)
+        const firstFcSlot=fcSlots.findIndex(v=>v>0);
+        const lastFcSlot=fcSlots.reduce((acc,v,i)=>v>0?i:acc,-1);
+        if(firstFcSlot<0) return;
+        
+        const windowStart=firstFcSlot+gapStart;
+        const windowEnd=lastFcSlot-gapEnd;
+        if(windowStart>=windowEnd) return;
+        
+        // Peak-Slots (höchster FC innerhalb Fenster)
+        const peakIdx=fcSlots.reduce((best,v,i)=>{
+          if(i<windowStart||i>windowEnd) return best;
+          return v>(fcSlots[best]||0)?i:best;
+        },Math.round(windowStart));
+        
+        overheadEmps.forEach(ohEmp=>{
+          if(u['s_'+ohEmp.id+'_'+ds]) return; // schon geplant
+          if(absent(ohEmp,ds)) return;
+          // Check SA/SO
+          const dow=d.getDay();
+          if(dow===6&&!ohEmp.work_saturday) return;
+          if(dow===0&&!ohEmp.work_sunday) return;
+          
+          // Rolle ermitteln
+          const rl=(ohEmp.position||ohEmp.project_skill||'').toLowerCase();
+          const roleCfgKey=Object.keys(ohCfg.roles||{}).find(k=>rl.includes(k))||null;
+          const rc=(ohCfg.roles||{})[roleCfgKey||'']||{};
+          const logic=rc.logic||'peak';
+          
+          // Bestimme bevorzugten Start/End Slot
+          let prefStart=rc.preferred_start||(rl.includes('qm')?'10:00':'09:00');
+          let prefEnd=rc.preferred_end||'18:00';
+          
+          // Finde passende Schicht
+          const sh=getShifts();
+          let bestSh=null;
+          
+          if(logic==='fixed'||logic==='morning'){
+            // Feste Zeit: finde Schicht die preferred_start/end abdeckt
+            bestSh=sh.find(s=>{
+              const [ss,se]=(s.value||'').split('-');
+              return ss<=prefStart&&se>=prefEnd;
+            });
+          }
+          
+          if(!bestSh&&coverPeak){
+            // Peak-Abdeckung: finde Schicht die den Peak-Bereich abdeckt
+            const peakTime=SLOTS[peakIdx]||'12:00';
+            bestSh=sh.find(s=>{
+              const idxs=slotIdxs(s.value)||[];
+              return idxs.includes(peakIdx)||idxs.some(i=>Math.abs(i-peakIdx)<=4);
+            });
+          }
+          
+          if(!bestSh) bestSh=sh.find(s=>{
+            const [ss]=(s.value||'').split('-');
+            return ss>=prefStart;
+          })||sh[0];
+          
+          if(!bestSh) return;
+          
+          u['s_'+ohEmp.id+'_'+ds]={
+            shift:bestSh.value,hours:bestSh.hours,
+            net:parseFloat(bestSh.net)||7.5,
+            label:bestSh.label,
+            _overhead:true
+          };
+          (slotIdxs(bestSh.value)||[]).forEach(si=>{
+            u['i_'+ohEmp.id+'_'+ds+'_'+si]='1';
+          });
+        });
+      });
+      
+      save(u);
+      console.log('Overhead Auto-Plan: %d Personen für %d Tage geplant', overheadEmps.length, futureDays.length);
+    }
   }
 
 
@@ -10114,6 +10204,116 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                   </div>
                 )}
                 <tbody>
+                      {/* ── OVERHEAD in Tages-Tabelle ── */}
+                      {overheadEmps.map((emp,ei)=>{
+                        const ab=absent(emp,day);
+                        const en=getEntry(emp.id,day);
+                        const netH=SLOTS.filter((_,si)=>getCell(emp.id,day,si)==='1').length*0.5;
+                        const ohCfg=(JSON.parse(localStorage.getItem('jsr_overhead_cfg_v1')||'{}')||{});
+                        const roleKey=(emp.position||emp.project_skill||'').toLowerCase();
+                        return(
+                          <tr key={emp.id} style={{borderBottom:'1px solid rgba(99,102,241,.2)',
+                            background:ab?'#fef9c3':'rgba(99,102,241,.04)'}}>
+                            <td style={{padding:'4px 8px',fontWeight:700,position:'sticky',left:0,zIndex:1,
+                              background:ab?'#fef9c3':'rgba(99,102,241,.07)',
+                              borderRight:'1px solid rgba(99,102,241,.2)',minWidth:130}}>
+                              <div style={{display:'flex',alignItems:'center',gap:4}}>
+                                <span style={{fontSize:10,padding:'1px 4px',background:'rgba(99,102,241,.15)',
+                                  color:'#818cf8',borderRadius:3,fontWeight:700,fontSize:9}}>
+                                  {emp.position||'OVH'}
+                                </span>
+                                <span style={{fontSize:11}}>{emp.first_name} {emp.last_name}</span>
+                                {en&&(
+                                  <button title='Schicht entfernen' onClick={()=>{
+                                    const u={...plan};
+                                    delete u['s_'+emp.id+'_'+day];
+                                    SLOTS.forEach((_,si)=>delete u['i_'+emp.id+'_'+day+'_'+si]);
+                                    save(u);showToast&&showToast(emp.first_name+' Overhead entfernt','info');
+                                  }} style={{fontSize:10,padding:'1px 5px',background:'#ede9fe',
+                                    color:'#7c3aed',border:'1px solid #c4b5fd',borderRadius:3,cursor:'pointer',lineHeight:1}}>
+                                    ✕
+                                  </button>
+                                )}
+                                {!en&&!ab&&(
+                                  <button title='Schicht zuweisen' onClick={()=>{
+                                    const sh=getShifts();
+                                    const cfg=JSON.parse(localStorage.getItem('jsr_overhead_cfg_v1')||'{}');
+                                    const rl=(emp.position||emp.project_skill||'').toLowerCase();
+                                    const cfgRole=Object.keys(cfg).find(k=>rl.includes(k))||'default';
+                                    const preferStart=cfg[cfgRole]?.preferred_start||'09:00';
+                                    const preferEnd=cfg[cfgRole]?.preferred_end||'17:30';
+                                    // Finde Schicht die preferred_start/end abdeckt
+                                    const bestSh=sh.find(s=>{
+                                      const [ss,se]=(s.value||'').split('-');
+                                      return ss<=preferStart&&se>=preferEnd;
+                                    })||sh.find(s=>{
+                                      const idxs=slotIdxs(s.value)||[];
+                                      return idxs.some(i=>(ifc[day]||[])[i]>0);
+                                    })||sh[0];
+                                    if(!bestSh) return;
+                                    const u={...plan};
+                                    u['s_'+emp.id+'_'+day]={shift:bestSh.value,hours:bestSh.hours,net:parseFloat(bestSh.net)||7.5,label:bestSh.label};
+                                    (slotIdxs(bestSh.value)||[]).forEach((si,p)=>{
+                                      const mid=Math.floor((slotIdxs(bestSh.value)||[]).length/2);
+                                      u['i_'+emp.id+'_'+day+'_'+si]=(slotIdxs(bestSh.value).length>6&&p===mid&&p>=4)?'p':'1';
+                                    });
+                                    save(u);showToast&&showToast(emp.first_name+' (Overhead) eingeplant','success');
+                                  }} style={{fontSize:9,padding:'1px 5px',background:'rgba(99,102,241,.15)',
+                                    color:'#6366f1',border:'1px solid rgba(99,102,241,.3)',borderRadius:3,cursor:'pointer',lineHeight:1}}>
+                                    + Schicht
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                            {SLOTS.map((_,si)=>{
+                              const cell=getCell(emp.id,day,si);
+                              const isPeak=(ifc[day]||[])[si]>0;
+                              return(
+                                <td key={si} onClick={()=>{
+                                  if(ab) return;
+                                  const u={...plan};
+                                  if(!en){
+                                    const sh=getShifts()[0];
+                                    if(sh){
+                                      u['s_'+emp.id+'_'+day]={shift:sh.value,hours:sh.hours,net:parseFloat(sh.net)||7.5,label:sh.label};
+                                      (slotIdxs(sh.value)||[]).forEach(s2=>{ u['i_'+emp.id+'_'+day+'_'+s2]='1'; });
+                                    }
+                                  }
+                                  const cur=u['i_'+emp.id+'_'+day+'_'+si];
+                                  u['i_'+emp.id+'_'+day+'_'+si]=cur==='1'?undefined:'1';
+                                  if(!u['i_'+emp.id+'_'+day+'_'+si]) delete u['i_'+emp.id+'_'+day+'_'+si];
+                                  const anySet=SLOTS.some((_,s2)=>u['i_'+emp.id+'_'+day+'_'+s2]==='1');
+                                  if(!anySet){ delete u['s_'+emp.id+'_'+day]; SLOTS.forEach((_,s2)=>delete u['i_'+emp.id+'_'+day+'_'+s2]); }
+                                  else {
+                                    const firstOn=SLOTS.findIndex((_,s2)=>u['i_'+emp.id+'_'+day+'_'+s2]==='1');
+                                    const lastOn=SLOTS.reduce((acc,_,s2)=>u['i_'+emp.id+'_'+day+'_'+s2]==='1'?s2:acc,-1);
+                                    if(firstOn>=0&&lastOn>=0){
+                                      const ss=SLOTS[firstOn];const se=SLOTS[lastOn];
+                                      const newNet=SLOTS.filter((_,s2)=>u['i_'+emp.id+'_'+day+'_'+s2]==='1').length*0.5;
+                                      u['s_'+emp.id+'_'+day]={...en,shift:ss+'-'+se,hours:newNet+0.5,net:newNet,label:ss+'-'+se};
+                                    }
+                                  }
+                                  save(u);
+                                }}
+                                style={{
+                                  width:20,cursor:'pointer',
+                                  background:cell==='1'?'#6366f1':cell==='p'?'#a5b4fc':isPeak?'rgba(99,102,241,.08)':'transparent',
+                                  borderLeft:SLOTS[si]?.endsWith(':00')?'2px solid var(--border)':'1px solid var(--border)',
+                                  borderBottom:'none',transition:'background .1s'
+                                }}/>
+                              );
+                            })}
+                            <td style={{padding:'4px 6px',textAlign:'center',fontSize:11,fontWeight:700,
+                              color:'#6366f1',borderLeft:'2px solid var(--border)',minWidth:48}}>
+                              {en?en.net+'h':'—'}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                      {overheadEmps.length>0&&(
+                        <tr><td colSpan={SLOTS.length+2} style={{height:4,background:'rgba(99,102,241,.1)'}}/>  </tr>
+                      )}
+                      {/* ── AGENTEN ── */}
                       {agentEmps.map((emp,ei)=>{
                         const ab=absent(emp,day);
                         const en=getEntry(emp.id,day);
@@ -10885,15 +11085,22 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                     const entry=getEntry(emp.id,ddDs);
                     const t=entry?parseShift(entry.shift):null;
                     const col=t?getShiftColor(entry.shift):'#6366f1';
+                    const ohEarliest=emp.shift_earliest||'06:00';
+                    const ohLatest=emp.shift_latest||'22:00';
                     return(
                       <div key={'oh_'+emp.id}
                         style={{display:'flex',height:ROW_H,
                           borderBottom:'1px solid rgba(99,102,241,.2)',
                           background:'rgba(99,102,241,.04)'}}>
+                        {/* Label */}
                         <div style={{width:LABEL_W,flexShrink:0,padding:'0 6px',
                           borderRight:'2px solid rgba(99,102,241,.2)',height:'100%',
                           display:'flex',flexDirection:'column',justifyContent:'center',gap:2}}>
                           <div style={{display:'flex',alignItems:'center',gap:3}}>
+                            <span style={{fontSize:9,padding:'1px 4px',background:'rgba(99,102,241,.2)',
+                              color:'#818cf8',borderRadius:3,fontWeight:700,flexShrink:0}}>
+                              {(emp.position||'OVH').slice(0,3).toUpperCase()}
+                            </span>
                             <span style={{fontWeight:700,fontSize:10,color:'#6366f1',
                               whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>
                               {emp.first_name} {emp.last_name}
@@ -10904,17 +11111,157 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                                   border:'1px solid #fcd34d',borderRadius:3,cursor:'pointer',flexShrink:0}}>⚡</button>
                             )}
                           </div>
-                          <div style={{fontSize:9,color:'#818cf8'}}>{emp.position||emp.project_skill}</div>
+                          <div style={{fontSize:9,color:'#818cf8',whiteSpace:'nowrap',overflow:'hidden'}}>
+                            {emp.position||emp.project_skill}
+                            {!isPastDay&&!ab&&<span style={{color:'rgba(99,102,241,.5)',marginLeft:4,fontSize:8}}>ziehen = Schicht</span>}
+                          </div>
                         </div>
-                        <div style={{position:'relative',flex:1,height:'100%',background:'rgba(99,102,241,.03)'}}>
-                          {t&&<div style={{position:'absolute',left:minToX(t.start),
-                            width:Math.max(minToX(t.end)-minToX(t.start),8),
-                            top:8,height:ROW_H-16,background:'#6366f1',borderRadius:4,opacity:0.7,
-                            display:'flex',alignItems:'center',justifyContent:'center'}}>
-                            <span style={{fontSize:9,fontWeight:700,color:'#fff',userSelect:'none'}}>
-                              {entry.shift}
-                            </span>
-                          </div>}
+                        {/* Drag-Drop Lane — identisch zu Agenten */}
+                        <div style={{
+                            position:'relative',flex:1,height:'100%',
+                            cursor:isPastDay||ab?'not-allowed':'copy',
+                            overflow:'hidden',
+                            background:ab
+                              ?'repeating-linear-gradient(45deg,transparent,transparent 5px,rgba(99,102,241,.06) 5px,rgba(99,102,241,.06) 10px)'
+                              :'transparent'}}
+                          onDragOver={e=>{
+                            if(isPastDay||ab) return;
+                            e.preventDefault();
+                            const rect=e.currentTarget.getBoundingClientRect();
+                            const dropMin=xToMin(e.clientX-rect.left);
+                            const snap=snapToShift(emp,dropMin);
+                            e.currentTarget.style.outline=snap.isBlocked?'2px solid #ef4444':'2px solid #6366f1';
+                            e.currentTarget.setAttribute('data-snap-shift',snap.best?.id||'');
+                          }}
+                          onDragLeave={e=>{
+                            e.currentTarget.style.outline='none';
+                            e.currentTarget.removeAttribute('data-snap-shift');
+                          }}
+                          onDrop={e=>{
+                            e.currentTarget.style.outline='none';
+                            if(isPastDay||ab) return;
+                            const rect=e.currentTarget.getBoundingClientRect();
+                            const dropMin=xToMin(e.clientX-rect.left);
+                            const snap=snapToShift(emp,dropMin);
+                            if(snap.best){
+                              setEntry(emp.id,ddDs,snap.best);
+                              showToast&&showToast(emp.first_name+' (Overhead) → '+snap.best.label,'success');
+                            }
+                          }}
+                          onClick={e=>{
+                            if(isPastDay||ab||t) return;
+                            const rect=e.currentTarget.getBoundingClientRect();
+                            const dropMin=xToMin(e.clientX-rect.left);
+                            const snap=snapToShift(emp,dropMin);
+                            if(snap.best){
+                              setEntry(emp.id,ddDs,snap.best);
+                              showToast&&showToast(emp.first_name+' (Overhead) → '+snap.best.label,'success');
+                            }
+                          }}>
+                          {/* Schicht-Block mit Resize */}
+                          {t&&(
+                            <div draggable={!isPastDay&&!ab}
+                              onDragStart={e=>{
+                                e.stopPropagation();
+                                e.dataTransfer.setData('text/plain','oh_shift_'+emp.id);
+                              }}
+                              style={{
+                                position:'absolute',
+                                left:minToX(t.start),
+                                width:Math.max(minToX(t.end)-minToX(t.start),8),
+                                top:6,height:ROW_H-12,
+                                background:isPastDay?col+'80':col,
+                                borderRadius:5,
+                                border:'1.5px solid '+col,
+                                cursor:isPastDay?'default':'grab',
+                                display:'flex',alignItems:'center',gap:4,paddingLeft:6,
+                                overflow:'hidden',whiteSpace:'nowrap',
+                                zIndex:1,userSelect:'none',
+                              }}>
+                              <span style={{fontSize:9,fontWeight:800,color:'#fff'}}>{entry.shift}</span>
+                              <span style={{fontSize:8,color:'rgba(255,255,255,.7)'}}>{entry.net}h</span>
+                              {!isPastDay&&(
+                                <button title='Schicht entfernen'
+                                  onClick={e=>{e.stopPropagation();setEntry(emp.id,ddDs,null);
+                                    showToast&&showToast(emp.first_name+' Overhead entfernt','info');}}
+                                  style={{marginLeft:'auto',marginRight:4,fontSize:9,padding:'1px 4px',
+                                    background:'rgba(255,255,255,.2)',color:'#fff',border:'none',
+                                    borderRadius:3,cursor:'pointer',lineHeight:1}}>✕</button>
+                              )}
+                              {/* Resize Start */}
+                              {!isPastDay&&(
+                                <div style={{position:'absolute',left:0,top:0,bottom:0,width:10,
+                                  cursor:'ew-resize',zIndex:4,
+                                  background:'linear-gradient(to right,'+col+'80,transparent)'}}
+                                  onMouseDown={e=>{
+                                    e.stopPropagation();e.preventDefault();
+                                    resizeRef.current={empId:emp.id,ds:ddDs,side:'start',
+                                      origStart:t.start,origEnd:t.end,startX:e.clientX};
+                                    const onMove=ev=>{
+                                      const r=resizeRef.current;if(!r)return;
+                                      const dmin=Math.round((ev.clientX-r.startX)/PX_MIN/30)*30;
+                                      const ns=Math.max(0,Math.min(r.origStart+dmin,r.origEnd-30));
+                                      const te=String(Math.floor(r.origEnd/60)).padStart(2,'0')+':'+String(r.origEnd%60).padStart(2,'0');
+                                      const ts=String(Math.floor(ns/60)).padStart(2,'0')+':'+String(ns%60).padStart(2,'0');
+                                      const el=document.getElementById('gantt-resize-preview');
+                                      if(el) el.textContent=ts+'-'+te;
+                                    };
+                                    const onUp=ev=>{
+                                      document.removeEventListener('mousemove',onMove);
+                                      document.removeEventListener('mouseup',onUp);
+                                      const r=resizeRef.current;if(!r)return;resizeRef.current=null;
+                                      const dmin=Math.round((ev.clientX-r.startX)/PX_MIN/30)*30;
+                                      const ns=Math.max(0,Math.min(r.origStart+dmin,r.origEnd-30));
+                                      const newNet=Math.round((r.origEnd-ns)/60*2)/2;
+                                      const ts=String(Math.floor(ns/60)).padStart(2,'0')+':'+String(ns%60).padStart(2,'0');
+                                      const te=String(Math.floor(r.origEnd/60)).padStart(2,'0')+':'+String(r.origEnd%60).padStart(2,'0');
+                                      setEntry(emp.id,ddDs,{...entry,shift:ts+'-'+te,hours:newNet+0.5,net:newNet,label:ts+'-'+te});
+                                    };
+                                    document.addEventListener('mousemove',onMove);
+                                    document.addEventListener('mouseup',onUp);
+                                  }}/>
+                              )}
+                              {/* Resize End */}
+                              {!isPastDay&&(
+                                <div style={{position:'absolute',right:0,top:0,bottom:0,width:10,
+                                  cursor:'ew-resize',zIndex:4,
+                                  background:'linear-gradient(to left,'+col+'80,transparent)'}}
+                                  onMouseDown={e=>{
+                                    e.stopPropagation();e.preventDefault();
+                                    resizeRef.current={empId:emp.id,ds:ddDs,side:'end',
+                                      origStart:t.start,origEnd:t.end,startX:e.clientX};
+                                    const onMove=ev=>{
+                                      const r=resizeRef.current;if(!r)return;
+                                      const dmin=Math.round((ev.clientX-r.startX)/PX_MIN/30)*30;
+                                      const ne=Math.max(r.origStart+30,Math.min(r.origEnd+dmin,24*60));
+                                      const ts=String(Math.floor(r.origStart/60)).padStart(2,'0')+':'+String(r.origStart%60).padStart(2,'0');
+                                      const te=String(Math.floor(ne/60)).padStart(2,'0')+':'+String(ne%60).padStart(2,'0');
+                                      const el=document.getElementById('gantt-resize-preview');
+                                      if(el) el.textContent=ts+'-'+te;
+                                    };
+                                    const onUp=ev=>{
+                                      document.removeEventListener('mousemove',onMove);
+                                      document.removeEventListener('mouseup',onUp);
+                                      const r=resizeRef.current;if(!r)return;resizeRef.current=null;
+                                      const dmin=Math.round((ev.clientX-r.startX)/PX_MIN/30)*30;
+                                      const ne=Math.max(r.origStart+30,Math.min(r.origEnd+dmin,24*60));
+                                      const newNet=Math.round((ne-r.origStart)/60*2)/2;
+                                      const ts=String(Math.floor(r.origStart/60)).padStart(2,'0')+':'+String(r.origStart%60).padStart(2,'0');
+                                      const te=String(Math.floor(ne/60)).padStart(2,'0')+':'+String(ne%60).padStart(2,'0');
+                                      setEntry(emp.id,ddDs,{...entry,shift:ts+'-'+te,hours:newNet+0.5,net:newNet,label:ts+'-'+te});
+                                    };
+                                    document.addEventListener('mousemove',onMove);
+                                    document.addEventListener('mouseup',onUp);
+                                  }}/>
+                              )}
+                            </div>
+                          )}
+                          {/* Stunden-Ticks */}
+                          {hours.map(hh=>(
+                            <div key={hh} style={{position:'absolute',left:minToX(hh*60),
+                              top:0,bottom:0,borderLeft:'1px solid rgba(99,102,241,.15)',
+                              opacity:.5,pointerEvents:'none'}}/>
+                          ))}
                         </div>
                       </div>
                     );
@@ -12248,6 +12595,162 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
 }
 
   
+          {activeSection==='overhead_cfg'&&(()=>{
+            const ohCfg=JSON.parse(localStorage.getItem('jsr_overhead_cfg_v1')||'{}');
+            const save=cfg=>{localStorage.setItem('jsr_overhead_cfg_v1',JSON.stringify(cfg));};
+            const ROLES=[
+              {key:'asp',label:'ASP / Senior Agent',icon:'🎯',
+                defaultStart:'09:00',defaultEnd:'18:00',
+                desc:'Fachliche Unterstützung, Qualitätskontrolle'},
+              {key:'teamlead',label:'Teamleitung',icon:'👥',
+                defaultStart:'08:00',defaultEnd:'17:00',
+                desc:'Teamführung, Eskalationen, Briefing'},
+              {key:'projektleiter',label:'Projektleitung',icon:'📋',
+                defaultStart:'08:00',defaultEnd:'17:00',
+                desc:'Projektsteuerung, Reporting'},
+              {key:'qm',label:'QM / Qualitätsmanagement',icon:'🔍',
+                defaultStart:'10:00',defaultEnd:'18:00',
+                desc:'Monitoring ab 10:00, Höchstlast-Abdeckung'},
+              {key:'trainer',label:'Trainer',icon:'📚',
+                defaultStart:'08:00',defaultEnd:'16:00',
+                desc:'Training und Einarbeitung'},
+            ];
+            const [cfg,setCfg]=React.useState(()=>({
+              always_cover_peak:ohCfg.always_cover_peak!==false,
+              min_gap_start:ohCfg.min_gap_start||60,
+              min_gap_end:ohCfg.min_gap_end||60,
+              auto_plan_on_upload:ohCfg.auto_plan_on_upload!==false,
+              roles:ohCfg.roles||{}
+            }));
+            const setField=(key,val)=>{
+              const n={...cfg,[key]:val};
+              setCfg(n);save(n);
+            };
+            const setRole=(roleKey,field,val)=>{
+              const n={...cfg,roles:{...cfg.roles,[roleKey]:{...(cfg.roles[roleKey]||{}),[field]:val}}};
+              setCfg(n);save(n);
+            };
+            return(
+              <div style={{padding:20,maxWidth:700}}>
+                <div style={{fontSize:16,fontWeight:800,marginBottom:4}}>👔 Overhead-Planungslogik</div>
+                <div style={{fontSize:12,color:'var(--muted)',marginBottom:20}}>
+                  Basis-Konfiguration für automatische und manuelle Overhead-Planung.
+                  Das Management kann die Planung täglich per Drag&Drop anpassen.
+                </div>
+
+                {/* Globale Einstellungen */}
+                <div style={{background:'var(--surface-2)',borderRadius:'var(--r)',padding:16,marginBottom:16,
+                  border:'1px solid var(--border)'}}>
+                  <div style={{fontWeight:700,fontSize:12,marginBottom:12}}>⚙️ Globale Regeln</div>
+                  <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
+                    <div>
+                      <label style={{fontSize:11,color:'var(--muted)',display:'block',marginBottom:4}}>
+                        Mindestabstand Schichtbeginn (Min.)
+                        <span style={{fontSize:10,color:'var(--blue)',marginLeft:4}}>Overhead startet nicht in der 1. Stunde</span>
+                      </label>
+                      <input type="number" min="0" max="120" step="30"
+                        value={cfg.min_gap_start}
+                        onChange={e=>setField('min_gap_start',parseInt(e.target.value)||60)}
+                        className="form-input" style={{width:'100%'}}/>
+                    </div>
+                    <div>
+                      <label style={{fontSize:11,color:'var(--muted)',display:'block',marginBottom:4}}>
+                        Mindestabstand Schichtende (Min.)
+                        <span style={{fontSize:10,color:'var(--blue)',marginLeft:4}}>Overhead endet nicht in der letzten Stunde</span>
+                      </label>
+                      <input type="number" min="0" max="120" step="30"
+                        value={cfg.min_gap_end}
+                        onChange={e=>setField('min_gap_end',parseInt(e.target.value)||60)}
+                        className="form-input" style={{width:'100%'}}/>
+                    </div>
+                  </div>
+                  <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginTop:12}}>
+                    <div onClick={()=>setField('always_cover_peak',!cfg.always_cover_peak)}
+                      style={{padding:'10px 14px',borderRadius:'var(--r)',cursor:'pointer',
+                        border:'2px solid '+(cfg.always_cover_peak?'#6366f1':'var(--border)'),
+                        background:cfg.always_cover_peak?'rgba(99,102,241,.08)':'var(--surface)'}}>
+                      <div style={{fontWeight:700,fontSize:12,color:cfg.always_cover_peak?'#6366f1':'var(--muted)'}}>
+                        📈 Starke Zeiten priorisieren
+                      </div>
+                      <div style={{fontSize:10,color:'var(--muted)',marginTop:2}}>
+                        Overhead wird bevorzugt in Stunden mit höchstem FC geplant
+                      </div>
+                    </div>
+                    <div onClick={()=>setField('auto_plan_on_upload',!cfg.auto_plan_on_upload)}
+                      style={{padding:'10px 14px',borderRadius:'var(--r)',cursor:'pointer',
+                        border:'2px solid '+(cfg.auto_plan_on_upload?'#10b981':'var(--border)'),
+                        background:cfg.auto_plan_on_upload?'rgba(16,185,129,.08)':'var(--surface)'}}>
+                      <div style={{fontWeight:700,fontSize:12,color:cfg.auto_plan_on_upload?'#10b981':'var(--muted)'}}>
+                        🤖 Auto-Plan nach FC-Upload
+                      </div>
+                      <div style={{fontSize:10,color:'var(--muted)',marginTop:2}}>
+                        Overhead wird nach FC-Upload automatisch vorgeschlagen
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Rollen-spezifische Einstellungen */}
+                <div style={{fontWeight:700,fontSize:12,marginBottom:10}}>🎭 Rollen-Konfiguration</div>
+                {ROLES.map(role=>{
+                  const rc=cfg.roles[role.key]||{};
+                  const prefStart=rc.preferred_start||role.defaultStart;
+                  const prefEnd=rc.preferred_end||role.defaultEnd;
+                  const logic=rc.logic||'peak';
+                  return(
+                    <div key={role.key} style={{background:'var(--surface-2)',borderRadius:'var(--r)',
+                      padding:14,marginBottom:10,border:'1px solid var(--border)'}}>
+                      <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10}}>
+                        <span style={{fontSize:16}}>{role.icon}</span>
+                        <div>
+                          <div style={{fontWeight:700,fontSize:12}}>{role.label}</div>
+                          <div style={{fontSize:10,color:'var(--muted)'}}>{role.desc}</div>
+                        </div>
+                      </div>
+                      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10}}>
+                        <div>
+                          <label style={{fontSize:10,color:'var(--muted)',display:'block',marginBottom:3}}>Bevorzugter Start</label>
+                          <input type="time" value={prefStart}
+                            onChange={e=>setRole(role.key,'preferred_start',e.target.value)}
+                            className="form-input"/>
+                        </div>
+                        <div>
+                          <label style={{fontSize:10,color:'var(--muted)',display:'block',marginBottom:3}}>Bevorzugtes Ende</label>
+                          <input type="time" value={prefEnd}
+                            onChange={e=>setRole(role.key,'preferred_end',e.target.value)}
+                            className="form-input"/>
+                        </div>
+                        <div>
+                          <label style={{fontSize:10,color:'var(--muted)',display:'block',marginBottom:3}}>Planungslogik</label>
+                          <select value={logic} onChange={e=>setRole(role.key,'logic',e.target.value)}
+                            className="form-select">
+                            <option value="peak">Peak-Abdeckung</option>
+                            <option value="morning">Immer morgens</option>
+                            <option value="spread">Über Tag verteilt</option>
+                            <option value="fixed">Feste Zeit</option>
+                          </select>
+                        </div>
+                      </div>
+                      {role.key==='qm'&&(
+                        <div style={{marginTop:8,padding:'6px 10px',background:'rgba(16,185,129,.08)',
+                          borderRadius:4,fontSize:10,color:'#059669',border:'1px solid rgba(16,185,129,.2)'}}>
+                          ✓ QM startet empfohlen ab 10:00 · Bei 2 QMs: einer morgens (10:00), einer nachmittags (13:00+)
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+
+                <div style={{padding:'10px 14px',background:'rgba(99,102,241,.06)',borderRadius:'var(--r)',
+                  fontSize:11,color:'var(--muted)',border:'1px solid rgba(99,102,241,.15)',marginTop:8}}>
+                  💡 Das Management kann die Overhead-Planung täglich per Klick oder Drag&Drop in der WFP-Tagesansicht anpassen.
+                  Diese Einstellungen dienen als Basis für den automatischen Vorschlag.
+                </div>
+              </div>
+            );
+          })()}
+
+          
 </script><script type="text/babel">function ForecastView({projects, employees, plans, forecast, setForecast}){
   const [showAddBatch, setShowAddBatch]=useState(false);
   const [newBatch, setNewBatch]=useState({project_id:'p1',name:'',start_date:'',active_date:'',planned_agents:5,status:'planned',monthly_rate:24,training_rate:18,avg_salary:800,notes:''});
@@ -19570,6 +20073,7 @@ function SystemSettingsTab({projects, setProjects, employees}){
     {key:'workmodels',  label:'⏰ Arbeitszeitmodelle'},
     {key:'kpicfg',      label:'📊 KPI-Konfiguration'},
     {key:'overtime_cfg',  label:'⏱ Überstunden-Korridore'},
+    {key:'overhead_cfg',  label:'👔 Overhead-Planung'},
     {key:'_lohn',       label:'── Lohnbuchhaltung ──', divider:true},
     {key:'lohncfg',     label:'💶 Pauschalen & Steuer'},
     {key:'surcharge',   label:'💰 Zuschläge'},
@@ -20200,7 +20704,115 @@ function SystemSettingsTab({projects, setProjects, employees}){
         <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.1em',padding:'4px 0 8px',borderBottom:'2px solid var(--border)',marginBottom:12,marginTop:8}}>💶 Lohnbuchhaltung</div>
 
         {/* ── LOHN CFG ── */}
-        {activeSection==='lohncfg'&&(()=>{
+        {
+          {activeSection==='overhead_cfg'&&(()=>{
+            const ROLES=[
+              {key:'asp',label:'ASP / Senior Agent',icon:'🎯',defStart:'09:00',defEnd:'18:00',desc:'Fachliche Unterstützung, Eskalationen'},
+              {key:'teamlead',label:'Teamleitung',icon:'👥',defStart:'08:00',defEnd:'17:00',desc:'Teamführung, Briefing, Eskalationen'},
+              {key:'projektleiter',label:'Projektleitung',icon:'📋',defStart:'08:00',defEnd:'17:00',desc:'Projektsteuerung, Reporting'},
+              {key:'qm',label:'QM / Qualitätsmanagement',icon:'🔍',defStart:'10:00',defEnd:'18:00',desc:'Monitoring — immer ab 10:00'},
+              {key:'trainer',label:'Trainer',icon:'📚',defStart:'08:00',defEnd:'16:00',desc:'Training & Einarbeitung'},
+            ];
+            const [cfg,setCfg]=React.useState(()=>{
+              try{return JSON.parse(localStorage.getItem('jsr_overhead_cfg_v1')||'{}');}catch(e){return{};}
+            });
+            const save=c=>{setCfg(c);localStorage.setItem('jsr_overhead_cfg_v1',JSON.stringify(c));};
+            const setG=(k,v)=>save({...cfg,[k]:v});
+            const setR=(rk,fk,v)=>save({...cfg,roles:{...cfg.roles,[rk]:{...(cfg.roles?.[rk]||{}),[fk]:v}}});
+            return(
+              <div style={{padding:20,maxWidth:680}}>
+                <div style={{fontWeight:800,fontSize:15,marginBottom:4}}>👔 Overhead-Planungslogik</div>
+                <div style={{fontSize:11,color:'var(--muted)',marginBottom:16}}>
+                  Konfiguriert die automatische Vorplanung von Overhead-Personal (ASP, QM, Teamlead etc.)
+                  nach FC-Upload. Das finale Feintuning erfolgt manuell per Klick im WFP-Tagesplan.
+                </div>
+
+                {/* Globale Regeln */}
+                <div style={{background:'var(--surface-2)',borderRadius:'var(--r)',padding:14,marginBottom:14,border:'1px solid var(--border)'}}>
+                  <div style={{fontWeight:700,fontSize:12,marginBottom:10}}>⚙️ Globale Regeln</div>
+                  <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:10}}>
+                    <div>
+                      <label style={{fontSize:11,color:'var(--muted)',display:'block',marginBottom:3}}>
+                        Puffer Schichtbeginn (Min.) <span style={{color:'var(--blue)'}}>— nicht 1. Stunde</span>
+                      </label>
+                      <input type="number" min="0" max="120" step="30" className="form-input"
+                        value={cfg.gap_start!=null?cfg.gap_start:60}
+                        onChange={e=>setG('gap_start',parseInt(e.target.value)||0)}/>
+                    </div>
+                    <div>
+                      <label style={{fontSize:11,color:'var(--muted)',display:'block',marginBottom:3}}>
+                        Puffer Schichtende (Min.) <span style={{color:'var(--blue)'}}>— nicht letzte Stunde</span>
+                      </label>
+                      <input type="number" min="0" max="120" step="30" className="form-input"
+                        value={cfg.gap_end!=null?cfg.gap_end:60}
+                        onChange={e=>setG('gap_end',parseInt(e.target.value)||0)}/>
+                    </div>
+                  </div>
+                  <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
+                    {[
+                      {k:'cover_peak',label:'📈 Starke Zeiten abdecken',desc:'Overhead priorisiert Stunden mit höchstem FC',def:true,color:'#6366f1'},
+                      {k:'auto_on_upload',label:'🤖 Auto-Plan nach FC-Upload',desc:'Overhead wird automatisch vorgeschlagen',def:true,color:'#10b981'},
+                    ].map(({k,label,desc,def,color})=>(
+                      <div key={k} onClick={()=>setG(k,cfg[k]===undefined?!def:!cfg[k])}
+                        style={{padding:'10px 12px',borderRadius:'var(--r)',cursor:'pointer',
+                          border:'2px solid '+((cfg[k]===undefined?def:cfg[k])?color:'var(--border)'),
+                          background:(cfg[k]===undefined?def:cfg[k])?'rgba(99,102,241,.06)':'var(--surface)'}}>
+                        <div style={{fontWeight:700,fontSize:11,color:(cfg[k]===undefined?def:cfg[k])?color:'var(--muted)'}}>{label}</div>
+                        <div style={{fontSize:10,color:'var(--muted)',marginTop:2}}>{desc}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Rollen */}
+                <div style={{fontWeight:700,fontSize:12,marginBottom:8}}>🎭 Rollen-Zeiten</div>
+                {ROLES.map(role=>{
+                  const rc=(cfg.roles||{})[role.key]||{};
+                  return(
+                    <div key={role.key} style={{display:'grid',gridTemplateColumns:'200px 1fr 1fr 1fr',
+                      gap:10,alignItems:'center',padding:'10px 14px',marginBottom:8,
+                      background:'var(--surface-2)',borderRadius:'var(--r)',border:'1px solid var(--border)'}}>
+                      <div>
+                        <span style={{fontSize:14,marginRight:6}}>{role.icon}</span>
+                        <span style={{fontWeight:700,fontSize:11}}>{role.label}</span>
+                        <div style={{fontSize:9,color:'var(--muted)',marginTop:2}}>{role.desc}</div>
+                      </div>
+                      <div>
+                        <div style={{fontSize:9,color:'var(--muted)',marginBottom:2}}>Bevorzugter Start</div>
+                        <input type="time" className="form-input"
+                          value={rc.preferred_start||role.defStart}
+                          onChange={e=>setR(role.key,'preferred_start',e.target.value)}/>
+                      </div>
+                      <div>
+                        <div style={{fontSize:9,color:'var(--muted)',marginBottom:2}}>Bevorzugtes Ende</div>
+                        <input type="time" className="form-input"
+                          value={rc.preferred_end||role.defEnd}
+                          onChange={e=>setR(role.key,'preferred_end',e.target.value)}/>
+                      </div>
+                      <div>
+                        <div style={{fontSize:9,color:'var(--muted)',marginBottom:2}}>Logik</div>
+                        <select className="form-select"
+                          value={rc.logic||'peak'}
+                          onChange={e=>setR(role.key,'logic',e.target.value)}>
+                          <option value="peak">Peak-Abdeckung</option>
+                          <option value="morning">Immer morgens</option>
+                          <option value="spread">Über Tag verteilt</option>
+                          <option value="fixed">Feste Zeit</option>
+                        </select>
+                      </div>
+                    </div>
+                  );
+                })}
+                <div style={{padding:'8px 12px',background:'rgba(99,102,241,.06)',borderRadius:'var(--r)',
+                  fontSize:10,color:'var(--muted)',border:'1px solid rgba(99,102,241,.15)'}}>
+                  💡 Finale Anpassung: Im WFP → Tag auswählen → Overhead-Zeile anklicken oder Slots direkt setzen.
+                  Das Management kann täglich per Klick jede Overhead-Schicht überschreiben.
+                </div>
+              </div>
+            );
+          })()}
+
+          activeSection==='lohncfg'&&(()=>{
           const cfgKey='jsr_payroll_cfg_'+payTab;
           const cfg=JSON.parse(localStorage.getItem(cfgKey)||'{}');
           const lohnSave=(k,v)=>{const c=JSON.parse(localStorage.getItem(cfgKey)||'{}');c[k]=v;localStorage.setItem(cfgKey,JSON.stringify(c));};
