@@ -10269,49 +10269,90 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                                 )}
                               </div>
                             </td>
-                            {SLOTS.map((_,si)=>{
-                              const cell=getCell(emp.id,day,si);
-                              const isPeak=(ifc[day]||[])[si]>0;
+                            {{/* Overhead Intervall: Drag-Select in Stunden-Schritten */}
+                          {(()=>{
+                            const ohDragRef=React.useRef(null);
+                            // Stunden-Gruppen: jeweils 2 Slots (xx:00 und xx:30) = 1 Stunde
+                            const hourGroups=[];
+                            for(let hh=8;hh<22;hh++){
+                              const s0=SLOTS.indexOf(String(hh).padStart(2,'0')+':00');
+                              const s1=SLOTS.indexOf(String(hh).padStart(2,'0')+':30');
+                              if(s0>=0) hourGroups.push({hour:hh,slots:[s0,s1].filter(x=>x>=0)});
+                            }
+                            return hourGroups.map(({hour,slots:hSlots})=>{
+                              const allActive=hSlots.every(si=>getCell(emp.id,day,si)==='1');
+                              const anyActive=hSlots.some(si=>getCell(emp.id,day,si)==='1');
+                              const isPeak=hSlots.some(si=>(ifc[day]||[])[si]>0);
+                              const hLabel=String(hour).padStart(2,'0')+':00';
                               return(
-                                <td key={si} onClick={()=>{
-                                  if(ab) return;
-                                  const u={...plan};
-                                  if(!en){
-                                    const sh=getShifts()[0];
-                                    if(sh){
-                                      u['s_'+emp.id+'_'+day]={shift:sh.value,hours:sh.hours,net:parseFloat(sh.net)||7.5,label:sh.label};
-                                      (slotIdxs(sh.value)||[]).forEach(s2=>{ u['i_'+emp.id+'_'+day+'_'+s2]='1'; });
+                                <td key={hour} colSpan={2}
+                                  title={hLabel}
+                                  onMouseDown={e=>{
+                                    if(ab||isPastDay) return;
+                                    e.preventDefault();
+                                    ohDragRef.current={empId:emp.id,startHour:hour,active:!allActive};
+                                    // Toggle diese Stunde sofort
+                                    const u={...plan};
+                                    const newVal=!allActive?'1':undefined;
+                                    if(!u['s_'+emp.id+'_'+day]&&newVal){
+                                      const sh=getShifts()[0];
+                                      if(sh) u['s_'+emp.id+'_'+day]={shift:sh.value,hours:sh.hours,net:parseFloat(sh.net)||7.5,label:sh.label};
                                     }
-                                  }
-                                  const cur=u['i_'+emp.id+'_'+day+'_'+si];
-                                  u['i_'+emp.id+'_'+day+'_'+si]=cur==='1'?undefined:'1';
-                                  if(!u['i_'+emp.id+'_'+day+'_'+si]) delete u['i_'+emp.id+'_'+day+'_'+si];
-                                  const anySet=SLOTS.some((_,s2)=>u['i_'+emp.id+'_'+day+'_'+s2]==='1');
-                                  if(!anySet){ delete u['s_'+emp.id+'_'+day]; SLOTS.forEach((_,s2)=>delete u['i_'+emp.id+'_'+day+'_'+s2]); }
-                                  else {
-                                    const firstOn=SLOTS.findIndex((_,s2)=>u['i_'+emp.id+'_'+day+'_'+s2]==='1');
-                                    const lastOn=SLOTS.reduce((acc,_,s2)=>u['i_'+emp.id+'_'+day+'_'+s2]==='1'?s2:acc,-1);
-                                    if(firstOn>=0&&lastOn>=0){
-                                      const ss=SLOTS[firstOn];const se=SLOTS[lastOn];
-                                      const newNet=SLOTS.filter((_,s2)=>u['i_'+emp.id+'_'+day+'_'+s2]==='1').length*0.5;
-                                      u['s_'+emp.id+'_'+day]={...en,shift:ss+'-'+se,hours:newNet+0.5,net:newNet,label:ss+'-'+se};
+                                    hSlots.forEach(si=>{
+                                      if(newVal) u['i_'+emp.id+'_'+day+'_'+si]=newVal;
+                                      else delete u['i_'+emp.id+'_'+day+'_'+si];
+                                    });
+                                    // Update shift range
+                                    const active2=SLOTS.filter((_,si)=>u['i_'+emp.id+'_'+day+'_'+si]==='1');
+                                    if(!active2.length){ delete u['s_'+emp.id+'_'+day]; SLOTS.forEach((_,si)=>delete u['i_'+emp.id+'_'+day+'_'+si]); }
+                                    else {
+                                      const first=SLOTS[SLOTS.findIndex((_,si)=>u['i_'+emp.id+'_'+day+'_'+si]==='1')];
+                                      const last=SLOTS[SLOTS.reduce((a,_,si)=>u['i_'+emp.id+'_'+day+'_'+si]==='1'?si:a,-1)];
+                                      const net=active2.length*0.5;
+                                      u['s_'+emp.id+'_'+day]={...u['s_'+emp.id+'_'+day],shift:first+'-'+last,hours:net+0.5,net,label:first+'-'+last};
                                     }
-                                  }
-                                  save(u);
-                                }}
-                                style={{
-                                  width:20,cursor:'pointer',
-                                  background:cell==='1'?'#6366f1':cell==='p'?'#a5b4fc':isPeak?'rgba(99,102,241,.08)':'transparent',
-                                  borderLeft:SLOTS[si]?.endsWith(':00')?'2px solid var(--border)':'1px solid var(--border)',
-                                  borderBottom:'none',transition:'background .1s'
-                                }}/>
+                                    save(u);
+                                  }}
+                                  onMouseEnter={e=>{
+                                    if(!ohDragRef.current||ohDragRef.current.empId!==emp.id||ab||isPastDay) return;
+                                    const u={...plan};
+                                    const newVal=ohDragRef.current.active?'1':undefined;
+                                    if(!u['s_'+emp.id+'_'+day]&&newVal){
+                                      const sh=getShifts()[0];
+                                      if(sh) u['s_'+emp.id+'_'+day]={shift:sh.value,hours:sh.hours,net:parseFloat(sh.net)||7.5,label:sh.label};
+                                    }
+                                    hSlots.forEach(si=>{
+                                      if(newVal) u['i_'+emp.id+'_'+day+'_'+si]=newVal;
+                                      else delete u['i_'+emp.id+'_'+day+'_'+si];
+                                    });
+                                    const active2=SLOTS.filter((_,si)=>u['i_'+emp.id+'_'+day+'_'+si]==='1');
+                                    if(!active2.length){ delete u['s_'+emp.id+'_'+day]; SLOTS.forEach((_,si)=>delete u['i_'+emp.id+'_'+day+'_'+si]); }
+                                    else {
+                                      const first=SLOTS[SLOTS.findIndex((_,si)=>u['i_'+emp.id+'_'+day+'_'+si]==='1')];
+                                      const last=SLOTS[SLOTS.reduce((a,_,si)=>u['i_'+emp.id+'_'+day+'_'+si]==='1'?si:a,-1)];
+                                      const net=active2.length*0.5;
+                                      u['s_'+emp.id+'_'+day]={...u['s_'+emp.id+'_'+day],shift:first+'-'+last,hours:net+0.5,net,label:first+'-'+last};
+                                    }
+                                    save(u);
+                                  }}
+                                  style={{
+                                    width:40,cursor:ab||isPastDay?'not-allowed':'pointer',
+                                    background:allActive?'#4f46e5':anyActive?'#a5b4fc':isPeak?'rgba(99,102,241,.12)':'transparent',
+                                    borderLeft:'2px solid rgba(99,102,241,.2)',
+                                    borderBottom:'none',
+                                    transition:'background .1s',
+                                    userSelect:'none',
+                                    position:'relative',
+                                  }}>
+                                  <div style={{fontSize:7,color:allActive?'rgba(255,255,255,.7)':'rgba(99,102,241,.4)',
+                                    position:'absolute',bottom:1,left:2,lineHeight:1,pointerEvents:'none'}}>
+                                    {hour}
+                                  </div>
+                                </td>
                               );
-                            })}
-                            <td style={{padding:'4px 6px',textAlign:'center',fontSize:11,fontWeight:700,
-                              color:'#6366f1',borderLeft:'2px solid var(--border)',minWidth:48}}>
-                              {en?en.net+'h':'—'}
-                            </td>
-                          </tr>
+                            });
+                          })()}
+                        </tr>
                         );
                       })}
                       {overheadEmps.length>0&&(
@@ -11088,171 +11129,182 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                     const ab=absent(emp,ddDs);
                     const entry=getEntry(emp.id,ddDs);
                     const t=entry?parseShift(entry.shift):null;
-                    const col=t?getShiftColor(entry.shift):'#6366f1';
-                    const ohEarliest=emp.shift_earliest||'06:00';
-                    const ohLatest=emp.shift_latest||'22:00';
+                    const col='#6366f1';
+                    // Stunden-Snap: rundet auf ganze Stunden
+                    const snapHour=m=>Math.round(m/60)*60;
+                    const minH=8*60, maxH=22*60;
                     return(
                       <div key={'oh_'+emp.id}
                         style={{display:'flex',height:ROW_H,
-                          borderBottom:'1px solid rgba(99,102,241,.2)',
-                          background:'rgba(99,102,241,.04)'}}>
+                          borderBottom:'1px solid rgba(99,102,241,.25)',
+                          background:'rgba(99,102,241,.05)'}}>
                         {/* Label */}
                         <div style={{width:LABEL_W,flexShrink:0,padding:'0 6px',
-                          borderRight:'2px solid rgba(99,102,241,.2)',height:'100%',
+                          borderRight:'2px solid rgba(99,102,241,.25)',height:'100%',
                           display:'flex',flexDirection:'column',justifyContent:'center',gap:2}}>
                           <div style={{display:'flex',alignItems:'center',gap:3}}>
                             <span style={{fontSize:9,padding:'1px 4px',background:'rgba(99,102,241,.2)',
                               color:'#818cf8',borderRadius:3,fontWeight:700,flexShrink:0}}>
                               {(emp.position||'OVH').slice(0,3).toUpperCase()}
                             </span>
-                            <span style={{fontWeight:700,fontSize:10,color:'#6366f1',
+                            <span style={{fontWeight:700,fontSize:10,color:'#4f46e5',
                               whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>
                               {emp.first_name} {emp.last_name}
                             </span>
-                            {entry&&ddDs===iso(today)&&(
-                              <button onClick={e=>{e.stopPropagation();const _n=new Date();const _t=String(_n.getHours()).padStart(2,'0')+':'+String(Math.floor(_n.getMinutes()/30)*30).padStart(2,'0');setPartialEndTime(_t);setPartialModal({empId:emp.id,ds:ddDs,entry,absType:'sick'});}}
-                                style={{fontSize:8,padding:'1px 3px',background:'#fef3c7',color:'#d97706',
-                                  border:'1px solid #fcd34d',borderRadius:3,cursor:'pointer',flexShrink:0}}>⚡</button>
-                            )}
                           </div>
-                          <div style={{fontSize:9,color:'#818cf8',whiteSpace:'nowrap',overflow:'hidden'}}>
-                            {emp.position||emp.project_skill}
-                            {!isPastDay&&!ab&&<span style={{color:'rgba(99,102,241,.5)',marginLeft:4,fontSize:8}}>ziehen = Schicht</span>}
+                          <div style={{fontSize:9,color:'#818cf8'}}>
+                            {t?entry.shift:'— ziehen zum Planen'}
+                            {t&&!isPastDay&&<button onClick={e=>{e.stopPropagation();
+                              setEntry(emp.id,ddDs,null);
+                              showToast&&showToast(emp.first_name+' Overhead entfernt','info');
+                            }} style={{marginLeft:4,fontSize:9,padding:'0 4px',background:'#ede9fe',
+                              color:'#7c3aed',border:'none',borderRadius:3,cursor:'pointer'}}>✕</button>}
                           </div>
                         </div>
-                        {/* Drag-Drop Lane — identisch zu Agenten */}
-                        <div style={{
-                            position:'relative',flex:1,height:'100%',
-                            cursor:isPastDay||ab?'not-allowed':'copy',
-                            overflow:'hidden',
-                            background:ab
-                              ?'repeating-linear-gradient(45deg,transparent,transparent 5px,rgba(99,102,241,.06) 5px,rgba(99,102,241,.06) 10px)'
-                              :'transparent'}}
-                          onDragOver={e=>{
-                            if(isPastDay||ab) return;
-                            e.preventDefault();
+
+                        {/* Drag-Lane: frei nach Stunden ziehen */}
+                        <div style={{position:'relative',flex:1,height:'100%',overflow:'hidden',
+                            cursor:isPastDay||ab?'not-allowed':'crosshair',
+                            background:ab?'repeating-linear-gradient(45deg,transparent,transparent 4px,rgba(99,102,241,.04) 4px,rgba(99,102,241,.04) 8px)':'transparent'}}
+                          onMouseDown={e=>{
+                            if(isPastDay||ab||e.button!==0) return;
                             const rect=e.currentTarget.getBoundingClientRect();
-                            const dropMin=xToMin(e.clientX-rect.left);
-                            const snap=snapToShift(emp,dropMin);
-                            e.currentTarget.style.outline=snap.isBlocked?'2px solid #ef4444':'2px solid #6366f1';
-                            e.currentTarget.setAttribute('data-snap-shift',snap.best?.id||'');
-                          }}
-                          onDragLeave={e=>{
-                            e.currentTarget.style.outline='none';
-                            e.currentTarget.removeAttribute('data-snap-shift');
-                          }}
-                          onDrop={e=>{
-                            e.currentTarget.style.outline='none';
-                            if(isPastDay||ab) return;
-                            const rect=e.currentTarget.getBoundingClientRect();
-                            const dropMin=xToMin(e.clientX-rect.left);
-                            const snap=snapToShift(emp,dropMin);
-                            if(snap.best){
-                              setEntry(emp.id,ddDs,snap.best);
-                              showToast&&showToast(emp.first_name+' (Overhead) → '+snap.best.label,'success');
-                            }
-                          }}
-                          onClick={e=>{
-                            if(isPastDay||ab||t) return;
-                            const rect=e.currentTarget.getBoundingClientRect();
-                            const dropMin=xToMin(e.clientX-rect.left);
-                            const snap=snapToShift(emp,dropMin);
-                            if(snap.best){
-                              setEntry(emp.id,ddDs,snap.best);
-                              showToast&&showToast(emp.first_name+' (Overhead) → '+snap.best.label,'success');
-                            }
+                            const startMin=snapHour(Math.max(minH,Math.min(maxH,xToMin(e.clientX-rect.left))));
+                            const lane=e.currentTarget;
+                            let endMin=startMin;
+                            const preview=document.createElement('div');
+                            preview.style.cssText='position:absolute;top:6px;height:'+(ROW_H-12)+'px;background:rgba(99,102,241,.4);border-radius:4px;border:2px solid #6366f1;pointer-events:none;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#fff;z-index:10;';
+                            lane.appendChild(preview);
+                            const update=clientX=>{
+                              const x=clientX-rect.left;
+                              endMin=snapHour(Math.max(minH,Math.min(maxH,xToMin(x))));
+                              const s=Math.min(startMin,endMin);
+                              const e2=Math.max(startMin,endMin);
+                              if(e2<=s){preview.style.display='none';return;}
+                              preview.style.display='flex';
+                              preview.style.left=minToX(s)+'px';
+                              preview.style.width=Math.max(4,minToX(e2)-minToX(s))+'px';
+                              const sh=String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0');
+                              const eh=String(Math.floor(e2/60)).padStart(2,'0')+':'+String(e2%60).padStart(2,'0');
+                              preview.textContent=sh+'–'+eh;
+                            };
+                            const onMove=ev=>update(ev.clientX);
+                            const onUp=ev=>{
+                              document.removeEventListener('mousemove',onMove);
+                              document.removeEventListener('mouseup',onUp);
+                              if(preview.parentNode) preview.parentNode.removeChild(preview);
+                              const s=Math.min(startMin,endMin);
+                              const e2=Math.max(startMin,endMin);
+                              if(e2-s<30) return; // mindestens 30 Min
+                              const sh=String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0');
+                              const eh=String(Math.floor(e2/60)).padStart(2,'0')+':'+String(e2%60).padStart(2,'0');
+                              const net=Math.round((e2-s)/60*2)/2;
+                              setEntry(emp.id,ddDs,{shift:sh+'-'+eh,hours:net+0.5,net,label:sh+'-'+eh});
+                              showToast&&showToast(emp.first_name+' '+sh+'–'+eh,'success');
+                            };
+                            document.addEventListener('mousemove',onMove);
+                            document.addEventListener('mouseup',onUp);
+                            update(e.clientX);
                           }}>
-                          {/* Schicht-Block mit Resize */}
+
+                          {/* Geplanter Block */}
                           {t&&(
-                            <div draggable={!isPastDay&&!ab}
-                              onDragStart={e=>{
-                                e.stopPropagation();
-                                e.dataTransfer.setData('text/plain','oh_shift_'+emp.id);
-                              }}
-                              style={{
+                            <div style={{
                                 position:'absolute',
                                 left:minToX(t.start),
-                                width:Math.max(minToX(t.end)-minToX(t.start),8),
+                                width:Math.max(8,minToX(t.end)-minToX(t.start)),
                                 top:6,height:ROW_H-12,
                                 background:isPastDay?col+'80':col,
-                                borderRadius:5,
-                                border:'1.5px solid '+col,
-                                cursor:isPastDay?'default':'grab',
-                                display:'flex',alignItems:'center',gap:4,paddingLeft:6,
-                                overflow:'hidden',whiteSpace:'nowrap',
-                                zIndex:1,userSelect:'none',
+                                borderRadius:5,border:'2px solid '+col,
+                                cursor:isPastDay?'default':'move',
+                                display:'flex',alignItems:'center',justifyContent:'space-between',
+                                paddingLeft:6,paddingRight:4,overflow:'hidden',
+                                zIndex:2,userSelect:'none',
+                              }}
+                              onMouseDown={e=>{
+                                if(isPastDay||e.button!==0) return;
+                                e.stopPropagation();
+                                const lane=e.currentTarget.parentElement;
+                                const rect=lane.getBoundingClientRect();
+                                const origStart=t.start, origEnd=t.end;
+                                const offsetMin=xToMin(e.clientX-rect.left)-origStart;
+                                const onMove=ev=>{
+                                  const curMin=xToMin(ev.clientX-rect.left);
+                                  const newStart=snapHour(Math.max(minH,Math.min(maxH-60,curMin-offsetMin)));
+                                  const dur=origEnd-origStart;
+                                  const newEnd=Math.min(maxH,newStart+dur);
+                                  const sh=String(Math.floor(newStart/60)).padStart(2,'0')+':'+String(newStart%60).padStart(2,'0');
+                                  const eh=String(Math.floor(newEnd/60)).padStart(2,'0')+':'+String(newEnd%60).padStart(2,'0');
+                                  const el=document.getElementById('oh-drag-preview-'+emp.id);
+                                  if(el) el.textContent=sh+'–'+eh;
+                                };
+                                const onUp=ev=>{
+                                  document.removeEventListener('mousemove',onMove);
+                                  document.removeEventListener('mouseup',onUp);
+                                  const curMin=xToMin(ev.clientX-rect.left);
+                                  const newStart=snapHour(Math.max(minH,Math.min(maxH-60,curMin-offsetMin)));
+                                  const dur=origEnd-origStart;
+                                  const newEnd=Math.min(maxH,newStart+dur);
+                                  const net=Math.round(dur/60*2)/2;
+                                  const sh=String(Math.floor(newStart/60)).padStart(2,'0')+':'+String(newStart%60).padStart(2,'0');
+                                  const eh=String(Math.floor(newEnd/60)).padStart(2,'0')+':'+String(newEnd%60).padStart(2,'0');
+                                  setEntry(emp.id,ddDs,{shift:sh+'-'+eh,hours:net+0.5,net,label:sh+'-'+eh});
+                                  showToast&&showToast(emp.first_name+' verschoben: '+sh+'–'+eh,'info');
+                                };
+                                document.addEventListener('mousemove',onMove);
+                                document.addEventListener('mouseup',onUp);
                               }}>
-                              <span style={{fontSize:9,fontWeight:800,color:'#fff'}}>{entry.shift}</span>
-                              <span style={{fontSize:8,color:'rgba(255,255,255,.7)'}}>{entry.net}h</span>
+                              <span id={'oh-drag-preview-'+emp.id}
+                                style={{fontSize:9,fontWeight:800,color:'#fff',pointerEvents:'none'}}>
+                                {entry.shift}
+                              </span>
+                              <span style={{fontSize:8,color:'rgba(255,255,255,.7)',flexShrink:0}}>{entry.net}h</span>
+                              {/* Resize Handles */}
                               {!isPastDay&&(
-                                <button title='Schicht entfernen'
-                                  onClick={e=>{e.stopPropagation();setEntry(emp.id,ddDs,null);
-                                    showToast&&showToast(emp.first_name+' Overhead entfernt','info');}}
-                                  style={{marginLeft:'auto',marginRight:4,fontSize:9,padding:'1px 4px',
-                                    background:'rgba(255,255,255,.2)',color:'#fff',border:'none',
-                                    borderRadius:3,cursor:'pointer',lineHeight:1}}>✕</button>
-                              )}
-                              {/* Resize Start */}
-                              {!isPastDay&&(
-                                <div style={{position:'absolute',left:0,top:0,bottom:0,width:10,
-                                  cursor:'ew-resize',zIndex:4,
-                                  background:'linear-gradient(to right,'+col+'80,transparent)'}}
+                                <div style={{position:'absolute',left:0,top:0,bottom:0,width:8,cursor:'ew-resize',zIndex:4}}
                                   onMouseDown={e=>{
                                     e.stopPropagation();e.preventDefault();
-                                    resizeRef.current={empId:emp.id,ds:ddDs,side:'start',
-                                      origStart:t.start,origEnd:t.end,startX:e.clientX};
+                                    const lane=e.currentTarget.parentElement.parentElement;
+                                    const rect=lane.getBoundingClientRect();
+                                    const origEnd=t.end;
                                     const onMove=ev=>{
-                                      const r=resizeRef.current;if(!r)return;
-                                      const dmin=Math.round((ev.clientX-r.startX)/PX_MIN/30)*30;
-                                      const ns=Math.max(0,Math.min(r.origStart+dmin,r.origEnd-30));
-                                      const te=String(Math.floor(r.origEnd/60)).padStart(2,'0')+':'+String(r.origEnd%60).padStart(2,'0');
-                                      const ts=String(Math.floor(ns/60)).padStart(2,'0')+':'+String(ns%60).padStart(2,'0');
-                                      const el=document.getElementById('gantt-resize-preview');
-                                      if(el) el.textContent=ts+'-'+te;
+                                      const ns=snapHour(Math.max(minH,Math.min(origEnd-60,xToMin(ev.clientX-rect.left))));
+                                      const el=document.getElementById('oh-drag-preview-'+emp.id);
+                                      if(el) el.textContent=String(Math.floor(ns/60)).padStart(2,'0')+':00–'+String(Math.floor(origEnd/60)).padStart(2,'0')+':'+String(origEnd%60).padStart(2,'0');
                                     };
                                     const onUp=ev=>{
                                       document.removeEventListener('mousemove',onMove);
                                       document.removeEventListener('mouseup',onUp);
-                                      const r=resizeRef.current;if(!r)return;resizeRef.current=null;
-                                      const dmin=Math.round((ev.clientX-r.startX)/PX_MIN/30)*30;
-                                      const ns=Math.max(0,Math.min(r.origStart+dmin,r.origEnd-30));
-                                      const newNet=Math.round((r.origEnd-ns)/60*2)/2;
-                                      const ts=String(Math.floor(ns/60)).padStart(2,'0')+':'+String(ns%60).padStart(2,'0');
-                                      const te=String(Math.floor(r.origEnd/60)).padStart(2,'0')+':'+String(r.origEnd%60).padStart(2,'0');
-                                      setEntry(emp.id,ddDs,{...entry,shift:ts+'-'+te,hours:newNet+0.5,net:newNet,label:ts+'-'+te});
+                                      const ns=snapHour(Math.max(minH,Math.min(origEnd-60,xToMin(ev.clientX-rect.left))));
+                                      const net=Math.round((origEnd-ns)/60*2)/2;
+                                      const sh=String(Math.floor(ns/60)).padStart(2,'0')+':'+String(ns%60).padStart(2,'0');
+                                      const eh=String(Math.floor(origEnd/60)).padStart(2,'0')+':'+String(origEnd%60).padStart(2,'0');
+                                      setEntry(emp.id,ddDs,{shift:sh+'-'+eh,hours:net+0.5,net,label:sh+'-'+eh});
                                     };
                                     document.addEventListener('mousemove',onMove);
                                     document.addEventListener('mouseup',onUp);
                                   }}/>
                               )}
-                              {/* Resize End */}
                               {!isPastDay&&(
-                                <div style={{position:'absolute',right:0,top:0,bottom:0,width:10,
-                                  cursor:'ew-resize',zIndex:4,
-                                  background:'linear-gradient(to left,'+col+'80,transparent)'}}
+                                <div style={{position:'absolute',right:0,top:0,bottom:0,width:8,cursor:'ew-resize',zIndex:4}}
                                   onMouseDown={e=>{
                                     e.stopPropagation();e.preventDefault();
-                                    resizeRef.current={empId:emp.id,ds:ddDs,side:'end',
-                                      origStart:t.start,origEnd:t.end,startX:e.clientX};
+                                    const lane=e.currentTarget.parentElement.parentElement;
+                                    const rect=lane.getBoundingClientRect();
+                                    const origStart=t.start;
                                     const onMove=ev=>{
-                                      const r=resizeRef.current;if(!r)return;
-                                      const dmin=Math.round((ev.clientX-r.startX)/PX_MIN/30)*30;
-                                      const ne=Math.max(r.origStart+30,Math.min(r.origEnd+dmin,24*60));
-                                      const ts=String(Math.floor(r.origStart/60)).padStart(2,'0')+':'+String(r.origStart%60).padStart(2,'0');
-                                      const te=String(Math.floor(ne/60)).padStart(2,'0')+':'+String(ne%60).padStart(2,'0');
-                                      const el=document.getElementById('gantt-resize-preview');
-                                      if(el) el.textContent=ts+'-'+te;
+                                      const ne=snapHour(Math.max(origStart+60,Math.min(maxH,xToMin(ev.clientX-rect.left))));
+                                      const el=document.getElementById('oh-drag-preview-'+emp.id);
+                                      if(el) el.textContent=String(Math.floor(origStart/60)).padStart(2,'0')+':'+String(origStart%60).padStart(2,'0')+'–'+String(Math.floor(ne/60)).padStart(2,'0')+':00';
                                     };
                                     const onUp=ev=>{
                                       document.removeEventListener('mousemove',onMove);
                                       document.removeEventListener('mouseup',onUp);
-                                      const r=resizeRef.current;if(!r)return;resizeRef.current=null;
-                                      const dmin=Math.round((ev.clientX-r.startX)/PX_MIN/30)*30;
-                                      const ne=Math.max(r.origStart+30,Math.min(r.origEnd+dmin,24*60));
-                                      const newNet=Math.round((ne-r.origStart)/60*2)/2;
-                                      const ts=String(Math.floor(r.origStart/60)).padStart(2,'0')+':'+String(r.origStart%60).padStart(2,'0');
-                                      const te=String(Math.floor(ne/60)).padStart(2,'0')+':'+String(ne%60).padStart(2,'0');
-                                      setEntry(emp.id,ddDs,{...entry,shift:ts+'-'+te,hours:newNet+0.5,net:newNet,label:ts+'-'+te});
+                                      const ne=snapHour(Math.max(origStart+60,Math.min(maxH,xToMin(ev.clientX-rect.left))));
+                                      const net=Math.round((ne-origStart)/60*2)/2;
+                                      const sh=String(Math.floor(origStart/60)).padStart(2,'0')+':'+String(origStart%60).padStart(2,'0');
+                                      const eh=String(Math.floor(ne/60)).padStart(2,'0')+':'+String(ne%60).padStart(2,'0');
+                                      setEntry(emp.id,ddDs,{shift:sh+'-'+eh,hours:net+0.5,net,label:sh+'-'+eh});
                                     };
                                     document.addEventListener('mousemove',onMove);
                                     document.addEventListener('mouseup',onUp);
@@ -11260,11 +11312,11 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                               )}
                             </div>
                           )}
-                          {/* Stunden-Ticks */}
+                          {/* Stunden-Raster */}
                           {hours.map(hh=>(
                             <div key={hh} style={{position:'absolute',left:minToX(hh*60),
-                              top:0,bottom:0,borderLeft:'1px solid rgba(99,102,241,.15)',
-                              opacity:.5,pointerEvents:'none'}}/>
+                              top:0,bottom:0,width:1,background:'rgba(99,102,241,.12)',
+                              pointerEvents:'none'}}/>
                           ))}
                         </div>
                       </div>
