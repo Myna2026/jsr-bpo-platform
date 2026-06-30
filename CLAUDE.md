@@ -13,9 +13,6 @@ tive-finance.vercel.app).
   - `frontend/hr.html`
   - `frontend/mitarbeiter.html`
   - `frontend/client.html`
-- **Ausgekapselt / nicht weiterentwickeln** (separates Kleinprojekt, wird später
-  aus dem Repo gezogen):
-  - `beleg_server.py` (Root, lokaler HTTP-Server auf Port 4001)
 - **Nachrangig**: `leads.html`, `stempel.html`,
   Nebenseiten (`bewerber.html`, `index.html`, `payslip_preview.html`,
   `setup.html`, `showcase.html`, `dummy_loader.html`).
@@ -30,11 +27,6 @@ Konflikten gilt CLAUDE.md.
   ein Modul anzunehmen. Nur wenn die Anfrage einen eindeutigen inhaltlichen
   Hinweis enthält (z. B. „Bewerber", „Schicht", „Kunde"), ohne Rückfrage
   darauf basieren.
-- Keine proaktiven Refactorings, Cleanups oder Feature-Vorschläge für
-  `beleg_server.py`. Buchhaltung und Belege sind in das eigene Repo
-  `tive-finance` ausgelagert und nicht mehr im Scope dieses Repos. Auch
-  beim eingebetteten Belege-Block in `hr.html` keine ungefragten Änderungen
-  — separate technische Schuld.
 - Bei nachrangigen Modulen vorsichtiger mit umfangreichen Änderungen sein;
   im Zweifel vorher klären, ob sich der Aufwand lohnt.
 - Architektur- und übergreifende Vorschläge primär an `hr.html`,
@@ -645,8 +637,6 @@ rein abgeleiteter Anzeigewert ausgewiesen werden.
   Vercel-Konfiguration liegt im `.vercel/`-Ordner.
 - **Backend**: läuft separat (nicht auf Vercel). Eigene Infrastruktur,
   unabhängiger Lifecycle.
-- `beleg_server.py`: läuft nur lokal (Port 4001, Dev-Tool), wird nicht
-  deployt.
 
 ### Git-Push
 - Vor jedem `git push`: erst `git status` und `git diff` (bzw.
@@ -672,19 +662,24 @@ rein abgeleiteter Anzeigewert ausgewiesen werden.
 
 ## Belege-Auskapselung
 
-ERLEDIGT (Juni 2026). Die zuvor in buchhaltung.html und
-belege.html enthaltenen Module wurden in das eigenständige
-Repo `tive-finance` ausgelagert. Live unter
-https://tive-finance.vercel.app/.
+VOLLSTÄNDIG ERLEDIGT (Juni 2026).
+
+1. Die zuvor in buchhaltung.html und belege.html enthaltenen
+   Module wurden in das eigenständige Repo `tive-finance`
+   ausgelagert. Live unter https://tive-finance.vercel.app/.
+
+2. Der zuvor in hr.html eingebettete InvoiceView-Block
+   (Buchhaltung/Belege-Komponente, ~978 Zeilen) wurde
+   komplett entfernt. Die Komponente war toter Code
+   ohne Mount-Punkt und ist damit ohne Funktionsverlust
+   weg.
+
+3. beleg_server.py (Port 4001) ist gelöscht.
 
 Aus dem CRM-Launcher (`frontend/index.html`) wird auf die
-externe URL verlinkt (öffnet in neuem Tab).
-
-Hinweis: Der in `hr.html` eingebettete Belege-Block (etwa
-Zeile 18500-18900, newBelegeMap mit localhost:4001) ist
-DAVON UNBERÜHRT und bleibt als separate technische Schuld
-bestehen — nicht nebenbei anfassen. `beleg_server.py`
-gehört zu diesem Block.
+externe URL verlinkt (öffnet in neuem Tab). Wenn das HR-Tool
+Belege-Funktionen braucht, dann nur via dem ausgelagerten
+tive-finance Repo, nicht durch Wiedereinführung in hr.html.
 
 ### Legacy-Status-Werte aufräumen
 Im Code existieren Legacy-Status-Werte aus einer früheren Status-Sprache,
@@ -795,7 +790,6 @@ zu viel oder zu wenig bezahlt.
 - `docker/docker-compose.yml` startet **nur** `postgres` + `redis`.
   Die im README erwähnten `api`/`worker`/`beat`-Services sind dort nicht
   definiert.
-- `beleg_server.py` ist ein eigenständiger Python-HTTP-Server (Port 4001).
 
 ## Ordnerstruktur
 ```
@@ -815,6 +809,5 @@ tourism-leads/
 │   ├── hr.html / mitarbeiter.html / client.html   ← Kern
 │   └── src/                     (weitgehend leerer Vite-Stub)
 ├── docker/docker-compose.yml    postgres + redis
-├── beleg_server.py              Lokaler Beleg-Server (Port 4001, wird ausgekapselt)
 └── README.md                    beschreibt nur den ursprünglichen Tourism-Leads-Teil
 ```
