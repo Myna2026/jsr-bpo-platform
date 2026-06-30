@@ -3,8 +3,10 @@
 ## Was die Anwendung macht
 Ursprünglich DACH Tourismus-Lead-Management für Call-Center (siehe `README.md`),
 inzwischen zu einer breiteren **BPO Intelligence Platform** gewachsen. Mehrere
-Geschäftsmodule (HR, Mitarbeiter, Client, Buchhaltung, Belege, Stempel, Leads)
-liegen als monolithische HTML-Dateien im `frontend/`-Ordner.
+Geschäftsmodule (HR, Mitarbeiter, Client, Stempel, Leads)
+liegen als monolithische HTML-Dateien im `frontend/`-Ordner. Buchhaltung und
+Belege sind in das eigene Repo tive-finance ausgelagert (Vercel:
+tive-finance.vercel.app).
 
 ## Modul-Scope (wichtig)
 - **Kernmodule** (Fokus, hier wird weiterentwickelt):
@@ -13,9 +15,8 @@ liegen als monolithische HTML-Dateien im `frontend/`-Ordner.
   - `frontend/client.html`
 - **Ausgekapselt / nicht weiterentwickeln** (separates Kleinprojekt, wird später
   aus dem Repo gezogen):
-  - `frontend/belege.html`
   - `beleg_server.py` (Root, lokaler HTTP-Server auf Port 4001)
-- **Nachrangig**: `leads.html`, `buchhaltung.html`, `stempel.html`,
+- **Nachrangig**: `leads.html`, `stempel.html`,
   Nebenseiten (`bewerber.html`, `index.html`, `payslip_preview.html`,
   `setup.html`, `showcase.html`, `dummy_loader.html`).
 
@@ -30,14 +31,21 @@ Konflikten gilt CLAUDE.md.
   Hinweis enthält (z. B. „Bewerber", „Schicht", „Kunde"), ohne Rückfrage
   darauf basieren.
 - Keine proaktiven Refactorings, Cleanups oder Feature-Vorschläge für
-  `belege.html` / `beleg_server.py`. Nur reagieren, wenn ausdrücklich danach
-  gefragt wird, und dann darauf hinweisen, dass das Modul ohnehin ausgekapselt
-  wird.
+  `beleg_server.py`. Buchhaltung und Belege sind in das eigene Repo
+  `tive-finance` ausgelagert und nicht mehr im Scope dieses Repos. Auch
+  beim eingebetteten Belege-Block in `hr.html` keine ungefragten Änderungen
+  — separate technische Schuld.
 - Bei nachrangigen Modulen vorsichtiger mit umfangreichen Änderungen sein;
   im Zweifel vorher klären, ob sich der Aufwand lohnt.
 - Architektur- und übergreifende Vorschläge primär an `hr.html`,
   `mitarbeiter.html`, `client.html` ausrichten — nicht an Modulen, die
   ausgekapselt oder nachrangig sind.
+
+- **Ausgelagert in eigenes Repo** (nicht mehr Teil des CRM):
+  - Buchhaltung und Belege leben im Repo `tive-finance`
+  - Live unter https://tive-finance.vercel.app/
+  - Verlinkt aus dem CRM-Launcher (`frontend/index.html`) als
+    externe Kacheln, die in neuem Tab aufgehen
 
 ## Datenmodell: Mitarbeiter, Projekte, Zuweisungen
 
@@ -662,21 +670,21 @@ rein abgeleiteter Anzeigewert ausgewiesen werden.
 - Falls eine `.env.example` benötigt wird: nur Platzhalter, keine echten
   Werte.
 
-### Belege-Auskapselung — offene technische Schuld
-`hr.html` enthält einen eingebetteten Belege-/Buchhaltungs-Bereich
-(ca. Zeilen 17500–19000), der direkt `http://localhost:4001/{scan,file,save}`
-des `beleg_server.py` aufruft und die `COMPANIES`-Liste (Parklane 1–4) mit
-`beleg_server.py:24` dupliziert.
+## Belege-Auskapselung
 
-**Bevor `belege.html` + `beleg_server.py` aus dem Repo ausgekapselt werden
-können**, muss dieser Block in `hr.html` entweder mitmigriert oder vollständig
-vom Port-4001-Aufruf entkoppelt werden.
+ERLEDIGT (Juni 2026). Die zuvor in buchhaltung.html und
+belege.html enthaltenen Module wurden in das eigenständige
+Repo `tive-finance` ausgelagert. Live unter
+https://tive-finance.vercel.app/.
 
-**Arbeitsregel: nicht nebenbei anfassen.** Diese Migration ist ein dediziertes
-Vorhaben. Bei laufenden Arbeiten an `hr.html` den Belege-Block in Ruhe lassen
-— keine Refactorings, kein „mal eben aufräumen", keine Drive-by-Änderungen an
-den Port-4001-Aufrufen oder der duplizierten `COMPANIES`-Konstante. Wenn eine
-andere Aufgabe den Block berührt, vorher mit dem User klären.
+Aus dem CRM-Launcher (`frontend/index.html`) wird auf die
+externe URL verlinkt (öffnet in neuem Tab).
+
+Hinweis: Der in `hr.html` eingebettete Belege-Block (etwa
+Zeile 18500-18900, newBelegeMap mit localhost:4001) ist
+DAVON UNBERÜHRT und bleibt als separate technische Schuld
+bestehen — nicht nebenbei anfassen. `beleg_server.py`
+gehört zu diesem Block.
 
 ### Legacy-Status-Werte aufräumen
 Im Code existieren Legacy-Status-Werte aus einer früheren Status-Sprache,
