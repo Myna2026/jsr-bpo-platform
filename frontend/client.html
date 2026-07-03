@@ -7,6 +7,7 @@
 <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -173,7 +174,15 @@ td{padding:8px 12px;font-size:12px;vertical-align:middle}
 <body>
 <div id="root"></div>
 <script type="text/babel">
-const { useState, useEffect } = React;
+const { useState, useEffect, useRef } = React;
+
+// ─── SUPABASE AUTH (shared) ───────────────────────────────
+const SB_URL = 'https://msdiyjxckmpvuomnhvjp.supabase.co';
+const SB_KEY = 'sb_publishable_exKYOG6Znhj_JlO0v6erQQ_q0HWWiyl';
+const PORTAL = 'client';
+const PORTAL_LABELS = {client:'Client Portal', mitarbeiter:'Mitarbeiter Portal', hr:'HR Portal'};
+const PORTAL_URLS   = {client:'client.html', mitarbeiter:'mitarbeiter.html', hr:'hr.html'};
+const sb = window.supabase.createClient(SB_URL, SB_KEY);
 
 // ── Client Data ───────────────────────────────────────────
 const CLIENTS = (()=>{
@@ -213,6 +222,21 @@ const CLIENTS = (()=>{
     giganetz:{id:'giganetz',name:'Giganetz GmbH',password:'Giganetz2024',login_email:'',project:'Giganetz',project_id:'p2',contract:'Standard SLA · Stundensatz 22€/h',logo:'📡',color:'#2563eb',visible_tabs:{overview:true,calendar:true}},
   };
 })();
+
+// ── Supabase-User → Client-Objekt bauen ──────────────────
+// Match per E-Mail, sonst Firmenname. Kein Match:
+//  - Admin (management/hr) → Fallback auf ersten Client (Demo/Vorschau)
+//  - reine kunde-Rolle      → null  (gate zeigt "noch keinem Kunden zugeordnet")
+function buildClient(au, authUser){
+  const list = Object.values(CLIENTS);
+  const email = (authUser.email||'').toLowerCase();
+  let match = list.find(c => c.login_email && c.login_email.toLowerCase()===email);
+  if(!match && au.full_name) match = list.find(c => c.name && c.name.toLowerCase()===au.full_name.toLowerCase());
+  if(match) return {...match, name: match.name||au.full_name||authUser.email, email: authUser.email, role_keys: au.role_keys};
+  const isAdmin = (au.role_keys||[]).some(k => k==='management' || k==='hr');
+  if(isAdmin && list.length) return {...list[0], email: authUser.email, role_keys: au.role_keys};
+  return null;
+}
 
 // ── Staff Data (public-safe, no costs) ───────────────────
 const STAFF = [
@@ -263,61 +287,117 @@ const INIT_MESSAGES = {
 };
 
 // ── Login Page ────────────────────────────────────────────
-function LoginPage({onLogin}){
-  const [user, setUser]=useState('');
-  const [pass, setPass]=useState('');
-  const [error, setError]=useState('');
+function LoginPage({authMsg, portalDenied, myPortals}){
+  const [email, setEmail] = useState('');
+  const [pw, setPw]       = useState('');
+  const [showPw, setShowPw] = useState(false);
+  const [sent, setSent]   = useState(false);
+  const [err, setErr]     = useState('');
+  const [busy, setBusy]   = useState(false);
 
-  function tryLogin(){
-    const client = Object.values(CLIENTS).find(c=>
-      (c.name.toLowerCase().includes(user.toLowerCase())||
-       (c.login_email&&c.login_email.toLowerCase()===user.toLowerCase()))&&
-      c.password===pass
-    );
-    if(client){
-      if(client.must_change_pw){
-        // Mark as needing password change - for now just log in
-      }
-      onLogin(client);
-    } else {
-      setError('E-Mail/Name oder Passwort falsch');
-    }
+  async function sendMagicLink(){
+    if(!email.trim()){ setErr('Bitte E-Mail eingeben.'); return; }
+    setErr(''); setBusy(true);
+    try{
+      const {error} = await sb.auth.signInWithOtp({email:email.trim(), options:{emailRedirectTo:window.location.href.split('#')[0]}});
+      setBusy(false);
+      if(error){ setErr('Fehler: '+error.message); return; }
+      setSent(true);
+    }catch(e){ setBusy(false); setErr('Netzwerkfehler. Bitte erneut versuchen.'); }
   }
+  async function passwordLogin(){
+    if(!email.trim()||!pw){ setErr('Bitte E-Mail und Passwort eingeben.'); return; }
+    setErr('');
+    try{
+      const {error} = await sb.auth.signInWithPassword({email:email.trim(), password:pw});
+      if(error){ setErr('Login fehlgeschlagen: '+error.message); }
+    }catch(e){ setErr('Netzwerkfehler. Bitte erneut versuchen.'); }
+  }
+  function switchPortal(p){ if(p!==PORTAL && PORTAL_URLS[p]) window.location.href=PORTAL_URLS[p]; }
 
-  return(
-    <div className="login-page">
-      <div className="login-box">
-        <div className="login-logo">
-          {(()=>{
-            // Try to find logo from stored session
-            try{
-              const sess=JSON.parse(localStorage.getItem('jsr_client_session')||'{}');
-              const accounts=JSON.parse(localStorage.getItem('jsr_client_accounts_v1')||'[]');
-              const acc=accounts.find(a=>a.id===sess.id);
-              if(acc&&acc.logo_url) return <img src={acc.logo_url} alt="Logo" style={{height:48,maxWidth:180,objectFit:'contain',marginBottom:8}}/>;
-            }catch(e){}
-            // Fallback: JSR logo from admin settings
-            const sysLogo=localStorage.getItem('jsr_logo_url')||'';
-            return sysLogo
-              ?<img src={sysLogo} alt="Logo" style={{height:48,maxWidth:180,objectFit:'contain',marginBottom:8}}/>
-              :<div className="login-logo-badge"><img src="assets/tive360-mark.svg" alt="TIVE 360°" style={{width:24,height:24,filter:'brightness(0) invert(1)'}}/></div>;
-          })()}
-          <div className="login-logo-name">Kunden Portal</div>
-          <div className="login-logo-sub">TIVE 360°</div>
+  const denied = portalDenied || authMsg;
+  const target = myPortals && myPortals.length ? myPortals[0] : null;
+
+  return (
+    <div className="login-wrap-cl">
+      <style>{`
+        .login-wrap-cl{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;
+          background:linear-gradient(180deg,#E4EEF0 0%,#F5F6F8 42%);font-family:'Inter',system-ui,sans-serif;}
+        .login-wrap-cl .lc{width:100%;max-width:420px;background:#fff;border-radius:16px;border:1px solid rgba(15,86,97,.08);
+          padding:40px 36px;box-shadow:0 24px 60px rgba(15,86,97,.14),0 4px 14px rgba(15,86,97,.06);}
+        .login-wrap-cl .lc-brand{display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:6px;}
+        .login-wrap-cl .lc-mark{width:40px;height:40px;border-radius:11px;display:flex;align-items:center;justify-content:center;
+          background:linear-gradient(135deg,#0F5661,#0B454E);box-shadow:0 4px 10px rgba(15,86,97,.28);}
+        .login-wrap-cl .lc-word{font-size:20px;font-weight:800;color:#0B454E;}
+        .login-wrap-cl .lc-word span{color:#2A7E8C;font-weight:700;}
+        .login-wrap-cl .lc-portal{font-size:13px;color:#5EA3AF;text-align:center;font-weight:600;margin-bottom:26px;letter-spacing:.02em;}
+        .login-wrap-cl .lc-label{display:block;font-size:11px;font-weight:700;color:#5EA3AF;margin:12px 0 5px;text-transform:uppercase;letter-spacing:.5px;}
+        .login-wrap-cl .lc-inp{width:100%;padding:11px 13px;border-radius:9px;border:1px solid #D5DEE0;background:#fff;color:#0f2b30;
+          font-size:14px;font-family:inherit;outline:none;transition:border-color .15s,box-shadow .15s;box-sizing:border-box;}
+        .login-wrap-cl .lc-inp:focus{border-color:#0F5661;box-shadow:0 0 0 3px rgba(15,86,97,.12);}
+        .login-wrap-cl .lc-btn{width:100%;padding:12px;border:none;border-radius:9px;background:#0F5661;color:#fff;font-size:14px;
+          font-weight:700;font-family:inherit;cursor:pointer;margin-top:8px;transition:background .15s,opacity .15s;}
+        .login-wrap-cl .lc-btn:hover{background:#0B454E;}
+        .login-wrap-cl .lc-btn:disabled{opacity:.55;cursor:default;}
+        .login-wrap-cl .lc-btn.ghost{background:#fff;color:#0F5661;border:1.5px solid #0F5661;}
+        .login-wrap-cl .lc-btn.ghost:hover{background:#E4EEF0;}
+        .login-wrap-cl .lc-toggle{display:block;width:100%;background:none;border:none;color:#2A7E8C;font-size:12px;font-weight:600;
+          font-family:inherit;cursor:pointer;margin-top:16px;text-align:center;padding:4px;}
+        .login-wrap-cl .lc-toggle:hover{color:#0F5661;text-decoration:underline;}
+        .login-wrap-cl .lc-err{font-size:12px;color:#dc2626;text-align:center;margin-top:12px;min-height:15px;font-weight:600;}
+        .login-wrap-cl .lc-icon{font-size:40px;margin-bottom:10px;text-align:center;}
+        .login-wrap-cl .lc-title{font-size:17px;font-weight:800;color:#0B454E;margin-bottom:8px;text-align:center;}
+        .login-wrap-cl .lc-text{font-size:13px;color:#5b6b6e;line-height:1.6;margin-bottom:6px;text-align:center;}
+        .login-wrap-cl .lc-text b{color:#0F5661;}
+      `}</style>
+      <div className="lc">
+        <div className="lc-brand">
+          <div className="lc-mark"><svg viewBox="0 0 100 100" width="24" height="24" aria-hidden="true"><path d="M18 22 H82 V40 H60 V80 H40 V40 H18 Z" fill="#fff"/></svg></div>
+          <div className="lc-word">TIVE <span>360°</span></div>
         </div>
-        <div className="form-group">
-          <label className="login-label">Unternehmen</label>
-          <input className="login-input" placeholder="z.B. Holidaycheck AG" value={user} onChange={e=>{setUser(e.target.value);setError('');}} onKeyDown={e=>e.key==='Enter'&&tryLogin()}/>
-        </div>
-        <div className="form-group">
-          <label className="login-label">Passwort</label>
-          <input className="login-input" type="password" placeholder="••••••••" value={pass} onChange={e=>{setPass(e.target.value);setError('');}} onKeyDown={e=>e.key==='Enter'&&tryLogin()}/>
-        </div>
-        {error&&<div className="login-error">{error}</div>}
-        <button className="login-btn" onClick={tryLogin}>Anmelden →</button>
-        <div style={{textAlign:'center',marginTop:16,fontSize:11,color:'#9ca3af'}}>
-          Zugangsdaten erhalten Sie von Ihrem TIVE 360° Ansprechpartner
-        </div>
+        <div className="lc-portal">Client Portal</div>
+
+        {denied ? (
+          <div>
+            <div className="lc-icon">⛔</div>
+            <div className="lc-title">{portalDenied?'Kein Zugriff auf dieses Portal':'Kein Zugriff'}</div>
+            <div className="lc-text" dangerouslySetInnerHTML={{__html: portalDenied ? 'Deine Rollen haben keinen Zugriff auf das <b>Client Portal</b>.' : (authMsg||'Zugriff verweigert.')}} />
+            {portalDenied && target && (
+              <button className="lc-btn" style={{marginTop:16}} onClick={()=>switchPortal(target)}>
+                Zu {PORTAL_LABELS[target]||target} wechseln
+              </button>
+            )}
+            <button className="lc-toggle" onClick={async()=>{try{await sb.auth.signOut();}catch(e){}window.location.href='client.html';}}>Abmelden</button>
+          </div>
+        ) : sent ? (
+          <div>
+            <div className="lc-icon">✉️</div>
+            <div className="lc-title">E-Mail gesendet</div>
+            <div className="lc-text">Wir haben einen Login-Link an <b>{email}</b> geschickt.<br/>Pruef dein Postfach und klick den Link.</div>
+            <button className="lc-toggle" onClick={()=>{setSent(false);setErr('');}}>← Zurueck</button>
+          </div>
+        ) : (
+          <div>
+            <label className="lc-label">E-Mail</label>
+            <input className="lc-inp" type="email" value={email} placeholder="name@firma.de" autoComplete="username"
+              onChange={e=>setEmail(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')sendMagicLink();}} />
+            <button className="lc-btn" disabled={busy} onClick={sendMagicLink}>{busy?'Sende…':'Login-Link per E-Mail'}</button>
+            {showPw ? (
+              <div>
+                <label className="lc-label">Passwort</label>
+                <input className="lc-inp" type="password" value={pw} placeholder="Passwort" autoComplete="current-password"
+                  onChange={e=>setPw(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')passwordLogin();}} />
+                <button className="lc-btn ghost" onClick={passwordLogin}>Anmelden</button>
+              </div>
+            ) : (
+              <button className="lc-toggle" onClick={()=>setShowPw(true)}>Stattdessen mit Passwort einloggen</button>
+            )}
+            <div className="lc-err">{err}</div>
+            <div style={{textAlign:'center',marginTop:14,fontSize:11,color:'#9ca3af'}}>
+              Zugangsdaten erhalten Sie von Ihrem TIVE 360° Ansprechpartner
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1183,20 +1263,44 @@ function CalendarView({client}){
 
 
 function App(){
-  const [client, setClient]=useState(()=>{
-    try{
-      const s=JSON.parse(localStorage.getItem('jsr_client_session')||'null');
-      if(s&&(Date.now()-s.ts)<28800000) return s.client; // 8h session
-      localStorage.removeItem('jsr_client_session');
-    }catch(e){}
-    return null;
-  });
+  const [client, setClient]=useState(null);
   const [view, setView]=useState('overview');
+  const [authMsg, setAuthMsg]=useState(null);
+  const [portalDenied, setPortalDenied]=useState(false);
+  const [myPortals, setMyPortals]=useState([]);
+  const gatingRef=useRef(false);
 
-  if(!client) return <LoginPage onLogin={c=>{
-    localStorage.setItem('jsr_client_session',JSON.stringify({client:c,ts:Date.now()}));
-    setClient(c);setView('overview');
-  }}/>;
+  // Nach erfolgreichem Auth: Rolle + Portalzugriff (client) pruefen, dann einloggen
+  async function gate(session){
+    if(gatingRef.current || !session || !session.user) return;
+    gatingRef.current=true;
+    try{
+      const {data:au, error}=await sb.from('app_users')
+        .select('role_keys, full_name, staff_number, active').eq('user_id', session.user.id).single();
+      if(error||!au){ gatingRef.current=false; setPortalDenied(false); setAuthMsg('Kein Benutzerprofil gefunden. Wende dich an deinen Ansprechpartner.'); return; }
+      if(!au.active){ gatingRef.current=false; setPortalDenied(false); setAuthMsg('Dieser Zugang ist deaktiviert.'); return; }
+      if(!au.role_keys||!au.role_keys.length){ gatingRef.current=false; setPortalDenied(false); setAuthMsg('Noch keine Rolle zugewiesen.'); return; }
+      const {data:rdefs, error:e2}=await sb.from('roles_definitions').select('role_key, portals').in('role_key', au.role_keys);
+      if(e2){ gatingRef.current=false; setPortalDenied(false); setAuthMsg(e2.message); return; }
+      const portals=[...new Set((rdefs||[]).flatMap(r=>r.portals||[]))];
+      setMyPortals(portals);
+      if(!portals.includes('client')){ gatingRef.current=false; setAuthMsg(null); setPortalDenied(true); return; }
+      const c=buildClient(au, session.user);
+      if(!c){ gatingRef.current=false; setPortalDenied(false); setAuthMsg('Dein Konto ist noch keinem Kunden zugeordnet. Wende dich an deinen Ansprechpartner.'); return; }
+      localStorage.setItem('jsr_client_session', JSON.stringify({client:c, ts:Date.now()}));
+      setClient(c); setView('overview');
+    }catch(e){ gatingRef.current=false; setPortalDenied(false); setAuthMsg('Verbindungsfehler beim Laden des Profils.'); }
+  }
+
+  useEffect(()=>{
+    // Session-Restore (INITIAL_SESSION) + Magic-Link-Rueckkehr (SIGNED_IN)
+    const {data:sub}=sb.auth.onAuthStateChange((event, session)=>{
+      if(session && !gatingRef.current){ setTimeout(()=>gate(session), 0); }
+    });
+    return ()=>{ try{ sub.subscription.unsubscribe(); }catch(e){} };
+  }, []);
+
+  if(!client) return <LoginPage authMsg={authMsg} portalDenied={portalDenied} myPortals={myPortals}/>;
 
   const ALL_NAV_ITEMS=[
     {key:'overview',  label:'Übersicht',           icon:'⊞', tab:'overview'},
@@ -1251,13 +1355,13 @@ function App(){
         </div>
         <div className="s-logout">
           <div style={{display:'flex',gap:4}}>
-            <div onClick={()=>{localStorage.removeItem('jsr_client_session');window.location.reload();}}
+            <div onClick={async()=>{try{await sb.auth.signOut();}catch(e){}localStorage.removeItem('jsr_client_session');window.location.href='client.html';}}
               style={{flex:1,display:'flex',alignItems:'center',gap:7,padding:'7px 10px',borderRadius:'var(--r-md)',cursor:'pointer',color:'var(--muted)',fontSize:12,fontFamily:'var(--font)',transition:'all .12s'}}
               onMouseEnter={e=>{e.currentTarget.style.background='#F5F6F8';e.currentTarget.style.color='#1F2937'}}
               onMouseLeave={e=>{e.currentTarget.style.background='transparent';e.currentTarget.style.color='var(--muted)'}}>
               <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M11.47 3.841a.75.75 0 0 1 1.06 0l8.69 8.69a.75.75 0 1 0 1.06-1.061l-8.689-8.69a2.25 2.25 0 0 0-3.182 0l-8.69 8.69a.75.75 0 1 0 1.061 1.06l8.69-8.689Z"/> <path d="m12 5.432 8.159 8.159c.03.03.06.058.091.086v6.198c0 1.035-.84 1.875-1.875 1.875H15a.75.75 0 0 1-.75-.75v-4.5a.75.75 0 0 0-.75-.75h-3a.75.75 0 0 0-.75.75V21a.75.75 0 0 1-.75.75H5.625a1.875 1.875 0 0 1-1.875-1.875v-6.198a2.29 2.29 0 0 0 .091-.086L12 5.432Z"/></svg> <span style={{marginLeft:2}}>Startseite</span>
             </div>
-            <div onClick={()=>setClient(null)}
+            <div onClick={async()=>{try{await sb.auth.signOut();}catch(e){}localStorage.removeItem('jsr_client_session');window.location.reload();}}
               style={{display:'flex',alignItems:'center',justifyContent:'center',width:32,borderRadius:'var(--r-md)',cursor:'pointer',color:'var(--muted)',fontSize:16,transition:'all .12s'}}
               title="Abmelden"
               onMouseEnter={e=>{e.currentTarget.style.background='rgba(239,68,68,.12)';e.currentTarget.style.color='var(--red)'}}
