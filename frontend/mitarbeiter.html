@@ -276,6 +276,32 @@ td.muted{color:var(--muted);}
 .shift-empty{color:var(--dim);font-style:italic;}
 
 /* ═══════════ URLAUB ═══════════ */
+.vcal-hint{font-size:13px;color:var(--muted);margin-bottom:14px;}
+.vcal-months{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:20px;}
+.vcal-month-title{font-size:13px;font-weight:700;color:var(--text);margin-bottom:8px;text-align:center;}
+.vcal-dow{display:grid;grid-template-columns:repeat(7,1fr);gap:2px;margin-bottom:4px;}
+.vcal-dow span{font-size:10px;font-weight:600;color:var(--muted);text-align:center;}
+.vcal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:3px;}
+.vcal-cell{aspect-ratio:1;display:flex;align-items:center;justify-content:center;font-size:12px;border-radius:6px;color:var(--text);cursor:pointer;user-select:none;transition:background .1s;}
+.vcal-cell:not(.vcal-blank):not(.vcal-past):hover{background:#E4EEF0;}
+.vcal-blank{cursor:default;}
+.vcal-weekend{background:#f5f6f8;color:var(--muted);}
+.vcal-past{color:#cbd5e1;cursor:not-allowed;}
+.vcal-pending{background:rgba(201,162,39,.20);color:#8a6d13;}
+.vcal-approved{background:rgba(5,150,105,.16);color:#047857;}
+.vcal-in-range{background:rgba(15,86,97,.16);color:#0F5661;}
+.vcal-sel-start,.vcal-sel-end{background:#0F5661 !important;color:#fff !important;font-weight:700;}
+.vcal-today{box-shadow:inset 0 0 0 1.5px #0F5661;font-weight:700;}
+.vcal-more{margin-top:16px;background:#fff;border:1px solid #0F5661;color:#0F5661;}
+.vcal-modal-overlay{position:fixed;inset:0;background:rgba(11,69,78,.45);z-index:1000;display:flex;align-items:center;justify-content:center;padding:20px;}
+.vcal-modal{background:#fff;border-radius:16px;padding:24px;width:100%;max-width:440px;box-shadow:0 24px 60px rgba(15,86,97,.25);}
+.vcal-modal-title{font-size:17px;font-weight:800;color:#0B454E;margin-bottom:10px;}
+.vcal-modal-summary{font-size:14px;font-weight:600;color:#0F5661;background:#E4EEF0;border-radius:9px;padding:11px 14px;margin-bottom:18px;}
+.vcal-modal-label{font-size:10px;font-weight:700;color:#5EA3AF;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;}
+.vcal-radios{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;}
+.vcal-radio{display:flex;align-items:center;gap:6px;font-size:13px;padding:8px 12px;border:1px solid var(--border);border-radius:8px;cursor:pointer;}
+.vcal-modal-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:18px;}
+.vcal-cancel{background:#fff;border:1px solid var(--border);color:var(--text);}
 .vac-status{display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap;}
 .vac-stat{flex:1;min-width:130px;background:#fff;border:1px solid var(--border);
   border-radius:10px;padding:12px 14px;}
@@ -628,6 +654,8 @@ function getEmployees(){
 
 // Global state
 var ME=null, COLS=[], CONVS={}, ACTIVE=null;
+var vacMonthsShown=6, vacHover=null;
+var vacSel={start:null,end:null};
 var shiftMode='month', shiftYear=new Date().getFullYear(), shiftMonth=new Date().getMonth()+1;
 var shiftWeekStart=getMonday(new Date());
 var payDisplayYear=new Date().getFullYear();
@@ -1271,6 +1299,79 @@ function downloadPayslip(month){alert('Lohnzettel-Download für '+month+' folgt 
 // ═══════════════════════════════════════════════════════════════════════════
 // URLAUB VIEW
 // ═══════════════════════════════════════════════════════════════════════════
+// ─── URLAUBS-KALENDER (visuelle Range-Auswahl) ───────────────────────────────
+var MONTHS_DE=['Januar','Februar','März','April','Mai','Juni','Juli','August','September','Oktober','November','Dezember'];
+function vacEachDay(from,to,cb){var d=new Date(from+'T00:00:00'),e=new Date(to+'T00:00:00');while(d<=e){cb(isoDate(d));d.setDate(d.getDate()+1);}}
+function fmtVacDate(iso){var d=new Date(iso+'T00:00:00');return d.getDate()+'. '+MONTHS_DE[d.getMonth()]+' '+d.getFullYear();}
+function fmtVacRange(from,to){
+  if(from===to)return fmtVacDate(from);
+  var a=new Date(from+'T00:00:00'),b=new Date(to+'T00:00:00');
+  if(a.getMonth()===b.getMonth()&&a.getFullYear()===b.getFullYear())return a.getDate()+'.–'+b.getDate()+'. '+MONTHS_DE[b.getMonth()]+' '+b.getFullYear();
+  return fmtVacDate(from)+' – '+fmtVacDate(to);
+}
+function vacInRange(iso){
+  var s=vacSel.start,e=vacSel.end;
+  if(s&&!e&&vacHover){var lo=s<vacHover?s:vacHover,hi=s<vacHover?vacHover:s;if(iso===lo)return'start';if(iso===hi)return'end';if(iso>lo&&iso<hi)return'mid';return null;}
+  if(s&&!e)return iso===s?'start':null;
+  if(s&&e){var l=s<e?s:e,h=s<e?e:s;if(iso===l)return'start';if(iso===h)return'end';if(iso>l&&iso<h)return'mid';}
+  return null;
+}
+function vacContext(){
+  var ctx={},allReqs=ls('jsr_vacation_requests_v1')||{};
+  var mine=Array.isArray(allReqs)?allReqs.filter(function(r){return r.emp_id===ME.id;}):(allReqs[ME.id]||[]);
+  mine.forEach(function(r){if(!r.from||!r.to||r.status==='rejected')return;var st=r.status==='approved'?'approved':'pending';vacEachDay(r.from,r.to,function(iso){if(ctx[iso]!=='approved')ctx[iso]=st;});});
+  var meRec=getEmployees().find(function(e){return e.id===ME.id;})||{};
+  var abs=meRec.absences||ME.absences||[];
+  abs.forEach(function(a){if(!a.from||!a.to)return;vacEachDay(a.from,a.to,function(iso){ctx[iso]='approved';});});
+  return ctx;
+}
+function renderVacMonth(y,m,today,todayIso,ctx){
+  var startDow=(new Date(y,m,1).getDay()||7),dim=new Date(y,m+1,0).getDate();
+  var h='<div class="vcal-month"><div class="vcal-month-title">'+MONTHS_DE[m]+' '+y+'</div>';
+  h+='<div class="vcal-dow"><span>Mo</span><span>Di</span><span>Mi</span><span>Do</span><span>Fr</span><span>Sa</span><span>So</span></div>';
+  h+='<div class="vcal-grid">';
+  for(var b=1;b<startDow;b++)h+='<span class="vcal-cell vcal-blank"></span>';
+  for(var d=1;d<=dim;d++){
+    var date=new Date(y,m,d),iso=isoDate(date),dow=date.getDay(),we=(dow===0||dow===6),past=date<today,cls='vcal-cell';
+    if(we)cls+=' vcal-weekend';
+    if(past)cls+=' vcal-past';
+    else{
+      if(ctx[iso]==='pending')cls+=' vcal-pending';
+      if(ctx[iso]==='approved')cls+=' vcal-approved';
+      var r=vacInRange(iso);
+      if(r==='mid')cls+=' vcal-in-range';
+      if(r==='start')cls+=' vcal-sel-start';
+      if(r==='end')cls+=' vcal-sel-end';
+    }
+    if(iso===todayIso)cls+=' vcal-today';
+    var attr=past?'':' onclick="vacPickDay(\''+iso+'\')" onmouseover="vacHoverDay(\''+iso+'\')"';
+    h+='<span class="'+cls+'"'+attr+'>'+d+'</span>';
+  }
+  return h+'</div></div>';
+}
+function renderVacCalendar(){
+  var host=document.getElementById('vacCal');if(!host)return;
+  var today=new Date();today.setHours(0,0,0,0);var todayIso=isoDate(today),ctx=vacContext();
+  var base=new Date(today.getFullYear(),today.getMonth(),1),html='<div class="vcal-months">';
+  for(var i=0;i<vacMonthsShown;i++){var dt=new Date(base.getFullYear(),base.getMonth()+i,1);html+=renderVacMonth(dt.getFullYear(),dt.getMonth(),today,todayIso,ctx);}
+  html+='</div>';
+  if(vacMonthsShown<12)html+='<button class="btn vcal-more" onclick="vacShowMore()">Weitere 6 Monate anzeigen</button>';
+  host.innerHTML=html;
+}
+function vacPickDay(iso){
+  if(!vacSel.start||(vacSel.start&&vacSel.end)){vacSel.start=iso;vacSel.end=null;vacHover=null;renderVacCalendar();}
+  else{if(iso<vacSel.start){vacSel.end=vacSel.start;vacSel.start=iso;}else{vacSel.end=iso;}vacHover=null;renderVacCalendar();openVacModal();}
+}
+function vacHoverDay(iso){if(vacSel.start&&!vacSel.end){vacHover=iso;renderVacCalendar();}}
+function vacShowMore(){vacMonthsShown=12;renderVacCalendar();}
+function openVacModal(){
+  var m=document.getElementById('vacModal');if(!m)return;
+  var days=calcVacReqDays(vacSel.start,vacSel.end);
+  document.getElementById('vacModalSummary').textContent='Zeitraum: '+fmtVacRange(vacSel.start,vacSel.end)+' ('+days+' Werktag'+(days!==1?'e':'')+')';
+  m.style.display='flex';
+}
+function closeVacModal(){var m=document.getElementById('vacModal');if(m)m.style.display='none';}
+
 function renderUrlaub(){
   var vac=calcVacation();
   var html='';
@@ -1283,15 +1384,10 @@ function renderUrlaub(){
   html+='<div class="kpi"><div class="kpi-label">Verfügbar</div><div class="kpi-val green">'+vac.remaining+'</div><div class="kpi-sub">Noch frei</div></div>';
   html+='</div>';
 
-  // Antrag
+  // Antrag — visueller Kalender
   html+='<div class="card"><div class="card-header"><div class="card-title">📝 Neuen Urlaub beantragen</div></div><div class="card-body">';
-  html+='<div class="form-row-3">';
-  html+='<div class="form-group"><label class="form-label">Von</label><input type="date" id="vacFrom" class="form-input"></div>';
-  html+='<div class="form-group"><label class="form-label">Bis</label><input type="date" id="vacTo" class="form-input"></div>';
-  html+='<div class="form-group"><label class="form-label">Typ</label><select id="vacType" class="form-select"><option value="vacation">Urlaub</option><option value="unpaid">Unbezahlt</option><option value="special">Sonderfrei</option></select></div>';
-  html+='</div>';
-  html+='<div class="form-group"><label class="form-label">Notiz (optional)</label><textarea id="vacNote" class="form-textarea" placeholder="Begründung oder Anmerkung..."></textarea></div>';
-  html+='<button class="btn btn-primary" onclick="submitVacationRequest()">Antrag einreichen</button>';
+  html+='<div class="vcal-hint">Start- und Enddatum im Kalender anklicken — danach öffnet sich die Antrags-Maske.</div>';
+  html+='<div id="vacCal"></div>';
   html+='</div></div>';
 
   // Antrags-Historie — Object-Format (hr.html-Standard) ODER Array (Legacy)
@@ -1329,16 +1425,36 @@ function renderUrlaub(){
   }
   html+='</div></div>';
 
+  // Modal (versteckt)
+  html+='<div id="vacModal" class="vcal-modal-overlay" style="display:none;"><div class="vcal-modal">';
+  html+='<div class="vcal-modal-title">Urlaub beantragen</div>';
+  html+='<div id="vacModalSummary" class="vcal-modal-summary"></div>';
+  html+='<div class="vcal-modal-label">Typ</div>';
+  html+='<div class="vcal-radios">';
+  html+='<label class="vcal-radio"><input type="radio" name="vacType" value="vacation" checked> Urlaub</label>';
+  html+='<label class="vcal-radio"><input type="radio" name="vacType" value="unpaid"> Unbezahlt</label>';
+  html+='<label class="vcal-radio"><input type="radio" name="vacType" value="special"> Sonderfrei</label>';
+  html+='</div>';
+  html+='<div class="vcal-modal-label">Notiz (optional)</div>';
+  html+='<textarea id="vacNote" class="form-textarea" placeholder="Begründung oder Anmerkung..."></textarea>';
+  html+='<div class="vcal-modal-actions">';
+  html+='<button class="btn vcal-cancel" onclick="closeVacModal()">Abbrechen</button>';
+  html+='<button class="btn btn-primary" onclick="submitVacationRequest()">Speichern</button>';
+  html+='</div>';
+  html+='</div></div>';
+
   document.getElementById('vUrlaub').innerHTML=html;
+  renderVacCalendar();
 }
 
 function submitVacationRequest(){
-  var from=document.getElementById('vacFrom').value;
-  var to=document.getElementById('vacTo').value;
-  var type=document.getElementById('vacType').value;
-  var note=document.getElementById('vacNote').value;
-  if(!from||!to){alert('Bitte Von- und Bis-Datum angeben.');return;}
-  if(from>to){alert('Von-Datum muss vor Bis-Datum liegen.');return;}
+  var from=vacSel.start, to=vacSel.end;
+  var typeEl=document.querySelector('input[name="vacType"]:checked');
+  var type=typeEl?typeEl.value:'vacation';
+  var noteEl=document.getElementById('vacNote');
+  var note=noteEl?noteEl.value:'';
+  if(!from||!to){alert('Bitte Zeitraum im Kalender wählen.');return;}
+  if(from>to){var _t=from;from=to;to=_t;}
   var days=calcVacReqDays(from,to);
   if(days<=0){alert('Zeitraum enthält keine Werktage.');return;}
   var vac=calcVacation();
@@ -1372,10 +1488,9 @@ function submitVacationRequest(){
   };
   allReqs[ME.id].push(newReq);
   lss('jsr_vacation_requests_v1',allReqs);
+  vacSel={start:null,end:null};vacHover=null;
+  closeVacModal();
   alert('Antrag eingereicht. HR wird benachrichtigt.');
-  document.getElementById('vacFrom').value='';
-  document.getElementById('vacTo').value='';
-  document.getElementById('vacNote').value='';
   renderUrlaub();
 }
 
