@@ -367,6 +367,24 @@ td.muted{color:var(--muted);}
 .chat-input:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(15,86,97,.1);}
 .chat-empty{flex:1;display:flex;align-items:center;justify-content:center;color:var(--muted);
   font-size:13px;}
+.dm-search{padding:8px 10px;border-bottom:1px solid var(--border);}
+.dm-search input{width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:8px;font-size:12px;font-family:inherit;outline:none;box-sizing:border-box;}
+.dm-unread{background:var(--blue);color:#fff;font-size:10px;font-weight:700;min-width:18px;height:18px;border-radius:9px;display:inline-flex;align-items:center;justify-content:center;padding:0 5px;flex-shrink:0;}
+.dm-row{display:flex;flex-direction:column;max-width:78%;}
+.dm-row.me{align-self:flex-end;align-items:flex-end;}
+.dm-row.them{align-self:flex-start;align-items:flex-start;}
+.dm-meta{font-size:10px;color:var(--muted);margin-top:2px;}
+.dm-back{background:none;border:none;color:var(--blue);font-size:20px;cursor:pointer;padding:0 6px 0 0;display:none;line-height:1;}
+.dm-input-area{padding:10px 12px;border-top:1px solid var(--border);display:flex;gap:8px;align-items:flex-end;}
+.dm-textarea{flex:1;padding:9px 12px;border:1px solid var(--border);border-radius:10px;font-family:inherit;font-size:13px;outline:none;resize:none;max-height:120px;line-height:1.4;box-sizing:border-box;}
+.dm-textarea:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(15,86,97,.1);}
+.dm-send{background:var(--blue);border:none;border-radius:10px;width:38px;height:38px;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;color:#fff;}
+.dm-send:hover{background:#0B454E;}
+@media (max-width:768px){
+  .chat-layout.dm-open .chat-list{display:none;}
+  .chat-layout:not(.dm-open) .chat-main{display:none;}
+  .dm-back{display:inline-block;}
+}
 
 @media (max-width: 900px){
   .chat-layout{flex-direction:column;height:auto;}
@@ -656,6 +674,9 @@ function getEmployees(){
 
 // Global state
 var ME=null, COLS=[], CONVS={}, ACTIVE=null;
+var LANG_LABELS={de:'Deutsch',en:'Englisch',sq:'Albanisch'};
+var DM_ACTIVE=null;
+var DM_PLANE='<path d="M3.478 2.404a.75.75 0 0 0-.926.941l2.432 7.905H13.5a.75.75 0 0 1 0 1.5H4.984l-2.432 7.905a.75.75 0 0 0 .926.94 60.519 60.519 0 0 0 18.445-8.986.75.75 0 0 0 0-1.218A60.517 60.517 0 0 0 3.478 2.404Z"/>';
 var vacExpanded=false, vacHover=null;
 var vacSel={start:null,end:null};
 var shiftMode='month', shiftYear=new Date().getFullYear(), shiftMonth=new Date().getMonth()+1;
@@ -1098,7 +1119,7 @@ function renderHome(){
 
   // Unread messages
   var unread=0;
-  Object.values(CONVS).forEach(function(c){(c.messages||[]).forEach(function(m){if(m.sender!==ME.id&&!m.read)unread++;});});
+  unread=dmUnreadCount();
   var ubEl=document.getElementById('navUnread');
   if(ubEl){if(unread>0){ubEl.textContent=unread;ubEl.style.display='inline';}else ubEl.style.display='none';}
 
@@ -1149,11 +1170,10 @@ function renderHome(){
   html+='</div></div>';
 
   // Last Message
-  var lastMsg=null;
-  Object.values(CONVS).forEach(function(c){var msgs=c.messages||[];if(msgs.length)lastMsg=msgs[msgs.length-1];});
+  var lastMsg=dmLastMessage();
   html+='<div class="card"><div class="card-header"><div class="card-title">💬 Team-Chat</div><button class="btn btn-sm" onclick="showView(\'Team\',document.querySelector([data-view=Team]))">Öffnen</button></div><div class="card-body">';
   if(unread>0)html+='<div class="badge badge-blue" style="margin-bottom:8px;">'+unread+' ungelesene Nachricht'+(unread===1?'':'en')+'</div>';
-  html+='<div style="font-size:12px;color:var(--muted);">'+(lastMsg?esc((lastMsg.text||'').substring(0,80))+((lastMsg.text||'').length>80?'…':''):'Keine Nachrichten.')+'</div>';
+  html+='<div style="font-size:12px;color:var(--muted);">'+(lastMsg?esc((lastMsg.text_original||'').substring(0,80))+((lastMsg.text_original||'').length>80?'…':''):'Keine Nachrichten.')+'</div>';
   html+='</div></div>';
 
   html+='</div>'; // close 2-col grid
@@ -1595,88 +1615,133 @@ function renderPerf(){
 // ═══════════════════════════════════════════════════════════════════════════
 // TEAM/CHAT VIEW
 // ═══════════════════════════════════════════════════════════════════════════
-function convId(a,b){return [a,b].sort().join('_');}
-function convName(c){
-  if(c.group)return c.name||'Gruppe';
-  var other=c.members?c.members.find(function(m){return m!==ME.id;}):null;
-  var emp=other?([ME].concat(COLS||[])).find(function(e){return e.id===other;}):null;
-  return emp?(emp.first_name+' '+emp.last_name):other||'?';
+// DM Store-Helfer
+function dmThreadId(a,b){return [a,b].sort().join('_');}
+function dmLoadThreads(){var t=ls('jsr_dm_threads_v1');return Array.isArray(t)?t:[];}
+function dmSaveThreads(t){lss('jsr_dm_threads_v1',t);}
+function dmLoadMessages(){var m=ls('jsr_dm_messages_v1');return Array.isArray(m)?m:[];}
+function dmSaveMessages(m){lss('jsr_dm_messages_v1',m);}
+function dmGetThread(otherId){
+  var tid=dmThreadId(ME.id,otherId), threads=dmLoadThreads();
+  var t=threads.find(function(x){return x.thread_id===tid;});
+  if(!t){
+    t={thread_id:tid,participants:[ME.id,otherId].sort(),lang_prefs:{},updated_at:new Date().toISOString()};
+    t.lang_prefs[ME.id]={my_lang:'de',see_lang:'de'};
+    t.lang_prefs[otherId]={my_lang:'de',see_lang:'de'};
+    threads.push(t); dmSaveThreads(threads);
+  }
+  return t;
 }
-function convIni(c){var n=convName(c);return n.split(' ').map(function(w){return w[0];}).join('').toUpperCase().slice(0,2);}
-function convCol(c){
-  if(c.group)return '#0F5661';
-  var emp=([ME].concat(COLS||[])).find(function(e){return c.members&&c.members.indexOf(e.id)>=0&&e.id!==ME.id;});
-  return emp?emp.photo_color||'#64748b':'#64748b';
+// Kontakte = aktive MA im selben Projekt (außer ich)
+function dmContacts(){
+  var all=getEmployees().filter(function(e){return e&&e.status==='active'&&e.id!==ME.id&&e.project_id===ME.project_id;});
+  all.sort(function(a,b){return ((a.first_name||'')+' '+(a.last_name||'')).localeCompare((b.first_name||'')+' '+(b.last_name||''),'de');});
+  return all;
 }
+function dmThreadMsgs(otherId){
+  var tid=dmThreadId(ME.id,otherId);
+  return dmLoadMessages().filter(function(m){return m.thread_id===tid;}).sort(function(a,b){return (a.sent_at||'').localeCompare(b.sent_at||'');});
+}
+function dmUnreadCount(){return dmLoadMessages().filter(function(m){return m.to_emp_id===ME.id&&!m.read_at;}).length;}
+function dmUnreadFrom(otherId){var tid=dmThreadId(ME.id,otherId);return dmLoadMessages().filter(function(m){return m.thread_id===tid&&m.to_emp_id===ME.id&&!m.read_at;}).length;}
+function dmLastMessage(){
+  var msgs=dmLoadMessages().filter(function(m){return m.from_emp_id===ME.id||m.to_emp_id===ME.id;});
+  msgs.sort(function(a,b){return (a.sent_at||'').localeCompare(b.sent_at||'');});
+  return msgs.length?msgs[msgs.length-1]:null;
+}
+function dmSeeLang(otherId){
+  var tid=dmThreadId(ME.id,otherId), t=dmLoadThreads().find(function(x){return x.thread_id===tid;});
+  return (t&&t.lang_prefs&&t.lang_prefs[ME.id]&&t.lang_prefs[ME.id].see_lang)||'de';
+}
+function dmMsgText(m){
+  var other=m.from_emp_id===ME.id?m.to_emp_id:m.from_emp_id, see=dmSeeLang(other);
+  return (m.translations&&m.translations[see])||m.text_original||'';
+}
+function dmAvatar(e,s){
+  var ini=((e.first_name||'?')[0]+(e.last_name||'?')[0]).toUpperCase();
+  var inner=e.photo_url?'<img src="'+e.photo_url+'" style="width:100%;height:100%;object-fit:cover;">':ini;
+  return '<div class="chat-avatar" style="width:'+s+'px;height:'+s+'px;background:'+(e.photo_color||'#0F5661')+';overflow:hidden;">'+inner+'</div>';
+}
+
+var _dmSearch='';
+function dmSetSearch(v){_dmSearch=v;dmRenderList();}
+function dmAutoGrow(ta){ta.style.height='auto';ta.style.height=Math.min(ta.scrollHeight,120)+'px';}
+function dmInputKey(ev){if(ev.key==='Enter'&&!ev.shiftKey){ev.preventDefault();dmSend();}}
+function dmScrollBottom(){setTimeout(function(){var ml=document.getElementById('dmMsgs');if(ml)ml.scrollTop=ml.scrollHeight;},10);}
 
 function renderTeam(){
-  var html='';
-  // Info-Hinweis
-  html+='<div style="background:var(--blue-bg);border:1px solid #c7d2fe;border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:12px;color:#1e3a8a;display:flex;align-items:center;gap:10px;">';
-  html+='<span style="font-size:16px;">ℹ️</span>';
-  html+='<span><strong>Vertraulich:</strong> Chats sind privat zwischen Kollegen. HR und Vorgesetzte können hier nicht mitlesen.</span>';
-  html+='</div>';
-
-  html+='<div class="chat-layout">';
-
-  // Linke Spalte: Kollegen + Conversations
+  var html='<div class="chat-layout'+(DM_ACTIVE?' dm-open':'')+'">';
   html+='<div class="chat-list">';
-  html+='<div class="chat-list-header">Kollegen</div>';
-  html+='<div class="chat-list-body">';
-  COLS.forEach(function(c){
-    var cid=convId(ME.id,c.id);
-    var conv=CONVS[cid];
-    var lastMsg=conv&&conv.messages&&conv.messages.length?conv.messages[conv.messages.length-1]:null;
-    var preview=lastMsg?lastMsg.text.substring(0,50):c.position||'Mitarbeiter';
-    var isActive=ACTIVE===cid?' active':'';
-    html+='<div class="chat-item'+isActive+'" onclick="openConv(\''+cid+'\',\''+esc(c.id)+'\')">';
-    html+='<div class="chat-avatar" style="background:'+(c.photo_color||'#64748b')+';">'+((c.first_name||'?')[0]+(c.last_name||'?')[0]).toUpperCase()+'</div>';
-    html+='<div class="chat-info"><div class="chat-name">'+esc(c.first_name+' '+c.last_name)+'</div><div class="chat-preview">'+esc(preview)+'</div></div>';
+  html+='<div class="dm-search"><input type="text" placeholder="Kontakt suchen…" value="'+esc(_dmSearch)+'" oninput="dmSetSearch(this.value)"></div>';
+  html+='<div class="chat-list-body" id="dmList"></div>';
+  html+='</div>';
+  html+='<div class="chat-main" id="dmMain">'+dmThreadHtml()+'</div>';
+  html+='</div>';
+  document.getElementById('vTeam').innerHTML=html;
+  dmRenderList();
+  dmScrollBottom();
+}
+function dmRenderList(){
+  var host=document.getElementById('dmList'); if(!host)return;
+  var q=_dmSearch.trim().toLowerCase();
+  var contacts=dmContacts().filter(function(e){return !q||((e.first_name||'')+' '+(e.last_name||'')).toLowerCase().indexOf(q)>=0;});
+  var html='';
+  if(contacts.length===0)html+='<div class="empty" style="padding:20px;">Keine Kontakte im Projekt.</div>';
+  contacts.forEach(function(e){
+    var msgs=dmThreadMsgs(e.id), last=msgs.length?msgs[msgs.length-1]:null;
+    var preview=last?dmMsgText(last):(e.position||'Mitarbeiter'), unread=dmUnreadFrom(e.id);
+    html+='<div class="chat-item'+(DM_ACTIVE===e.id?' active':'')+'" onclick="dmOpen(\''+esc(e.id)+'\')">';
+    html+=dmAvatar(e,36);
+    html+='<div class="chat-info"><div class="chat-name">'+esc(e.first_name+' '+e.last_name)+'</div><div class="chat-preview">'+esc(preview)+'</div></div>';
+    if(unread>0)html+='<span class="dm-unread">'+unread+'</span>';
     html+='</div>';
   });
-  html+='</div></div>';
-
-  // Rechte Spalte: aktuelle Conversation
-  html+='<div class="chat-main">';
-  if(ACTIVE){
-    var c=CONVS[ACTIVE]||{messages:[]};
-    var name=convName(c);
-    html+='<div class="chat-header"><div class="chat-avatar" style="background:'+convCol(c)+';">'+convIni(c)+'</div><div><div style="font-size:13px;font-weight:600;">'+esc(name)+'</div></div></div>';
-    html+='<div class="chat-messages" id="msgList">';
-    (c.messages||[]).forEach(function(m){
-      var isMe=m.sender===ME.id;
-      html+='<div class="msg '+(isMe?'me':'them')+'">'+esc(m.text)+'</div>';
-    });
-    html+='</div>';
-    html+='<div class="chat-input-wrap"><input id="msgInp" class="chat-input" placeholder="Nachricht..." onkeypress="if(event.key===\'Enter\')sendMsg()"><button class="btn btn-primary" onclick="sendMsg()">Senden</button></div>';
-  }else{
-    html+='<div class="chat-empty">Wähle einen Kollegen aus.</div>';
-  }
-  html+='</div></div>';
-
-  document.getElementById('vTeam').innerHTML=html;
-
-  // Scroll messages to bottom
-  setTimeout(function(){var ml=document.getElementById('msgList');if(ml)ml.scrollTop=ml.scrollHeight;},10);
+  host.innerHTML=html;
 }
-
-function openConv(cid,empId){
-  ACTIVE=cid;
-  if(!CONVS[cid])CONVS[cid]={id:cid,members:[ME.id,empId],messages:[]};
-  // Mark messages as read
-  (CONVS[cid].messages||[]).forEach(function(m){if(m.sender!==ME.id)m.read=true;});
-  lss('jsr_conversations_v1',CONVS);
+function dmThreadHtml(){
+  if(!DM_ACTIVE)return '<div class="chat-empty">Wähle einen Kontakt.</div>';
+  var other=getEmployees().find(function(e){return e.id===DM_ACTIVE;})||{first_name:'?',last_name:''};
+  var msgs=dmThreadMsgs(DM_ACTIVE), html='';
+  html+='<div class="chat-header"><button class="dm-back" onclick="dmBackToList()">←</button>'+dmAvatar(other,36);
+  html+='<div><div style="font-size:13px;font-weight:600;">'+esc(other.first_name+' '+other.last_name)+'</div><div style="font-size:11px;color:var(--green);">aktiv</div></div></div>';
+  html+='<div class="chat-messages" id="dmMsgs">';
+  msgs.forEach(function(m){
+    var isMe=m.from_emp_id===ME.id;
+    var time=m.sent_at?new Date(m.sent_at).toLocaleTimeString('de-AT',{hour:'2-digit',minute:'2-digit'}):'';
+    var marker=isMe?(m.read_at?'●':'○'):'';
+    html+='<div class="dm-row '+(isMe?'me':'them')+'"><div class="msg '+(isMe?'me':'them')+'">'+esc(dmMsgText(m)).replace(/\n/g,'<br>')+'</div>';
+    html+='<div class="dm-meta">'+esc(time)+(marker?' '+marker:'')+'</div></div>';
+  });
+  html+='</div>';
+  html+='<div class="dm-input-area"><textarea id="dmInput" class="dm-textarea" rows="1" placeholder="Nachricht…" oninput="dmAutoGrow(this)" onkeydown="dmInputKey(event)"></textarea>';
+  html+='<button class="dm-send" onclick="dmSend()" title="Senden"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor">'+DM_PLANE+'</svg></button></div>';
+  return html;
+}
+function dmOpen(otherId){
+  DM_ACTIVE=otherId; dmGetThread(otherId);
+  var tid=dmThreadId(ME.id,otherId), msgs=dmLoadMessages(), changed=false;
+  msgs.forEach(function(m){if(m.thread_id===tid&&m.to_emp_id===ME.id&&!m.read_at){m.read_at=new Date().toISOString();changed=true;}});
+  if(changed)dmSaveMessages(msgs);
   renderTeam();
 }
-
-function sendMsg(){
-  var inp=document.getElementById('msgInp');
-  if(!inp||!inp.value.trim()||!ACTIVE)return;
-  var msg={id:Date.now(),sender:ME.id,text:inp.value.trim(),ts:Date.now(),read:false};
-  if(!CONVS[ACTIVE])CONVS[ACTIVE]={id:ACTIVE,members:[ME.id],messages:[]};
-  CONVS[ACTIVE].messages.push(msg);
-  lss('jsr_conversations_v1',CONVS);
-  inp.value='';
+function dmBackToList(){DM_ACTIVE=null;renderTeam();}
+function dmSend(){
+  var ta=document.getElementById('dmInput');
+  if(!ta||!ta.value.trim()||!DM_ACTIVE)return;
+  var text=ta.value.trim(), t=dmGetThread(DM_ACTIVE);
+  var myLang=(t.lang_prefs[ME.id]&&t.lang_prefs[ME.id].my_lang)||'de';
+  var msgs=dmLoadMessages();
+  msgs.push({
+    id:'m_'+Date.now()+'_'+Math.floor(Math.random()*1000),
+    thread_id:t.thread_id, from_emp_id:ME.id, to_emp_id:DM_ACTIVE,
+    text_original:text, lang_original:myLang,
+    translations:{}, // TODO: translateMessage(text, lang_original, target_langs) - KI-Anbindung folgt (5b)
+    sent_at:new Date().toISOString(), read_at:null
+  });
+  dmSaveMessages(msgs);
+  var threads=dmLoadThreads(), th=threads.find(function(x){return x.thread_id===t.thread_id;});
+  if(th){th.updated_at=new Date().toISOString();dmSaveThreads(threads);}
+  ta.value='';
   renderTeam();
 }
 
