@@ -1869,8 +1869,10 @@ function dmThreadHtml(){
     var marker=isMe?(m.read_at?'●':'○'):'';
     var sender='';
     if(isG&&!isMe){ var se=getEmployees().find(function(x){return x.id===m.from_emp_id;}); var sr=se?ROLE_STYLES_CHAT[getEmpRole(se)]:null; sender='<div class="dm-sender-name"'+(sr?' style="color:'+sr.color+';"':'')+'>'+esc(se?se.first_name:'?')+'</div>'; }
+    var _seeL=dmSeeLang(m.thread_id);
+    var _untr=(_seeL!==m.lang_original)&&!(m.translations&&m.translations[_seeL])&&loadAiConfig().mode!=='off';
     html+='<div class="dm-row '+(isMe?'me':'them')+'">'+sender+'<div class="msg '+(isMe?'me':'them')+'">'+esc(dmMsgText(m)).replace(/\n/g,'<br>')+'</div>';
-    html+='<div class="dm-meta">'+esc(time)+(marker?' '+marker:'')+'</div></div>';
+    html+='<div class="dm-meta">'+esc(time)+(marker?' '+marker:'')+(_untr?' · <span style="opacity:.6;">Original</span>':'')+'</div></div>';
   });
   html+='</div>';
   html+='<div class="dm-input-area"><textarea id="dmInput" class="dm-textarea" rows="1" placeholder="Nachricht…" oninput="dmAutoGrow(this)" onkeydown="dmInputKey(event)"></textarea>';
@@ -1909,6 +1911,43 @@ function dmPickerHtml(){
   return html;
 }
 function aiEnabled(){var s=ls('jsr_ai_settings_v1');return !!(s&&s.dm_translation_enabled);}
+function loadAiConfig(){ var d={mode:'off',provider:'openai',endpoint:'',model:'gpt-4o-mini',timeout_ms:5000,cache_enabled:true}; try{ var v=JSON.parse(localStorage.getItem('jsr_ai_config_v1')||'null'); return v?Object.assign(d,v):d; }catch(e){ return d; } }
+function saveAiConfig(cfg){ try{ localStorage.setItem('jsr_ai_config_v1', JSON.stringify(cfg||{})); }catch(e){} }
+async function translateMessage(text, sourceLang, targetLang){
+  var cfg=loadAiConfig();
+  if(cfg.mode==='off') return null;
+  if(sourceLang===targetLang) return text;
+  if(cfg.mode==='stub') return '[STUB-KI '+sourceLang+'→'+targetLang+'] '+text;
+  if(!cfg.endpoint){ console.warn('KI-Live-Modus aktiv aber Endpoint fehlt'); return null; }
+  try{
+    var ctrl=new AbortController();
+    var timer=setTimeout(function(){ctrl.abort();}, cfg.timeout_ms||5000);
+    var res=await fetch(cfg.endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:text,source_lang:sourceLang,target_lang:targetLang,model:cfg.model}),signal:ctrl.signal});
+    clearTimeout(timer);
+    if(!res.ok) return null;
+    var data=await res.json();
+    return data.translated_text||null;
+  }catch(err){ console.warn('KI-Uebersetzung fehlgeschlagen', err); return null; }
+}
+async function dmTranslateForMessage(msgId, threadId){
+  try{
+    var cfg=loadAiConfig(); if(cfg.mode==='off')return;
+    var t=dmLoadThreads().find(function(x){return x.thread_id===threadId;}); if(!t)return;
+    var msg=dmLoadMessages().find(function(x){return x.id===msgId;}); if(!msg)return;
+    var myLang=msg.lang_original||'de', targets={};
+    if(t.is_group){ (t.participants||[]).forEach(function(pid){ if(pid===ME.id)return; var sl=(t.lang_prefs&&t.lang_prefs[pid]&&t.lang_prefs[pid].see_lang)||'de'; if(sl!==myLang)targets[sl]=1; }); }
+    else { var toId=dmOtherId(t); var sl=(t.lang_prefs&&t.lang_prefs[toId]&&t.lang_prefs[toId].see_lang)||'de'; if(sl!==myLang)targets[sl]=1; }
+    var langs=Object.keys(targets); if(!langs.length)return;
+    var changed=false;
+    for(var i=0;i<langs.length;i++){
+      var lang=langs[i];
+      if(cfg.cache_enabled && msg.translations && msg.translations[lang])continue;
+      var tr=await translateMessage(msg.text_original, myLang, lang);
+      if(tr){ var all=dmLoadMessages(); var m=all.find(function(x){return x.id===msgId;}); if(m){ if(!m.translations)m.translations={}; m.translations[lang]=tr; dmSaveMessages(all); msg=m; changed=true; } }
+    }
+    if(changed)renderTeam();
+  }catch(e){}
+}
 function dmToggleLangPop(){DM_LANGPOP=!DM_LANGPOP;renderTeam();}
 function dmCloseLangPop(){DM_LANGPOP=false;renderTeam();}
 function dmSetLang(field,val){
@@ -2080,15 +2119,8 @@ function dmSend(){
       if(thj){ thj.participants.push(ME.id); if(!thj.lang_prefs)thj.lang_prefs={}; thj.lang_prefs[ME.id]={my_lang:'de',see_lang:'de'}; dmSaveThreads(thr); t=dmActiveThread(); }
     }
     msg.to_emp_id=null; msg.read_by=[ME.id];
-    if(aiOn){ (t.participants||[]).forEach(function(pid){ if(pid===ME.id)return; var sl=(t.lang_prefs&&t.lang_prefs[pid]&&t.lang_prefs[pid].see_lang)||'de'; if(sl!==myLang){
-      // TODO: translateMessage(text, myLang, [sl]) -> translations[sl] (KI-Anbindung folgt, pro Empfaenger-Sprache)
-    } }); }
   } else {
-    var toId=dmOtherId(t); var recvSee=(t.lang_prefs&&t.lang_prefs[toId]&&t.lang_prefs[toId].see_lang)||'de';
-    if(aiOn&&myLang!==recvSee){
-      // TODO: translateMessage(text, myLang, [recvSee]) -> translations[recvSee] (KI-Anbindung folgt)
-    }
-    msg.to_emp_id=toId; msg.read_at=null;
+    msg.to_emp_id=dmOtherId(t); msg.read_at=null;
   }
   var msgs=dmLoadMessages();
   msgs.push(msg);
@@ -2097,6 +2129,7 @@ function dmSend(){
   if(th){th.updated_at=new Date().toISOString();dmSaveThreads(threads);}
   ta.value='';
   renderTeam();
+  if(aiOn) dmTranslateForMessage(msg.id, t.thread_id);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
