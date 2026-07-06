@@ -41,6 +41,8 @@
   .display{font-family:'Space Grotesk','Inter',sans-serif;letter-spacing:-.02em;}
   .grad-text{background:var(--accent-grad);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;}
 
+  /* Interactive constellation canvas (Signature) */
+  .net-canvas{position:fixed;inset:0;z-index:0;pointer-events:none;}
   /* Fixed glow layer (behind content, above bg) */
   .glow{position:fixed;inset:0;z-index:0;pointer-events:none;overflow:hidden;}
   .glow span{position:absolute;border-radius:50%;filter:blur(90px);opacity:.5;}
@@ -175,6 +177,9 @@
 </style>
 </head>
 <body>
+
+<!-- Signature: interactive constellation -->
+<canvas id="net" class="net-canvas" aria-hidden="true"></canvas>
 
 <!-- Fixed glow layer -->
 <div class="glow" aria-hidden="true"><span class="g1"></span><span class="g2"></span><span class="g3"></span></div>
@@ -387,6 +392,126 @@
     <div class="copy">© 2026 TIVE 360°. Alle Rechte vorbehalten.</div>
   </div>
 </footer>
+
+<script>
+/* ══ Signature: interactive constellation network ══ */
+(function(){
+  "use strict";
+  var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var canvas = document.getElementById('net');
+  if(!canvas || !canvas.getContext) return;
+  var ctx = canvas.getContext('2d');
+  var W = 0, H = 0, dpr = 1;
+  var points = [];
+  var mouse = { x: 0, y: 0, active: false };
+  var LINK = 140;   // Punkt-zu-Punkt Verbindungsradius
+  var MLINK = 190;  // Cursor-Anziehungs-/Verbindungsradius
+  var raf = null;
+
+  function resize(){
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width = Math.floor(W * dpr);
+    canvas.height = Math.floor(H * dpr);
+    canvas.style.width = W + 'px';
+    canvas.style.height = H + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    seed();
+  }
+
+  function seed(){
+    // Dichte an Viewport-Fläche gekoppelt, hart begrenzt (mobil weniger)
+    var target = Math.round((W * H) / 16000);
+    var cap = (W < 720) ? 42 : 110;
+    var count = Math.max(24, Math.min(target, cap));
+    points = [];
+    for(var i = 0; i < count; i++){
+      points.push({
+        x: Math.random() * W,
+        y: Math.random() * H,
+        vx: (Math.random() - 0.5) * 0.35,
+        vy: (Math.random() - 0.5) * 0.35,
+        r: Math.random() * 1.5 + 1.0
+      });
+    }
+  }
+
+  function frame(){
+    ctx.clearRect(0, 0, W, H);
+    var i, p;
+    for(i = 0; i < points.length; i++){
+      p = points[i];
+      p.x += p.vx; p.y += p.vy;
+      if(p.x < 0 || p.x > W) p.vx *= -1;
+      if(p.y < 0 || p.y > H) p.vy *= -1;
+      p.x = Math.max(0, Math.min(W, p.x));
+      p.y = Math.max(0, Math.min(H, p.y));
+      if(mouse.active){
+        var dxm = mouse.x - p.x, dym = mouse.y - p.y;
+        var dm = Math.sqrt(dxm * dxm + dym * dym);
+        if(dm < MLINK && dm > 0.01){
+          var f = (1 - dm / MLINK) * 0.018;   // sanfte Anziehung
+          p.vx += (dxm / dm) * f;
+          p.vy += (dym / dm) * f;
+        }
+      }
+      p.vx *= 0.994; p.vy *= 0.994;          // Dämpfung → Geschwindigkeit bleibt beschränkt
+      if(Math.abs(p.vx) < 0.04) p.vx += (Math.random() - 0.5) * 0.02;
+      if(Math.abs(p.vy) < 0.04) p.vy += (Math.random() - 0.5) * 0.02;
+    }
+
+    // Verbindungen zwischen Punkten (Opacity ∝ Nähe)
+    for(var a = 0; a < points.length; a++){
+      var pa = points[a];
+      for(var b = a + 1; b < points.length; b++){
+        var pb = points[b];
+        var dx = pa.x - pb.x, dy = pa.y - pb.y;
+        var d = Math.sqrt(dx * dx + dy * dy);
+        if(d < LINK){
+          var o = (1 - d / LINK) * 0.45;
+          ctx.strokeStyle = 'rgba(123,156,255,' + o.toFixed(3) + ')';
+          ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y); ctx.stroke();
+        }
+      }
+      // Verbindung zum Cursor
+      if(mouse.active){
+        var cdx = pa.x - mouse.x, cdy = pa.y - mouse.y;
+        var cd = Math.sqrt(cdx * cdx + cdy * cdy);
+        if(cd < MLINK){
+          var co = (1 - cd / MLINK) * 0.6;
+          ctx.strokeStyle = 'rgba(123,156,255,' + co.toFixed(3) + ')';
+          ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(mouse.x, mouse.y); ctx.stroke();
+        }
+      }
+    }
+
+    // Knoten
+    for(i = 0; i < points.length; i++){
+      p = points[i];
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(185,205,255,.72)'; ctx.fill();
+    }
+
+    if(!reduce) raf = requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', resize, { passive: true });
+  window.addEventListener('pointermove', function(e){
+    if(e.pointerType === 'touch') return;   // Touch: läuft ruhig ohne Cursor weiter
+    mouse.x = e.clientX; mouse.y = e.clientY; mouse.active = true;
+  }, { passive: true });
+  window.addEventListener('pointerout', function(e){
+    if(!e.relatedTarget) mouse.active = false;
+  }, { passive: true });
+  window.addEventListener('blur', function(){ mouse.active = false; });
+
+  resize();
+  frame();   // bei reduced-motion: genau ein statisches Frame, kein Loop
+})();
+</script>
 
 </body>
 </html>
