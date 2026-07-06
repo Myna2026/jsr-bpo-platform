@@ -5978,7 +5978,7 @@ function saveEmpUserLinks(o){ localStorage.setItem('jsr_emp_user_links_v1', JSON
 function setEmpUserLink(empId,email){ var o=loadEmpUserLinks(); o[empId]=(email||'').toString().trim(); saveEmpUserLinks(o); }
 function removeEmpUserLink(empId){ var o=loadEmpUserLinks(); delete o[empId]; saveEmpUserLinks(o); }
 function loadKnownAppUsers(){ try{ var v=JSON.parse(localStorage.getItem('jsr_known_app_users_v1')||'[]'); return Array.isArray(v)?v:[]; }catch(e){ return []; } }
-function recordKnownAppUser(u){ try{ if(!u||!u.email)return; var list=loadKnownAppUsers(); var em=u.email.toLowerCase(); var i=list.findIndex(function(x){return (x.email||'').toLowerCase()===em;}); var rec={email:u.email,name:u.name||'',roles:u.roles||[],staff_number:u.staff_number||'',last_seen:new Date().toISOString()}; if(i>=0)list[i]=rec; else list.push(rec); localStorage.setItem('jsr_known_app_users_v1',JSON.stringify(list)); }catch(e){} }
+function recordKnownAppUser(u){ try{ if(!u||!u.email)return; var list=loadKnownAppUsers(); var em=u.email.toLowerCase(); var i=list.findIndex(function(x){return (x.email||'').toLowerCase()===em;}); var rec={email:u.email,name:u.name||'',roles:u.roles||[],staff_number:u.staff_number||'',client_id:u.client_id||'',last_seen:new Date().toISOString()}; if(i>=0)list[i]=rec; else list.push(rec); localStorage.setItem('jsr_known_app_users_v1',JSON.stringify(list)); }catch(e){} }
 // Auflösung: verknüpfte App-User-Email für einen MA (Override -> Auto-Match E-Mail -> staff_number)
 function linkedEmailForEmp(emp){
   if(!emp)return null;
@@ -21373,6 +21373,26 @@ function ProjectEditModal({project, onSave, onClose}){
 
           {section==='settings'&&(
             <div>
+              {(()=>{
+                let acc=[]; try{ acc=JSON.parse(localStorage.getItem('jsr_client_accounts_v1')||'[]'); }catch(e){}
+                if(!Array.isArray(acc))acc=[];
+                const account=acc.find(a=>a&&a.project_id===form.id);
+                let known=[]; try{ known=JSON.parse(localStorage.getItem('jsr_known_app_users_v1')||'[]'); }catch(e){}
+                const clientUsers=(account&&Array.isArray(known))?known.filter(u=>u&&u.client_id===account.id):[];
+                return (
+                  <div style={{marginBottom:14,border:'1px solid var(--border)',borderRadius:8,overflow:'hidden'}}>
+                    <div style={{padding:'8px 12px',background:'var(--surface-2)',fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em'}}>🔗 Portal-Zugänge {account?'· '+(account.company_name||account.id):''}</div>
+                    <div style={{padding:'10px 12px'}}>
+                      {!account && <div style={{fontSize:12,color:'var(--muted)'}}>Kein Kunden-Account diesem Projekt zugeordnet.</div>}
+                      {account && clientUsers.length===0 && <div style={{fontSize:12,color:'#d97706',fontWeight:600}}>Nicht verknüpft — kein App-User mit dieser client_id.</div>}
+                      {clientUsers.map(u=>(
+                        <div key={u.email} style={{fontSize:12,padding:'3px 0'}}>{u.email}{u.name?' · '+u.name:''}</div>
+                      ))}
+                      <div style={{fontSize:10,color:'var(--muted)',marginTop:6}}>Read-only. Die Zuweisung von client_id erfolgt in Supabase (app_users.client_id).</div>
+                    </div>
+                  </div>
+                );
+              })()}
               <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
                 <div className="form-group">
                   <label className="form-label">Mindest-Deutschlevel</label>
@@ -22340,7 +22360,11 @@ function HrAccessView(){
 }
 function AppUsersView({employees}){
   const [tick,setTick]=useState(0);
+  const [portalFilter,setPortalFilter]=useState('all');
   const known=loadKnownAppUsers();
+  const HR_ROLES=['management','hr','finance','teamlead','projektleiter','qm','trainer'];
+  function clientNameFor(cid){ try{ const acc=JSON.parse(localStorage.getItem('jsr_client_accounts_v1')||'[]'); const a=(Array.isArray(acc)?acc:[]).find(x=>x&&x.id===cid); return a?(a.company_name||a.id):cid; }catch(e){ return cid; } }
+  function portalOf(u){ if(u.client_id) return 'client'; if((u.roles||[]).some(r=>HR_ROLES.indexOf(r)>=0)) return 'hr'; return 'none'; }
   function empFor(u){
     const links=loadEmpUserLinks();
     for(const eid in links){ if((links[eid]||'').toLowerCase()===(u.email||'').toLowerCase()){ return (employees||[]).find(e=>e.id===eid)||null; } }
@@ -22351,7 +22375,13 @@ function AppUsersView({employees}){
     <div>
       <div style={{marginBottom:14}}>
         <div style={{fontSize:18,fontWeight:700}}>App-User &amp; Verknüpfungen</div>
-        <div style={{fontSize:13,color:'var(--muted)',marginTop:2}}>Alle Portal-User, die sich eingeloggt haben, mit ihrer aktuellen Mitarbeiter-Verknüpfung. (Live-Liste aller Supabase-User ist RLS-bedingt nicht abrufbar — diese Liste wächst mit jedem Login.)</div>
+        <div style={{fontSize:13,color:'var(--muted)',marginTop:2}}>Alle Portal-User, die sich eingeloggt haben, mit Portal-Zugang und Verknüpfung. (Live-Liste aller Supabase-User ist RLS-bedingt nicht abrufbar — wächst mit jedem Login.)</div>
+        <select className="form-select" style={{marginTop:8,maxWidth:200}} value={portalFilter} onChange={e=>setPortalFilter(e.target.value)}>
+          <option value="all">Alle Portale</option>
+          <option value="hr">HR</option>
+          <option value="client">Client</option>
+          <option value="none">Ohne Portal</option>
+        </select>
       </div>
       {known.length===0&&<div className="card" style={{maxWidth:640}}><div className="card-body" style={{color:'var(--muted)'}}>Noch keine App-User erfasst.</div></div>}
       {known.length>0&&(
@@ -22360,16 +22390,22 @@ function AppUsersView({employees}){
           <thead><tr>
             <th style={{textAlign:'left',padding:'8px 10px',borderBottom:'2px solid var(--border)'}}>E-Mail</th>
             <th style={{textAlign:'left',padding:'8px 10px',borderBottom:'2px solid var(--border)'}}>Name / Rollen</th>
+            <th style={{textAlign:'left',padding:'8px 10px',borderBottom:'2px solid var(--border)'}}>Portal-Zugang</th>
             <th style={{textAlign:'left',padding:'8px 10px',borderBottom:'2px solid var(--border)'}}>Verknüpfter MA</th>
           </tr></thead>
           <tbody>
-            {known.slice().sort((a,b)=>(a.email||'').localeCompare(b.email||'')).map(u=>{
-              const e=empFor(u);
+            {known.slice().filter(u=>portalFilter==='all'||portalOf(u)===portalFilter).sort((a,b)=>(a.email||'').localeCompare(b.email||'')).map(u=>{
+              const e=empFor(u); const po=portalOf(u);
+              const badge = po==='client'
+                ? <span style={{fontSize:11,fontWeight:700,padding:'2px 8px',borderRadius:4,background:'#E4EEF0',color:'#0F5661'}}>Client: {clientNameFor(u.client_id)}</span>
+                : po==='hr' ? <span style={{fontSize:11,fontWeight:700,padding:'2px 8px',borderRadius:4,background:'#eef2ff',color:'#1e40af'}}>HR</span>
+                : <span style={{fontSize:11,color:'var(--muted)'}}>Ohne Portal</span>;
               return (
-                <tr key={u.email} style={{background:e?'transparent':'rgba(217,119,6,.06)'}}>
+                <tr key={u.email} style={{background:(po==='none')?'rgba(217,119,6,.06)':'transparent'}}>
                   <td style={{padding:'8px 10px',borderBottom:'1px solid var(--border)'}}>{u.email}</td>
                   <td style={{padding:'8px 10px',borderBottom:'1px solid var(--border)'}}>{u.name||'—'}<span style={{color:'var(--muted)'}}> · {(u.roles||[]).map(k=>ROLE_LABELS[k]||k).join(', ')||'—'}</span></td>
-                  <td style={{padding:'8px 10px',borderBottom:'1px solid var(--border)'}}>{e?<b>{e.first_name} {e.last_name}</b>:<span style={{color:'#d97706',fontWeight:600}}>Nicht verknüpft</span>}</td>
+                  <td style={{padding:'8px 10px',borderBottom:'1px solid var(--border)'}}>{badge}</td>
+                  <td style={{padding:'8px 10px',borderBottom:'1px solid var(--border)'}}>{e?<b>{e.first_name} {e.last_name}</b>:<span style={{color:'var(--muted)'}}>—</span>}</td>
                 </tr>
               );
             })}

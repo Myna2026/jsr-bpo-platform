@@ -310,7 +310,14 @@ const CLIENTS = (()=>{
 // Match per E-Mail, sonst Firmenname. Kein Match:
 //  - Admin (management/hr) → Fallback auf ersten Client (Demo/Vorschau)
 //  - reine kunde-Rolle      → null  (gate zeigt "noch keinem Kunden zugeordnet")
+function loadKnownAppUsers(){ try{ var v=JSON.parse(localStorage.getItem('jsr_known_app_users_v1')||'[]'); return Array.isArray(v)?v:[]; }catch(e){ return []; } }
+function recordKnownAppUser(u){ try{ if(!u||!u.email)return; var list=loadKnownAppUsers(); var em=u.email.toLowerCase(); var i=list.findIndex(function(x){return (x.email||'').toLowerCase()===em;}); var rec={email:u.email,name:u.name||'',roles:u.roles||[],staff_number:u.staff_number||'',client_id:u.client_id||'',last_seen:new Date().toISOString()}; if(i>=0)list[i]=rec; else list.push(rec); localStorage.setItem('jsr_known_app_users_v1',JSON.stringify(list)); }catch(e){} }
+// Feature 17: strenger client_id-Login (Email/Name/Admin-Fallback entfernt)
 function buildClient(au, authUser){
+  const c = Object.values(CLIENTS).find(x => x.id === au.client_id);
+  return c ? {...c, name: c.name||authUser.email, email: authUser.email, role_keys: au.role_keys} : null;
+}
+function _oldBuildClient(au, authUser){
   const list = Object.values(CLIENTS);
   const email = (authUser.email||'').toLowerCase();
   let match = list.find(c => c.login_email && c.login_email.toLowerCase()===email);
@@ -1529,12 +1536,28 @@ function ShowcasesView({client}){
   );
 }
 
+function ClientAccessDenied({email}){
+  useEffect(function(){ const t=setTimeout(function(){ (async function(){ try{ await sb.auth.signOut(); }catch(e){} window.location.href='client.html'; })(); },2000); return function(){clearTimeout(t);}; },[]);
+  return (
+    <div style={{position:'fixed',inset:0,zIndex:9999,display:'flex',alignItems:'center',justifyContent:'center',padding:20,background:'linear-gradient(180deg,#E4EEF0 0%,#F5F6F8 42%)',fontFamily:"'Inter',system-ui,sans-serif"}}>
+      <div style={{background:'#fff',borderRadius:16,border:'1px solid rgba(15,86,97,.08)',padding:'40px 36px',maxWidth:420,textAlign:'center',boxShadow:'0 24px 60px rgba(15,86,97,.14)'}}>
+        <div style={{fontSize:40,marginBottom:10}}>⛔</div>
+        <div style={{fontSize:18,fontWeight:800,color:'#0B454E',marginBottom:8}}>Kein Client-Zugang</div>
+        <div style={{fontSize:13,color:'#5b6b6e',lineHeight:1.6}}>Dein Account (<b style={{color:'#0F5661'}}>{email}</b>) ist keinem Kunden zugeordnet.</div>
+        <div style={{fontSize:13,color:'#94A3B8',marginTop:10}}>Zurück zum Login…</div>
+        <div style={{marginTop:16,height:3,background:'#E4EEF0',borderRadius:2,overflow:'hidden'}}><div style={{height:'100%',background:'#0F5661',animation:'cprog 2s linear forwards'}}/></div>
+        <style>{`@keyframes cprog{from{width:0}to{width:100%}}`}</style>
+      </div>
+    </div>
+  );
+}
 function App(){
   migrateProjectData();
   const [client, setClient]=useState(null);
   const [view, setView]=useState('overview');
   const [authMsg, setAuthMsg]=useState(null);
   const [portalDenied, setPortalDenied]=useState(false);
+  const [clientDenied, setClientDenied]=useState(null);
   const [myPortals, setMyPortals]=useState([]);
   const gatingRef=useRef(false);
 
@@ -1544,7 +1567,7 @@ function App(){
     gatingRef.current=true;
     try{
       const {data:au, error}=await sb.from('app_users')
-        .select('role_keys, full_name, staff_number, active').eq('user_id', session.user.id).single();
+        .select('role_keys, full_name, staff_number, active, client_id').eq('user_id', session.user.id).single();
       if(error||!au){ gatingRef.current=false; setPortalDenied(false); setAuthMsg('Kein Benutzerprofil gefunden. Wende dich an deinen Ansprechpartner.'); return; }
       if(!au.active){ gatingRef.current=false; setPortalDenied(false); setAuthMsg('Dieser Zugang ist deaktiviert.'); return; }
       if(!au.role_keys||!au.role_keys.length){ gatingRef.current=false; setPortalDenied(false); setAuthMsg('Noch keine Rolle zugewiesen.'); return; }
@@ -1553,8 +1576,10 @@ function App(){
       const portals=[...new Set((rdefs||[]).flatMap(r=>r.portals||[]))];
       setMyPortals(portals);
       if(!portals.includes('client')){ gatingRef.current=false; setAuthMsg(null); setPortalDenied(true); return; }
+      recordKnownAppUser({email:session.user.email, name:au.full_name, roles:au.role_keys, staff_number:au.staff_number, client_id:au.client_id});
+      if(!au.client_id){ gatingRef.current=false; setClientDenied(session.user.email); return; }
       const c=buildClient(au, session.user);
-      if(!c){ gatingRef.current=false; setPortalDenied(false); setAuthMsg('Dein Konto ist noch keinem Kunden zugeordnet. Wende dich an deinen Ansprechpartner.'); return; }
+      if(!c){ gatingRef.current=false; setPortalDenied(false); setAuthMsg('Kunde nicht gefunden (client_id="'+au.client_id+'"). Wende dich an deinen Ansprechpartner.'); return; }
       localStorage.setItem('jsr_client_session', JSON.stringify({client:c, ts:Date.now()}));
       setClient(c); setView('overview');
     }catch(e){ gatingRef.current=false; setPortalDenied(false); setAuthMsg('Verbindungsfehler beim Laden des Profils.'); }
@@ -1568,6 +1593,7 @@ function App(){
     return ()=>{ try{ sub.subscription.unsubscribe(); }catch(e){} };
   }, []);
 
+  if(clientDenied) return <ClientAccessDenied email={clientDenied}/>;
   if(!client) return <LoginPage authMsg={authMsg} portalDenied={portalDenied} myPortals={myPortals}/>;
 
   const ALL_NAV_ITEMS=[
