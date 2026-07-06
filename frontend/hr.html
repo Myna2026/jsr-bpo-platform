@@ -22521,6 +22521,184 @@ function AiEndpointView(){
     </div>
   );
 }
+// ══ CV-Sync aus öffentlichem Google Sheet (Feature 20) ══
+function loadCvSyncConfig(){
+  const DEF={enabled:false, sheet_url:'', csv_url:'', auto_sync_on_login:false,
+    mapping:{name:'Name',email:'Email',phone:'Telefon',skill:'Skill',project:'Projekt',date:'Datum'},
+    last_sync_at:null, last_sync_count:0, last_sync_skipped:0, last_error:null};
+  try{ const p=JSON.parse(localStorage.getItem('jsr_cv_sync_config_v1')||'null'); if(!p) return DEF;
+    return {...DEF, ...p, mapping:{...DEF.mapping, ...(p.mapping||{})}}; }catch(e){ return DEF; }
+}
+function saveCvSyncConfig(cfg){ try{ localStorage.setItem('jsr_cv_sync_config_v1', JSON.stringify(cfg)); }catch(e){} }
+
+function extractCsvUrl(sheetUrl){
+  if(!sheetUrl) return null;
+  const s=sheetUrl.trim();
+  if(/[?&]format=csv/.test(s)||/output=csv/.test(s)||/tqx=out:csv/.test(s)) return s;
+  const m=s.match(/\/spreadsheets\/d\/([a-zA-Z0-9\-_]+)/);
+  if(!m) return null;
+  const g=s.match(/[#&?]gid=(\d+)/);
+  return 'https://docs.google.com/spreadsheets/d/'+m[1]+'/gviz/tq?tqx=out:csv&gid='+(g?g[1]:'0');
+}
+
+function parseCsv(text){
+  const rows=[]; let row=[], field='', inQ=false;
+  text=String(text).replace(/\r\n/g,'\n').replace(/\r/g,'\n');
+  for(let i=0;i<text.length;i++){ const ch=text[i];
+    if(inQ){
+      if(ch==='"'){ if(text[i+1]==='"'){ field+='"'; i++; } else inQ=false; }
+      else field+=ch;
+    } else {
+      if(ch==='"') inQ=true;
+      else if(ch===','){ row.push(field); field=''; }
+      else if(ch==='\n'){ row.push(field); rows.push(row); row=[]; field=''; }
+      else field+=ch;
+    }
+  }
+  if(field.length||row.length){ row.push(field); rows.push(row); }
+  if(!rows.length) return [];
+  const header=rows[0].map(h=>(h||'').trim());
+  return rows.slice(1).filter(r=>r.some(cell=>(cell||'').trim()!=='')).map(r=>{
+    const o={}; header.forEach((h,idx)=>{ o[h]=(r[idx]!=null?r[idx]:'').trim(); }); return o;
+  });
+}
+
+function parseCvDate(v){
+  const today=new Date().toISOString().slice(0,10);
+  if(!v) return today;
+  const s=String(v).trim();
+  if(/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const m=s.match(/^(\d{1,2})[.\/](\d{1,2})[.\/](\d{4})$/);
+  if(m) return m[3]+'-'+m[2].padStart(2,'0')+'-'+m[1].padStart(2,'0');
+  return today;
+}
+
+async function syncCvsFromSheet(){
+  const cfg=loadCvSyncConfig();
+  const csvUrl=cfg.csv_url||extractCsvUrl(cfg.sheet_url);
+  const finish=(patch)=>{ const cur=loadCvSyncConfig(); saveCvSyncConfig({...cur, ...patch, last_sync_at:new Date().toISOString()}); };
+  if(!csvUrl){ finish({last_error:'Keine gültige Sheet-URL.'}); return {imported:0,skipped:0,total:0,preview:[],error:'Keine gültige Sheet-URL.'}; }
+  let rows=[];
+  try{
+    const res=await fetch(csvUrl);
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    rows=parseCsv(await res.text());
+  }catch(e){
+    const msg=(e&&e.message)||String(e);
+    finish({last_error:'Abruf fehlgeschlagen: '+msg+' (evtl. CORS – Sheet „Im Web veröffentlichen").'});
+    console.warn('[CV-Sync]', e);
+    return {imported:0,skipped:0,total:0,preview:[],error:msg};
+  }
+  const M=cfg.mapping;
+  let projects=[]; try{ projects=JSON.parse(localStorage.getItem('jsr_projects_v1')||'null')||PROJECTS_INIT; }catch(e){ projects=PROJECTS_INIT; }
+  const projByName=(nm)=>{ if(!nm) return ''; const n=nm.trim().toLowerCase(); if(!n) return '';
+    let p=projects.find(x=>(x.name||'').toLowerCase()===n); if(p) return p.id;
+    p=projects.find(x=>{const xn=(x.name||'').toLowerCase(); return xn&&(xn.includes(n)||n.includes(xn));}); return p?p.id:''; };
+  let existing=[]; try{ existing=JSON.parse(localStorage.getItem('jsr_cvs_v1')||'[]'); }catch(e){ existing=[]; }
+  const seen=new Set(existing.map(x=>(x.email||'').trim().toLowerCase()).filter(Boolean));
+  let imported=0, skipped=0; const ts=Date.now(); const added=[];
+  rows.forEach((r,i)=>{
+    const email=(r[M.email]||'').trim();
+    if(!email){ skipped++; return; }
+    if(seen.has(email.toLowerCase())){ skipped++; return; }
+    const full=(r[M.name]||'').trim(); const sp=full.split(/\s+/).filter(Boolean);
+    const first=sp.shift()||''; const last=sp.join(' ');
+    const skill=(r[M.skill]||'').trim();
+    added.push({ id:'cvgs_'+ts+'_'+i, first_name:first, last_name:last, email:email,
+      phone:(r[M.phone]||'').trim(), city:'', target_project:projByName(r[M.project]||''),
+      target_role:'Agent', cv_skills:skill?[skill]:[], status:'cv_inbound',
+      cv_date:parseCvDate(r[M.date]||''), source:'Google Sheet',
+      photo_url:'', audios:[], videos:[], test_scores:{}, test_answers:{}, notes:'' });
+    seen.add(email.toLowerCase()); imported++;
+  });
+  if(added.length){ try{ localStorage.setItem('jsr_cvs_v1', JSON.stringify(existing.concat(added))); }catch(e){} }
+  finish({last_error:null, last_sync_count:imported, last_sync_skipped:skipped});
+  return {imported, skipped, total:rows.length, preview:rows.slice(0,5), error:null};
+}
+
+function CvSyncView({setCvList, projects}){
+  const [cfg, setCfg] = useState(loadCvSyncConfig);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState(null);
+  const csvUrl = cfg.csv_url || extractCsvUrl(cfg.sheet_url) || '';
+  const up=(patch)=>setCfg(prev=>{ const next={...prev, ...patch}; saveCvSyncConfig(next); return next; });
+  const upMap=(k,v)=>setCfg(prev=>{ const next={...prev, mapping:{...prev.mapping,[k]:v}}; saveCvSyncConfig(next); return next; });
+  async function runSync(){ setBusy(true); const r=await syncCvsFromSheet(); setBusy(false); setResult(r); setCfg(loadCvSyncConfig());
+    if(r&&r.imported){ try{ setCvList(JSON.parse(localStorage.getItem('jsr_cvs_v1')||'[]')); }catch(e){} } }
+  const MAPS=[['name','Name'],['email','Email'],['phone','Telefon'],['skill','Skill'],['project','Projekt'],['date','Datum']];
+  const preview=result&&result.preview&&result.preview.length?result.preview:[];
+  const cols=preview.length?Object.keys(preview[0]):[];
+  const fmtTs=(iso)=>{ try{ return new Date(iso).toLocaleString('de-DE'); }catch(e){ return iso; } };
+  return (
+    <div>
+      <div style={{marginBottom:14}}>
+        <div style={{fontSize:18,fontWeight:700,display:'inline-flex',alignItems:'center',gap:8}}>
+          <span style={{display:'inline-flex',color:'#0F5661'}} dangerouslySetInnerHTML={{__html:'<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="currentColor">' + `<path fill-rule="evenodd" d="M10.5 3.75a6 6 0 0 0-5.98 6.496A5.25 5.25 0 0 0 6.75 20.25H18a4.5 4.5 0 0 0 2.206-8.423 3.75 3.75 0 0 0-4.133-4.303A6.001 6.001 0 0 0 10.5 3.75Zm2.25 6a.75.75 0 0 0-1.5 0v4.94l-1.72-1.72a.75.75 0 0 0-1.06 1.06l3 3a.75.75 0 0 0 1.06 0l3-3a.75.75 0 1 0-1.06-1.06l-1.72 1.72V9.75Z" clip-rule="evenodd"/>` + '</svg>'}} />
+          CV-Sync aus Google Sheet
+        </div>
+        <div style={{fontSize:13,color:'var(--muted)',marginTop:2}}>Importiert Bewerber aus einem öffentlichen Google Sheet (CSV-Export). Dedup per E-Mail — bestehende Bewerber werden nie überschrieben.</div>
+      </div>
+
+      <div className="card" style={{maxWidth:640,marginBottom:16}}><div className="card-body">
+        <label style={{display:'flex',alignItems:'center',gap:10,cursor:'pointer',marginBottom:14}}>
+          <input type="checkbox" checked={!!cfg.enabled} onChange={e=>up({enabled:e.target.checked})} style={{width:16,height:16}}/>
+          <span style={{fontSize:14,fontWeight:600}}>CV-Sync aktiviert</span>
+        </label>
+
+        <div className="form-group">
+          <label className="form-label">Google-Sheet-URL (Freigabe „Jeder mit Link")</label>
+          <input className="form-input" placeholder="https://docs.google.com/spreadsheets/d/…/edit#gid=0"
+            value={cfg.sheet_url||''} onChange={e=>up({sheet_url:e.target.value})}/>
+          <div style={{fontSize:11,color:csvUrl?'#0F5661':'var(--red)',marginTop:4,wordBreak:'break-all'}}>
+            {csvUrl?('→ CSV: '+csvUrl):'⚠ Keine gültige Sheet-URL erkannt'}
+          </div>
+        </div>
+
+        <div className="form-group" style={{marginTop:10}}>
+          <label className="form-label">Spalten-Mapping (Header-Namen im Sheet)</label>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginTop:4}}>
+            {MAPS.map(([k,label])=>(
+              <div key={k}>
+                <div style={{fontSize:11,color:'var(--muted)',marginBottom:2}}>{label}</div>
+                <input className="form-input" value={cfg.mapping[k]||''} onChange={e=>upMap(k,e.target.value)}/>
+              </div>
+            ))}
+          </div>
+          <div style={{fontSize:11,color:'var(--muted)',marginTop:6}}>„Skill" → CV-Skills · „Projekt" → Projekt-Zuordnung (Klartext → intern gematcht) · „Datum" → Eingangsdatum.</div>
+        </div>
+
+        <label style={{display:'flex',alignItems:'center',gap:10,cursor:'pointer',marginTop:14}}>
+          <input type="checkbox" checked={!!cfg.auto_sync_on_login} onChange={e=>up({auto_sync_on_login:e.target.checked})} style={{width:16,height:16}}/>
+          <span style={{fontSize:14,fontWeight:600}}>Automatisch bei Login syncen</span>
+        </label>
+
+        <div style={{display:'flex',alignItems:'center',gap:12,marginTop:16}}>
+          <button className="btn btn-primary" disabled={busy||!csvUrl} onClick={runSync}>{busy?'⏳ Synchronisiere…':'☁ Jetzt syncen'}</button>
+          {result&&!result.error&&<span style={{fontSize:13,fontWeight:600,color:'#0F5661'}}>✓ {result.imported} importiert, {result.skipped} übersprungen</span>}
+          {result&&result.error&&<span style={{fontSize:13,fontWeight:600,color:'var(--red)'}}>✗ {result.error}</span>}
+        </div>
+      </div></div>
+
+      {preview.length>0&&(
+        <div className="card" style={{maxWidth:'100%',marginBottom:16}}><div className="card-body">
+          <div style={{fontSize:13,fontWeight:700,marginBottom:8}}>Vorschau — erste {preview.length} Zeilen</div>
+          <div style={{overflowX:'auto'}}>
+            <table style={{borderCollapse:'collapse',fontSize:12,width:'100%'}}>
+              <thead><tr>{cols.map(cn=><th key={cn} style={{textAlign:'left',padding:'4px 8px',borderBottom:'2px solid var(--border)',whiteSpace:'nowrap'}}>{cn}</th>)}</tr></thead>
+              <tbody>{preview.map((r,ri)=><tr key={ri}>{cols.map(cn=><td key={cn} style={{padding:'4px 8px',borderBottom:'1px solid var(--border)',whiteSpace:'nowrap'}}>{r[cn]}</td>)}</tr>)}</tbody>
+            </table>
+          </div>
+        </div></div>
+      )}
+
+      <div style={{fontSize:12,color:'var(--muted)'}}>
+        {cfg.last_sync_at
+          ? <span>Letzter Sync: {fmtTs(cfg.last_sync_at)} · {cfg.last_sync_count||0} importiert, {cfg.last_sync_skipped||0} übersprungen{cfg.last_error?(' · Fehler: '+cfg.last_error):''}</span>
+          : <span>Noch kein Sync durchgeführt.</span>}
+      </div>
+    </div>
+  );
+}
 function App(){
   migrateProjectData();
   const [loggedIn, setLoggedIn] = useState(false);
@@ -22579,6 +22757,7 @@ function App(){
         employee_id: matchEmployeeToUser(session.user.email, au.staff_number),  // Feature 14: Auto-Match Email/staff_number
         email: session.user.email
       });
+      try{ const _cvcfg=loadCvSyncConfig(); if(_cvcfg.enabled&&_cvcfg.auto_sync_on_login){ syncCvsFromSheet().then(r=>{ if(r&&r.imported){ try{ setCvList(JSON.parse(localStorage.getItem('jsr_cvs_v1')||'[]')); }catch(_e){} } }).catch(()=>{}); } }catch(_e){}
     }catch(e){ gatingRef.current=false; setPortalDenied(false); setAuthMsg('Verbindungsfehler beim Laden des Profils.'); }
   }
 
@@ -22719,7 +22898,7 @@ function App(){
     );
   }
 
-  const hasAccess = (key) => { try{ const always=['locations','spaces','payroll','showcase','timetracking','superadmin','tabperms','aisettings','cockpits','hraccess','appusers','aiendpoint']; if(always.includes(key)) return true; return !team||(team.access==='all'||team.access.includes(key));}catch(e){return true;} };
+  const hasAccess = (key) => { try{ const always=['locations','spaces','payroll','showcase','timetracking','superadmin','tabperms','aisettings','cockpits','hraccess','appusers','aiendpoint','cvsync']; if(always.includes(key)) return true; return !team||(team.access==='all'||team.access.includes(key));}catch(e){return true;} };
 
   function saveEmployee(form){
     if(form.id){setEmployees(es=>es.map(e=>e.id===form.id?form:e));showToast('✓ Mitarbeiter gespeichert');}
@@ -22876,6 +23055,7 @@ function App(){
       {key:'tabperms',label:'Portal-Tabs',icon:'🔒'},
       {key:'aisettings',label:'KI-Einstellungen',icon:'✨'},
       {key:'aiendpoint',label:'KI-Anbindung',icon:'🔌'},
+      {key:'cvsync',label:'CV-Sync',icon:'☁'},
       {key:'cockpits',label:'Cockpits',icon:'▦'},
       {key:'hraccess',label:'HR-Zugriff',icon:'🛡'},
       {key:'appusers',label:'App-User',icon:'👤'},
@@ -22891,6 +23071,7 @@ function App(){
 
   function getIcon(key){
     const ICONS = {
+      'cvsync':'<path fill-rule="evenodd" d="M10.5 3.75a6 6 0 0 0-5.98 6.496A5.25 5.25 0 0 0 6.75 20.25H18a4.5 4.5 0 0 0 2.206-8.423 3.75 3.75 0 0 0-4.133-4.303A6.001 6.001 0 0 0 10.5 3.75Zm2.25 6a.75.75 0 0 0-1.5 0v4.94l-1.72-1.72a.75.75 0 0 0-1.06 1.06l3 3a.75.75 0 0 0 1.06 0l3-3a.75.75 0 1 0-1.06-1.06l-1.72 1.72V9.75Z" clip-rule="evenodd"/>',
       'cockpits':'<path fill-rule="evenodd" d="M3 6a3 3 0 0 1 3-3h2.25a3 3 0 0 1 3 3v2.25a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V6Zm9.75 0a3 3 0 0 1 3-3H18a3 3 0 0 1 3 3v2.25a3 3 0 0 1-3 3h-2.25a3 3 0 0 1-3-3V6ZM3 15.75a3 3 0 0 1 3-3h2.25a3 3 0 0 1 3 3V18a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3v-2.25Zm9.75 0a3 3 0 0 1 3-3H18a3 3 0 0 1 3 3V18a3 3 0 0 1-3 3h-2.25a3 3 0 0 1-3-3v-2.25Z" clip-rule="evenodd"/>',
       'aiendpoint':'<path d="M16.5 7.5h-9v9h9v-9Z"/><path fill-rule="evenodd" d="M8.25 2.25A.75.75 0 0 1 9 3v.75h2.25V3a.75.75 0 0 1 1.5 0v.75H15V3a.75.75 0 0 1 1.5 0v.75h.75a3 3 0 0 1 3 3v.75H21A.75.75 0 0 1 21 9h-.75v2.25H21a.75.75 0 0 1 0 1.5h-.75V15H21a.75.75 0 0 1 0 1.5h-.75v.75a3 3 0 0 1-3 3h-.75V21a.75.75 0 0 1-1.5 0v-.75h-2.25V21a.75.75 0 0 1-1.5 0v-.75H9V21a.75.75 0 0 1-1.5 0v-.75h-.75a3 3 0 0 1-3-3v-.75H3A.75.75 0 0 1 3 15h.75v-2.25H3a.75.75 0 0 1 0-1.5h.75V9H3a.75.75 0 0 1 0-1.5h.75v-.75a3 3 0 0 1 3-3h.75V3a.75.75 0 0 1 .75-.75ZM6 6.75A.75.75 0 0 1 6.75 6h10.5a.75.75 0 0 1 .75.75v10.5a.75.75 0 0 1-.75.75H6.75a.75.75 0 0 1-.75-.75V6.75Z" clip-rule="evenodd"/>',
       'aisettings':'<path fill-rule="evenodd" d="M9 4.5a.75.75 0 0 1 .721.544l.813 2.846a3.75 3.75 0 0 0 2.576 2.576l2.846.813a.75.75 0 0 1 0 1.442l-2.846.813a3.75 3.75 0 0 0-2.576 2.576l-.813 2.846a.75.75 0 0 1-1.442 0l-.813-2.846a3.75 3.75 0 0 0-2.576-2.576l-2.846-.813a.75.75 0 0 1 0-1.442l2.846-.813A3.75 3.75 0 0 0 7.466 7.89l.813-2.846A.75.75 0 0 1 9 4.5ZM18 1.5a.75.75 0 0 1 .728.568l.258 1.036c.236.94.97 1.674 1.91 1.91l1.036.258a.75.75 0 0 1 0 1.456l-1.036.258c-.94.236-1.674.97-1.91 1.91l-.258 1.036a.75.75 0 0 1-1.456 0l-.258-1.036a2.625 2.625 0 0 0-1.91-1.91l-1.036-.258a.75.75 0 0 1 0-1.456l1.036-.258a2.625 2.625 0 0 0 1.91-1.91l.258-1.036A.75.75 0 0 1 18 1.5ZM16.5 15a.75.75 0 0 1 .712.513l.394 1.183c.15.447.5.799.948.948l1.183.395a.75.75 0 0 1 0 1.422l-1.183.395c-.447.15-.799.5-.948.948l-.395 1.183a.75.75 0 0 1-1.422 0l-.395-1.183a1.5 1.5 0 0 0-.948-.948l-1.183-.395a.75.75 0 0 1 0-1.422l1.183-.395c.447-.15.799-.5.948-.948l.395-1.183A.75.75 0 0 1 16.5 15Z" clip-rule="evenodd"/>',
@@ -23058,6 +23239,7 @@ function App(){
           {view==='cockpits'&&(<div><CockpitsView/></div>)}
           {view==='hraccess'&&(<div><HrAccessView/></div>)}
           {view==='appusers'&&(<div><AppUsersView employees={employees}/></div>)}
+          {view==='cvsync'&&(<div><CvSyncView setCvList={setCvList} projects={projects}/></div>)}
           {view==='spaces'&&(
             <div>
               <SpacesView employees={employees} projects={projects} locations={[{id:'tirana',name:'Tirana'},{id:'prishtina',name:'Prishtina'}]}/>
