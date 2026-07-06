@@ -18390,10 +18390,32 @@ function RoleEditModal({role, onSave, onClose, PERMISSION_TABS}){
   );
 }
 
+// ── Kunden-Logo · Supabase Storage (privater Bucket "client-logos") · Feature 19 ──
+async function uploadClientLogo(clientId, file){
+  try{
+    const ext=((file.name||'').split('.').pop()||'png').toLowerCase();
+    const path=(clientId||'new')+'/logo_'+Date.now()+'.'+ext;
+    const {error}=await sb.storage.from('client-logos').upload(path, file, {upsert:true, cacheControl:'3600'});
+    if(error){ console.warn('Logo-Upload', error); alert('Upload fehlgeschlagen: '+((error&&error.message)||error)+'\n(Bucket "client-logos" + RLS-Policies im Supabase-Backend nötig)'); return null; }
+    return path;
+  }catch(e){ alert('Upload-Fehler: '+((e&&e.message)||e)); return null; }
+}
+async function deleteClientLogo(pathOrData){
+  try{ if(pathOrData && pathOrData.indexOf('data:')!==0 && !/^https?:\/\//.test(pathOrData)){ await sb.storage.from('client-logos').remove([pathOrData]); } }catch(e){ console.warn('Logo-Delete', e); }
+}
+async function getSignedLogoUrl(v){
+  if(!v) return null;
+  if(v.indexOf('data:')===0) return v;            // base64-Altlogos: direkt anzeigen
+  if(/^https?:\/\//.test(v)) return v;            // schon volle URL
+  try{ const {data,error}=await sb.storage.from('client-logos').createSignedUrl(v, 3600); if(error) return null; return (data&&data.signedUrl)||null; }catch(e){ return null; }
+}
 function ClientEditModal({client, onSave, onClose, CLIENT_TABS, projects}){
   const [form, setForm] = useState(JSON.parse(JSON.stringify(client)));
   const [section, setSection] = useState('stamm');
   const setF=(k,v)=>setForm(f=>({...f,[k]:v}));
+  const [logoPreview, setLogoPreview] = useState(null);
+  const [logoBusy, setLogoBusy] = useState(false);
+  useEffect(()=>{ let alive=true; if(form.logo_url){ getSignedLogoUrl(form.logo_url).then(u=>{ if(alive) setLogoPreview(u); }); } else { setLogoPreview(null); } return ()=>{ alive=false; }; },[form.logo_url]);
 
   const SECTIONS = [
     {key:'stamm',    label:'🏢 Stammdaten'},
@@ -18469,30 +18491,34 @@ function ClientEditModal({client, onSave, onClose, CLIENT_TABS, projects}){
                 </div>
               </div>
               <div className="form-group" style={{marginTop:10}}>
-                <label className="form-label">🖼 Kundenlogo (PNG / SVG)</label>
+                <label className="form-label">🖼 Kundenlogo (PNG / JPEG / SVG / WebP · max 2 MB · Supabase Storage)</label>
                 <div style={{display:'flex',alignItems:'center',gap:12,flexWrap:'wrap',marginTop:4}}>
                   <div style={{width:160,height:48,borderRadius:'var(--r)',border:'1.5px solid var(--border)',
                     background:'var(--surface-2)',display:'flex',alignItems:'center',justifyContent:'center',overflow:'hidden',flexShrink:0}}>
-                    {form.logo_url
-                      ?<img src={form.logo_url} alt="Logo" style={{maxWidth:'100%',maxHeight:'100%',objectFit:'contain'}}/>
-                      :<span style={{fontSize:11,color:'var(--dim)'}}>Kein Logo</span>}
+                    {logoBusy
+                      ?<span style={{fontSize:11,color:'var(--muted)'}}>… lädt …</span>
+                      :logoPreview
+                        ?<img src={logoPreview} alt="Logo" style={{maxWidth:'100%',maxHeight:'100%',objectFit:'contain'}}/>
+                        :<span style={{fontSize:11,color:'var(--dim)'}}>Kein Logo</span>}
                   </div>
                   <div style={{display:'flex',gap:6}}>
                     <label className="btn btn-sm" style={{cursor:'pointer',background:'var(--blue)',color:'white',border:'none'}}>
                       📎 Hochladen
                       <input type="file" accept="image/png,image/svg+xml,image/jpeg,image/webp" style={{display:'none'}}
-                        onChange={e=>{
+                        onChange={async e=>{
                           const file=e.target.files[0];if(!file)return;
-                          if(file.size>1024*1024){alert('Max 1 MB');return;}
-                          const reader=new FileReader();
-                          reader.onload=ev=>setF('logo_url',ev.target.result);
-                          reader.readAsDataURL(file);
+                          if(file.size>2*1024*1024){alert('Max 2 MB');e.target.value='';return;}
+                          setLogoBusy(true);
+                          const path=await uploadClientLogo(form.id||'new', file);
+                          setLogoBusy(false); e.target.value='';
+                          if(path) setF('logo_url',path);
                         }}/>
                     </label>
                     {form.logo_url&&<button type="button" className="btn btn-sm" style={{color:'var(--red)'}}
-                      onClick={()=>setF('logo_url','')}>× Entfernen</button>}
+                      onClick={async()=>{ await deleteClientLogo(form.logo_url); setF('logo_url',''); }}>× Entfernen</button>}
                   </div>
                 </div>
+                <div style={{fontSize:10,color:'var(--muted)',marginTop:4}}>Privater Bucket · signierte URL (1 h). Bestehende Base64-Logos bleiben sichtbar.</div>
               </div>
               <div className="form-group" style={{marginTop:10}}>
                 <label className="form-label">Interne Notizen</label>
