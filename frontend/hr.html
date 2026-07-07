@@ -18715,17 +18715,10 @@ function ClientEditModal({client, onSave, onClose, CLIENT_TABS, projects}){
   );
 }
 
-function ClientAccountsTab({projects}){
-  const [clients, setClients] = useState(()=>{
-    try{return JSON.parse(localStorage.getItem('jsr_client_accounts_v1')||'null')||[];}
-    catch(e){return [];}
-  });
+function ClientAccountsTab({projects, clients, setClients}){
+  // 25a: clients kommt aus App-State (Supabase + Realtime), Persist über saveClientAccountToDB
   const [showModal, setShowModal] = useState(false);
   const [editClient, setEditClient] = useState(null);
-
-  useEffect(()=>{
-    localStorage.setItem('jsr_client_accounts_v1', JSON.stringify(clients));
-  },[clients]);
 
   const CLIENT_TABS = [
     {key:'overview',    label:'Projektübersicht',  icon:'📊'},
@@ -18763,27 +18756,37 @@ function ClientAccountsTab({projects}){
     };
   }
 
-  function save(form){
+  async function save(form){
     if(!form.company_name) return alert('Bitte Firmenname eingeben.');
     if(!form.login_email) return alert('Bitte Login E-Mail eingeben.');
     setClients(cs=>cs.find(c=>c.id===form.id)?cs.map(c=>c.id===form.id?form:c):[...cs,form]);
+    try{ await saveClientAccountToDB(form); }
+    catch(e){ console.error('[25a] saveClient', e); alert('Fehler beim Speichern: '+(e.message||'DB')); }
     setShowModal(false);
     setEditClient(null);
   }
 
-  function resetPassword(client){
+  async function resetPassword(client){
     const pw = Math.random().toString(36).slice(2,8).toUpperCase();
-    setClients(cs=>cs.map(c=>c.id===client.id?{...c,login_password:pw,must_change_pw:true}:c));
+    const updated = {...client, login_password:pw, must_change_pw:true};
+    setClients(cs=>cs.map(c=>c.id===client.id?updated:c));
+    try{ await saveClientAccountToDB(updated); }
+    catch(e){ console.error('[25a] resetPassword', e); alert('Fehler beim Speichern: '+(e.message||'DB')); return; }
     alert('Neues Passwort fuer '+client.company_name+': '+pw);
   }
 
-  function toggleActive(client){
-    setClients(cs=>cs.map(c=>c.id===client.id?{...c,active:!c.active}:c));
+  async function toggleActive(client){
+    const updated = {...client, active:!client.active};
+    setClients(cs=>cs.map(c=>c.id===client.id?updated:c));
+    try{ await saveClientAccountToDB(updated); }
+    catch(e){ console.error('[25a] toggleActive', e); alert('Fehler beim Speichern: '+(e.message||'DB')); }
   }
 
-  function deleteClient(id){
-    if(window.confirm('Kunden-Account loeschen?'))
-      setClients(cs=>cs.filter(c=>c.id!==id));
+  async function deleteClient(id){
+    if(!window.confirm('Kunden-Account loeschen?')) return;
+    setClients(cs=>cs.filter(c=>c.id!==id));
+    try{ await deleteClientAccountFromDB(id); }
+    catch(e){ console.error('[25a] deleteClient', e); alert('Fehler beim Löschen: '+(e.message||'DB')); }
   }
 
   return(
@@ -18890,7 +18893,7 @@ function ClientAccountsTab({projects}){
   );
 }
 
-function SystemSettingsTab({projects, setProjects, employees}){
+function SystemSettingsTab({projects, setProjects, employees, clients}){
   const [activeSection, setActiveSection] = useState('skills');
 
   // Skills
@@ -18958,7 +18961,7 @@ function SystemSettingsTab({projects, setProjects, employees}){
       locations: JSON.parse(localStorage.getItem('jsr_locations_v1')||'[]'),
       roles: JSON.parse(localStorage.getItem('jsr_roles_v1')||'[]'),
       accounts: JSON.parse(localStorage.getItem('jsr_accounts_v1')||'[]'),
-      clients: JSON.parse(localStorage.getItem('jsr_client_accounts_v1')||'[]'),
+      clients: clients, /* 25a: aus App-State */
       time: JSON.parse(localStorage.getItem('jsr_time_v1')||'[]'),
       showcases: JSON.parse(localStorage.getItem('jsr_showcases_v1')||'[]'),
       skills, absenceTypes, positions, holidays, workModels, vacationDefaults, pins,
@@ -18992,7 +18995,11 @@ function SystemSettingsTab({projects, setProjects, employees}){
         if(data.locations) localStorage.setItem('jsr_locations_v1', JSON.stringify(data.locations));
         if(data.roles) localStorage.setItem('jsr_roles_v1', JSON.stringify(data.roles));
         if(data.accounts) localStorage.setItem('jsr_accounts_v1', JSON.stringify(data.accounts));
-        if(data.clients) localStorage.setItem('jsr_client_accounts_v1', JSON.stringify(data.clients));
+        // 25a: clients → Supabase (Rest bleibt localStorage bis eigene Sub-Features migrieren)
+        if(Array.isArray(data.clients)){
+          try{ for(const cl of data.clients){ await saveClientAccountToDB(cl); } }
+          catch(err){ console.error('[25a] importBackup clients', err); alert('Fehler beim Clients-Import: '+(err.message||'unbekannt')); }
+        }
         if(data.time) localStorage.setItem('jsr_time_v1', JSON.stringify(data.time));
         if(data.showcases) localStorage.setItem('jsr_showcases_v1', JSON.stringify(data.showcases));
         alert('Import erfolgreich. Seite wird neu geladen.');
@@ -21001,7 +21008,7 @@ function SystemSettingsTab({projects, setProjects, employees}){
   );
 }
 
-function ProjectsAdminTab({projects, setProjects}){
+function ProjectsAdminTab({projects, setProjects, clients}){
   const [showModal, setShowModal] = useState(false);
   const [editProject, setEditProject] = useState(null);
 
@@ -21058,6 +21065,7 @@ function ProjectsAdminTab({projects, setProjects}){
           project={editProject}
           onSave={save}
           onClose={()=>{setShowModal(false);setEditProject(null);}}
+          clients={clients}
         />
       )}
 
@@ -21128,7 +21136,7 @@ function ProjectsAdminTab({projects, setProjects}){
 
 const GREEN='var(--green)',AMBER='var(--amber)',GRAY='var(--muted)',BLUE='var(--blue)';
 
-function ProjectEditModal({project, onSave, onClose}){
+function ProjectEditModal({project, onSave, onClose, clients}){
   const [form, setForm] = useState(JSON.parse(JSON.stringify(project)));
   const [section, setSection] = useState('basics');
   const setF=(k,v)=>setForm(f=>({...f,[k]:v}));
@@ -21406,8 +21414,7 @@ function ProjectEditModal({project, onSave, onClose}){
           {section==='settings'&&(
             <div>
               {(()=>{
-                let acc=[]; try{ acc=JSON.parse(localStorage.getItem('jsr_client_accounts_v1')||'[]'); }catch(e){}
-                if(!Array.isArray(acc))acc=[];
+                const acc = Array.isArray(clients) ? clients : []; /* 25a: aus App-State */
                 const account=acc.find(a=>a&&a.project_id===form.id);
                 let known=[]; try{ known=JSON.parse(localStorage.getItem('jsr_known_app_users_v1')||'[]'); }catch(e){}
                 const clientUsers=(account&&Array.isArray(known))?known.filter(u=>u&&u.client_id===account.id):[];
@@ -21667,17 +21674,17 @@ function SuperAdminView({employees, projects, setProjects}){
 
       {/* SETTINGS TAB */}
       {tab==='settings'&&(
-        <SystemSettingsTab projects={projects} setProjects={setProjects} employees={employees}/>
+        <SystemSettingsTab projects={projects} setProjects={setProjects} employees={employees} clients={clients}/>
       )}
 
       {/* PROJECTS TAB */}
       {tab==='projects'&&(
-        <ProjectsAdminTab projects={projects} setProjects={setProjects}/>
+        <ProjectsAdminTab projects={projects} setProjects={setProjects} clients={clients}/>
       )}
 
       {/* CLIENTS TAB */}
       {tab==='clients'&&(
-        <ClientAccountsTab projects={projects}/>
+        <ClientAccountsTab projects={projects} clients={clients} setClients={setClients}/>
       )}
 
       {/* ACCOUNTS TAB */}
@@ -21882,6 +21889,84 @@ async function matchEmployeeToUserSb(email, staffNumber){
     }
   }catch(e){ console.warn('[25a] matchEmployeeToUserSb', e); }
   return null;
+}
+
+// ─── 25a/25c: Client-Accounts CRUD on Supabase (Realtime + Deprecation) ────
+const CLIENT_COLS = new Set([
+  // Stammdaten
+  'id','company_name','company_legal','industry','website',
+  // Kontakt primary
+  'contact_name','contact_title','contact_email','contact_phone',
+  // Kontakt secondary (25c)
+  'contact2_name','contact2_email','contact2_phone',
+  // Adresse (25c)
+  'address_street','address_city','address_country',
+  // Vertrag/Billing
+  'project_name','project_id','contract_start','contract_end',
+  'billing_model','billing_rate','billing_currency','payment_terms','vat_id',
+  // Login
+  'login_email','login_password','active','must_change_pw',
+  // Tabs (text[])
+  'visible_tabs',
+  // Notes (25c) + Logo
+  'notes','logo_url',
+  // DB-managed
+  'created_at','updated_at'
+]);
+const CLIENT_DB_MANAGED = new Set(['created_at','updated_at']);
+const CLIENT_NUMERIC_COLS = new Set(['billing_rate']);
+const CLIENT_DATE_COLS = new Set(['contract_start','contract_end']);
+// Legacy-Frontend-Feld: text `created` wird bewusst gedropt — DB `created_at` uebernimmt.
+const CLIENT_LEGACY_DROP = new Set(['created']);
+const CLIENT_WARNED_FIELDS = new Set();
+
+async function loadClientAccountsFromDB(){
+  try{
+    const {data, error} = await sb.from('client_accounts').select('*').order('company_name', {ascending:true});
+    if(error){ console.error('[25a] loadClientAccountsFromDB', error); return []; }
+    return data || [];
+  }catch(e){ console.error('[25a] loadClientAccountsFromDB', e); return []; }
+}
+async function saveClientAccountToDB(client){
+  if(!client) throw new Error('client required');
+  const payload = {};
+  for(const k of Object.keys(client)){
+    if(CLIENT_DB_MANAGED.has(k)) continue;
+    if(CLIENT_LEGACY_DROP.has(k)) continue;
+    let v = client[k];
+    if(v === '' && (CLIENT_NUMERIC_COLS.has(k) || CLIENT_DATE_COLS.has(k))){ v = null; }
+    if(CLIENT_COLS.has(k)){
+      payload[k] = v;
+    } else {
+      if(!CLIENT_WARNED_FIELDS.has(k)){
+        console.warn('[25a] Client field dropped (no extra column):', k);
+        CLIENT_WARNED_FIELDS.add(k);
+      }
+    }
+  }
+  const {data, error} = await sb.from('client_accounts').upsert(payload).select().single();
+  if(error) throw error;
+  return data;
+}
+async function deleteClientAccountFromDB(id){
+  if(!id) throw new Error('id required');
+  const {error} = await sb.from('client_accounts').delete().eq('id', id);
+  if(error) throw error;
+  return true;
+}
+function subscribeClientAccounts(setter){
+  const chan = sb.channel('client_accounts-25a')
+    .on('postgres_changes', {event:'INSERT', schema:'public', table:'client_accounts'}, (p)=>{
+      setter(prev => prev.some(c=>c.id===p.new.id) ? prev : [...prev, p.new]);
+    })
+    .on('postgres_changes', {event:'UPDATE', schema:'public', table:'client_accounts'}, (p)=>{
+      setter(prev => prev.map(c => c.id===p.new.id ? p.new : c));
+    })
+    .on('postgres_changes', {event:'DELETE', schema:'public', table:'client_accounts'}, (p)=>{
+      setter(prev => prev.filter(c => c.id !== p.old.id));
+    })
+    .subscribe();
+  return ()=>{ try{ sb.removeChannel(chan); }catch(e){} };
 }
 
 function LoginScreen({authMsg, portalDenied, myPortals}){
@@ -22508,12 +22593,12 @@ async function translateMessage(text, sourceLang, targetLang){
     return data.translated_text||null;
   }catch(err){ console.warn('KI-Uebersetzung fehlgeschlagen', err); return null; }
 }
-function AppUsersView({employees}){
+function AppUsersView({employees, clients}){
   const [tick,setTick]=useState(0);
   const [portalFilter,setPortalFilter]=useState('all');
   const known=loadKnownAppUsers();
   const HR_ROLES=['management','hr','finance','teamlead','projektleiter','qm','trainer'];
-  function clientNameFor(cid){ try{ const acc=JSON.parse(localStorage.getItem('jsr_client_accounts_v1')||'[]'); const a=(Array.isArray(acc)?acc:[]).find(x=>x&&x.id===cid); return a?(a.company_name||a.id):cid; }catch(e){ return cid; } }
+  function clientNameFor(cid){ const a=(clients||[]).find(x=>x&&x.id===cid); return a?(a.company_name||a.id):cid; }
   function portalOf(u){ if(u.client_id) return 'client'; if((u.roles||[]).some(r=>HR_ROLES.indexOf(r)>=0)) return 'hr'; return 'none'; }
   function empFor(u){
     const links=loadEmpUserLinks();
@@ -22947,6 +23032,9 @@ function App(){
   // 25a: Employees kommen aus Supabase (Load + Realtime via useEffect unten)
   const [employees, setEmployees] = useState([]);
   const [showSyncFallbackBanner, setShowSyncFallbackBanner] = useState(false);
+  // 25a: Client-Accounts analog
+  const [clients, setClients] = useState([]);
+  const [showClientsFallbackBanner, setShowClientsFallbackBanner] = useState(false);
   const [testQuestions, setTestQuestions] = useState(()=>{
     try{return JSON.parse(localStorage.getItem('jsr_test_q_v1')||'null')||LANGUAGE_TEST_QUESTIONS;}
     catch(e){return LANGUAGE_TEST_QUESTIONS;}
@@ -23020,6 +23108,29 @@ function App(){
       setEmployees(DUMMY_EMPLOYEES);
     })();
     const unsub = subscribeEmployees(setEmployees);
+    return ()=>{ alive=false; if(unsub) unsub(); };
+  }, []);
+
+  // 25a: Client-Accounts aus Supabase laden + Realtime-Subscription
+  //      Fallback: falls DB leer aber localStorage befüllt → Legacy-Anzeige + Banner
+  useEffect(()=>{
+    let alive=true;
+    (async()=>{
+      const dbClients = await loadClientAccountsFromDB();
+      if(!alive) return;
+      if(dbClients.length > 0){ setClients(dbClients); return; }
+      try{
+        const localData = JSON.parse(localStorage.getItem('jsr_client_accounts_v1')||'null');
+        if(Array.isArray(localData) && localData.length > 0){
+          console.warn('[DEPRECATED-25a] Supabase client_accounts leer → jsr_client_accounts_v1 als Fallback. Migration ausführen. (Removal ~2026-08-07)');
+          setClients(localData);
+          setShowClientsFallbackBanner(true);
+          return;
+        }
+      }catch(e){}
+      // leer bleibt leer — keine Dummies für Clients
+    })();
+    const unsub = subscribeClientAccounts(setClients);
     return ()=>{ alive=false; if(unsub) unsub(); };
   }, []);
 
@@ -23287,6 +23398,11 @@ function App(){
           ⚠ Supabase-Sync (25a): Es wird der lokale localStorage-Fallback verwendet. Bitte im Admin → Settings die Migration ausführen.
         </div>
       )}
+      {showClientsFallbackBanner && (
+        <div style={{position:'fixed',top:showSyncFallbackBanner?36:0,left:0,right:0,zIndex:9998,background:'var(--amber-bg)',borderBottom:'1px solid var(--amber)',color:'var(--amber)',padding:'8px 14px',fontSize:12,textAlign:'center',fontWeight:600}}>
+          ⚠ Supabase-Sync (25a): Kunden-Accounts aus localStorage-Fallback. Bitte im Admin die Migration ausführen.
+        </div>
+      )}
       {sidebarOpen&&<div className="sidebar-overlay" onClick={()=>setSidebarOpen(false)}/>}
       <div className={`sidebar${sidebarOpen?" sidebar-open":""}`}>
         <div className="s-logo">
@@ -23396,7 +23512,7 @@ function App(){
           {view==='aiendpoint'&&(<div><AiEndpointView/></div>)}
           {view==='cockpits'&&(<div><CockpitsView/></div>)}
           {view==='hraccess'&&(<div><HrAccessView/></div>)}
-          {view==='appusers'&&(<div><AppUsersView employees={employees}/></div>)}
+          {view==='appusers'&&(<div><AppUsersView employees={employees} clients={clients}/></div>)}
           {view==='cvsync'&&(<div><CvSyncView setCvList={setCvList} projects={projects}/></div>)}
           {view==='spaces'&&(
             <div>
