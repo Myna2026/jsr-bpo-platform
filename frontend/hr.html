@@ -21792,11 +21792,47 @@ async function loadEmployeesFromDB(){
     return data || [];
   }catch(e){ console.error('[25a] loadEmployeesFromDB', e); return []; }
 }
+// 25a/25b: 46 bekannte Schema-Spalten (38 aus 25a + 8 aus 25b).
+// created_at/updated_at sind DB-managed und werden nicht geschrieben.
+// Alles was NICHT in EMP_COLS steht wandert in `extra jsonb` + einmaliger console.warn.
+const EMP_COLS = new Set([
+  'id','first_name','last_name','email','phone','staff_number','role_keys','project_id',
+  'skill','target_role','status','source','cv_skills','hire_date','termination_date',
+  'location','photo_url','about_text','interests','notes','salary_type','hourly_rate',
+  'work_model','work_hours','shift_earliest','shift_latest','vacation_days',
+  'absences','audios','videos','warnings','project_assignments','allowed_shifts',
+  'bank','contract','extra',
+  'abilities','bonuses','referrals','quality_ratings','hardware',
+  'position','city','id_number',
+  'created_at','updated_at'
+]);
+const EMP_DB_MANAGED = new Set(['created_at','updated_at']);
+const EMP_WARNED_FIELDS = new Set();
+
 async function saveEmployeeToDB(emp){
   if(!emp) throw new Error('emp required');
   const uuidRx=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  const payload={...emp};
-  if(!uuidRx.test(String(emp.id||''))) delete payload.id; // Legacy-ID → DB vergibt uuid
+  const payload = {};
+  const extraOverflow = {};
+  for(const k of Object.keys(emp)){
+    if(EMP_DB_MANAGED.has(k)) continue;
+    if(EMP_COLS.has(k)){
+      payload[k] = emp[k];
+    } else {
+      extraOverflow[k] = emp[k];
+      if(!EMP_WARNED_FIELDS.has(k)){
+        console.warn('[25a] Unknown field routed to extra:', k);
+        EMP_WARNED_FIELDS.add(k);
+      }
+    }
+  }
+  // Merge overflow mit bestehendem extra (falls emp.extra ein Objekt ist)
+  if(Object.keys(extraOverflow).length > 0){
+    const existingExtra = (emp.extra && typeof emp.extra === 'object' && !Array.isArray(emp.extra)) ? emp.extra : {};
+    payload.extra = {...existingExtra, ...extraOverflow};
+  }
+  // ID-Handling: Legacy-Non-UUID → DB vergibt neue uuid
+  if(!uuidRx.test(String(emp.id||''))) delete payload.id;
   const {data, error} = await sb.from('employees').upsert(payload).select().single();
   if(error) throw error;
   return data;
