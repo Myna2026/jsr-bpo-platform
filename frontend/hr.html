@@ -21920,10 +21920,23 @@ const CLIENT_DATE_COLS = new Set(['contract_start','contract_end']);
 const CLIENT_LEGACY_DROP = new Set(['created']);
 const CLIENT_WARNED_FIELDS = new Set();
 
+// Frontend nutzt visible_tabs als Dict {key:bool}, Schema als text[].
+function serializeVisibleTabs(v){
+  if(Array.isArray(v)) return v;
+  if(v && typeof v === 'object') return Object.keys(v).filter(k=>!!v[k]);
+  return [];
+}
+function hydrateVisibleTabs(v){
+  if(v && typeof v === 'object' && !Array.isArray(v)) return v;
+  if(Array.isArray(v)){ const o={}; for(const k of v) o[k]=true; return o; }
+  return {};
+}
+
 async function loadClientAccountsFromDB(){
   try{
     const {data, error} = await sb.from('client_accounts').select('*').order('company_name', {ascending:true});
     if(error){ console.error('[25a] loadClientAccountsFromDB', error); return []; }
+    (data||[]).forEach(c => { c.visible_tabs = hydrateVisibleTabs(c.visible_tabs); });
     return data || [];
   }catch(e){ console.error('[25a] loadClientAccountsFromDB', e); return []; }
 }
@@ -21944,6 +21957,8 @@ async function saveClientAccountToDB(client){
       }
     }
   }
+  // visible_tabs: Dict {key:bool} → Array text[] vor Save
+  if('visible_tabs' in payload) payload.visible_tabs = serializeVisibleTabs(payload.visible_tabs);
   const {data, error} = await sb.from('client_accounts').upsert(payload).select().single();
   if(error) throw error;
   return data;
@@ -21957,9 +21972,11 @@ async function deleteClientAccountFromDB(id){
 function subscribeClientAccounts(setter){
   const chan = sb.channel('client_accounts-25a')
     .on('postgres_changes', {event:'INSERT', schema:'public', table:'client_accounts'}, (p)=>{
+      p.new.visible_tabs = hydrateVisibleTabs(p.new.visible_tabs);
       setter(prev => prev.some(c=>c.id===p.new.id) ? prev : [...prev, p.new]);
     })
     .on('postgres_changes', {event:'UPDATE', schema:'public', table:'client_accounts'}, (p)=>{
+      p.new.visible_tabs = hydrateVisibleTabs(p.new.visible_tabs);
       setter(prev => prev.map(c => c.id===p.new.id ? p.new : c));
     })
     .on('postgres_changes', {event:'DELETE', schema:'public', table:'client_accounts'}, (p)=>{
