@@ -1513,8 +1513,8 @@ function calcVacationEntitlement(emp, forMonth){
   // Count used vacation days this year
   let used = 0;
   try{
-    // Absences are stored in emp.absences[] within jsr_emp_v3
-    const empData = emp || JSON.parse(localStorage.getItem('jsr_emp_v3')||'[]').find(e=>e.id===emp.id) || {};
+    // 25a: Absences liegen im emp.absences[]-Array (State kommt aus Supabase)
+    const empData = emp || {};
     const absences = empData.absences || [];
     used = absences.filter(a=>
       a.type==='vacation' &&
@@ -4416,14 +4416,16 @@ function EmployeeList({employees, projects, onEdit, onAdd, onAbsence, onBonus, o
     reader.readAsArrayBuffer(file);
   }
 
-  function confirmEmpImport(){
+  async function confirmEmpImport(){
     if(!importResult) return;
     const existing=(employees||[]).filter(e=>
       !importResult.imported.find(i=>i.staff_number&&i.staff_number===e.staff_number)
     );
     const merged=[...existing,...importResult.imported];
     setEmployees(merged);
-    localStorage.setItem('jsr_emp_v3',JSON.stringify(merged));
+    // 25a: Batch-Upsert nach Supabase (Fehler informiert User, State bleibt)
+    try{ await Promise.all(importResult.imported.map(e => saveEmployeeToDB(e))); }
+    catch(err){ console.error('[25a] confirmEmpImport', err); alert('Fehler bei DB-Sync: '+(err.message||'unbekannt')); }
     setImportResult(null);
     alert(importResult.imported.length+' Mitarbeiter erfolgreich importiert!');
   }
@@ -18975,10 +18977,14 @@ function SystemSettingsTab({projects, setProjects, employees}){
     const file = e.target.files[0];
     if(!file) return;
     const reader = new FileReader();
-    reader.onload = ev => {
+    reader.onload = async ev => {
       try{
         const data = JSON.parse(ev.target.result);
-        if(data.employees) localStorage.setItem('jsr_emp_v3', JSON.stringify(data.employees));
+        // 25a: employees → Supabase (Rest bleibt localStorage bis eigene Sub-Features migrieren)
+        if(Array.isArray(data.employees)){
+          try{ for(const emp of data.employees){ await saveEmployeeToDB(emp); } }
+          catch(err){ console.error('[25a] importBackup employees', err); alert('Fehler beim Employees-Import: '+(err.message||'unbekannt')); }
+        }
         if(data.cvs) localStorage.setItem('jsr_cvs_v1', JSON.stringify(data.cvs));
         if(data.plans) localStorage.setItem('jsr_plans_v3', JSON.stringify(data.plans));
         if(data.payroll) localStorage.setItem('jsr_payroll_v1', JSON.stringify(data.payroll));
@@ -20544,7 +20550,7 @@ function SystemSettingsTab({projects, setProjects, employees}){
             <div className="table-responsive"><table>
               <thead><tr><th>Mitarbeiter</th><th>Standort</th><th>PIN</th><th>Zuletzt geändert</th><th></th></tr></thead>
               <tbody>
-                {(JSON.parse(localStorage.getItem('jsr_emp_v3')||'null')||[])
+                {(employees||[]) /* 25a: aus Supabase-State */
                   .filter(e=>e&&['active','training'].includes(e.status))
                   .map(emp=>{
                     const pin = pins[emp.id];
@@ -21778,6 +21784,61 @@ const PORTAL_URLS   = {client:'client.html', mitarbeiter:'mitarbeiter.html', hr:
 const ROLE_LABELS   = {management:'Management', hr:'HR', teamlead:'Teamlead', qm:'QM', trainer:'Trainer', asp:'ASP', projektleiter:'Projektleiter', finance:'Finance', mitarbeiter:'Mitarbeiter', kunde:'Kunde'};
 const sb = window.supabase.createClient(SB_URL, SB_KEY);
 
+// ─── 25a: Employees CRUD on Supabase (Realtime + Deprecation) ────────
+async function loadEmployeesFromDB(){
+  try{
+    const {data, error} = await sb.from('employees').select('*').order('created_at', {ascending:true});
+    if(error){ console.error('[25a] loadEmployeesFromDB', error); return []; }
+    return data || [];
+  }catch(e){ console.error('[25a] loadEmployeesFromDB', e); return []; }
+}
+async function saveEmployeeToDB(emp){
+  if(!emp) throw new Error('emp required');
+  const uuidRx=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const payload={...emp};
+  if(!uuidRx.test(String(emp.id||''))) delete payload.id; // Legacy-ID → DB vergibt uuid
+  const {data, error} = await sb.from('employees').upsert(payload).select().single();
+  if(error) throw error;
+  return data;
+}
+async function deleteEmployeeFromDB(id){
+  if(!id) throw new Error('id required');
+  const {error} = await sb.from('employees').delete().eq('id', id);
+  if(error) throw error;
+  return true;
+}
+function subscribeEmployees(setter){
+  const chan = sb.channel('employees-25a')
+    .on('postgres_changes', {event:'INSERT', schema:'public', table:'employees'}, (p)=>{
+      setter(prev => prev.some(e=>e.id===p.new.id) ? prev : [...prev, p.new]);
+    })
+    .on('postgres_changes', {event:'UPDATE', schema:'public', table:'employees'}, (p)=>{
+      setter(prev => prev.map(e => e.id===p.new.id ? p.new : e));
+    })
+    .on('postgres_changes', {event:'DELETE', schema:'public', table:'employees'}, (p)=>{
+      setter(prev => prev.filter(e => e.id !== p.old.id));
+    })
+    .subscribe();
+  return ()=>{ try{ sb.removeChannel(chan); }catch(e){} };
+}
+async function matchEmployeeToUserSb(email, staffNumber){
+  try{
+    const em=(email||'').toString().trim().toLowerCase();
+    const sn=(staffNumber==null?'':String(staffNumber)).trim();
+    const links=loadEmpUserLinks();
+    for(const lEmp in links){ if((links[lEmp]||'').toString().trim().toLowerCase()===em) return lEmp; }
+    if(em){
+      const {data} = await sb.from('employees').select('id').ilike('email', em).limit(1).maybeSingle();
+      if(data) return data.id;
+    }
+    if(sn){
+      const {data} = await sb.from('employees').select('id').eq('staff_number', sn).limit(1).maybeSingle();
+      if(data) return data.id;
+    }
+  }catch(e){ console.warn('[25a] matchEmployeeToUserSb', e); }
+  return null;
+}
+
 function LoginScreen({authMsg, portalDenied, myPortals}){
   const [email, setEmail] = useState('');
   const [pw, setPw]       = useState('');
@@ -22412,8 +22473,12 @@ function AppUsersView({employees}){
   function empFor(u){
     const links=loadEmpUserLinks();
     for(const eid in links){ if((links[eid]||'').toLowerCase()===(u.email||'').toLowerCase()){ return (employees||[]).find(e=>e.id===eid)||null; } }
-    const id=matchEmployeeToUser(u.email, u.staff_number);
-    return id?(employees||[]).find(e=>e.id===id)||null:null;
+    // 25a: Direktsuche im employees-State (Supabase-backed) statt Sync-Helper
+    const em=(u.email||'').toString().trim().toLowerCase();
+    const sn=(u.staff_number||'').toString().trim();
+    if(em){ const byMail=(employees||[]).find(e=>(e.email||'').toString().trim().toLowerCase()===em); if(byMail) return byMail; }
+    if(sn){ const byNum=(employees||[]).find(e=>String(e.staff_number||'').trim()===sn); if(byNum) return byNum; }
+    return null;
   }
   return (
     <div>
@@ -22754,7 +22819,7 @@ function App(){
         access: 'all',                 // MVP: alle Tabs; feingranulare Matrix = spaeterer Schritt
         role_keys: au.role_keys,
         portals: portals,
-        employee_id: matchEmployeeToUser(session.user.email, au.staff_number),  // Feature 14: Auto-Match Email/staff_number
+        employee_id: await matchEmployeeToUserSb(session.user.email, au.staff_number),  // 25a: Auto-Match über Supabase
         email: session.user.email
       });
       try{ const _cvcfg=loadCvSyncConfig(); if(_cvcfg.enabled&&_cvcfg.auto_sync_on_login){ syncCvsFromSheet().then(r=>{ if(r&&r.imported){ try{ setCvList(JSON.parse(localStorage.getItem('jsr_cvs_v1')||'[]')); }catch(_e){} } }).catch(()=>{}); } }catch(_e){}
@@ -22834,9 +22899,9 @@ function App(){
     if(!localStorage.getItem('jsr_shift_cfg')){localStorage.setItem('jsr_shift_cfg',JSON.stringify({"proj_hc_sales":[{"id":"s1","label":"Frueh","value":"08:00-16:30","hours":8.0,"net":7.5,"split":false},{"id":"s2","label":"Frueh lang","value":"09:00-17:30","hours":8.5,"net":8.0,"split":false},{"id":"s3","label":"Spaet frueh","value":"11:30-20:00","hours":8.5,"net":8.0,"split":false},{"id":"s4","label":"Spaet","value":"13:30-22:00","hours":8.5,"net":8.0,"split":false},{"id":"s5","label":"Frueh kurz","value":"08:00-15:30","hours":7.5,"net":7.0,"split":false},{"id":"s6","label":"Split 08-12+16-20","value":"08:00-12:00","value2":"16:00-20:00","hours":8.0,"net":7.5,"split":true},{"id":"s7","label":"Split 08-12+18-22","value":"08:00-12:00","value2":"18:00-22:00","hours":8.0,"net":7.5,"split":true}],"proj_hc_support":[{"id":"s1","label":"Frueh lang","value":"08:00-17:30","hours":9.5,"net":9.0,"split":false},{"id":"s2","label":"Spaet frueh","value":"11:30-20:00","hours":8.5,"net":8.0,"split":false},{"id":"s3","label":"Split 08-12+16-20","value":"08:00-12:00","value2":"16:00-20:00","hours":8.0,"net":7.5,"split":true}],"proj_giga_all":[{"id":"s1","label":"Standard","value":"09:00-17:30","hours":8.5,"net":8.0,"split":false},{"id":"s2","label":"Spaet","value":"10:30-19:00","hours":8.5,"net":8.0,"split":false},{"id":"s3","label":"Split 09-13+17-21","value":"09:00-13:00","value2":"17:00-21:00","hours":8.0,"net":7.5,"split":true}]}));}
   },[]);
 
-  const [employees, setEmployees] = useState(()=>{
-    try{const s=JSON.parse(localStorage.getItem('jsr_emp_v3')||'null');if(!s||!s.length) return DUMMY_EMPLOYEES;const ids=new Set(s.map(e=>e.id));const merged=[...s,...DUMMY_EMPLOYEES.filter(e=>!ids.has(e.id))];localStorage.setItem('jsr_emp_v3',JSON.stringify(merged));return merged;}catch(e){return DUMMY_EMPLOYEES;}
-  });
+  // 25a: Employees kommen aus Supabase (Load + Realtime via useEffect unten)
+  const [employees, setEmployees] = useState([]);
+  const [showSyncFallbackBanner, setShowSyncFallbackBanner] = useState(false);
   const [testQuestions, setTestQuestions] = useState(()=>{
     try{return JSON.parse(localStorage.getItem('jsr_test_q_v1')||'null')||LANGUAGE_TEST_QUESTIONS;}
     catch(e){return LANGUAGE_TEST_QUESTIONS;}
@@ -22880,7 +22945,7 @@ function App(){
   const [qualityModal, setQualityModal] = useState(null);
   const [commModal, setCommModal] = useState(null);
 
-  useEffect(()=>{localStorage.setItem('jsr_emp_v3',JSON.stringify(employees));},[employees]);
+  // 25a: employees persistieren nicht mehr nach jsr_emp_v3 (Supabase ist SoT)
   useEffect(()=>{localStorage.setItem('jsr_test_q_v1',JSON.stringify(testQuestions));},[testQuestions]);
   useEffect(()=>{localStorage.setItem('jsr_kb_v1',JSON.stringify(kbData));},[kbData]);
   useEffect(()=>{localStorage.setItem('jsr_el_v1',JSON.stringify(elData));},[elData]);
@@ -22888,6 +22953,30 @@ function App(){
   useEffect(()=>{localStorage.setItem('jsr_plans_v3',JSON.stringify(plans));},[plans]);
   useEffect(()=>{localStorage.setItem('jsr_org_v1',JSON.stringify(orgCharts));},[orgCharts]);
   useEffect(()=>{localStorage.setItem('jsr_forecast_v1',JSON.stringify(forecast));},[forecast]);
+
+  // 25a: Employees aus Supabase laden + Realtime-Subscription
+  //      Fallback: falls DB leer aber localStorage befüllt → Legacy-Anzeige + Banner
+  //      TODO: Fallback + jsr_emp_v3-Reads nach Migration (Removal ~2026-08-07) entfernen
+  useEffect(()=>{
+    let alive=true;
+    (async()=>{
+      const dbEmps = await loadEmployeesFromDB();
+      if(!alive) return;
+      if(dbEmps.length > 0){ setEmployees(dbEmps); return; }
+      try{
+        const localData = JSON.parse(localStorage.getItem('jsr_emp_v3')||'null');
+        if(Array.isArray(localData) && localData.length > 0){
+          console.warn('[DEPRECATED-25a] Supabase employees leer → jsr_emp_v3 als Fallback. Migration ausführen. (Removal ~2026-08-07)');
+          setEmployees(localData);
+          setShowSyncFallbackBanner(true);
+          return;
+        }
+      }catch(e){}
+      setEmployees(DUMMY_EMPLOYEES);
+    })();
+    const unsub = subscribeEmployees(setEmployees);
+    return ()=>{ alive=false; if(unsub) unsub(); };
+  }, []);
 
   if(loggedIn && !team){
     return(
@@ -22900,15 +22989,34 @@ function App(){
 
   const hasAccess = (key) => { try{ const always=['locations','spaces','payroll','showcase','timetracking','superadmin','tabperms','aisettings','cockpits','hraccess','appusers','aiendpoint','cvsync']; if(always.includes(key)) return true; return !team||(team.access==='all'||team.access.includes(key));}catch(e){return true;} };
 
-  function saveEmployee(form){
-    if(form.id){setEmployees(es=>es.map(e=>e.id===form.id?form:e));showToast('✓ Mitarbeiter gespeichert');}
-    else{
+  async function saveEmployee(form){
+    let saved = form;
+    if(!form.id){
+      // Neu — Client-side UUID + staff_number + Defaults
       const allNums=employees.map(e=>parseInt(e.staff_number||0)).filter(n=>n>0);
       const nextNum=allNums.length>0?Math.max(...allNums)+1:1001;
       const vDef=JSON.parse(localStorage.getItem('jsr_vacation_defaults_v1')||'{"tirana":20,"prishtina":20,"training":15}');
       const vQuota=(form.location||'').toLowerCase().includes('prishtina')?vDef.prishtina:vDef.tirana;
-      setEmployees(es=>[...es,{...form,id:'e'+Date.now(),staff_number:form.staff_number||String(nextNum),absences:[],productive_pct:85,vacation_days_quota:vQuota||20,bonuses:[],referrals:[],quality_ratings:[]}]);
+      saved = {
+        ...form,
+        id: (typeof crypto!=='undefined'&&crypto.randomUUID) ? crypto.randomUUID() : 'e'+Date.now(),
+        staff_number: form.staff_number||String(nextNum),
+        absences: form.absences||[],
+        productive_pct: form.productive_pct||85,
+        vacation_days_quota: form.vacation_days_quota||vQuota||20,
+        bonuses: form.bonuses||[],
+        referrals: form.referrals||[],
+        quality_ratings: form.quality_ratings||[]
+      };
     }
+    // Optimistic UI-Update (Realtime bestätigt anschließend)
+    setEmployees(es => {
+      const i = es.findIndex(e=>e.id===saved.id);
+      return i>=0 ? es.map((e,k)=>k===i?saved:e) : [...es, saved];
+    });
+    // 25a: Persist nach Supabase; bei Fehler State bleibt, Toast informiert
+    try{ await saveEmployeeToDB(saved); showToast('✓ Mitarbeiter gespeichert'); }
+    catch(e){ console.error('[25a] saveEmployee', e); showToast('⚠ Fehler beim Speichern: '+(e.message||'DB'), 'error'); }
     setModal(null);
   }
   function saveAbsences(emp, keepOpen=false){
@@ -23129,6 +23237,11 @@ function App(){
 
   return(
     <div className="layout">
+      {showSyncFallbackBanner && (
+        <div style={{position:'fixed',top:0,left:0,right:0,zIndex:9999,background:'var(--amber-bg)',borderBottom:'1px solid var(--amber)',color:'var(--amber)',padding:'8px 14px',fontSize:12,textAlign:'center',fontWeight:600}}>
+          ⚠ Supabase-Sync (25a): Es wird der lokale localStorage-Fallback verwendet. Bitte im Admin → Settings die Migration ausführen.
+        </div>
+      )}
       {sidebarOpen&&<div className="sidebar-overlay" onClick={()=>setSidebarOpen(false)}/>}
       <div className={`sidebar${sidebarOpen?" sidebar-open":""}`}>
         <div className="s-logo">
