@@ -192,7 +192,7 @@ function migrateProjectData(){
     if(localStorage.getItem('jsr_schema_v')==='2') return;
     var M=_migMapProjectId();
     // 1) Feld-Migration (project_id / target_project / id)
-    ['jsr_emp_v3','jsr_employees_v1','jsr_cvs_v1','jsr_plans_v3','jsr_forecast_v1','jsr_projects_v1','jsr_kpi_cfg_v1'].forEach(function(key){
+    ['jsr_employees_v1','jsr_cvs_v1','jsr_plans_v3','jsr_forecast_v1','jsr_projects_v1','jsr_kpi_cfg_v1'].forEach(function(key){
       var raw=localStorage.getItem(key); if(!raw) return;
       try{ var d=JSON.parse(raw); _migField(d,M); localStorage.setItem(key,JSON.stringify(d)); }catch(e){}
     });
@@ -268,49 +268,9 @@ const roleBadge = rs => (
 );
 
 // ── Client Data ───────────────────────────────────────────
-const CLIENTS = (()=>{
-  // Load from HR system's client accounts (set in SuperAdmin)
-  try{
-    const stored = JSON.parse(localStorage.getItem('jsr_client_accounts_v1')||'[]');
-    if(stored.length > 0){
-      const obj = {};
-      stored.filter(c=>c.active).forEach(c=>{
-        const key = c.id;
-        obj[key] = {
-          id: c.id,
-          name: c.company_name,
-          password: c.login_password||'',
-          login_email: c.login_email||'',
-          project: c.project_name||c.company_name,
-          project_id: c.project_id||'',
-          contract: [
-            c.billing_model==='per_agent'?'Abrechnung pro Agent':c.billing_model==='monthly_flat'?'Monatspauschale':'Stundensatz',
-            c.billing_rate?c.billing_rate+' '+c.billing_currency:null,
-            c.contract_start?'ab '+c.contract_start:null,
-            c.payment_terms?'Zahlungsziel '+c.payment_terms+' Tage':null,
-          ].filter(Boolean).join(' · '),
-          contact: c.contact_name||'',
-          logo: '🏢',
-          logo_url: c.logo_url||'',
-          color: '#1d4ed8',
-          visible_tabs: c.visible_tabs||{overview:true,calendar:true},
-          must_change_pw: c.must_change_pw,
-        };
-      });
-      if(Object.keys(obj).length > 0) return obj;
-    }
-  }catch(e){}
-  // Fallback demo clients
-  return {
-    holidaycheck:{id:'holidaycheck',name:'Holidaycheck AG',password:'Holidaycheck',login_email:'kunde@tive360.de',project:'Holidaycheck',project_id:'proj_hc_a1b2c3d4',contract:'Premium SLA · Stundensatz 24€/h',logo:'🌍',color:'#f97316',visible_tabs:{overview:true,employees:true,quality:true,training:true,calendar:true,showcases:true}},
-    giganetz:{id:'giganetz',name:'Giganetz GmbH',password:'Giganetz2024',login_email:'',project:'Giganetz',project_id:'proj_gn_e5f6a7b8',contract:'Standard SLA · Stundensatz 22€/h',logo:'📡',color:'#2563eb',visible_tabs:{overview:true,calendar:true}},
-  };
-})();
-
-// ── Supabase-User → Client-Objekt bauen ──────────────────
-// Match per E-Mail, sonst Firmenname. Kein Match:
-//  - Admin (management/hr) → Fallback auf ersten Client (Demo/Vorschau)
-//  - reine kunde-Rolle      → null  (gate zeigt "noch keinem Kunden zugeordnet")
+// ── Supabase-User → Client-Objekt bauen (25a/25c/25e) ────
+// Kunde wird per app_users.client_id direkt aus client_accounts geladen.
+// Kein localStorage-Bridge mehr, kein CLIENTS-Map — buildClient() ist async.
 function loadKnownAppUsers(){ try{ var v=JSON.parse(localStorage.getItem('jsr_known_app_users_v1')||'[]'); return Array.isArray(v)?v:[]; }catch(e){ return []; } }
 function recordKnownAppUser(u){ try{ if(!u||!u.email)return; var list=loadKnownAppUsers(); var em=u.email.toLowerCase(); var i=list.findIndex(function(x){return (x.email||'').toLowerCase()===em;}); var rec={email:u.email,name:u.name||'',roles:u.roles||[],staff_number:u.staff_number||'',client_id:u.client_id||'',last_seen:new Date().toISOString()}; if(i>=0)list[i]=rec; else list.push(rec); localStorage.setItem('jsr_known_app_users_v1',JSON.stringify(list)); }catch(e){} }
 // Feature 17: strenger client_id-Login (Email/Name/Admin-Fallback entfernt)
@@ -320,19 +280,90 @@ async function getSignedLogoUrl(v){
   if(/^https?:\/\//.test(v)) return v;
   try{ const {data,error}=await sb.storage.from('client-logos').createSignedUrl(v, 3600); if(error) return null; return (data&&data.signedUrl)||null; }catch(e){ return null; }
 }
-function buildClient(au, authUser){
-  const c = Object.values(CLIENTS).find(x => x.id === au.client_id);
-  return c ? {...c, name: c.name||authUser.email, email: authUser.email, role_keys: au.role_keys} : null;
+// ─── 25a/25c/25e: Portal-Client + Employees direkt aus Supabase ────
+// Frontend nutzt visible_tabs als Dict {key:bool}, Schema als text[].
+function hydrateVisibleTabs(v){
+  if(v && typeof v === 'object' && !Array.isArray(v)) return v;
+  if(Array.isArray(v)){ const o={}; for(const k of v) o[k]=true; return o; }
+  return {};
 }
-function _oldBuildClient(au, authUser){
-  const list = Object.values(CLIENTS);
-  const email = (authUser.email||'').toLowerCase();
-  let match = list.find(c => c.login_email && c.login_email.toLowerCase()===email);
-  if(!match && au.full_name) match = list.find(c => c.name && c.name.toLowerCase()===au.full_name.toLowerCase());
-  if(match) return {...match, name: match.name||au.full_name||authUser.email, email: authUser.email, role_keys: au.role_keys};
-  const isAdmin = (au.role_keys||[]).some(k => k==='management' || k==='hr');
-  if(isAdmin && list.length) return {...list[0], email: authUser.email, role_keys: au.role_keys};
-  return null;
+
+async function loadClientAccountFromDB(clientId){
+  if(!clientId) return null;
+  try{
+    const {data, error} = await sb.from('client_accounts').select('*').eq('id', clientId).maybeSingle();
+    if(error){ console.error('[25a] loadClientAccountFromDB', error); return null; }
+    if(!data) return null;
+    data.visible_tabs = hydrateVisibleTabs(data.visible_tabs);
+    if(Object.keys(data.visible_tabs).length === 0){
+      // Default analog hr.html newClientTemplate — verhindert leere Portale
+      data.visible_tabs = {overview:true, employees:true, quality:true, training:true, calendar:true};
+    }
+    return data;
+  }catch(e){ console.error('[25a] loadClientAccountFromDB', e); return null; }
+}
+
+// Column-Scope: nur Portal-relevante Felder. Row-Level-RLS (25e) filtert bereits
+// active/training + eigenes Projekt; Column-Scope verhindert Leak sensibler Felder.
+async function loadEmployeesForClient(projectId){
+  if(!projectId) return [];
+  try{
+    const {data, error} = await sb.from('employees')
+      .select('id, first_name, last_name, position, skill, photo_url, audios, videos, project_id, status')
+      .eq('project_id', projectId)
+      .in('status', ['active','training']);
+    if(error){ console.error('[25a] loadEmployeesForClient', error); return []; }
+    return data || [];
+  }catch(e){ console.error('[25a] loadEmployeesForClient', e); return []; }
+}
+
+function subscribeEmployeesForClient(projectId, setter){
+  if(!projectId) return ()=>{};
+  const chan = sb.channel('employees-client-25a-'+projectId)
+    .on('postgres_changes', {event:'INSERT', schema:'public', table:'employees', filter:'project_id=eq.'+projectId}, (p)=>{
+      if(!['active','training'].includes(p.new.status)) return;
+      setter(prev => prev.some(e=>e.id===p.new.id) ? prev : [...prev, p.new]);
+    })
+    .on('postgres_changes', {event:'UPDATE', schema:'public', table:'employees', filter:'project_id=eq.'+projectId}, (p)=>{
+      if(!['active','training'].includes(p.new.status)){
+        setter(prev => prev.filter(e=>e.id!==p.new.id));
+      } else {
+        setter(prev => prev.some(e=>e.id===p.new.id) ? prev.map(e=>e.id===p.new.id?p.new:e) : [...prev, p.new]);
+      }
+    })
+    .on('postgres_changes', {event:'DELETE', schema:'public', table:'employees', filter:'project_id=eq.'+projectId}, (p)=>{
+      setter(prev => prev.filter(e=>e.id!==p.old.id));
+    })
+    .subscribe();
+  return ()=>{ try{ sb.removeChannel(chan); }catch(e){} };
+}
+
+async function buildClient(au, authUser){
+  const raw = await loadClientAccountFromDB(au.client_id);
+  if(!raw) return null;
+  return {
+    id: raw.id,
+    name: raw.company_name || authUser.email,
+    login_email: raw.login_email || '',
+    project: raw.project_name || raw.company_name,
+    project_id: raw.project_id || '',
+    contract: [
+      raw.billing_model==='per_agent' ? 'Abrechnung pro Agent'
+        : raw.billing_model==='monthly_flat' ? 'Monatspauschale'
+        : 'Stundensatz',
+      raw.billing_rate ? raw.billing_rate+' '+(raw.billing_currency||'EUR') : null,
+      raw.contract_start ? 'ab '+raw.contract_start : null,
+      raw.payment_terms ? 'Zahlungsziel '+raw.payment_terms+' Tage' : null,
+    ].filter(Boolean).join(' · '),
+    contact: raw.contact_name || '',
+    logo: '🏢',
+    logo_url: raw.logo_url || '',
+    color: '#1d4ed8',
+    visible_tabs: raw.visible_tabs,
+    must_change_pw: raw.must_change_pw,
+    email: authUser.email,
+    role_keys: au.role_keys,
+  };
 }
 
 // ── Staff Data (public-safe, no costs) ───────────────────
@@ -622,15 +653,10 @@ function Overview({client, onOpenTeam}){
 }
 
 // ── Media Indicator (small badge on card) ────────────────
-function MediaIndicator({staffId}){
-  const audioCount = (() => {
-    try{const emps=JSON.parse(localStorage.getItem('jsr_emp_v3')||'[]');const emp=emps.find(e=>e.id===staffId);return (emp?.audios||[]).length;}
-    catch{return 0;}
-  })();
-  const videoCount = (() => {
-    try{const emps=JSON.parse(localStorage.getItem('jsr_emp_v3')||'[]');const emp=emps.find(e=>e.id===staffId);return (emp?.videos||[]).length;}
-    catch{return 0;}
-  })();
+function MediaIndicator({staffId, employees}){
+  const emp = (employees||[]).find(e=>e.id===staffId);
+  const audioCount = (emp?.audios||[]).length;
+  const videoCount = (emp?.videos||[]).length;
   if(audioCount===0&&videoCount===0) return null;
   return(
     <div style={{display:'flex',gap:5,marginTop:4}}>
@@ -641,14 +667,9 @@ function MediaIndicator({staffId}){
 }
 
 // ── Media Player (read-only, data from HR app) ───────────
-function MediaSection({staffId}){
-  // Read employee data from HR app localStorage (shared same browser/domain)
-  const emp = React.useMemo(()=>{
-    try{
-      const employees = JSON.parse(localStorage.getItem('jsr_emp_v3')||'[]');
-      return employees.find(e=>e.id===staffId)||null;
-    }catch{return null;}
-  },[staffId]);
+function MediaSection({staffId, employees}){
+  // 25a: employees kommt aus App-State (Supabase + Realtime)
+  const emp = React.useMemo(()=> (employees||[]).find(e=>e.id===staffId)||null, [staffId, employees]);
 
   const audios = emp?.audios||[];
   const videos = emp?.videos||[];
@@ -690,12 +711,9 @@ function MediaSection({staffId}){
 }
 
 // ── Staff Cards ───────────────────────────────────────────
-function StaffView({client}){
-  // Merge static STAFF data with live HR employee profile data
-  const hrEmployees = React.useMemo(()=>{
-    try{return JSON.parse(localStorage.getItem('jsr_emp_v3')||'[]');}
-    catch{return [];}
-  },[]);
+function StaffView({client, employees}){
+  // 25a: employees kommt aus App-State (Supabase + Realtime, project_id-scoped)
+  const hrEmployees = employees||[];
 
   const staff = STAFF.filter(s=>s&&s.project_id===client.project_id).map(s=>{
     const hrEmp = hrEmployees.find(e=>e.id===s.id);
@@ -781,7 +799,7 @@ function StaffView({client}){
               )}
 
               {/* Audio & Video Samples */}
-              <MediaSection staffId={selected.id}/>
+              <MediaSection staffId={selected.id} employees={employees}/>
               <div style={{marginTop:16}}>
                 <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',marginBottom:10}}>🌍 Sprachen</div>
                 <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:12}}>
@@ -917,7 +935,7 @@ function StaffView({client}){
                   🎓 {s.education.split('(')[0].trim()}
                 </div>
               )}
-              <MediaIndicator staffId={s.id}/>
+              <MediaIndicator staffId={s.id} employees={employees}/>
             </div>
           </div>
         ))}
@@ -1567,6 +1585,7 @@ function App(){
   const [portalDenied, setPortalDenied]=useState(false);
   const [clientDenied, setClientDenied]=useState(null);
   const [myPortals, setMyPortals]=useState([]);
+  const [employees, setEmployees]=useState([]);
   const gatingRef=useRef(false);
 
   // Nach erfolgreichem Auth: Rolle + Portalzugriff (client) pruefen, dann einloggen
@@ -1586,9 +1605,8 @@ function App(){
       if(!portals.includes('client')){ gatingRef.current=false; setAuthMsg(null); setPortalDenied(true); return; }
       recordKnownAppUser({email:session.user.email, name:au.full_name, roles:au.role_keys, staff_number:au.staff_number, client_id:au.client_id});
       if(!au.client_id){ gatingRef.current=false; setClientDenied(session.user.email); return; }
-      const c=buildClient(au, session.user);
+      const c=await buildClient(au, session.user);
       if(!c){ gatingRef.current=false; setPortalDenied(false); setAuthMsg('Kunde nicht gefunden (client_id="'+au.client_id+'"). Wende dich an deinen Ansprechpartner.'); return; }
-      localStorage.setItem('jsr_client_session', JSON.stringify({client:c, ts:Date.now()}));
       setClient(c); setView('overview');
     }catch(e){ gatingRef.current=false; setPortalDenied(false); setAuthMsg('Verbindungsfehler beim Laden des Profils.'); }
   }
@@ -1602,6 +1620,18 @@ function App(){
   }, []);
 
   useEffect(()=>{ let alive=true; if(client && client.logo_url){ getSignedLogoUrl(client.logo_url).then(u=>{ if(alive) setClientLogoUrl(u); }); } else { setClientLogoUrl(null); } return ()=>{ alive=false; }; }, [client]);
+
+  // 25a/25e: Employees des eigenen Projekts + Realtime
+  useEffect(()=>{
+    if(!client || !client.project_id){ setEmployees([]); return; }
+    let alive=true;
+    (async()=>{
+      const emps = await loadEmployeesForClient(client.project_id);
+      if(alive) setEmployees(emps);
+    })();
+    const unsub = subscribeEmployeesForClient(client.project_id, setEmployees);
+    return ()=>{ alive=false; if(unsub) unsub(); };
+  }, [client]);
 
   if(clientDenied) return <ClientAccessDenied email={clientDenied}/>;
   if(!client) return <LoginPage authMsg={authMsg} portalDenied={portalDenied} myPortals={myPortals}/>;
@@ -1660,13 +1690,13 @@ function App(){
         </div>
         <div className="s-logout">
           <div style={{display:'flex',gap:4}}>
-            <div onClick={async()=>{try{await sb.auth.signOut();}catch(e){}localStorage.removeItem('jsr_client_session');window.location.href='client.html';}}
+            <div onClick={async()=>{try{await sb.auth.signOut();}catch(e){}window.location.href='client.html';}}
               style={{flex:1,display:'flex',alignItems:'center',gap:7,padding:'7px 10px',borderRadius:'var(--r-md)',cursor:'pointer',color:'var(--muted)',fontSize:12,fontFamily:'var(--font)',transition:'all .12s'}}
               onMouseEnter={e=>{e.currentTarget.style.background='#F5F6F8';e.currentTarget.style.color='#1F2937'}}
               onMouseLeave={e=>{e.currentTarget.style.background='transparent';e.currentTarget.style.color='var(--muted)'}}>
               <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M11.47 3.841a.75.75 0 0 1 1.06 0l8.69 8.69a.75.75 0 1 0 1.06-1.061l-8.689-8.69a2.25 2.25 0 0 0-3.182 0l-8.69 8.69a.75.75 0 1 0 1.061 1.06l8.69-8.689Z"/> <path d="m12 5.432 8.159 8.159c.03.03.06.058.091.086v6.198c0 1.035-.84 1.875-1.875 1.875H15a.75.75 0 0 1-.75-.75v-4.5a.75.75 0 0 0-.75-.75h-3a.75.75 0 0 0-.75.75V21a.75.75 0 0 1-.75.75H5.625a1.875 1.875 0 0 1-1.875-1.875v-6.198a2.29 2.29 0 0 0 .091-.086L12 5.432Z"/></svg> <span style={{marginLeft:2}}>Startseite</span>
             </div>
-            <div onClick={async()=>{try{await sb.auth.signOut();}catch(e){}localStorage.removeItem('jsr_client_session');window.location.reload();}}
+            <div onClick={async()=>{try{await sb.auth.signOut();}catch(e){}window.location.reload();}}
               style={{display:'flex',alignItems:'center',justifyContent:'center',width:32,borderRadius:'var(--r-md)',cursor:'pointer',color:'var(--muted)',fontSize:16,transition:'all .12s'}}
               title="Abmelden"
               onMouseEnter={e=>{e.currentTarget.style.background='rgba(239,68,68,.12)';e.currentTarget.style.color='var(--red)'}}
@@ -1694,7 +1724,7 @@ function App(){
         </div>
         <div className="content">
           {view==='overview'&&<Overview client={client} onOpenTeam={()=>setView('staff')}/>}
-          {view==='staff'&&<StaffView client={client}/>}
+          {view==='staff'&&<StaffView client={client} employees={employees}/>}
           {view==='invoices'&&<InvoicesView client={client}/>}
           {view==='messages'&&<MessagesView client={client}/>}
           {view==='calendar'&&<CalendarView client={client}/>}
