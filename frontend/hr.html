@@ -19053,8 +19053,9 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
     {key:'holidays',    label:'🎉 Feiertage'},
     {key:'referral',    label:'👥 Referral Logik'},
     {key:'pins',        label:'🔢 Stempeluhr PINs'},
-    {key:'backup',      label:'💾 Datensicherung'},
-    {key:'spinwheel',   label:'🎡 Glücksrad Gewinne'},
+    {key:'backup',       label:'💾 Datensicherung'},
+    {key:'migration25a', label:'⚡ Migration 25a → Supabase'},
+    {key:'spinwheel',    label:'🎡 Glücksrad Gewinne'},
   ];
 
   // ── Settings state (top-level — Rules of Hooks) ──────────────────────
@@ -19134,6 +19135,8 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
   const DAY_NAMES_W=['So','Mo','Di','Mi','Do','Fr','Sa'];
   const WHEEL_COLORS=['#22c55e','#3b82f6','#f59e0b','#ef4444','#8b5cf6','#ec4899','#14b8a6','#f97316','#64748b'];
 
+  // 25a Sub-Commit 5: Migration-UI-State (Live-Counter in Button-Label)
+  const [migrationProgress, setMigrationProgress] = useState(null);
 
   return(
     <div className='admin-grid' style={{display:'grid',gridTemplateColumns:'min(220px,30vw) 1fr',gap:12,alignItems:'start'}}>
@@ -20933,6 +20936,46 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
           </div>
         )}
 
+        {/* ── MIGRATION 25a → SUPABASE ── */}
+        {activeSection==='migration25a'&&(
+          <div><div className="card">
+            <div className="card-header"><span className="card-title">⚡ Datenmigration 25a → Supabase</span></div>
+            <div style={{padding:'14px 16px',fontSize:13,color:'var(--text)',lineHeight:1.5}}>
+              <div style={{marginBottom:12}}>
+                Verschiebt Legacy-Daten aus dem lokalen Browser-Speicher (localStorage) in die Supabase-Datenbank.
+                Betrifft <b>Mitarbeiter</b> (<code>jsr_emp_v3</code>) und <b>Kunden-Accounts</b> (<code>jsr_client_accounts_v1</code>).
+                Reihenfolge: erst Mitarbeiter, dann Kunden. Upsert per <code>id</code> — bestehende DB-Zeilen werden dabei überschrieben.
+              </div>
+              <div style={{marginBottom:12,padding:'8px 12px',background:'var(--blue-bg)',borderRadius:6,fontSize:12,color:'var(--blue)'}}>
+                localStorage bleibt nach der Migration <b>unverändert</b> (als Fallback erhalten). Manuelles Aufräumen später möglich.
+              </div>
+              <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:8}}>
+                <button className="btn"
+                  disabled={migrationProgress !== null}
+                  onClick={async ()=>{
+                    try{ await migrateToSupabase25a({dryRun:true, onProgress:setMigrationProgress}); }
+                    finally { setMigrationProgress(null); }
+                  }}>
+                  Vorschau (Dry-Run)
+                </button>
+                <button className="btn btn-primary"
+                  disabled={migrationProgress !== null}
+                  onClick={async ()=>{
+                    try{ await migrateToSupabase25a({dryRun:false, onProgress:setMigrationProgress}); }
+                    finally { setMigrationProgress(null); }
+                  }}>
+                  {migrationProgress
+                    ? `Migriere ${migrationProgress.phase==='employees'?'MA':'Kunde'} ${migrationProgress.step}/${migrationProgress.total}…`
+                    : 'Migration ausführen'}
+                </button>
+              </div>
+              <div style={{fontSize:11,color:'var(--muted)',marginTop:8}}>
+                Ergebnis + Fehler werden in einem Alert angezeigt · Detail-Log in Browser-Konsole (F12).
+              </div>
+            </div>
+          </div></div>
+        )}
+
         {/* ── FEIERTAGE ── */}
         {activeSection==='holidays'&&(
           <div>
@@ -21984,6 +22027,103 @@ function subscribeClientAccounts(setter){
     })
     .subscribe();
   return ()=>{ try{ sb.removeChannel(chan); }catch(e){} };
+}
+
+// ─── 25a Sub-Commit 5: One-time-Migration jsr_* → Supabase ───────────
+async function migrateToSupabase25a({dryRun = false, onProgress = null} = {}){
+  const errors = [];
+  const report = (phase, step, total) => { if(onProgress) onProgress(phase ? {phase, step, total} : null); };
+
+  // 1) Local read
+  let empLocal = [], clientLocal = [];
+  try{ empLocal = JSON.parse(localStorage.getItem('jsr_emp_v3')||'[]') || []; }catch(e){}
+  try{ clientLocal = JSON.parse(localStorage.getItem('jsr_client_accounts_v1')||'[]') || []; }catch(e){}
+  if(!Array.isArray(empLocal)) empLocal = [];
+  if(!Array.isArray(clientLocal)) clientLocal = [];
+
+  // 2) DB counts
+  const dbEmps = await loadEmployeesFromDB();
+  const dbClients = await loadClientAccountsFromDB();
+
+  const summary = {
+    empLocal: empLocal.length, empDb: dbEmps.length,
+    clientLocal: clientLocal.length, clientDb: dbClients.length,
+    empOk: 0, empErr: 0,
+    clientOk: 0, clientErr: 0,
+    dryRun
+  };
+
+  // 3) Dry-Run → nur Vorschau
+  if(dryRun){
+    console.log('[25a-migration] Dry-Run summary', summary);
+    alert(
+      'Dry-Run — kein Schreibvorgang.\n\n' +
+      'Local jsr_emp_v3:            ' + summary.empLocal + ' MAs\n' +
+      'DB employees:                ' + summary.empDb + ' MAs\n\n' +
+      'Local jsr_client_accounts_v1: ' + summary.clientLocal + ' Kunden\n' +
+      'DB client_accounts:          ' + summary.clientDb + ' Kunden\n\n' +
+      (summary.empDb > 0 || summary.clientDb > 0
+        ? '⚠ DB ist NICHT leer. Bei Ausfuehrung wird per Upsert nach id ueberschrieben.'
+        : 'DB leer — Migration ist reine Ergaenzung.')
+    );
+    return summary;
+  }
+
+  // 4) Confirm (unterschiedlicher Text je nach DB-Zustand)
+  const dbHasData = summary.empDb > 0 || summary.clientDb > 0;
+  const confirmMsg = dbHasData
+    ? 'DB hat bereits Datensaetze (' + summary.empDb + ' MAs, ' + summary.clientDb + ' Kunden).\n' +
+      'Migration fuehrt Upsert per id durch — bestehende Zeilen werden ueberschrieben.\n\n' +
+      empLocal.length + ' lokale MAs + ' + clientLocal.length + ' lokale Kunden migrieren?'
+    : 'Migration startet:\n' +
+      empLocal.length + ' Mitarbeiter + ' + clientLocal.length + ' Kunden werden nach Supabase geschrieben.\n\n' +
+      'Fortfahren?';
+  if(!window.confirm(confirmMsg)) return null;
+
+  // 5) Employees zuerst (visuelle Prio)
+  for(let i = 0; i < empLocal.length; i++){
+    const emp = empLocal[i];
+    report('employees', i + 1, empLocal.length);
+    try{ await saveEmployeeToDB(emp); summary.empOk++; }
+    catch(e){
+      summary.empErr++;
+      errors.push({ phase:'employees', id: emp && emp.id, code: e.code || e.status || '?', message: (e.message || '').slice(0, 120) });
+      console.error('[25a-migration] employee', emp && emp.id, e);
+    }
+  }
+
+  // 6) Clients danach
+  for(let i = 0; i < clientLocal.length; i++){
+    const cl = clientLocal[i];
+    report('clients', i + 1, clientLocal.length);
+    try{ await saveClientAccountToDB(cl); summary.clientOk++; }
+    catch(e){
+      summary.clientErr++;
+      errors.push({ phase:'clients', id: cl && cl.id, code: e.code || e.status || '?', message: (e.message || '').slice(0, 120) });
+      console.error('[25a-migration] client', cl && cl.id, e);
+    }
+  }
+
+  // 7) Reset progress
+  report(null, 0, 0);
+
+  // 8) Summary + Error-Preview (max 5 Fehler à 3 Zeilen)
+  const errPreview = errors.slice(0, 5).map(e =>
+    '- ' + e.phase + ' id=' + (e.id || '?') + '\n  code=' + e.code + '\n  ' + (e.message || '')
+  ).join('\n');
+  const errTail = errors.length > 5 ? '\n... ' + (errors.length - 5) + ' weitere in Konsole' : '';
+
+  alert(
+    'Migration abgeschlossen.\n\n' +
+    'Mitarbeiter: ' + summary.empOk + '/' + summary.empLocal + ' erfolgreich · ' + summary.empErr + ' Fehler\n' +
+    'Kunden:      ' + summary.clientOk + '/' + summary.clientLocal + ' erfolgreich · ' + summary.clientErr + ' Fehler\n\n' +
+    (errors.length > 0 ? 'Fehler:\n' + errPreview + errTail : 'Keine Fehler.')
+  );
+
+  console.log('[25a-migration] Report', summary);
+  if(errors.length > 0) console.log('[25a-migration] Full errors', errors);
+
+  return summary;
 }
 
 function LoginScreen({authMsg, portalDenied, myPortals}){
