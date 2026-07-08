@@ -782,6 +782,99 @@ var PORTAL = 'mitarbeiter';                          // dieses Portal
 var PORTAL_LABELS = {client:'Client Portal', mitarbeiter:'Mitarbeiter Portal', hr:'HR Portal'};
 var PORTAL_URLS   = {client:'client.html', mitarbeiter:'mitarbeiter.html', hr:'hr.html'};
 var sb = window.supabase.createClient(SB_URL, SB_KEY);
+
+// ─── 25h: Employee Self-View direct Supabase read ────────────────────
+// Whitelist fuer Self-Edit: kein role_keys/status/hourly_rate/contract/etc.
+// email raus (Konsistenz mit auth.users), bank raus (HR/Payroll-Verification).
+var EMP_SELF_EDITABLE_COLS = ['about_text','interests','photo_url','phone','city'];
+var EMP_SELF_WARNED_FIELDS = {};
+var showSelfFallbackBannerOnBoot = false;
+
+function loadOwnEmployeeFromDB(employeeId, staffNumberFallback){
+  return new Promise(function(resolve, reject){
+    if(employeeId){
+      sb.from('employees').select('*').eq('id', employeeId).maybeSingle()
+        .then(function(r){
+          if(r.error){ console.error('[25h] loadOwnEmployeeFromDB by id', r.error); reject(r.error); return; }
+          resolve(r.data || null);
+        }, reject);
+      return;
+    }
+    if(staffNumberFallback){
+      sb.from('employees').select('*').eq('staff_number', staffNumberFallback).maybeSingle()
+        .then(function(r){
+          if(r.error){ console.error('[25h] loadOwnEmployeeFromDB by staff_number', r.error); reject(r.error); return; }
+          resolve(r.data || null);
+        }, reject);
+      return;
+    }
+    resolve(null);
+  });
+}
+
+function _buildMeFromLocalStorageOrDeny(au, authUser, denyMsg){
+  var emps = getEmployees();
+  var match = null;
+  if(au.staff_number){
+    for(var i=0;i<emps.length;i++){ if(String(emps[i].staff_number)===String(au.staff_number)){ match=emps[i]; break; } }
+  }
+  if(match){
+    console.warn('[DEPRECATED-25h] Supabase employees leer/unavailable → jsr_emp_v3 Fallback. Migration ausfuehren. (Removal ~2026-08-08)');
+    showSelfFallbackBannerOnBoot = true;
+    var me = Object.assign({}, match);
+    me.email = authUser.email;
+    me.role_keys = au.role_keys || [];
+    return me;
+  }
+  denied(denyMsg);
+  return null;
+}
+
+function saveOwnProfileToDB(employeeId, fields){
+  if(!employeeId) return Promise.reject(new Error('employee_id required'));
+  var payload = {};
+  var extraOverflow = {};
+  for(var k in fields){
+    if(EMP_SELF_EDITABLE_COLS.indexOf(k) >= 0){
+      payload[k] = fields[k];
+    } else {
+      extraOverflow[k] = fields[k];
+      if(!EMP_SELF_WARNED_FIELDS[k]){
+        console.warn('[25h] Field not in self-editable whitelist, routing to extra:', k);
+        EMP_SELF_WARNED_FIELDS[k] = true;
+      }
+    }
+  }
+  if(Object.keys(extraOverflow).length > 0){
+    var existingExtra = (ME.extra && typeof ME.extra === 'object' && !Array.isArray(ME.extra)) ? ME.extra : {};
+    payload.extra = Object.assign({}, existingExtra, extraOverflow);
+    ME.extra = payload.extra; // optimistic
+  }
+  return sb.from('employees').update(payload).eq('id', employeeId)
+    .then(function(r){
+      if(r.error) throw r.error;
+      return r.data;
+    });
+}
+
+function subscribeOwnEmployee(employeeId, onUpdate){
+  if(!employeeId) return function(){};
+  var chan = sb.channel('emp-self-25h-'+employeeId)
+    .on('postgres_changes', {event:'UPDATE', schema:'public', table:'employees', filter:'id=eq.'+employeeId}, function(p){
+      if(p && p.new) onUpdate(p.new);
+    })
+    .subscribe();
+  return function(){ try{ sb.removeChannel(chan); }catch(e){} };
+}
+
+function renderCurrentViewOnRealtime(){
+  try{ if(typeof renderProfile === 'function') renderProfile(); }
+  catch(e){ console.error('[25h] renderProfile after realtime', e); }
+  try{ if(typeof renderUrlaub === 'function') renderUrlaub(); }
+  catch(e){ console.error('[25h] renderUrlaub after realtime', e); }
+  try{ if(typeof renderHome === 'function') renderHome(); }
+  catch(e){ console.error('[25h] renderHome after realtime', e); }
+}
 var MY_PORTALS = [];
 var AUTH_GATING = false;   // verhindert doppelte Login-Verarbeitung
 
@@ -835,7 +928,7 @@ function gateSession(session){
   if(AUTH_GATING || !session || !session.user) return;
   AUTH_GATING = true;
   var authUser = session.user;
-  sb.from('app_users').select('role_keys, full_name, staff_number, active')
+  sb.from('app_users').select('role_keys, full_name, staff_number, active, employee_id')
     .eq('user_id', authUser.id).single()
     .then(function(r){
       if(r.error || !r.data){ AUTH_GATING=false; denied('Kein Benutzerprofil gefunden. Bitte an HR/Management wenden.'); return; }
@@ -849,9 +942,17 @@ function gateSession(session){
           (rr.data||[]).forEach(function(rd){ (rd.portals||[]).forEach(function(p){ set[p]=true; }); });
           MY_PORTALS = Object.keys(set);
           if(MY_PORTALS.indexOf(PORTAL)===-1){ AUTH_GATING=false; noPortalAccess(); return; }
-          ME = buildME(au, authUser);
-          buildPortalSwitcher(MY_PORTALS);
-          boot();
+          buildME(au, authUser).then(function(me){
+            if(!me){ AUTH_GATING=false; return; } // denied() wurde in buildME dispatched
+            ME = me;
+            buildPortalSwitcher(MY_PORTALS);
+            boot();
+            // 25h: Realtime auf eigene Row — HR-Aenderungen (absences, warnings, status) live
+            subscribeOwnEmployee(ME.id, function(updated){
+              Object.assign(ME, updated);
+              renderCurrentViewOnRealtime();
+            });
+          });
         });
     })
     .catch(function(){ AUTH_GATING=false; denied('Verbindungsfehler beim Laden des Profils.'); });
@@ -859,19 +960,23 @@ function gateSession(session){
 
 // ME aus Auth-User + app_users bauen (ggf. mit lokalem Mitarbeiter-Datensatz mergen)
 function buildME(au, authUser){
-  var emps=getEmployees(), match=null;
-  if(au.staff_number){
-    for(var i=0;i<emps.length;i++){ if(String(emps[i].staff_number)===String(au.staff_number)){ match=emps[i]; break; } }
-  }
-  var parts=(au.full_name||'').trim().split(/\s+/).filter(Boolean);
-  var me = match ? Object.assign({}, match) : {
-    id:'auth_'+authUser.id.slice(0,8), staff_number:au.staff_number||'',
-    first_name:parts[0]||'Mitarbeiter', last_name:parts.slice(1).join(' ')||'',
-    position:'Agent', project_id:'proj_hc_a1b2c3d4', project_skill:'support', status:'active',
-    photo_color:'#0F5661', location:'Tirana', work_hours:8, language_level:'B2', hourly_rate:6.20
-  };
-  me.email=authUser.email; me.role_keys=au.role_keys||[];
-  return me;
+  // 25h: Prioritaet — 1) Supabase via employee_id, 2) via staff_number,
+  //                   3) localStorage-Fallback (mit Banner), 4) denied().
+  //     Bei Netzwerk-Error: erst localStorage probieren, dann milder denied().
+  return loadOwnEmployeeFromDB(au.employee_id, au.staff_number).then(function(dbEmp){
+    if(dbEmp){
+      var me = Object.assign({}, dbEmp);
+      me.email = authUser.email;
+      me.role_keys = au.role_keys || [];
+      return me;
+    }
+    return _buildMeFromLocalStorageOrDeny(au, authUser,
+      'Ihr Konto ist noch nicht mit einem Mitarbeiter-Datensatz verlinkt. Bitte wenden Sie sich an HR (admin@tive360.de), um Ihr Portal freizuschalten.');
+  }).catch(function(err){
+    console.error('[25h] buildME network error', err);
+    return _buildMeFromLocalStorageOrDeny(au, authUser,
+      'Verbindungsfehler und kein lokaler Fallback verfuegbar. Bitte spaeter erneut versuchen.');
+  });
 }
 
 // Portal-Switcher (nur bei >= 2 erlaubten Portalen)
@@ -908,7 +1013,7 @@ function denied(msg){
 function doLogout(){
   AUTH_GATING=false;
   sb.auth.signOut()
-    .then(function(){ localStorage.removeItem('jsr_portal_me'); location.reload(); })
+    .then(function(){ location.reload(); })
     .catch(function(){ location.reload(); });
 }
 
@@ -962,10 +1067,19 @@ function boot(){
   migrateProjectData();
   ensureTeamGroups();
   seedKB();
+  // 25h: Fallback-Banner wenn Supabase leer und localStorage-Match gefunden
+  if(showSelfFallbackBannerOnBoot && !document.getElementById('selfFallbackBanner')){
+    document.body.insertAdjacentHTML('afterbegin',
+      '<div id="selfFallbackBanner" style="position:fixed;top:0;left:0;right:0;z-index:9999;background:var(--amber-bg);border-bottom:1px solid var(--amber);color:var(--amber);padding:8px 14px;font-size:12px;text-align:center;font-weight:600;">' +
+      '⚠ Supabase-Sync (25h): Es wird der lokale Fallback verwendet. Bitte HR bitten, Ihren Account zu verlinken.' +
+      '</div>'
+    );
+  }
   document.getElementById('loginWrap').style.display='none';
   document.getElementById('app').classList.add('on');
 
   // Kollegen
+  // 25h: Self-View laeuft auf DB, Team-View kommt in 25i (aktuell localStorage-Bridge)
   var all=getEmployees();
   COLS=all.filter(function(e){return e.id!==ME.id&&e.project_id===ME.project_id&&e.status==='active';});
   if(!COLS.length)COLS=[
@@ -1091,11 +1205,8 @@ function calcVacation(){
     else if(r.status==='pending')planned+=days;
     if(r.status==='approved'&&(r.type==='unpaid'||r.type==='special'))absentDays+=days;
   });
-  // 2. Lies emp.absences[] — HR schreibt approved-Anträge dorthin
-  // (Bug 24-Workaround: v3 first, v1 fallback)
-  var meV3=(ls('jsr_emp_v3')||[]).find(function(e){return e.id===ME.id;});
-  var meV1=(ls('jsr_employees_v1')||[]).find(function(e){return e.id===ME.id;});
-  var absences=(meV3&&meV3.absences)||(meV1&&meV1.absences)||ME.absences||[];
+  // 2. Lies ME.absences[] — HR schreibt approved-Anträge dort (25h: kommt aus Supabase, Realtime aktualisiert)
+  var absences = ME.absences || [];
   absences.forEach(function(a){
     if(!a)return;
     var from=a.start||a.from||a.date;
@@ -2487,15 +2598,12 @@ function finishSpin(){
 // ═══════════════════════════════════════════════════════════════════════════
 // ─── PROFIL: Selbstauskunft + Foto (schreibt in jsr_emp_v3 Array-Store) ───
 function saveMyEmpFields(fields){
-  ['jsr_emp_v3','jsr_employees_v1'].forEach(function(key){
-    var arr=ls(key); if(!Array.isArray(arr))return;
-    var idx=-1; for(var i=0;i<arr.length;i++){if(arr[i]&&arr[i].id===ME.id){idx=i;break;}}
-    if(idx>=0){arr[idx]=Object.assign({},arr[idx],fields);lss(key,arr);}
+  // 25h: Supabase-Save mit Whitelist + optimistic ME-Update. Dead-Cache jsr_portal_me entfaellt.
+  for(var k in fields) ME[k] = fields[k]; // optimistic
+  saveOwnProfileToDB(ME.id, fields).catch(function(err){
+    console.error('[25h] saveOwnProfileToDB failed', err);
+    alert('Speichern fehlgeschlagen: ' + (err.message || 'DB-Fehler'));
   });
-  var v3=ls('jsr_emp_v3')||[];
-  if(Array.isArray(v3)&&!v3.some(function(e){return e&&e.id===ME.id;})){v3.push(Object.assign({id:ME.id},fields));lss('jsr_emp_v3',v3);}
-  for(var k in fields)ME[k]=fields[k];
-  lss('jsr_portal_me',ME);
 }
 function saveAboutMe(){
   saveMyEmpFields({
