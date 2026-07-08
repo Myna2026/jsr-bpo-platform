@@ -21862,8 +21862,65 @@ const EMP_DATE_COLS = new Set(['hire_date','termination_date']);
 const EMP_UUID_COLS = new Set(); // 25d: project_id ist jetzt text (kein uuid-Coerce). Set bleibt als Platzhalter für spätere echte UUID-Spalten.
 const EMP_WARNED_FIELDS = new Set();
 
+// 25g: Legacy employee field names → Master-Feldnamen (Migrations-Backfill)
+// Regel: "Ziel behalten" — Legacy fuellt nur Luecken, existing Value wird nie ueberschrieben.
+function mapLegacyEmployeeFields(emp){
+  if(!emp || typeof emp !== 'object') return;
+  const remapped = [];
+
+  // 1) Numeric: vacation_days_quota → vacation_days
+  if(emp.vacation_days == null && emp.vacation_days_quota != null){
+    emp.vacation_days = emp.vacation_days_quota; remapped.push('vacation_days_quota');
+  }
+  if('vacation_days_quota' in emp) delete emp.vacation_days_quota;
+
+  // 2) Date: terminated_at → termination_date
+  if(emp.termination_date == null && emp.terminated_at != null){
+    emp.termination_date = emp.terminated_at; remapped.push('terminated_at');
+  }
+  if('terminated_at' in emp) delete emp.terminated_at;
+
+  // 3) jsonb-Merge: contract_* → contract.{start, end, signed_manual}
+  const contract = (emp.contract && typeof emp.contract === 'object' && !Array.isArray(emp.contract)) ? emp.contract : {};
+  const contractPairs = [
+    ['contract_start',         'start'],
+    ['contract_end',           'end'],
+    ['contract_signed_manual', 'signed_manual'],
+  ];
+  let contractTouched = false;
+  for(const [flat, key] of contractPairs){
+    if(contract[key] == null && emp[flat] != null){
+      contract[key] = emp[flat]; remapped.push(flat); contractTouched = true;
+    }
+    if(flat in emp) delete emp[flat];
+  }
+  if(contractTouched || Object.keys(contract).length > 0) emp.contract = contract;
+
+  // 4) jsonb-Merge: bank_* → bank.{name, iban, currency}  (Option B, CLAUDE.md-Master)
+  const bank = (emp.bank && typeof emp.bank === 'object' && !Array.isArray(emp.bank)) ? emp.bank : {};
+  const bankPairs = [
+    ['bank_name',     'name'],
+    ['bank_account',  'iban'],
+    ['bank_currency', 'currency'],
+  ];
+  let bankTouched = false;
+  for(const [flat, key] of bankPairs){
+    if(bank[key] == null && emp[flat] != null){
+      bank[key] = emp[flat]; remapped.push(flat); bankTouched = true;
+    }
+    if(flat in emp) delete emp[flat];
+  }
+  if(bankTouched || Object.keys(bank).length > 0) emp.bank = bank;
+
+  // 5) Diagnose-Signal
+  if(remapped.length > 0){
+    console.log('[25g] mapLegacyEmployeeFields remapped:', remapped, 'for emp id:', emp.id);
+  }
+}
+
 async function saveEmployeeToDB(emp){
   if(!emp) throw new Error('emp required');
+  mapLegacyEmployeeFields(emp); // 25g: Legacy-Namen → Master-Namen vor Payload-Build
   const uuidRx=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const payload = {};
   const extraOverflow = {};
