@@ -303,15 +303,26 @@ async function loadClientAccountFromDB(clientId){
   }catch(e){ console.error('[25a] loadClientAccountFromDB', e); return null; }
 }
 
-// Column-Scope: nur Portal-relevante Felder. Row-Level-RLS (25e) filtert bereits
-// active/training + eigenes Projekt; Column-Scope verhindert Leak sensibler Felder.
+// 25f: Column-Scope-Filter für Realtime-Payloads. View liefert schon nur diese
+// 10 Spalten. Realtime läuft aber auf employees-Tabelle → clientseitig auf
+// View-Scope filtern als "clean state" (nicht als Security-Barriere — die
+// Full-Row kommt via WebSocket ohnehin bereits an, wenn Row-RLS grünt).
+const CLIENT_EMP_COLS = ['id','first_name','last_name','position','skill','photo_url','audios','videos','project_id','status'];
+function _pickClientEmpCols(row){
+  if(!row) return row;
+  const out = {};
+  for(const k of CLIENT_EMP_COLS){ if(k in row) out[k] = row[k]; }
+  return out;
+}
+
+// 25f: View filtert Column-Scope + status IN ('active','training') serverseitig.
+// Row-Level-RLS (25e) filtert auf Projekt-Scope; kein clientseitiger Column-Bypass mehr moeglich.
 async function loadEmployeesForClient(projectId){
   if(!projectId) return [];
   try{
-    const {data, error} = await sb.from('employees')
-      .select('id, first_name, last_name, position, skill, photo_url, audios, videos, project_id, status')
-      .eq('project_id', projectId)
-      .in('status', ['active','training']);
+    const {data, error} = await sb.from('employees_client_view')
+      .select('*')
+      .eq('project_id', projectId);
     if(error){ console.error('[25a] loadEmployeesForClient', error); return []; }
     return data || [];
   }catch(e){ console.error('[25a] loadEmployeesForClient', e); return []; }
@@ -319,16 +330,20 @@ async function loadEmployeesForClient(projectId){
 
 function subscribeEmployeesForClient(projectId, setter){
   if(!projectId) return ()=>{};
+  // 25f: Realtime bleibt auf employees-Tabelle (Views haben kein Realtime).
+  // Payload wird per _pickClientEmpCols auf die 10 View-Spalten reduziert.
   const chan = sb.channel('employees-client-25a-'+projectId)
     .on('postgres_changes', {event:'INSERT', schema:'public', table:'employees', filter:'project_id=eq.'+projectId}, (p)=>{
       if(!['active','training'].includes(p.new.status)) return;
-      setter(prev => prev.some(e=>e.id===p.new.id) ? prev : [...prev, p.new]);
+      const scoped = _pickClientEmpCols(p.new);
+      setter(prev => prev.some(e=>e.id===scoped.id) ? prev : [...prev, scoped]);
     })
     .on('postgres_changes', {event:'UPDATE', schema:'public', table:'employees', filter:'project_id=eq.'+projectId}, (p)=>{
       if(!['active','training'].includes(p.new.status)){
         setter(prev => prev.filter(e=>e.id!==p.new.id));
       } else {
-        setter(prev => prev.some(e=>e.id===p.new.id) ? prev.map(e=>e.id===p.new.id?p.new:e) : [...prev, p.new]);
+        const scoped = _pickClientEmpCols(p.new);
+        setter(prev => prev.some(e=>e.id===scoped.id) ? prev.map(e=>e.id===scoped.id?scoped:e) : [...prev, scoped]);
       }
     })
     .on('postgres_changes', {event:'DELETE', schema:'public', table:'employees', filter:'project_id=eq.'+projectId}, (p)=>{
