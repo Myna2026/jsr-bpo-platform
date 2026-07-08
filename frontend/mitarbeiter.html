@@ -694,7 +694,7 @@ function getEmployees(){
 }
 
 // Global state
-var ME=null, COLS=[], CONVS={}, ACTIVE=null;
+var ME=null, TEAM=[], CONVS={}, ACTIVE=null;
 var PROJECT_UUIDS = {holidaycheck:'proj_hc_a1b2c3d4', giganetz:'proj_gn_e5f6a7b8', condor:'proj_cd_c9d0e1f2', fabletics:'proj_fb_a3b4c5d6'};
 
 function _migMapProjectId(){ return {'p1':'proj_hc_a1b2c3d4','p2':'proj_gn_e5f6a7b8','proj_hc':'proj_hc_a1b2c3d4','proj_holidaycheck':'proj_hc_a1b2c3d4'}; }
@@ -874,7 +874,68 @@ function renderCurrentViewOnRealtime(){
   catch(e){ console.error('[25h] renderUrlaub after realtime', e); }
   try{ if(typeof renderHome === 'function') renderHome(); }
   catch(e){ console.error('[25h] renderHome after realtime', e); }
+  try{ if(typeof renderTeam === 'function') renderTeam(); }
+  catch(e){ console.error('[25i] renderTeam after realtime', e); }
 }
+
+// ─── 25i: Employee Team-View direct Supabase read ────────────────────
+// Kollegen-Sicht fuer MA-Portal via employees_team_view (Column-Scope in DB).
+// Realtime laeuft auf employees-Tabelle → clientseitig _pickTeamCols noetig,
+// weil Realtime-Payload volle Row liefert (extra jsonb inklusive), View aber
+// nur 12 Spalten mit extra->>-Extract. _pickTeamCols normalisiert beide Shapes.
+var TEAM_VIEW_COLS = ['id','first_name','last_name','position','role_keys',
+  'project_id','status','photo_url','function','project_skill',
+  'primary_skill','photo_color'];
+
+function _pickTeamCols(row){
+  if(!row) return null;
+  var ex = (row.extra && typeof row.extra === 'object') ? row.extra : {};
+  return {
+    id: row.id,
+    first_name: row.first_name,
+    last_name: row.last_name,
+    position: row.position,
+    role_keys: row.role_keys,
+    project_id: row.project_id,
+    status: row.status,
+    photo_url: row.photo_url,
+    function: row.function != null ? row.function : ex.function,
+    project_skill: row.project_skill != null ? row.project_skill : ex.project_skill,
+    primary_skill: row.primary_skill != null ? row.primary_skill : ex.primary_skill,
+    photo_color: row.photo_color != null ? row.photo_color : ex.photo_color
+  };
+}
+
+function loadTeammatesFromDB(projectId, meId){
+  return new Promise(function(resolve, reject){
+    if(!projectId){ resolve([]); return; }
+    sb.from('employees_team_view').select('*').neq('id', meId||'').then(function(r){
+      if(r.error){ console.error('[25i] loadTeammatesFromDB', r.error); reject(r.error); return; }
+      resolve((r.data||[]).map(_pickTeamCols));
+    }, reject);
+  });
+}
+
+function subscribeTeammates(projectId, onChange){
+  if(!projectId) return function(){};
+  var chan = sb.channel('emp-team-25i-'+projectId)
+    .on('postgres_changes',
+      {event:'*', schema:'public', table:'employees', filter:'project_id=eq.'+projectId},
+      function(p){
+        var row = p.new || p.old;
+        onChange(_pickTeamCols(row), p.eventType);
+      })
+    .subscribe();
+  return function(){ try{ sb.removeChannel(chan); }catch(e){} };
+}
+
+function getEmpById(id){
+  if(!id) return null;
+  if(ME && id === ME.id) return ME;
+  for(var i=0;i<TEAM.length;i++){ if(TEAM[i].id === id) return TEAM[i]; }
+  return null;
+}
+
 var MY_PORTALS = [];
 var AUTH_GATING = false;   // verhindert doppelte Login-Verarbeitung
 
@@ -952,6 +1013,24 @@ function gateSession(session){
               Object.assign(ME, updated);
               renderCurrentViewOnRealtime();
             });
+            // 25i: Team-View — Kollegen laden + Realtime-Sub auf Projekt
+            if(ME.project_id){
+              loadTeammatesFromDB(ME.project_id, ME.id)
+                .then(function(rows){ TEAM = rows; renderCurrentViewOnRealtime(); })
+                .catch(function(err){ console.error('[25i] Team-Load fehlgeschlagen', err); });
+              subscribeTeammates(ME.project_id, function(picked, evtType){
+                if(!picked || picked.id === ME.id) return;
+                var stillEligible = picked.status === 'active' || picked.status === 'training';
+                if(evtType === 'DELETE' || !stillEligible){
+                  TEAM = TEAM.filter(function(x){ return x.id !== picked.id; });
+                } else {
+                  var idx = -1;
+                  for(var i=0;i<TEAM.length;i++){ if(TEAM[i].id === picked.id){ idx=i; break; } }
+                  if(idx >= 0) TEAM[idx] = picked; else TEAM.push(picked);
+                }
+                renderCurrentViewOnRealtime();
+              });
+            }
           });
         });
     })
@@ -1079,14 +1158,7 @@ function boot(){
   document.getElementById('app').classList.add('on');
 
   // Kollegen
-  // 25h: Self-View laeuft auf DB, Team-View kommt in 25i (aktuell localStorage-Bridge)
-  var all=getEmployees();
-  COLS=all.filter(function(e){return e.id!==ME.id&&e.project_id===ME.project_id&&e.status==='active';});
-  if(!COLS.length)COLS=[
-    {id:'c1',staff_number:'1002',first_name:'Arjola',last_name:'Demi',position:'Agent',project_id:'proj_hc_a1b2c3d4',photo_color:'#7c3aed',status:'active'},
-    {id:'c2',staff_number:'1003',first_name:'Besnik',last_name:'Krasniqi',position:'Senior Agent',project_id:'proj_hc_a1b2c3d4',photo_color:'#059669',status:'active'},
-    {id:'c3',staff_number:'1004',first_name:'Erion',last_name:'Hoxha',position:'Agent',project_id:'proj_hc_a1b2c3d4',photo_color:'#d97706',status:'active'}
-  ];
+  // 25i: TEAM wird in gateSession async geladen + realtime-subscribed. Kein Fallback.
 
   // Sidebar User Info
   var ini=((ME.first_name||'?')[0]+(ME.last_name||'?')[0]).toUpperCase();
@@ -1168,7 +1240,7 @@ function openMobileMenu(){toggleSidebar();}
 function getAdminHolidays(){try{var r=localStorage.getItem('jsr_holidays_v1');if(r)return Object.values(JSON.parse(r)).reduce(function(a,v){return a.concat(v);},[]).map(function(h){return h.date;});}catch(e){}return [];}
 
 function getPlan(empId,yr,mo){
-  var emp=empId===ME.id?ME:(function(){var all=getEmployees();return all.find(function(e){return e.id===empId;})||ME;})();
+  var emp = getEmpById(empId) || ME;
   var pid=emp.project_id||ME.project_id||'';
   var sk=emp.project_skill||emp.primary_skill||ME.project_skill||ME.primary_skill||'all';
   // wfp_plan_* zuerst (hr.html schreibt primär dort), jsr_plans_v3 als Fallback
@@ -1549,8 +1621,7 @@ function vacContext(){
   var ctx={},allReqs=ls('jsr_vacation_requests_v1')||{};
   var mine=Array.isArray(allReqs)?allReqs.filter(function(r){return r.emp_id===ME.id;}):(allReqs[ME.id]||[]);
   mine.forEach(function(r){if(!r.from||!r.to||r.status==='rejected')return;var st=r.status==='approved'?'approved':'pending';vacEachDay(r.from,r.to,function(iso){if(ctx[iso]!=='approved')ctx[iso]=st;});});
-  var meRec=getEmployees().find(function(e){return e.id===ME.id;})||{};
-  var abs=meRec.absences||ME.absences||[];
+  var abs = ME.absences || [];  // 25h+25i: ME ist Self-DB-Row, kein jsr_emp_v3-Fallback mehr
   abs.forEach(function(a){if(!a.from||!a.to)return;vacEachDay(a.from,a.to,function(iso){ctx[iso]='approved';});});
   return ctx;
 }
@@ -1862,7 +1933,7 @@ function dmJoinGroup(threadId){
   DM_GROUPSETTINGS=false; renderTeam();
 }
 function dmContacts(){
-  var all=getEmployees().filter(function(e){return e&&e.status==='active'&&e.id!==ME.id&&canChatWith(ME,e);});
+  var all=TEAM.filter(function(e){return e&&e.status==='active'&&canChatWith(ME,e);});
   all.sort(function(a,b){return ((a.first_name||'')+' '+(a.last_name||'')).localeCompare((b.first_name||'')+' '+(b.last_name||''),'de');});
   return all;
 }
@@ -1945,7 +2016,7 @@ function dmRenderList(){
       avatarHtml='<div class="dm-group-icon" style="width:36px;height:36px;">'+GROUP_ICON+'</div>';
       name=esc(t.group_name||'Gruppe');
     } else {
-      var e=getEmployees().find(function(x){return x.id===dmOtherId(t);})||{first_name:'?',last_name:'',position:''};
+      var e=getEmpById(dmOtherId(t))||{first_name:'?',last_name:'',position:''};
       avatarHtml=dmAvatar(e,36); name=esc(e.first_name+' '+e.last_name)+dmRolePill(e);
     }
     var notMember=t.is_group&&t.participants.indexOf(ME.id)<0;
@@ -1966,7 +2037,7 @@ function dmThreadHtml(){
   var msgs=dmThreadMsgs(DM_ACTIVE), html='';
   var headAvatar, headName, headSub;
   if(isG){ headAvatar='<div class="dm-group-icon" style="width:36px;height:36px;">'+GROUP_ICON+'</div>'; headName=t.group_name||'Gruppe'; headSub=(t.participants?t.participants.length:0)+' Mitglieder'; }
-  else { var other=getEmployees().find(function(e){return e.id===dmOtherId(t);})||{first_name:'?',last_name:''}; headAvatar=dmAvatar(other,36); headName=other.first_name+' '+other.last_name; headSub='aktiv'; }
+  else { var other=getEmpById(dmOtherId(t))||{first_name:'?',last_name:''}; headAvatar=dmAvatar(other,36); headName=other.first_name+' '+other.last_name; headSub='aktiv'; }
   html+='<div class="chat-header"><button class="dm-back" onclick="dmBackToList()">←</button>'+headAvatar;
   html+='<div><div style="font-size:13px;font-weight:600;">'+esc(headName)+'</div><div style="font-size:11px;color:var(--green);">'+esc(headSub)+'</div></div>';
   if(aiEnabled())html+='<button class="dm-lang-btn" onclick="dmToggleLangPop()" title="Chat-Sprache"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor">'+LANG_ICON+'</svg></button>';
@@ -1979,7 +2050,7 @@ function dmThreadHtml(){
     var time=m.sent_at?new Date(m.sent_at).toLocaleTimeString('de-AT',{hour:'2-digit',minute:'2-digit'}):'';
     var marker=isMe?(m.read_at?'●':'○'):'';
     var sender='';
-    if(isG&&!isMe){ var se=getEmployees().find(function(x){return x.id===m.from_emp_id;}); var sr=se?ROLE_STYLES_CHAT[getEmpRole(se)]:null; sender='<div class="dm-sender-name"'+(sr?' style="color:'+sr.color+';"':'')+'>'+esc(se?se.first_name:'?')+'</div>'; }
+    if(isG&&!isMe){ var se=getEmpById(m.from_emp_id); var sr=se?ROLE_STYLES_CHAT[getEmpRole(se)]:null; sender='<div class="dm-sender-name"'+(sr?' style="color:'+sr.color+';"':'')+'>'+esc(se?se.first_name:'?')+'</div>'; }
     var _seeL=dmSeeLang(m.thread_id);
     var _untr=(_seeL!==m.lang_original)&&!(m.translations&&m.translations[_seeL])&&loadAiConfig().mode!=='off';
     html+='<div class="dm-row '+(isMe?'me':'them')+'">'+sender+'<div class="msg '+(isMe?'me':'them')+'">'+esc(dmMsgText(m)).replace(/\n/g,'<br>')+'</div>';
@@ -2094,7 +2165,7 @@ function ensureTeamGroups(){
     if(seeded.some(function(x){return x.project_id===ME.project_id&&x.skill===skill;}))return;
     var projects=ls('jsr_projects_v1')||[]; var proj=(Array.isArray(projects)?projects:[]).find(function(p){return p.id===ME.project_id;});
     var pname=(proj&&proj.name)||'Projekt';
-    var members=getEmployees().filter(function(e){return e&&e.status==='active'&&e.project_id===ME.project_id&&_normSkill(e.project_skill)===skill;}).map(function(e){return e.id;});
+    var members=TEAM.filter(function(e){return e&&e.status==='active'&&e.project_id===ME.project_id&&_normSkill(e.project_skill)===skill;}).map(function(e){return e.id;});
     if(members.indexOf(ME.id)<0)members.push(ME.id);
     var tid='grp_team_'+ME.project_id+'_'+skill;
     var threads=dmLoadThreads();
@@ -2190,7 +2261,7 @@ function dmGroupSettingsHtml(){
   }
   html+='<div class="dm-lang-lbl" style="margin-top:12px;">Mitglieder ('+t.participants.length+')</div>';
   (t.participants||[]).forEach(function(pid){
-    var e=getEmployees().find(function(x){return x.id===pid;})||{first_name:'?',last_name:''};
+    var e=getEmpById(pid)||{first_name:'?',last_name:''};
     html+='<div class="chat-item" style="cursor:default;">'+dmAvatar(e,32)+'<div class="chat-info"><div class="chat-name">'+esc(e.first_name+' '+e.last_name)+dmRolePill(e)+(pid===t.group_creator?' <span style=\"font-size:10px;color:var(--muted);\">(Admin)</span>':'')+'</div></div>';
     if(isCreator&&pid!==ME.id)html+='<button class="dm-picker-x" style="color:#dc2626;" onclick="dmRemoveGroupMember(\''+esc(pid)+'\')">×</button>';
     html+='</div>';
