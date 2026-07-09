@@ -3011,6 +3011,21 @@ function StundenkontoTab({emp}){
 }
 
 function EmployeeModal({emp, projects, onSave, onClose, initialTab}){
+  // 27d-2: Salary-History-Panel liest direkt aus payslips-Table (Q3: kein Spinner)
+  // fmtMonth lokal, da die Definition in PayrollView (7165) nicht im Scope von EmployeeModal liegt
+  const fmtMonth=(m)=>{const [y,mo]=String(m||'').split('-');return new Date(y,mo-1,1).toLocaleDateString('de-DE',{month:'long',year:'numeric'});};
+  const [empPayslips, setEmpPayslips] = useState([]);
+  useEffect(()=>{
+    if(!emp||!emp.id) return;
+    (async ()=>{
+      const {data, error} = await sb.from('payslips')
+        .select('id, month, net, work_days, status')
+        .eq('employee_id', emp.id)
+        .order('month', {ascending:false});
+      if(error){ console.error('[27d-2] EmployeeModal payslips', error); return; }
+      setEmpPayslips(data||[]);
+    })();
+  },[emp&&emp.id]);
   const [form, setForm] = useState(emp||{
     first_name:'',last_name:'',staff_number:'',email:'',phone:'',
     city:'',location:'Tirana',position:'Agent',
@@ -3799,41 +3814,37 @@ function EmployeeModal({emp, projects, onSave, onClose, initialTab}){
                   <input className="form-input" type="date" value={form.contract_end||form.contract?.end||''} onChange={e=>set('contract_end',e.target.value)} disabled={isTerminated}/>
                 </div>
               </div>
-              {/* Payslip archive reference */}
+              {/* Payslip archive reference — 27d-2: aus payslips-Table via empPayslips useState */}
               {form.id&&(()=>{
-                try{
-                  const slips=JSON.parse(localStorage.getItem('jsr_payrolls_'+form.id)||'[]');
-                  if(!slips.length) return(
-                    <div style={{marginTop:12,padding:'10px 14px',background:'var(--red-bg)',borderRadius:'var(--r-md)',
-                      fontSize:12,color:'var(--red)',border:'1px solid rgba(239,68,68,.15)'}}>
-                      ⚠ Noch keine Gehaltsabrechnungen vorhanden. Im Tab <strong>Löhne</strong> erstellen.
-                    </div>
-                  );
-                  const sorted=[...slips].sort((a,b)=>b.month.localeCompare(a.month));
-                  const latest=sorted[0];
-                  return(
-                    <div style={{marginTop:12}}>
-                      <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',marginBottom:8}}>Gehaltsabrechnungen ({slips.length})</div>
-                      <div style={{padding:'10px 14px',background:'var(--green-bg)',borderRadius:'var(--r-md)',
-                        border:'1px solid rgba(5,150,105,.2)',marginBottom:8}}>
-                        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-                          <div>
-                            <div style={{fontSize:12,fontWeight:700,color:'var(--green)'}}>✅ Letzte: {latest.month_label}</div>
-                            <div style={{fontSize:11,color:'var(--muted)',marginTop:2}}>Netto: {Number(latest.net||0).toLocaleString('de-DE',{minimumFractionDigits:2})} € · {latest.days} Tage</div>
-                          </div>
+                if(!empPayslips.length) return(
+                  <div style={{marginTop:12,padding:'10px 14px',background:'var(--red-bg)',borderRadius:'var(--r-md)',
+                    fontSize:12,color:'var(--red)',border:'1px solid rgba(239,68,68,.15)'}}>
+                    ⚠ Noch keine Gehaltsabrechnungen vorhanden. Im Tab <strong>Löhne</strong> erstellen.
+                  </div>
+                );
+                const latest=empPayslips[0]; // desc-sorted von DB
+                return(
+                  <div style={{marginTop:12}}>
+                    <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',marginBottom:8}}>Gehaltsabrechnungen ({empPayslips.length})</div>
+                    <div style={{padding:'10px 14px',background:'var(--green-bg)',borderRadius:'var(--r-md)',
+                      border:'1px solid rgba(5,150,105,.2)',marginBottom:8}}>
+                      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                        <div>
+                          <div style={{fontSize:12,fontWeight:700,color:'var(--green)'}}>✅ Letzte: {fmtMonth(latest.month)}</div>
+                          <div style={{fontSize:11,color:'var(--muted)',marginTop:2}}>Netto: {Number(latest.net||0).toLocaleString('de-DE',{minimumFractionDigits:2})} € · {latest.work_days||0} Tage</div>
                         </div>
                       </div>
-                      <div style={{display:'flex',flexWrap:'wrap',gap:5}}>
-                        {sorted.slice(0,6).map(s=>(
-                          <span key={s.id} style={{padding:'3px 9px',borderRadius:20,fontSize:10,fontWeight:700,
-                            background:'var(--blue-bg)',color:'var(--blue)',border:'1px solid rgba(15,86,97,.15)'}}>
-                            {s.month_label}: {Number(s.net||0).toLocaleString('de-DE',{minimumFractionDigits:2})} €
-                          </span>
-                        ))}
-                      </div>
                     </div>
-                  );
-                }catch(e){return null;}
+                    <div style={{display:'flex',flexWrap:'wrap',gap:5}}>
+                      {empPayslips.slice(0,6).map(s=>(
+                        <span key={s.id} style={{padding:'3px 9px',borderRadius:20,fontSize:10,fontWeight:700,
+                          background:'var(--blue-bg)',color:'var(--blue)',border:'1px solid rgba(15,86,97,.15)'}}>
+                          {fmtMonth(s.month)}: {Number(s.net||0).toLocaleString('de-DE',{minimumFractionDigits:2})} €
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                );
               })()}
             </div>
           )}
@@ -7293,7 +7304,6 @@ function PayrollView({employees, projects, showToast}){
         const ms=[...(prev[selMonth]||[]).filter(x=>x.employee_id!==emp.id&&x.emp_id!==emp.id), decorated];
         return{...prev,[selMonth]:ms};
       });
-      pushToPortal(decorated);  // 27c: Legacy-Bridge bis 27d MA-Portal
       setPreviewSlip({...decorated, emp: emp});  // emp fuer PreviewModal generatePayslipHTML
     }catch(err){
       console.error('[27c] createPayslip', err);
@@ -7327,7 +7337,6 @@ function PayrollView({employees, projects, showToast}){
     if(isLocked(slip)) return;
     const updates={status:'paid', paid_at:new Date().toISOString(), payment_date:date||new Date().toISOString().slice(0,10), payment_method:method||'manuell'};
     await updateSlip(slip.emp_id, slip.month, updates);
-    pushToPortal({...slip, ...updates});  // 27c: Legacy-Bridge bis 27d
   }
 
   // 27c: updateSlip macht Full-Upsert (savePayslipToDB), da UPSERT nicht PATCH ist.
@@ -7347,20 +7356,6 @@ function PayrollView({employees, projects, showToast}){
       console.error('[27c] updateSlip', err);
       showToast('⚠ Speichern fehlgeschlagen: '+(err.message||'DB'), 'error');
     }
-  }
-
-  function pushToPortal(slip){
-    try{
-      const k='jsr_payrolls_'+slip.emp_id;
-      const ex=JSON.parse(localStorage.getItem(k)||'[]');
-      const up=[...ex.filter(p=>p.month!==slip.month),{
-        id:slip.id,month:slip.month,month_label:fmtMonth(slip.month),
-        net:slip.gross,days:slip.work_days,hours:slip.gross_hours,
-        base:slip.base,bonuses:slip.total_bonuses,status:slip.status,
-        payment_date:slip.payment_date||null,
-      }];
-      localStorage.setItem(k,JSON.stringify(up));
-    }catch(e){}
   }
 
   async function createAllDrafts(){
@@ -7384,7 +7379,6 @@ function PayrollView({employees, projects, showToast}){
       };
       try{
         const saved = await savePayslipToDB(slipData);
-        pushToPortal({...saved, emp_id: saved.employee_id});  // 27c: Legacy-Bridge bis 27d
         return {ok: true, saved};
       }catch(err){
         console.error('[27c] createAllDrafts save', emp.id, err);
@@ -7676,7 +7670,6 @@ function PayrollView({employees, projects, showToast}){
               const saved = await savePayslipToDB(merged);
               const decorated = {...saved, emp_id: saved.employee_id, _calc: saved.calc_detail || {}};
               setPayslips(prev=>({...prev, [decorated.month]:(prev[decorated.month]||[]).map(s=>s.id===decorated.id?decorated:s)}));
-              pushToPortal(decorated);  // 27c: Legacy-Bridge bis 27d
               setPreviewSlip(null);
               showToast('✅ Freigegeben!');
             }catch(err){
