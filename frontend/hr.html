@@ -22096,6 +22096,116 @@ function subscribeClientAccounts(setter){
   return ()=>{ try{ sb.removeChannel(chan); }catch(e){} };
 }
 
+// ─── 27b: Payslips Storage-Helpers (Feature 27a Schema) ─────────────
+// PAYSLIP_COLS: 34 typisierte Spalten des payslips-Schemas.
+// Ausgeschlossen (implizit gehandhabt): id (auto/upsert-match),
+// created_at/updated_at (DB-managed), calc_detail (jsonb aus slip._calc).
+const PAYSLIP_COLS = new Set([
+  'employee_id','month','status',
+  'first_name','last_name','staff_number','position','location','project_id','email',
+  'hourly_rate','work_hours','work_model','contract_start',
+  'work_days','hours_per_day','gross_hours',
+  'base','referral_bonus','target_bonus','special_bonus','total_bonuses','gross',
+  'deduction_tax','deduction_social','deduction_other','total_deductions','net',
+  'bonus_notes','deduction_notes',
+  'confirmed_at','paid_at','payment_date','payment_method',
+]);
+const PAYSLIP_NUMERIC_COLS = new Set([
+  'hourly_rate','work_hours','work_days','hours_per_day','gross_hours',
+  'base','referral_bonus','target_bonus','special_bonus','total_bonuses','gross',
+  'deduction_tax','deduction_social','deduction_other','total_deductions','net',
+]);
+const PAYSLIP_DATE_COLS = new Set(['contract_start','payment_date']);
+const PAYSLIP_TIMESTAMP_COLS = new Set(['confirmed_at','paid_at']);
+let PAYSLIP_WARNED_EMP = false;
+
+async function loadAllPayslipsFromDB(){
+  try{
+    const {data, error} = await sb.from('payslips').select('*').order('month', {ascending:false});
+    if(error){ console.error('[27b] loadAllPayslipsFromDB', error); return []; }
+    return data || [];
+  }catch(e){ console.error('[27b] loadAllPayslipsFromDB', e); return []; }
+}
+
+async function loadMyPayslipsFromDB(employeeId){
+  if(!employeeId) return [];
+  try{
+    const {data, error} = await sb.from('payslips').select('*')
+      .eq('employee_id', employeeId).order('month', {ascending:false});
+    if(error){ console.error('[27b] loadMyPayslipsFromDB', error); return []; }
+    return data || [];
+  }catch(e){ console.error('[27b] loadMyPayslipsFromDB', e); return []; }
+}
+
+async function savePayslipToDB(slip){
+  if(!slip) throw new Error('slip required');
+  if(!slip.employee_id) throw new Error('employee_id required');
+  if(!slip.month) throw new Error('month required');
+  const payload = {};
+  for(const k of Object.keys(slip)){
+    if(k === 'emp'){
+      if(!PAYSLIP_WARNED_EMP){
+        console.warn('[27b] slip.emp (Full-Employee-Object) ignored — Snapshot-Felder sind flat. Refactor createPayslip in 27c.');
+        PAYSLIP_WARNED_EMP = true;
+      }
+      continue;
+    }
+    if(k === '_calc') continue;                                       // Sonderbehandlung unten
+    if(k === 'id' || k === 'created_at' || k === 'updated_at') continue;  // implizit
+    let v = slip[k];
+    // PG 22P02: leerer String ist ungueltig fuer numeric/date/timestamp → null
+    if(v === '' && (PAYSLIP_NUMERIC_COLS.has(k) || PAYSLIP_DATE_COLS.has(k) || PAYSLIP_TIMESTAMP_COLS.has(k))){
+      v = null;
+    }
+    if(PAYSLIP_COLS.has(k)){
+      payload[k] = v;
+    }
+    // Unbekannte Keys werden stumm verworfen — kein extra-Overflow-Slot bei Payslips.
+  }
+  // calc_detail explizit aus slip._calc (calcFullPayslip-Output, 30+ Felder)
+  if(slip._calc && typeof slip._calc === 'object'){
+    payload.calc_detail = slip._calc;
+  }
+  // Upsert auf UNIQUE(employee_id, month) — deterministisches 1-slip-pro-monat
+  const {data, error} = await sb.from('payslips')
+    .upsert(payload, {onConflict:'employee_id,month'})
+    .select().single();
+  if(error) throw error;
+  return data;
+}
+
+async function deletePayslipFromDB(slipId){
+  if(!slipId) throw new Error('slipId required');
+  const {error} = await sb.from('payslips').delete().eq('id', slipId);
+  if(error) throw error;
+  return true;
+}
+
+function subscribeAllPayslips(setter){
+  const chan = sb.channel('payslips-27b')
+    .on('postgres_changes', {event:'INSERT', schema:'public', table:'payslips'}, (p)=>{
+      setter(prev => prev.some(s=>s.id===p.new.id) ? prev : [p.new, ...prev]);
+    })
+    .on('postgres_changes', {event:'UPDATE', schema:'public', table:'payslips'}, (p)=>{
+      setter(prev => prev.map(s => s.id===p.new.id ? p.new : s));
+    })
+    .on('postgres_changes', {event:'DELETE', schema:'public', table:'payslips'}, (p)=>{
+      setter(prev => prev.filter(s => s.id !== p.old.id));
+    })
+    .subscribe();
+  return ()=>{ try{ sb.removeChannel(chan); }catch(e){} };
+}
+
+function subscribeMyPayslips(employeeId, onChange){
+  if(!employeeId) return function(){};
+  const chan = sb.channel('payslips-my-27b-'+employeeId)
+    .on('postgres_changes',
+      {event:'*', schema:'public', table:'payslips', filter:'employee_id=eq.'+employeeId},
+      (p)=>{ onChange(p.new || p.old, p.eventType); })
+    .subscribe();
+  return ()=>{ try{ sb.removeChannel(chan); }catch(e){} };
+}
+
 // ─── 25a Sub-Commit 5: One-time-Migration jsr_* → Supabase ───────────
 async function migrateToSupabase25a({dryRun = false, onProgress = null} = {}){
   const errors = [];
