@@ -6904,7 +6904,7 @@ function OrgChart({projects, employees, orgCharts, setOrgCharts}){
 
 function PayrollView({employees, projects, showToast}){
   const [salaryData, setSalaryData] = useState(()=>{try{return JSON.parse(localStorage.getItem('jsr_payroll_v1')||'{}')}catch(e){return {};}});
-  const [payslips, setPayslips] = useState(()=>{try{return JSON.parse(localStorage.getItem('jsr_payslips_v1')||'{}')}catch(e){return {};}});
+  const [payslips, setPayslips] = useState({});  // 27c: initial leer, Load in useEffect (Supabase-First)
   const [activeTab, setActiveTab] = useState('current'); // current | archive
   const [selMonth, setSelMonth] = useState(()=>{const d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');});
   const [selEmp, setSelEmp] = useState('all');
@@ -6918,7 +6918,37 @@ function PayrollView({employees, projects, showToast}){
   const [manualPayDate, setManualPayDate] = useState(new Date().toISOString().slice(0,10));
 
   useEffect(()=>{localStorage.setItem('jsr_payroll_v1',JSON.stringify(salaryData));},[salaryData]);
-  useEffect(()=>{localStorage.setItem('jsr_payslips_v1',JSON.stringify(payslips));},[payslips]);
+
+  // 27c: Payslips-State ist Supabase-backed (kein localStorage-Auto-Persist).
+  //   Load-once + Realtime-Sub mit inline Map-aware Handlers.
+  //   slipFromDB decoriert DB-Row mit emp_id-Alias + _calc-jsonb-Rueckuebersetzung.
+  useEffect(()=>{
+    const slipFromDB = (r) => ({...r, emp_id: r.employee_id, _calc: r.calc_detail || {}});
+    (async ()=>{
+      const rows = await loadAllPayslipsFromDB();
+      const map = {};
+      rows.forEach(r => { const s = slipFromDB(r); (map[s.month] = map[s.month]||[]).push(s); });
+      setPayslips(map);
+    })();
+    const chan = sb.channel('payslips-view-27c')
+      .on('postgres_changes', {event:'INSERT', schema:'public', table:'payslips'}, (p)=>{
+        const s = slipFromDB(p.new);
+        setPayslips(prev => {
+          const arr = (prev[s.month]||[]).filter(x => x.id !== s.id);
+          return {...prev, [s.month]: [s, ...arr]};
+        });
+      })
+      .on('postgres_changes', {event:'UPDATE', schema:'public', table:'payslips'}, (p)=>{
+        const s = slipFromDB(p.new);
+        setPayslips(prev => ({...prev, [s.month]: (prev[s.month]||[]).map(x => x.id === s.id ? s : x)}));
+      })
+      .on('postgres_changes', {event:'DELETE', schema:'public', table:'payslips'}, (p)=>{
+        const month = p.old.month;
+        setPayslips(prev => ({...prev, [month]: (prev[month]||[]).filter(x => x.id !== p.old.id)}));
+      })
+      .subscribe();
+    return ()=>{ try{ sb.removeChannel(chan); }catch(e){} };
+  },[]);
 
   const activeEmps = employees.filter(e=>e&&e.status==='active');
 
@@ -7026,7 +7056,7 @@ function PayrollView({employees, projects, showToast}){
   // locked = paid — cannot be edited
   function isLocked(slip){return slip&&slip.status==='paid';}
 
-  function createPayslip(emp){
+  async function createPayslip(emp){
     if(!emp.hourly_rate){alert('Kein Stundenlohn im Vertrag für '+emp.first_name+'.');return;}
     const existing=getSlip(emp.id,selMonth);
     if(existing&&isLocked(existing)){alert('Abrechnung bereits überwiesen und gesperrt.');return;}
@@ -7053,9 +7083,9 @@ function PayrollView({employees, projects, showToast}){
       return{...prev,[selMonth]:md};
     });
     const s=calcSalary(emp);
-    const slip={
-      id:'slip_'+emp.id+'_'+selMonth, emp_id:emp.id, month:selMonth,
-      created_at:new Date().toISOString(), status:'draft',
+    // 27c: employee_id statt emp_id fuer DB. Kein emp:emp im Payload (savePayslipToDB droppt es).
+    const slipData={
+      employee_id:emp.id, month:selMonth, status:'draft',
       first_name:emp.first_name, last_name:emp.last_name,
       staff_number:emp.staff_number, position:emp.position,
       location:emp.location, project_id:emp.project_id,
@@ -7066,44 +7096,69 @@ function PayrollView({employees, projects, showToast}){
       base:s.base, referral_bonus:s.referralBonus, target_bonus:s.targetBonus,
       special_bonus:s.specialBonus, total_bonuses:s.totalBonuses, gross:s.gross,
       bonus_notes:s.rec?.notes||'',
-      emp:emp,
       _calc:calcFullPayslip(emp,selMonth,(salaryData[selMonth]||[]).find(x=>x.emp_id===emp.id)||{},employees,[]),
     };
-    setPayslips(prev=>{
-      const ms=[...(prev[selMonth]||[]).filter(x=>x.emp_id!==emp.id),slip];
-      return{...prev,[selMonth]:ms};
-    });
-    pushToPortal(slip);
-    setPreviewSlip(slip);
+    try{
+      const saved = await savePayslipToDB(slipData);
+      const decorated = {...saved, emp_id: saved.employee_id, _calc: saved.calc_detail || {}};
+      setPayslips(prev=>{
+        const ms=[...(prev[selMonth]||[]).filter(x=>x.employee_id!==emp.id&&x.emp_id!==emp.id), decorated];
+        return{...prev,[selMonth]:ms};
+      });
+      pushToPortal(decorated);  // 27c: Legacy-Bridge bis 27d MA-Portal
+      setPreviewSlip({...decorated, emp: emp});  // emp fuer PreviewModal generatePayslipHTML
+    }catch(err){
+      console.error('[27c] createPayslip', err);
+      showToast('⚠ Fehler beim Speichern: '+(err.message||'DB'), 'error');
+    }
   }
 
-  function confirmPayslip(slip){
+  async function confirmPayslip(slip){
     if(isLocked(slip)) return;
-    updateSlip(slip.emp_id,slip.month,{status:'confirmed',confirmed_at:new Date().toISOString()});
+    await updateSlip(slip.emp_id,slip.month,{status:'confirmed',confirmed_at:new Date().toISOString()});
   }
 
-  function retractPayslip(slip){
+  async function retractPayslip(slip){
     if(isLocked(slip)){alert('Abrechnung bereits überwiesen — kann nicht zurückgezogen werden.');return;}
     if(!window.confirm('Abrechnung zurückziehen und löschen?')) return;
-    setPayslips(prev=>{
-      const ms=(prev[slip.month]||[]).filter(x=>x.emp_id!==slip.emp_id);
-      return{...prev,[slip.month]:ms};
-    });
-    setPreviewSlip(null);
+    // 27c: Q2(b) — await delete first, danach State-Remove. Kein Optimistic-Remove.
+    try{
+      await deletePayslipFromDB(slip.id);
+      setPayslips(prev=>{
+        const ms=(prev[slip.month]||[]).filter(x=>x.id!==slip.id);
+        return{...prev,[slip.month]:ms};
+      });
+      setPreviewSlip(null);
+    }catch(err){
+      console.error('[27c] retractPayslip', err);
+      showToast('⚠ Loeschen fehlgeschlagen: '+(err.message||'DB'), 'error');
+    }
   }
 
-  function markPaid(slip, date, method){
+  async function markPaid(slip, date, method){
     if(isLocked(slip)) return;
-    const updated={...slip,status:'paid',paid_at:new Date().toISOString(),payment_date:date||new Date().toISOString().slice(0,10),payment_method:method||'manuell'};
-    updateSlip(slip.emp_id,slip.month,{status:'paid',paid_at:updated.paid_at,payment_date:updated.payment_date,payment_method:updated.payment_method});
-    pushToPortal(updated);
+    const updates={status:'paid', paid_at:new Date().toISOString(), payment_date:date||new Date().toISOString().slice(0,10), payment_method:method||'manuell'};
+    await updateSlip(slip.emp_id, slip.month, updates);
+    pushToPortal({...slip, ...updates});  // 27c: Legacy-Bridge bis 27d
   }
 
-  function updateSlip(empId,month,updates){
-    setPayslips(prev=>{
-      const ms=(prev[month]||[]).map(s=>s.emp_id===empId?{...s,...updates}:s);
-      return{...prev,[month]:ms};
-    });
+  // 27c: updateSlip macht Full-Upsert (savePayslipToDB), da UPSERT nicht PATCH ist.
+  //   getSlip liefert existierenden Slip, mergen mit updates, saven, State updaten.
+  async function updateSlip(empId, month, updates){
+    const existing = getSlip(empId, month);
+    if(!existing) return;
+    const merged = {...existing, ...updates, employee_id: existing.employee_id || existing.emp_id};
+    try{
+      const saved = await savePayslipToDB(merged);
+      const decorated = {...saved, emp_id: saved.employee_id, _calc: saved.calc_detail || {}};
+      setPayslips(prev=>{
+        const ms = (prev[month]||[]).map(s => s.id === decorated.id ? decorated : s);
+        return {...prev, [month]: ms};
+      });
+    }catch(err){
+      console.error('[27c] updateSlip', err);
+      showToast('⚠ Speichern fehlgeschlagen: '+(err.message||'DB'), 'error');
+    }
   }
 
   function pushToPortal(slip){
@@ -7120,33 +7175,88 @@ function PayrollView({employees, projects, showToast}){
     }catch(e){}
   }
 
-  function createAllDrafts(){
+  async function createAllDrafts(){
     const missing=activeEmps.filter(e=>e.hourly_rate&&!getSlip(e.id,selMonth));
     if(!missing.length){alert('Alle Abrechnungen bereits vorhanden.');return;}
     if(!window.confirm('Entwürfe für '+missing.length+' Mitarbeiter erstellen?')) return;
-    missing.forEach(emp=>{
-      const s=calcSalary(emp);
-      const slip={id:'slip_'+emp.id+'_'+selMonth,emp_id:emp.id,month:selMonth,
-        created_at:new Date().toISOString(),status:'draft',
-        first_name:emp.first_name,last_name:emp.last_name,staff_number:emp.staff_number,
-        position:emp.position,location:emp.location,project_id:emp.project_id,email:emp.email||'',
-        hourly_rate:emp.hourly_rate,work_hours:emp.work_hours,work_model:emp.work_model||'Vor Ort',
-        contract_start:emp.contract?.start||emp.contract_start||'',work_days:workDays,hours_per_day:s.hoursPerDay,
-        gross_hours:s.grossHours,base:s.base,referral_bonus:s.referralBonus,target_bonus:s.targetBonus,
-        special_bonus:s.specialBonus,total_bonuses:s.totalBonuses,gross:s.gross,deduction_tax:s.deductionTax,deduction_social:s.deductionSocial,deduction_other:s.deductionOther,total_deductions:s.totalDeductions,net:s.net,bonus_notes:s.rec?.notes||'',deduction_notes:s.rec?.deduction_notes||''};
-      setPayslips(prev=>{const ms=[...(prev[selMonth]||[]).filter(x=>x.emp_id!==emp.id),slip];return{...prev,[selMonth]:ms};});
-      pushToPortal(slip);
-    });
+    // 27c: Q3(a) — Promise.all mit einzelnem catch pro Save, Summary-Toast am Ende.
+    const results = await Promise.all(missing.map(async emp => {
+      const s = calcSalary(emp);
+      const slipData = {
+        employee_id: emp.id, month: selMonth, status: 'draft',
+        first_name: emp.first_name, last_name: emp.last_name, staff_number: emp.staff_number,
+        position: emp.position, location: emp.location, project_id: emp.project_id, email: emp.email||'',
+        hourly_rate: emp.hourly_rate, work_hours: emp.work_hours, work_model: emp.work_model||'Vor Ort',
+        contract_start: emp.contract?.start||emp.contract_start||'', work_days: workDays, hours_per_day: s.hoursPerDay,
+        gross_hours: s.grossHours, base: s.base, referral_bonus: s.referralBonus, target_bonus: s.targetBonus,
+        special_bonus: s.specialBonus, total_bonuses: s.totalBonuses, gross: s.gross,
+        deduction_tax: s.deductionTax, deduction_social: s.deductionSocial, deduction_other: s.deductionOther,
+        total_deductions: s.totalDeductions, net: s.net,
+        bonus_notes: s.rec?.notes||'', deduction_notes: s.rec?.deduction_notes||'',
+      };
+      try{
+        const saved = await savePayslipToDB(slipData);
+        pushToPortal({...saved, emp_id: saved.employee_id});  // 27c: Legacy-Bridge bis 27d
+        return {ok: true, saved};
+      }catch(err){
+        console.error('[27c] createAllDrafts save', emp.id, err);
+        return {ok: false, empId: emp.id};
+      }
+    }));
+    const successes = results.filter(r=>r.ok);
+    const errors = results.filter(r=>!r.ok);
+    if(successes.length > 0){
+      // Realtime bringt Inserts eh nach, aber Optimistic-Update fuer sofortige Sichtbarkeit:
+      setPayslips(prev => {
+        const map = {...prev};
+        successes.forEach(r => {
+          const s = r.saved;
+          const decorated = {...s, emp_id: s.employee_id, _calc: s.calc_detail || {}};
+          map[selMonth] = [...(map[selMonth]||[]).filter(x=>x.id!==decorated.id), decorated];
+        });
+        return map;
+      });
+    }
+    if(errors.length === 0){
+      showToast('✅ '+successes.length+' Entwürfe erstellt');
+    }else{
+      showToast('⚠ '+successes.length+' erstellt, '+errors.length+' Fehler — Konsole prüfen', 'error');
+    }
   }
 
-  function confirmAll(){
+  async function confirmAll(){
     const drafts=(payslips[selMonth]||[]).filter(s=>s.status==='draft');
     if(!drafts.length){alert('Keine Entwürfe zum Bestätigen.');return;}
     if(!window.confirm('Alle '+drafts.length+' Entwürfe bestätigen?')) return;
-    setPayslips(prev=>{
-      const ms=(prev[selMonth]||[]).map(s=>s.status==='draft'?{...s,status:'confirmed',confirmed_at:new Date().toISOString()}:s);
-      return{...prev,[selMonth]:ms};
-    });
+    // 27c: Q3(a) — Promise.all Batch-Confirm.
+    const now = new Date().toISOString();
+    const results = await Promise.all(drafts.map(async d => {
+      const merged = {...d, status:'confirmed', confirmed_at: now, employee_id: d.employee_id || d.emp_id};
+      try{
+        const saved = await savePayslipToDB(merged);
+        return {ok: true, saved};
+      }catch(err){
+        console.error('[27c] confirmAll save', d.id, err);
+        return {ok: false, slipId: d.id};
+      }
+    }));
+    const successes = results.filter(r=>r.ok);
+    const errors = results.filter(r=>!r.ok);
+    if(successes.length > 0){
+      setPayslips(prev => {
+        const arr = prev[selMonth] || [];
+        const updatedArr = arr.map(s => {
+          const hit = successes.find(r => r.saved.id === s.id);
+          return hit ? {...hit.saved, emp_id: hit.saved.employee_id, _calc: hit.saved.calc_detail || {}} : s;
+        });
+        return {...prev, [selMonth]: updatedArr};
+      });
+    }
+    if(errors.length === 0){
+      showToast('✅ '+successes.length+' bestätigt');
+    }else{
+      showToast('⚠ '+successes.length+' bestätigt, '+errors.length+' Fehler — Konsole prüfen', 'error');
+    }
   }
 
   // BANK CSV PARSING
@@ -7372,15 +7482,31 @@ function PayrollView({employees, projects, showToast}){
         <PayslipPreviewModal
           slip={previewSlip}
           onClose={()=>setPreviewSlip(null)}
-          onApprove={previewSlip.status==='draft'?()=>{
-            const u={...previewSlip,status:'confirmed',confirmed_at:new Date().toISOString()};
-            setPayslips(prev=>({...prev,[u.month]:(prev[u.month]||[]).map(s=>s.emp_id===u.emp_id?u:s)}));
-            pushToPortal(u); setPreviewSlip(null); showToast('✅ Freigegeben!');
+          onApprove={previewSlip.status==='draft'?async ()=>{
+            const merged={...previewSlip, status:'confirmed', confirmed_at:new Date().toISOString(), employee_id: previewSlip.employee_id || previewSlip.emp_id};
+            try{
+              const saved = await savePayslipToDB(merged);
+              const decorated = {...saved, emp_id: saved.employee_id, _calc: saved.calc_detail || {}};
+              setPayslips(prev=>({...prev, [decorated.month]:(prev[decorated.month]||[]).map(s=>s.id===decorated.id?decorated:s)}));
+              pushToPortal(decorated);  // 27c: Legacy-Bridge bis 27d
+              setPreviewSlip(null);
+              showToast('✅ Freigegeben!');
+            }catch(err){
+              console.error('[27c] onApprove', err);
+              showToast('⚠ Freigabe fehlgeschlagen: '+(err.message||'DB'), 'error');
+            }
           }:null}
-          onRetract={!isLocked(previewSlip)?()=>{
+          onRetract={!isLocked(previewSlip)?async ()=>{
             if(!window.confirm('Zurückziehen?'))return;
-            setPayslips(prev=>({...prev,[previewSlip.month]:(prev[previewSlip.month]||[]).filter(s=>s.emp_id!==previewSlip.emp_id)}));
-            setPreviewSlip(null);
+            // 27c: Q2(b) — await delete first, danach State-Remove.
+            try{
+              await deletePayslipFromDB(previewSlip.id);
+              setPayslips(prev=>({...prev, [previewSlip.month]:(prev[previewSlip.month]||[]).filter(s=>s.id!==previewSlip.id)}));
+              setPreviewSlip(null);
+            }catch(err){
+              console.error('[27c] onRetract', err);
+              showToast('⚠ Loeschen fehlgeschlagen: '+(err.message||'DB'), 'error');
+            }
           }:null}
         />
       )}
