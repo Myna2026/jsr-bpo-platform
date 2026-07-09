@@ -878,6 +878,8 @@ function renderCurrentViewOnRealtime(){
   catch(e){ console.error('[25h] renderHome after realtime', e); }
   try{ if(typeof renderTeam === 'function') renderTeam(); }
   catch(e){ console.error('[25i] renderTeam after realtime', e); }
+  try{ if(typeof renderPayroll === 'function') renderPayroll(); }
+  catch(e){ console.error('[27d] renderPayroll after realtime', e); }
 }
 
 // ─── 25i: Employee Team-View direct Supabase read ────────────────────
@@ -936,6 +938,45 @@ function getEmpById(id){
   if(ME && id === ME.id) return ME;
   for(var i=0;i<TEAM.length;i++){ if(TEAM[i].id === id) return TEAM[i]; }
   return null;
+}
+
+// ─── 27d: MA-Portal Payslips Direct-Read + Realtime (analog 25h) ─────
+// PAYSLIPS_ME: eigene Slips desc-sorted by month.
+// slipFromDB: Alias-Layer fuer Frontend-Renderer (emp_id, hours,
+// total_worked_hours) — DB-Row bleibt kompatibel mit renderPayroll/renderHome.
+var PAYSLIPS_ME = [];
+
+function slipFromDB(row){
+  if(!row) return null;
+  return Object.assign({}, row, {
+    emp_id: row.employee_id,
+    hours: row.gross_hours,
+    total_worked_hours: row.gross_hours,
+  });
+}
+
+function loadMyPayslipsFromDB(employeeId){
+  return new Promise(function(resolve, reject){
+    if(!employeeId){ resolve([]); return; }
+    sb.from('payslips').select('*').eq('employee_id', employeeId).order('month', {ascending:false})
+      .then(function(r){
+        if(r.error){ console.error('[27d] loadMyPayslipsFromDB', r.error); reject(r.error); return; }
+        resolve((r.data||[]).map(slipFromDB));
+      }, reject);
+  });
+}
+
+function subscribeMyPayslips(employeeId, onChange){
+  if(!employeeId) return function(){};
+  var chan = sb.channel('payslips-my-27d-'+employeeId)
+    .on('postgres_changes',
+      {event:'*', schema:'public', table:'payslips', filter:'employee_id=eq.'+employeeId},
+      function(p){
+        var row = p.new || p.old;
+        onChange(slipFromDB(row), p.eventType);
+      })
+    .subscribe();
+  return function(){ try{ sb.removeChannel(chan); }catch(e){} };
 }
 
 var MY_PORTALS = [];
@@ -1033,6 +1074,26 @@ function gateSession(session){
                 renderCurrentViewOnRealtime();
               });
             }
+            // 27d: MA-Portal Payslips — eigene Slips laden + Realtime auf employee_id
+            loadMyPayslipsFromDB(ME.id)
+              .then(function(rows){ PAYSLIPS_ME = rows; renderCurrentViewOnRealtime(); })
+              .catch(function(err){ console.error('[27d] Payslips-Load fehlgeschlagen', err); });
+            subscribeMyPayslips(ME.id, function(s, evtType){
+              if(!s) return;
+              if(evtType === 'DELETE'){
+                PAYSLIPS_ME = PAYSLIPS_ME.filter(function(x){ return x.id !== s.id; });
+              } else {
+                var idx = -1;
+                for(var i=0;i<PAYSLIPS_ME.length;i++){ if(PAYSLIPS_ME[i].id === s.id){ idx=i; break; } }
+                if(idx >= 0){
+                  PAYSLIPS_ME[idx] = s;
+                } else {
+                  PAYSLIPS_ME.push(s);
+                  PAYSLIPS_ME.sort(function(a,b){ return (b.month||'').localeCompare(a.month||''); });
+                }
+              }
+              renderCurrentViewOnRealtime();
+            });
           });
         });
     })
@@ -1351,11 +1412,8 @@ function renderHome(){
   var stats=calcWorkedStats();
   var vac=calcVacation();
 
-  // Letzter Lohnzettel
-  var slips=ls('jsr_payslips_v1')||{},mKeys=Object.keys(slips).sort().reverse(),mySlip=null;
-  for(var i=0;i<mKeys.length&&!mySlip;i++){
-    (slips[mKeys[i]]||[]).forEach(function(s){if(s.emp_id===ME.id&&!mySlip)mySlip=s;});
-  }
+  // Letzter Lohnzettel — 27d: PAYSLIPS_ME ist Supabase-Backed + desc-sorted
+  var mySlip = PAYSLIPS_ME.length > 0 ? PAYSLIPS_ME[0] : null;
   var slipMonth=mySlip&&mySlip.month?new Date(mySlip.month+'-01').toLocaleString('de-AT',{month:'long',year:'numeric'}):'—';
   var slipNet=mySlip&&mySlip.net?fmt(mySlip.net)+' €':'—';
 
@@ -1540,12 +1598,8 @@ function getShiftDays(){
 // PAYROLL VIEW
 // ═══════════════════════════════════════════════════════════════════════════
 function renderPayroll(){
-  var slips=ls('jsr_payslips_v1')||{};
-  var mySlips=[];
-  Object.keys(slips).forEach(function(k){
-    (slips[k]||[]).forEach(function(s){if(s.emp_id===ME.id)mySlips.push(s);});
-  });
-  mySlips.sort(function(a,b){return (b.month||'').localeCompare(a.month||'');});
+  // 27d: PAYSLIPS_ME ist Supabase-Backed + bereits desc-sorted by month
+  var mySlips = PAYSLIPS_ME.slice();
 
   var html='';
 
