@@ -23247,57 +23247,85 @@ async function translateMessage(text, sourceLang, targetLang){
   }catch(err){ console.warn('KI-Uebersetzung fehlgeschlagen', err); return null; }
 }
 function AppUsersView({employees, clients}){
-  const [tick,setTick]=useState(0);
+  // C1 (27-auth): Live-Read aus Supabase app_users statt dem alten localStorage-Cache.
+  //   Rollen-Labels + Portal-Zugang aus roles_definitions (live). Read-only Liste.
+  const [users,setUsers]=useState(null);      // null = laedt, [] = leer
+  const [rdefs,setRdefs]=useState([]);
+  const [loadErr,setLoadErr]=useState(null);
   const [portalFilter,setPortalFilter]=useState('all');
-  const known=loadKnownAppUsers();
-  const HR_ROLES=['management','hr','finance','teamlead','projektleiter','qm','trainer'];
-  function clientNameFor(cid){ const a=(clients||[]).find(x=>x&&x.id===cid); return a?(a.company_name||a.id):cid; }
-  function portalOf(u){ if(u.client_id) return 'client'; if((u.roles||[]).some(r=>HR_ROLES.indexOf(r)>=0)) return 'hr'; return 'none'; }
-  function empFor(u){
-    const links=loadEmpUserLinks();
-    for(const eid in links){ if((links[eid]||'').toLowerCase()===(u.email||'').toLowerCase()){ return (employees||[]).find(e=>e.id===eid)||null; } }
-    // 25a: Direktsuche im employees-State (Supabase-backed) statt Sync-Helper
-    const em=(u.email||'').toString().trim().toLowerCase();
+  useEffect(()=>{
+    let alive=true;
+    (async()=>{
+      const [ur, rr] = await Promise.all([
+        sb.from('app_users').select('user_id, role_keys, full_name, staff_number, active, employee_id, client_id'),
+        sb.from('roles_definitions').select('role_key, label, portals'),
+      ]);
+      if(!alive) return;
+      if(rr.error) setLoadErr(rr.error.message);
+      setRdefs(rr.data||[]);
+      if(ur.error){ setLoadErr(ur.error.message); setUsers([]); return; }
+      setUsers(ur.data||[]);
+    })();
+    return ()=>{ alive=false; };
+  },[]);
+
+  const roleLabel=(key)=>{ const r=rdefs.find(x=>x.role_key===key); return (r&&r.label)||ROLE_LABELS[key]||key; };
+  const portalsForUser=(u)=>{ const set=new Set(); (u.role_keys||[]).forEach(k=>{ const r=rdefs.find(x=>x.role_key===k); ((r&&r.portals)||[]).forEach(p=>set.add(p)); }); return [...set]; };
+  // Hybrid-Verknuepfung: gespeicherte employee_id (authoritative) > eindeutiger staff_number-Vorschlag > nichts.
+  const empFor=(u)=>{
+    if(u.employee_id){ const e=(employees||[]).find(x=>x&&x.id===u.employee_id); return e?{emp:e,saved:true}:null; }
     const sn=(u.staff_number||'').toString().trim();
-    if(em){ const byMail=(employees||[]).find(e=>(e.email||'').toString().trim().toLowerCase()===em); if(byMail) return byMail; }
-    if(sn){ const byNum=(employees||[]).find(e=>String(e.staff_number||'').trim()===sn); if(byNum) return byNum; }
+    if(sn){ const m=(employees||[]).filter(x=>x&&String(x.staff_number||'').trim()===sn); if(m.length===1) return {emp:m[0],saved:false}; }
     return null;
-  }
+  };
+  const clientFor=(u)=> u.client_id ? ((clients||[]).find(c=>c&&c.id===u.client_id)||null) : null;
+
+  const PORTAL_BADGE={
+    hr:{bg:'#eef2ff',c:'#1e40af',l:'HR'},
+    mitarbeiter:{bg:'#ecfdf5',c:'#047857',l:'MA'},
+    client:{bg:'#E4EEF0',c:'#0F5661',l:'Client'},
+  };
+  const rows=(users||[]).slice()
+    .filter(u=>{ if(portalFilter==='all') return true; const ps=portalsForUser(u); return portalFilter==='none'?ps.length===0:ps.includes(portalFilter); })
+    .sort((a,b)=>(a.full_name||'zzz').localeCompare(b.full_name||'zzz'));
+
   return (
     <div>
       <div style={{marginBottom:14}}>
-        <div style={{fontSize:18,fontWeight:700}}>App-User &amp; Verknüpfungen</div>
-        <div style={{fontSize:13,color:'var(--muted)',marginTop:2}}>Alle Portal-User, die sich eingeloggt haben, mit Portal-Zugang und Verknüpfung. (Live-Liste aller Supabase-User ist RLS-bedingt nicht abrufbar — wächst mit jedem Login.)</div>
-        <select className="form-select" style={{marginTop:8,maxWidth:200}} value={portalFilter} onChange={e=>setPortalFilter(e.target.value)}>
+        <div style={{fontSize:18,fontWeight:700}}>Benutzer &amp; Zugänge</div>
+        <div style={{fontSize:13,color:'var(--muted)',marginTop:2}}>Alle Supabase-App-User (Live) mit Rollen, Portal-Zugang und Verknüpfung.</div>
+        <select className="form-select" style={{marginTop:8,maxWidth:220}} value={portalFilter} onChange={e=>setPortalFilter(e.target.value)}>
           <option value="all">Alle Portale</option>
           <option value="hr">HR</option>
+          <option value="mitarbeiter">Mitarbeiter</option>
           <option value="client">Client</option>
-          <option value="none">Ohne Portal</option>
+          <option value="none">Ohne Rolle/Portal</option>
         </select>
       </div>
-      {known.length===0&&<div className="card" style={{maxWidth:640}}><div className="card-body" style={{color:'var(--muted)'}}>Noch keine App-User erfasst.</div></div>}
-      {known.length>0&&(
+      {loadErr&&<div className="card" style={{maxWidth:640,marginBottom:10}}><div className="card-body" style={{color:'var(--red)'}}>Fehler beim Laden: {loadErr}</div></div>}
+      {users===null&&<div className="card" style={{maxWidth:640}}><div className="card-body" style={{color:'var(--muted)'}}>Lädt…</div></div>}
+      {users!==null&&rows.length===0&&<div className="card" style={{maxWidth:640}}><div className="card-body" style={{color:'var(--muted)'}}>Keine Benutzer.</div></div>}
+      {users!==null&&rows.length>0&&(
       <div style={{overflowX:'auto'}}>
         <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
           <thead><tr>
-            <th style={{textAlign:'left',padding:'8px 10px',borderBottom:'2px solid var(--border)'}}>E-Mail</th>
-            <th style={{textAlign:'left',padding:'8px 10px',borderBottom:'2px solid var(--border)'}}>Name / Rollen</th>
-            <th style={{textAlign:'left',padding:'8px 10px',borderBottom:'2px solid var(--border)'}}>Portal-Zugang</th>
-            <th style={{textAlign:'left',padding:'8px 10px',borderBottom:'2px solid var(--border)'}}>Verknüpfter MA</th>
+            {['Name','Kennung','Rollen','Portal-Zugang','Verknüpfter MA','Verknüpfter Kunde','Aktiv'].map(h=>(
+              <th key={h} style={{textAlign:'left',padding:'8px 10px',borderBottom:'2px solid var(--border)'}}>{h}</th>
+            ))}
           </tr></thead>
           <tbody>
-            {known.slice().filter(u=>portalFilter==='all'||portalOf(u)===portalFilter).sort((a,b)=>(a.email||'').localeCompare(b.email||'')).map(u=>{
-              const e=empFor(u); const po=portalOf(u);
-              const badge = po==='client'
-                ? <span style={{fontSize:11,fontWeight:700,padding:'2px 8px',borderRadius:4,background:'#E4EEF0',color:'#0F5661'}}>Client: {clientNameFor(u.client_id)}</span>
-                : po==='hr' ? <span style={{fontSize:11,fontWeight:700,padding:'2px 8px',borderRadius:4,background:'#eef2ff',color:'#1e40af'}}>HR</span>
-                : <span style={{fontSize:11,color:'var(--muted)'}}>Ohne Portal</span>;
+            {rows.map(u=>{
+              const m=empFor(u), c=clientFor(u), ps=portalsForUser(u);
+              const noRole=!(u.role_keys&&u.role_keys.length);
               return (
-                <tr key={u.email} style={{background:(po==='none')?'rgba(217,119,6,.06)':'transparent'}}>
-                  <td style={{padding:'8px 10px',borderBottom:'1px solid var(--border)'}}>{u.email}</td>
-                  <td style={{padding:'8px 10px',borderBottom:'1px solid var(--border)'}}>{u.name||'—'}<span style={{color:'var(--muted)'}}> · {(u.roles||[]).map(k=>ROLE_LABELS[k]||k).join(', ')||'—'}</span></td>
-                  <td style={{padding:'8px 10px',borderBottom:'1px solid var(--border)'}}>{badge}</td>
-                  <td style={{padding:'8px 10px',borderBottom:'1px solid var(--border)'}}>{e?<b>{e.first_name} {e.last_name}</b>:<span style={{color:'var(--muted)'}}>—</span>}</td>
+                <tr key={u.user_id} style={{background:noRole?'rgba(217,119,6,.06)':'transparent'}}>
+                  <td style={{padding:'8px 10px',borderBottom:'1px solid var(--border)'}}>{u.full_name?<b>{u.full_name}</b>:<span style={{color:'var(--amber)'}}>⚠ kein Name</span>}</td>
+                  <td style={{padding:'8px 10px',borderBottom:'1px solid var(--border)',fontSize:11,color:'var(--muted)'}}>{u.staff_number||'—'}<div style={{fontFamily:'var(--mono)'}}>{String(u.user_id).slice(0,8)}</div></td>
+                  <td style={{padding:'8px 10px',borderBottom:'1px solid var(--border)'}}>{noRole?<span style={{color:'var(--amber)',fontWeight:600}}>⚠ keine Rolle</span>:(u.role_keys||[]).map(roleLabel).join(', ')}</td>
+                  <td style={{padding:'8px 10px',borderBottom:'1px solid var(--border)'}}>{ps.length?ps.map(p=>{const b=PORTAL_BADGE[p]||{bg:'#f1f5f9',c:'#475569',l:p}; return <span key={p} style={{fontSize:11,fontWeight:700,padding:'2px 8px',borderRadius:4,background:b.bg,color:b.c,marginRight:4}}>{b.l}</span>;}):<span style={{fontSize:11,color:'var(--muted)'}}>—</span>}</td>
+                  <td style={{padding:'8px 10px',borderBottom:'1px solid var(--border)'}}>{m?(m.saved?<b>{m.emp.first_name} {m.emp.last_name}</b>:<span style={{color:'var(--muted)'}}>{m.emp.first_name} {m.emp.last_name} <span style={{fontSize:10,fontStyle:'italic'}}>· nicht gespeichert</span></span>):<span style={{color:'var(--muted)'}}>—</span>}</td>
+                  <td style={{padding:'8px 10px',borderBottom:'1px solid var(--border)'}}>{c?(c.company_name||c.id):(u.client_id?<span style={{color:'var(--muted)'}}>{u.client_id}</span>:<span style={{color:'var(--muted)'}}>—</span>)}</td>
+                  <td style={{padding:'8px 10px',borderBottom:'1px solid var(--border)'}}>{u.active?<span style={{fontSize:11,fontWeight:700,color:'#047857'}}>✓ aktiv</span>:<span style={{fontSize:11,fontWeight:700,color:'var(--red)'}}>✗ inaktiv</span>}</td>
                 </tr>
               );
             })}
