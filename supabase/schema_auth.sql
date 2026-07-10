@@ -176,19 +176,18 @@ create policy app_users_update_admin
 
 
 -- ----------------------------------------------------------------------------
--- 9b) OPTIONAL — Admin-Lesezugriff auf ALLE app_users
---     Deine Spec sagt "SELECT: auth.uid() = user_id" (jeder nur sich selbst).
---     Damit koennen Admins zwar schreiben, aber keine fremden Zeilen LESEN,
---     was fuer eine spaetere User-Verwaltung (Liste aller User) noetig ist.
---     Wenn gewuenscht, dieses Kommentar entfernen -> Admins sehen alle Zeilen.
+-- 9b) Admin-Lesezugriff auf ALLE app_users — AKTIV (live seit Juli 2026)
+--     Die self-Policy (auth.uid() = user_id) allein liesse Admins schreiben,
+--     aber keine fremden Zeilen LESEN — was fuer die User-Verwaltung
+--     (Liste aller User) noetig ist. Diese Policy ergaenzt den Lesezugriff.
 --     Mehrere SELECT-Policies werden mit ODER verknuepft.
 -- ----------------------------------------------------------------------------
--- drop policy if exists app_users_select_admin on public.app_users;
--- create policy app_users_select_admin
---   on public.app_users
---   for select
---   to authenticated
---   using (public.is_admin());
+drop policy if exists app_users_select_admin on public.app_users;
+create policy app_users_select_admin
+  on public.app_users
+  for select
+  to authenticated
+  using (public.is_admin());
 
 
 -- ============================================================================
