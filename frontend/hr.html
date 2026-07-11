@@ -23246,21 +23246,24 @@ async function translateMessage(text, sourceLang, targetLang){
     return data.translated_text||null;
   }catch(err){ console.warn('KI-Uebersetzung fehlgeschlagen', err); return null; }
 }
-function AppUsersView({employees, clients}){
+function AppUsersView({employees, clients, showToast}){
   // C1 (27-auth): Live-Read aus Supabase app_users statt dem alten localStorage-Cache.
   //   Rollen-Labels + Portal-Zugang aus roles_definitions (live). Read-only Liste.
   const [users,setUsers]=useState(null);      // null = laedt, [] = leer
   const [rdefs,setRdefs]=useState([]);
   const [loadErr,setLoadErr]=useState(null);
   const [portalFilter,setPortalFilter]=useState('all');
+  const [myUserId,setMyUserId]=useState(null);   // C2a: Self-Guard (eigene Zeile nicht deaktivierbar)
   useEffect(()=>{
     let alive=true;
     (async()=>{
-      const [ur, rr] = await Promise.all([
+      const [ur, rr, au] = await Promise.all([
         sb.from('app_users').select('user_id, role_keys, full_name, staff_number, active, employee_id, client_id'),
         sb.from('roles_definitions').select('role_key, label, portals'),
+        sb.auth.getUser(),
       ]);
       if(!alive) return;
+      setMyUserId((au&&au.data&&au.data.user&&au.data.user.id)||null);
       if(rr.error) setLoadErr(rr.error.message);
       setRdefs(rr.data||[]);
       if(ur.error){ setLoadErr(ur.error.message); setUsers([]); return; }
@@ -23279,6 +23282,18 @@ function AppUsersView({employees, clients}){
     return null;
   };
   const clientFor=(u)=> u.client_id ? ((clients||[]).find(c=>c&&c.id===u.client_id)||null) : null;
+
+  // C2a: aktiv-Toggle — erster schreibender RLS-Zugriff (Policy app_users_update_admin / is_admin).
+  //   Pessimistisch: State nur bei Erfolg. Confirm NUR bei Deaktivierung. Self-Guard gegen Selbst-Aussperren.
+  async function toggleActive(u){
+    if(u.user_id===myUserId) return;                 // Self-Guard (Button ist ohnehin disabled)
+    const next=!u.active;
+    if(u.active && !window.confirm('User "'+(u.full_name||u.staff_number||String(u.user_id).slice(0,8))+'" deaktivieren? Der Login wird gesperrt.')) return;
+    const {error}=await sb.from('app_users').update({active:next}).eq('user_id', u.user_id);
+    if(error){ showToast&&showToast('⚠ Änderung fehlgeschlagen: '+(error.message||'DB'),'error'); return; }
+    setUsers(prev=>(prev||[]).map(x=>x.user_id===u.user_id?{...x,active:next}:x));
+    showToast&&showToast('✅ '+(u.full_name||'User')+(next?' aktiviert':' deaktiviert'));
+  }
 
   const PORTAL_BADGE={
     hr:{bg:'#eef2ff',c:'#1e40af',l:'HR'},
@@ -23325,7 +23340,9 @@ function AppUsersView({employees, clients}){
                   <td style={{padding:'8px 10px',borderBottom:'1px solid var(--border)'}}>{ps.length?ps.map(p=>{const b=PORTAL_BADGE[p]||{bg:'#f1f5f9',c:'#475569',l:p}; return <span key={p} style={{fontSize:11,fontWeight:700,padding:'2px 8px',borderRadius:4,background:b.bg,color:b.c,marginRight:4}}>{b.l}</span>;}):<span style={{fontSize:11,color:'var(--muted)'}}>—</span>}</td>
                   <td style={{padding:'8px 10px',borderBottom:'1px solid var(--border)'}}>{m?(m.saved?<b>{m.emp.first_name} {m.emp.last_name}</b>:<span style={{color:'var(--muted)'}}>{m.emp.first_name} {m.emp.last_name} <span style={{fontSize:10,fontStyle:'italic'}}>· nicht gespeichert</span></span>):<span style={{color:'var(--muted)'}}>—</span>}</td>
                   <td style={{padding:'8px 10px',borderBottom:'1px solid var(--border)'}}>{c?(c.company_name||c.id):(u.client_id?<span style={{color:'var(--muted)'}}>{u.client_id}</span>:<span style={{color:'var(--muted)'}}>—</span>)}</td>
-                  <td style={{padding:'8px 10px',borderBottom:'1px solid var(--border)'}}>{u.active?<span style={{fontSize:11,fontWeight:700,color:'#047857'}}>✓ aktiv</span>:<span style={{fontSize:11,fontWeight:700,color:'var(--red)'}}>✗ inaktiv</span>}</td>
+                  <td style={{padding:'8px 10px',borderBottom:'1px solid var(--border)'}}>{u.user_id===myUserId
+                    ? <span title="eigener Account" style={{fontSize:11,fontWeight:700,opacity:.65,color:u.active?'#047857':'var(--red)'}}>{u.active?'✓ aktiv':'✗ inaktiv'} <span style={{fontSize:9,color:'var(--muted)'}}>(du)</span></span>
+                    : <button onClick={()=>toggleActive(u)} title={u.active?'Deaktivieren':'Aktivieren'} style={{cursor:'pointer',border:'none',background:'transparent',padding:0,fontSize:11,fontWeight:700,color:u.active?'#047857':'var(--red)'}}>{u.active?'✓ aktiv':'✗ inaktiv'}</button>}</td>
                 </tr>
               );
             })}
@@ -24182,7 +24199,7 @@ function App(){
           {view==='aiendpoint'&&(<div><AiEndpointView/></div>)}
           {view==='cockpits'&&(<div><CockpitsView/></div>)}
           {view==='hraccess'&&(<div><HrAccessView/></div>)}
-          {view==='appusers'&&(<div><AppUsersView employees={employees} clients={clients}/></div>)}
+          {view==='appusers'&&(<div><AppUsersView employees={employees} clients={clients} showToast={showToast}/></div>)}
           {view==='cvsync'&&(<div><CvSyncView setCvList={setCvList} projects={projects}/></div>)}
           {view==='spaces'&&(
             <div>
