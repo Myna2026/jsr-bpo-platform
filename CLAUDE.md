@@ -813,6 +813,23 @@ dieser Stelle sind effektiv immer `false`. Latente tote Logik. Beim
 `PRESET_ROLES`-Removal (Baustein D, zusammen mit `SuperAdminView`)
 mitaufräumen.
 
+## Prozess-Regel: Referenz-Check vor Komponenten-Removal
+
+Vor dem Löschen einer Komponente prüfen, **was sie rendert/mountet** — nicht
+nur, ob ihr Name woanders referenziert wird. Ein Tab-Container kann große
+Feature-Komponenten mounten, die im reinen Namens-Grep unsichtbar bleiben.
+Konkret: `grep -n "<KomponentenName" INNERHALB des Löschbereichs`, um
+gemountete Kinder zu finden — plus prüfen, welche localStorage-Keys/Business-
+Logik der Block schreibt.
+
+Beinahe-Unfall 2026-07-11: `SuperAdminView` sah wie tote Auth-UI aus (nur
+`jsr_roles_v1`/`jsr_accounts_v1`), mountete aber via Tabs `SystemSettingsTab`,
+`ProjectsAdminTab`, `ClientAccountsTab` — die gesamte Business-Config (Urlaub,
+Feiertage, KPI, Weiterempfehlung, Drehrad, Kunden-Accounts). Ein 320-Zeilen-
+Container-Schnitt hätte diese Features verwaist. Rollback nötig. Lösung
+stattdessen: nur die toten Tab-Buttons (`roles`/`accounts`) aus der
+SuperAdminView-Navigation entfernt, Container + Config-Tabs unangetastet.
+
 ## Technologie-Stack
 
 ### Backend (`backend/`)
