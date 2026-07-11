@@ -190,6 +190,51 @@ create policy app_users_select_admin
   using (public.is_admin());
 
 
+-- ----------------------------------------------------------------------------
+-- 10) DB-Absicherung der zwei Frontend-Guards (hart, nicht per Console umgehbar)
+--     Die Guards in hr.html (AppUsersView) sind nur UX. Diese Ebene ist das Netz
+--     gegen Bypass via Console/SQL/anderen Client.
+-- ----------------------------------------------------------------------------
+
+-- 10a) Kunden-Rollen-Exklusivität (row-lokal → CHECK)
+--      'kunde' darf nie mit einer internen Rolle kombiniert sein — sonst greifen
+--      die "HR full access"-Policies fuer einen externen Kunden.
+--      role_keys <@ {kunde} = jedes Element ist 'kunde' (erlaubt: {} und {kunde}).
+alter table public.app_users drop constraint if exists app_users_kunde_exclusive;
+alter table public.app_users add constraint app_users_kunde_exclusive
+  check (
+    not ('kunde' = any(role_keys))
+    or role_keys <@ array['kunde']::text[]
+  );
+
+-- 10b) Letzter-aktiver-Admin (tabellen-global → Trigger)
+--      Nach jeder Aenderung muss >=1 User mit active=true UND (management|hr)
+--      bestehen bleiben, sonst kann niemand mehr die User-Verwaltung oeffnen
+--      (liegt hinter is_admin()). SECURITY DEFINER → zaehlt unabhaengig von RLS.
+create or replace function public.enforce_last_admin()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if (select count(*) from public.app_users
+        where active = true
+          and role_keys && array['management','hr']) = 0 then
+    raise exception 'Mindestens ein aktiver Admin (management/hr) muss bestehen bleiben';
+  end if;
+  return null;                    -- AFTER-Trigger ignoriert den Rueckgabewert
+end;
+$$;
+
+-- Statement-level: feuert einmal nach der ganzen Anweisung (korrekte Zaehlung
+-- auch bei Multi-Row-Updates). Nur update/delete — INSERT kann die Zahl nie senken.
+drop trigger if exists app_users_last_admin on public.app_users;
+create trigger app_users_last_admin
+  after update or delete on public.app_users
+  for each statement execute function public.enforce_last_admin();
+
+
 -- ============================================================================
 -- FERTIG. Danach: Test-User im Dashboard anlegen (siehe Anleitung im Chat).
 -- ============================================================================

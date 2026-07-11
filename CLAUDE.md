@@ -796,6 +796,15 @@ Datenbankebene garantiert, dass mindestens ein aktiver `management`/`hr`-
 User bestehen bleibt (deactivate/role-removal sonst ablehnen). Erst damit
 ist der Aussperr-Vektor wirklich dicht.
 
+**Status:** DB-Ebene umgesetzt in `supabase/schema_auth.sql` §10 —
+CHECK `app_users_kunde_exclusive` (Kunden-Rollen-Exklusivität) +
+Trigger `app_users_last_admin` (`enforce_last_admin()`, statement-level).
+Verbleibendes Restrisiko: Der Trigger zählt im Snapshot der eigenen
+Transaktion → unter `READ COMMITTED` können **zwei gleichzeitige**
+Deaktivierungen verschiedener Admins beide „≥1" sehen und committen
+(Write-Skew → theoretisch 0 aktive Admins). Bei 3–4 Admins akzeptabel.
+Spätere Härtung: Advisory-Lock im Trigger oder `SERIALIZABLE`-Isolation.
+
 ### Altvokabular-Bug `hr.html:13789-13790` (Baustein D)
 `team?.role_id === 'role_superadmin'` / `'role_teamlead'` verwenden das
 alte `PRESET_ROLES`-Vokabular (`role_`-Präfix). `gate()` setzt heute aber
