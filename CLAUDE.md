@@ -766,6 +766,44 @@ werden, dass:
 Risiko bei Nicht-Beachtung: Gehälter sind unstimmig, Mitarbeiter werden
 zu viel oder zu wenig bezahlt.
 
+## Auth-Konsolidierung — offene Go-Live-Blocker
+
+Kontext: Login/Rollen/Portale laufen bereits über Supabase (`app_users` +
+`roles_definitions`, RLS aktiv). Die User-Verwaltung wird in `hr.html`
+(`AppUsersView`, Tab „App-User") schrittweise aufgebaut (Bausteine C1–C4).
+Zwei Punkte müssen vor dem Produktivgang zwingend abgeschlossen sein:
+
+### Letzter-aktiver-Admin-Guard — MUSS VOR GO-LIVE
+Admin = User mit Rolle `management` oder `hr` (siehe `is_admin()` in
+`supabase/schema_auth.sql`). Es gibt zwei Wege, sich (oder alle)
+auszusperren:
+
+1. Den letzten aktiven Admin **deaktivieren** (`app_users.active=false`).
+2. Dem letzten aktiven Admin die **Rolle entziehen** (`role_keys` ohne
+   `management`/`hr`) — ab Baustein C2b (Rollen-Editor) möglich.
+
+Folge: Niemand kommt mehr ins HR-Portal, und die User-Verwaltung liegt
+hinter `is_admin()` → Reparatur nur noch direkt im Supabase-SQL-Editor.
+
+Stand: Der Self-Guard aus C2a verhindert nur die **Selbst-Deaktivierung**
+der eigenen Zeile. C2b ergänzt clientseitig: eigene Zeile — `management`/
+`hr` nicht abwählbar; fremde Zeile — Blockade, wenn dadurch der letzte
+aktive Admin entfiele (Zählung aktiver Admin-User im State).
+
+Der Client-Check ist die UX-Schranke, **nicht** die harte Absicherung.
+Vor Go-Live zusätzlich nötig: ein **DB-Trigger oder eine Policy**, die auf
+Datenbankebene garantiert, dass mindestens ein aktiver `management`/`hr`-
+User bestehen bleibt (deactivate/role-removal sonst ablehnen). Erst damit
+ist der Aussperr-Vektor wirklich dicht.
+
+### Altvokabular-Bug `hr.html:13789-13790` (Baustein D)
+`team?.role_id === 'role_superadmin'` / `'role_teamlead'` verwenden das
+alte `PRESET_ROLES`-Vokabular (`role_`-Präfix). `gate()` setzt heute aber
+`role_keys` (ohne Präfix), **kein** `role_id` → `isHR`/`isTeamLead` an
+dieser Stelle sind effektiv immer `false`. Latente tote Logik. Beim
+`PRESET_ROLES`-Removal (Baustein D, zusammen mit `SuperAdminView`)
+mitaufräumen.
+
 ## Technologie-Stack
 
 ### Backend (`backend/`)
