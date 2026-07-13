@@ -232,6 +232,24 @@ revoke all    on function public.list_my_showcases() from public;
 grant execute on function public.list_my_showcases() to authenticated;
 
 
+-- ----------------------------------------------------------------------------
+-- 8) Realtime-Publication (WICHTIG: ohne das feuern keine postgres_changes für
+--    cvs/showcases — der Kanal joined, empfängt aber nie Events). Muster wie
+--    25a (employees/…) + 27a (payslips). Idempotent via IF NOT EXISTS.
+-- ----------------------------------------------------------------------------
+do $$
+begin
+  if not exists (select 1 from pg_publication_tables
+                 where pubname='supabase_realtime' and schemaname='public' and tablename='cvs') then
+    alter publication supabase_realtime add table public.cvs;
+  end if;
+  if not exists (select 1 from pg_publication_tables
+                 where pubname='supabase_realtime' and schemaname='public' and tablename='showcases') then
+    alter publication supabase_realtime add table public.showcases;
+  end if;
+end $$;
+
+
 -- ============================================================================
 -- FERTIG. Danach: Frontend-Umbau (CVsView/RecruitingKanban/GDoc-Sync → sb.from
 -- ('cvs'); client.html ShowcasesView → sb.rpc('list_my_showcases'); showcase.html
