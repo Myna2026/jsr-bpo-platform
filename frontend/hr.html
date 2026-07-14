@@ -6300,7 +6300,9 @@ function Widget_VertragAuslauf({employees}){
   );})}</div>;
 }
 function Widget_RecruitingPipeline(){
-  const cvs=readLS('jsr_cvs_v1',[]);
+  // 4a-4: CVs aus Supabase (einmaliger Load, kein Realtime — Dashboard).
+  const [cvs,setCvs]=useState([]);
+  useEffect(()=>{ let alive=true; loadCvsFromDB().then(rows=>{ if(alive) setCvs(rows||[]); }); return ()=>{ alive=false; }; },[]);
   const phases=[['cv_inbound','Eingang'],['cv_accepted','Akzeptiert'],['cv_confirmed','Bestätigt'],['invited','Eingeladen'],['interview','Interview'],['selection1','Auswahl 1'],['selection2','Auswahl 2']];
   const counts=phases.map(([k,l])=>({l,n:(cvs||[]).filter(c=>c&&c.status===k).length})).filter(x=>x.n>0);
   if(!counts.length) return <div className="w-empty">Keine offenen Bewerbungen.</div>;
@@ -6358,9 +6360,17 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team}){
     loadAllPayslipsFromDB().then(rows=>{ if(alive) setPayslipsDb(rows||[]); });
     return ()=>{ alive=false; };
   },[]);
+  // 4a-4: CVs liegen in Supabase (Legacy-Store leer). Einmaliger Load für Task-Zähler/Sektionen.
+  const [cvsDb, setCvsDb] = useState([]);
+  useEffect(()=>{
+    let alive=true;
+    loadCvsFromDB().then(rows=>{ if(alive) setCvsDb(rows||[]); });
+    return ()=>{ alive=false; };
+  },[]);
   const active=employees.filter(e=>e&&e.status==='active');
   const inTraining=employees.filter(e=>e&&e.status==='training');
-  const pipeline=employees.filter(e=>['cv_received','in_system','presented','selected'].includes(e.status));
+  // 4a-4: Pipeline-Kandidaten aus cvs-DB (CV-Funnel-Phasen), nicht mehr aus employees mit Legacy-Status.
+  const pipeline=cvsDb.filter(c=>c&&['cv_inbound','cv_accepted','cv_confirmed','invited','interview','selection1','selection2'].includes(c.status));
   const now=new Date();
   const todayStr=now.toISOString().slice(0,10);
   const year=now.getFullYear();
@@ -6482,13 +6492,13 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team}){
           if(open.length) tasks.push({icon:'💰',label:open.length+' Gehaltsabrechnungen offen',color:'var(--amber)',tab:'payroll'});
         }catch(e){}
         try{
-          const cvs=JSON.parse(localStorage.getItem('jsr_cvs_v1')||'[]');
+          const cvs=cvsDb;
           const weekAgo=new Date(Date.now()-7*864e5).toISOString().slice(0,10);
           const newCvs=cvs.filter(c=>c.cv_date>=weekAgo&&c.status==='cv_inbound');
           if(newCvs.length) tasks.push({icon:'📥',label:newCvs.length+' neue CVs diese Woche (Inbound)',color:'var(--blue)',tab:'cvs'});
         }catch(e){}
         try{
-          const cvs=JSON.parse(localStorage.getItem('jsr_cvs_v1')||'[]');
+          const cvs=cvsDb;
           const stuck=cvs.filter(c=>{
             if(['active','rejected_by_us','blacklist','rejected_by_applicant','rejected_by_client'].includes(c.status)) return false;
             const last=c.last_status_change||c.cv_date;
@@ -6527,7 +6537,7 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team}){
       {(()=>{
         const today=new Date().toISOString().slice(0,10);
         try{
-          const cvs=JSON.parse(localStorage.getItem('jsr_cvs_v1')||'[]');
+          const cvs=cvsDb;
           const todayCvs=cvs.filter(c=>c.cv_date===today||c.id&&c.id.startsWith('cv_')&&new Date(parseInt((c.id||'').replace('cv_',''))).toISOString().slice(0,10)===today);
           if(!todayCvs.length) return null;
           return(
@@ -6560,7 +6570,7 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team}){
       <div className="cockpit-bottom-grid">
         {(()=>{
           try{
-            const allCvs=JSON.parse(localStorage.getItem('jsr_cvs_v1')||'[]');
+            const allCvs=cvsDb;
             const month=new Date().toISOString().slice(0,7);
             const base=allCvs.filter(c=>(c.cv_date||'').startsWith(month));
             if(!base.length) return null;
@@ -19205,7 +19215,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
     const allData = {
       exported: new Date().toISOString(),
       employees: JSON.parse(localStorage.getItem('jsr_employees_v1')||'[]'),
-      cvs: JSON.parse(localStorage.getItem('jsr_cvs_v1')||'[]'),
+      // 4a-4: cvs nicht mehr im Export — liegen in Supabase (DB-Backup). Ein leeres cvs zu exportieren täuschte Sicherheit vor.
       plans: JSON.parse(localStorage.getItem('jsr_plans_v3')||'[]'),
       payroll: JSON.parse(localStorage.getItem('jsr_payroll_v1')||'{}'),
       projects: JSON.parse(localStorage.getItem('jsr_projects_v1')||'[]'),
@@ -19239,7 +19249,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
           try{ for(const emp of data.employees){ await saveEmployeeToDB(emp); } }
           catch(err){ console.error('[25a] importBackup employees', err); alert('Fehler beim Employees-Import: '+(err.message||'unbekannt')); }
         }
-        if(data.cvs) localStorage.setItem('jsr_cvs_v1', JSON.stringify(data.cvs));
+        // 4a-4: cvs-Import entfällt — CVs liegen in Supabase, nicht mehr im localStorage-Store.
         if(data.plans) localStorage.setItem('jsr_plans_v3', JSON.stringify(data.plans));
         if(data.payroll) localStorage.setItem('jsr_payroll_v1', JSON.stringify(data.payroll));
         if(data.projects) localStorage.setItem('jsr_projects_v1', JSON.stringify(data.projects));
