@@ -1495,15 +1495,16 @@ function CalendarView({client}){
 
 
 function ShowcasesView({client}){
-  const shows = (()=>{
-    try{
-      return JSON.parse(localStorage.getItem('jsr_showcases_v1')||'[]')
-        .filter(sc=>sc && sc.project_id===client.project_id)
-        .sort((a,b)=>(b.created||'').localeCompare(a.created||''));
-    }catch(e){ return []; }
-  })();
-  const cvs = (()=>{ try{ return JSON.parse(localStorage.getItem('jsr_cvs_v1')||'[]'); }catch(e){ return []; } })();
-  const resolve = ids => (ids||[]).map(id=>cvs.find(c=>c && c.id===id)).filter(Boolean);
+  // Blocker 1: Showcases aus Supabase via RPC (serverseitig auf eigenes Projekt gefiltert,
+  // Kandidaten bereits whitelisted aufgelöst). Kein localStorage, kein resolve() mehr.
+  const [shows, setShows] = useState([]);
+  useEffect(()=>{
+    (async ()=>{
+      const {data,error}=await sb.rpc('list_my_showcases');
+      if(error){ console.error('[showcases] list_my_showcases', error); setShows([]); return; }
+      setShows(data||[]);
+    })();
+  },[]);
   const langPills = str => (str||'').split(',').map(x=>x.trim()).filter(Boolean);
 
   return (
@@ -1523,8 +1524,8 @@ function ShowcasesView({client}){
       )}
 
       {shows.map(sc=>{
-        const list = resolve(sc.cv_ids);
-        const n = (sc.cv_ids||[]).length;
+        const list = sc.candidates||[];
+        const n = list.length;
         return (
           <div key={sc.id} className="card" style={{marginBottom:20}}>
             <div className="card-header">
@@ -1532,12 +1533,15 @@ function ShowcasesView({client}){
               <span className="badge badge-blue">{n} Kandidat{n!==1?'en':''}</span>
             </div>
             <div className="card-body">
-              {sc.created && <div style={{fontSize:11,color:'var(--muted)',marginBottom:sc.note?4:12}}>Erstellt {sc.created}</div>}
+              {sc.created_at && <div style={{fontSize:11,color:'var(--muted)',marginBottom:sc.note?4:12}}>Erstellt {(sc.created_at||'').slice(0,10)}</div>}
               {sc.note && <div style={{fontSize:13,color:'var(--text)',marginBottom:14,lineHeight:1.5}}>{sc.note}</div>}
               <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(210px,1fr))',gap:12}}>
-                {list.map(cv=>{
-                  const initials = ((cv.first_name||'?')[0]+(cv.last_name||'?')[0]).toUpperCase();
-                  const sub = [cv.age&&cv.age+' Jahre', cv.gender, cv.city].filter(Boolean).join(' · ');
+                {list.map((cv,ci)=>{
+                  // Namen-Fallback (anonyme Präsentation, §11): ohne Namen → „Kandidat #N".
+                  const hasName = cv.first_name||cv.last_name;
+                  const displayName = hasName ? [cv.first_name,cv.last_name].filter(Boolean).join(' ') : 'Kandidat #'+(ci+1);
+                  const initials = hasName ? ((cv.first_name||'?')[0]+(cv.last_name||'?')[0]).toUpperCase() : '#'+(ci+1);
+                  const sub = [cv.age&&cv.age+' Jahre', cv.city].filter(Boolean).join(' · ');
                   const pills = langPills(cv.languages_str);
                   return (
                     <div key={cv.id} style={{border:'1px solid #E5E7EB',borderRadius:12,overflow:'hidden',background:'#fff'}}>
@@ -1546,7 +1550,7 @@ function ShowcasesView({client}){
                           {cv.photo_url?<img src={cv.photo_url} style={{width:'100%',height:'100%',objectFit:'cover'}}/>:initials}
                         </div>
                         <div style={{minWidth:0}}>
-                          <div style={{fontWeight:600,fontSize:13,lineHeight:1.2}}>{cv.first_name} {cv.last_name}</div>
+                          <div style={{fontWeight:600,fontSize:13,lineHeight:1.2}}>{displayName}</div>
                           {sub && <div style={{fontSize:11,color:'var(--muted)',marginTop:2}}>{sub}</div>}
                         </div>
                       </div>

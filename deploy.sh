@@ -24,6 +24,11 @@ rsync -az --progress "$LOCAL_DIR/mitarbeiter.html" "$SERVER:$REMOTE_BASE/mitarbe
 echo "→ Client-Portal..."
 rsync -az --progress "$LOCAL_DIR/client.html" "$SERVER:$REMOTE_BASE/client/index.html"
 
+# showcase.html → /var/www/tive360/client/showcase.html (öffentliche Token-Seite, login-los)
+# Caddy file_server liefert Geschwisterdateien direkt aus → client.tive360.de/showcase.html
+echo "→ Showcase (öffentlich)..."
+rsync -az --progress "$LOCAL_DIR/showcase.html" "$SERVER:$REMOTE_BASE/client/showcase.html"
+
 # root-index.html → /var/www/tive360/root/index.html (Marketing-Landing)
 # root-login.html → /var/www/tive360/root/login.html (universeller Login)
 echo "→ Root (Landing + Login)..."
@@ -37,3 +42,4 @@ echo "  https://tive360.de"
 echo "  https://hr.tive360.de"
 echo "  https://mitarbeiter.tive360.de"
 echo "  https://client.tive360.de"
+echo "  https://client.tive360.de/showcase.html (öffentlich, Token)"

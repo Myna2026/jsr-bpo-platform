@@ -48,6 +48,7 @@ create table if not exists public.cvs (
   available_from   date,
   dream            text,
   hobbies          text,
+  favorite_food    text,               -- Whitelist-Feld (Showcase), analog EmployeeModal
   travel_wish      text,
   photo_url        text,
   photo_color      text,
@@ -81,6 +82,9 @@ create index if not exists idx_cvs_status     on public.cvs(status);
 create index if not exists idx_cvs_project_id on public.cvs(project_id);
 create index if not exists idx_cvs_email      on public.cvs(email);
 
+-- Nachtrag (idempotent): favorite_food auch auf Bestandstabellen sicherstellen.
+alter table public.cvs add column if not exists favorite_food text;
+
 
 -- ----------------------------------------------------------------------------
 -- 2) showcases — Kandidaten-Präsentationen. Token = Bearer-Capability.
@@ -93,10 +97,22 @@ create table if not exists public.showcases (
   note        text,
   cv_ids      uuid[] not null default '{}',
   token       text not null unique default encode(gen_random_bytes(24),'hex'),
+  -- HR-Feldauswahl pro Showcase (§11). Kann nur wegnehmen, nie hinzufügen
+  -- (harte Grenze = Erlaubnisliste in cv_public_json). Default = die 12 Standardfelder.
+  visible_fields text[] not null default array[
+    'first_name','last_name','age','city','experience_years','language_level',
+    'writing_level','languages_str','photo_url','photo_color','hobbies','favorite_food'
+  ]::text[],
   created_at  timestamptz default now()
 );
 create index if not exists idx_showcases_project_id on public.showcases(project_id);
 create index if not exists idx_showcases_token      on public.showcases(token);
+
+-- Nachtrag (idempotent): visible_fields auch auf Bestandstabellen sicherstellen.
+alter table public.showcases add column if not exists visible_fields text[] not null default array[
+  'first_name','last_name','age','city','experience_years','language_level',
+  'writing_level','languages_str','photo_url','photo_color','hobbies','favorite_food'
+]::text[];
 
 
 -- ----------------------------------------------------------------------------
@@ -133,45 +149,54 @@ create policy "HR full access showcases" on public.showcases
 
 
 -- ----------------------------------------------------------------------------
--- 5) Whitelist-Helper: eine cvs-Zeile → öffentlich sichere Felder (jsonb).
---    Entscheidung (b): OHNE notes/sales_potential/is_structured.
---    Ebenso NIE: email, phone, status, project_id, ai_reasoning, test_answers.
+-- 5) Whitelist-Helper (§11): eine cvs-Zeile → öffentlich sichere Felder (jsonb),
+--    gefiltert nach HR-Auswahl p_visible. Zwei Stufen:
+--      1. ERLAUBNISLISTE = die hier gebauten Keys (harte Sicherheitsgrenze).
+--      2. HR-Auswahl p_visible filtert daraus weg (kann nie hinzufügen).
+--    → Geliefert wird Erlaubnisliste ∩ p_visible. Ein manipuliertes p_visible mit
+--    'notes' läuft ins Leere, weil der Key gar nicht erst gebaut wird.
+--    FEST GESPERRT (nie im Objekt): email, phone, notes, is_structured,
+--    sales_potential, status, project_id, ai_reasoning, test_answers, extra,
+--    better_email, better_phone.  id ist immer dabei (React-Key, nicht wählbar).
 -- ----------------------------------------------------------------------------
-create or replace function public.cv_public_json(c public.cvs)
+create or replace function public.cv_public_json(c public.cvs, p_visible text[])
 returns jsonb
 language sql
 immutable
 as $$
-  select jsonb_build_object(
-    'id',               c.id,
-    'first_name',       c.first_name,
-    'last_name',        c.last_name,
-    'age',              c.age,
-    'gender',           c.gender,
-    'city',             c.city,
-    'dialect',          c.dialect,
-    'education',        c.education,
-    'education_level',  c.education_level,
-    'experience_years', c.experience_years,
-    'work_history',     c.work_history,
-    'language_level',   c.language_level,
-    'writing_level',    c.writing_level,
-    'languages_str',    c.languages_str,
-    'homeoffice_pref',  c.homeoffice_pref,
-    'available_from',   c.available_from,
-    'dream',            c.dream,
-    'hobbies',          c.hobbies,
-    'travel_wish',      c.travel_wish,
-    'photo_url',        c.photo_url,
-    'photo_color',      c.photo_color,
-    'better_email',     c.better_email,
-    'better_phone',     c.better_phone,
-    'audios',           c.audios,
-    'videos',           c.videos,
-    'test_scores',      c.test_scores
-  );
+  select jsonb_build_object('id', c.id)
+  || coalesce((
+    select jsonb_object_agg(key, value)
+    from jsonb_each(jsonb_build_object(
+      'first_name',       c.first_name,
+      'last_name',        c.last_name,
+      'age',              c.age,
+      'gender',           c.gender,
+      'city',             c.city,
+      'dialect',          c.dialect,
+      'education',        c.education,
+      'education_level',  c.education_level,
+      'experience_years', c.experience_years,
+      'work_history',     c.work_history,
+      'language_level',   c.language_level,
+      'writing_level',    c.writing_level,
+      'languages_str',    c.languages_str,
+      'homeoffice_pref',  c.homeoffice_pref,
+      'available_from',   c.available_from,
+      'dream',            c.dream,
+      'travel_wish',      c.travel_wish,
+      'hobbies',          c.hobbies,
+      'favorite_food',    c.favorite_food,
+      'photo_url',        c.photo_url,
+      'photo_color',      c.photo_color,
+      'audios',           c.audios,
+      'videos',           c.videos,
+      'test_scores',      c.test_scores
+    ))
+    where key = any(coalesce(p_visible, '{}'::text[]))   -- HR-Auswahl nimmt nur weg
+  ), '{}'::jsonb);
 $$;
-revoke all on function public.cv_public_json(public.cvs) from public;
+revoke all on function public.cv_public_json(public.cvs, text[]) from public;
 
 
 -- ----------------------------------------------------------------------------
@@ -191,7 +216,7 @@ as $$
     'note',       s.note,
     'created_at', s.created_at,
     'candidates', coalesce((
-      select jsonb_agg(public.cv_public_json(c))
+      select jsonb_agg(public.cv_public_json(c, s.visible_fields))
       from public.cvs c where c.id = any(s.cv_ids)
     ), '[]'::jsonb)
   ) end
@@ -221,7 +246,7 @@ as $$
     'token',      s.token,
     'created_at', s.created_at,
     'candidates', coalesce((
-      select jsonb_agg(public.cv_public_json(c))
+      select jsonb_agg(public.cv_public_json(c, s.visible_fields))
       from public.cvs c where c.id = any(s.cv_ids)
     ), '[]'::jsonb)
   ) order by s.created_at desc), '[]'::jsonb)
@@ -260,6 +285,13 @@ create unique index if not exists idx_cvs_phone_unique
   on public.cvs(phone) where phone is not null and phone <> '';
 create unique index if not exists idx_cvs_email_unique
   on public.cvs(email) where email is not null and email <> '';
+
+
+-- ----------------------------------------------------------------------------
+-- 11) Alte 1-arg-Funktion droppen. Muss NACH dem RPC-Update laufen (§6/§7 rufen
+--     jetzt die 2-arg-Variante) — sonst Abhängigkeitsfehler. Idempotent.
+-- ----------------------------------------------------------------------------
+drop function if exists public.cv_public_json(public.cvs);
 
 
 -- ============================================================================

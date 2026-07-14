@@ -14002,6 +14002,13 @@ Levels: A2, B1, B2, C1, C2. Für Kundenservice ist B2 das Minimum.`;
               </div>
               <div className="form-group"><label className="form-label">Bisherige Stationen</label>
                 <textarea className="form-input" rows={2} value={form.work_history||''} onChange={e=>set('work_history',e.target.value)} placeholder="Arbeitgeber, Positionen…"/></div>
+              {/* Soft-Facts — Teil der Showcase-Whitelist (Kunden-Kachel). Ohne Input unbefüllbar. */}
+              <div className="form-row">
+                <div className="form-group"><label className="form-label">Hobbies</label>
+                  <input className="form-input" value={form.hobbies||''} onChange={e=>set('hobbies',e.target.value)} placeholder="z.B. Fußball, Fotografie, Reisen"/></div>
+                <div className="form-group"><label className="form-label">Lieblingsessen</label>
+                  <input className="form-input" value={form.favorite_food||''} onChange={e=>set('favorite_food',e.target.value)} placeholder="z.B. Tave Kosi"/></div>
+              </div>
 
               {/* Hörprobe */}
               <div style={{borderTop:'1px solid var(--border)',paddingTop:14,marginTop:4}}>
@@ -14953,21 +14960,58 @@ function CVsView({cvList, setCvList, projects, onPromoteToEmployee, team, showTo
 // ── Recruiting Kanban ────────────────────────────────────
 
 
+// §11 Feld-Auswahl: Gruppen + deutsche Labels (Reihenfolge = UI-Reihenfolge).
+// Nur Erlaubnislisten-Felder (harte Grenze in cv_public_json) — hart gesperrte
+// Felder (email, phone, notes, …) tauchen hier bewusst nie auf. id ist technisch,
+// immer an, keine Checkbox.
+const SHOWCASE_FIELD_GROUPS = [
+  {group:'Identität & Foto', fields:[
+    ['first_name','Vorname'],['last_name','Nachname'],['photo_url','Foto'],['photo_color','Farbe'],
+    ['age','Alter'],['gender','Geschlecht'],['city','Stadt'],['dialect','Dialekt'],
+  ]},
+  {group:'Sprache', fields:[
+    ['language_level','Sprechniveau'],['writing_level','Schriftniveau'],['languages_str','Sprachen'],
+  ]},
+  {group:'Qualifikation', fields:[
+    ['education','Ausbildung'],['education_level','Ausbildungsgrad'],
+    ['experience_years','Erfahrung (Jahre)'],['work_history','Stationen'],
+  ]},
+  {group:'Präferenz', fields:[
+    ['homeoffice_pref','Homeoffice'],['available_from','Verfügbar ab'],
+  ]},
+  {group:'Persönliches', fields:[
+    ['dream','Traum / Ziel'],['travel_wish','Reiseziel'],['hobbies','Hobbies'],['favorite_food','Lieblingsessen'],
+  ]},
+  {group:'Medien & Tests', fields:[
+    ['audios','Hörproben'],['videos','Videos'],['test_scores','Testergebnisse'],
+  ]},
+];
+const SHOWCASE_DEFAULT_FIELDS = ['first_name','last_name','age','city','experience_years',
+  'language_level','writing_level','languages_str','photo_url','photo_color','hobbies','favorite_food'];
+
 function CandidateShowcase({cvList, projects}){
-  const [showcases, setShowcases] = useState(()=>{
-    try{return JSON.parse(localStorage.getItem('jsr_showcases_v1')||'[]');}
-    catch(e){return [];}
-  });
+  const [showcases, setShowcases] = useState([]);
   const [showCreate, setShowCreate] = useState(false);
-  const [form, setForm] = useState({title:'', project_id:'', note:'', selectedCvs:[]});
+  const [form, setForm] = useState({title:'', project_id:'', note:'', selectedCvs:[], visible_fields:SHOWCASE_DEFAULT_FIELDS});
   const [preview, setPreview] = useState(null);
   const setF=(k,v)=>setForm(f=>({...f,[k]:v}));
 
+  // Showcases liegen in Supabase (Blocker 1). Laden + Realtime statt localStorage.
+  async function loadShowcases(){
+    const {data,error}=await sb.from('showcases').select('*').order('created_at',{ascending:false});
+    if(error){ console.error('[showcases] load', error); return; }
+    setShowcases(data||[]);
+  }
   useEffect(()=>{
-    localStorage.setItem('jsr_showcases_v1', JSON.stringify(showcases));
-  },[showcases]);
+    loadShowcases();
+    const ch=sb.channel('showcases-sc1')
+      .on('postgres_changes',{event:'*',schema:'public',table:'showcases'},()=>loadShowcases())
+      .subscribe();
+    return ()=>{ sb.removeChannel(ch); };
+  },[]);
 
-  const approvedCvs = cvList.filter(c=>['test_done','selected','presented'].includes(c.status)||c.language_level);
+  // Präsentierbar = nach interner Vorauswahl: selection1/selection2/contract.
+  const approvedCvs = cvList.filter(c=>['selection1','selection2','contract'].includes(c.status));
 
   function toggleCv(id){
     setForm(f=>({...f,
@@ -14977,26 +15021,33 @@ function CandidateShowcase({cvList, projects}){
     }));
   }
 
-  function createShowcase(){
+  function toggleField(key){
+    setForm(f=>({...f,
+      visible_fields: f.visible_fields.includes(key)
+        ? f.visible_fields.filter(x=>x!==key)
+        : [...f.visible_fields, key]
+    }));
+  }
+
+  async function createShowcase(){
     if(!form.title.trim()) return alert('Bitte Titel eingeben.');
+    if(!form.project_id) return alert('Bitte ein Projekt wählen.');   // project_id ist NOT NULL
     if(form.selectedCvs.length===0) return alert('Mindestens einen Kandidaten wählen.');
-    const token = 'sc_'+Math.random().toString(36).slice(2,10);
-    const sc = {
-      id: 'sc'+Date.now(),
-      token,
-      title: form.title,
-      project_id: form.project_id,
-      note: form.note,
-      cv_ids: form.selectedCvs,
-      created: new Date().toISOString().slice(0,10),
-    };
-    setShowcases(s=>[sc,...s]);
+    // Token/id/created_at vergibt die DB (gen_random_bytes/uuid/now) — nicht clientseitig.
+    // visible_fields = HR-Auswahl; DB-Funktion schneidet gegen die Erlaubnisliste (kann nur wegnehmen).
+    const {data,error}=await sb.from('showcases')
+      .insert({title:form.title, project_id:form.project_id, note:form.note,
+               cv_ids:form.selectedCvs, visible_fields:form.visible_fields})
+      .select().single();
+    if(error){ alert('Fehler beim Erstellen: '+(error.message||'unbekannt')); return; }
     setShowCreate(false);
-    setForm({title:'',project_id:'',note:'',selectedCvs:[]});
+    setForm({title:'',project_id:'',note:'',selectedCvs:[],visible_fields:SHOWCASE_DEFAULT_FIELDS});
+    setShowcases(s=>[data,...s]);   // sofortiges Feedback; Realtime hält den Rest konsistent
   }
 
   function getLink(token){
-    return window.location.origin+'/showcase.html?token='+token;
+    // Öffentliche Kunden-URL — fest auf client-Subdomain (login-lose Seite via Caddy file_server).
+    return 'https://client.tive360.de/showcase.html?token='+token;
   }
 
   function copyLink(token){
@@ -15004,8 +15055,11 @@ function CandidateShowcase({cvList, projects}){
     alert('Link kopiert!');
   }
 
-  function deleteShowcase(id){
-    if(window.confirm('Showcase löschen?')) setShowcases(s=>s.filter(x=>x.id!==id));
+  async function deleteShowcase(id){
+    if(!window.confirm('Showcase löschen?')) return;
+    const {error}=await sb.from('showcases').delete().eq('id',id);
+    if(error){ alert('Fehler beim Löschen: '+(error.message||'unbekannt')); return; }
+    setShowcases(s=>s.filter(x=>x.id!==id));
   }
 
   return(
@@ -15028,10 +15082,10 @@ function CandidateShowcase({cvList, projects}){
                     placeholder="z.B. HC Schulungsgruppe Aug 2026"/>
                 </div>
                 <div className="form-group">
-                  <label className="form-label">Projekt</label>
+                  <label className="form-label">Projekt *</label>
                   <select className="form-select" value={form.project_id}
                     onChange={e=>setF('project_id',e.target.value)}>
-                    <option value="">Kein Projekt</option>
+                    <option value="">Projekt wählen…</option>
                     {projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
                   </select>
                 </div>
@@ -15041,6 +15095,45 @@ function CandidateShowcase({cvList, projects}){
                 <textarea className="form-input" rows={2} value={form.note}
                   onChange={e=>setF('note',e.target.value)}
                   placeholder="z.B. Vorauswahl für Q3 Ramp-Up — alle Kandidaten haben B2+ Deutsch"/>
+              </div>
+
+              {/* §11 Sichtbare Felder — HR-Auswahl. DB schneidet gegen die Erlaubnisliste. */}
+              <div style={{marginBottom:16}}>
+                <div style={{fontWeight:600,fontSize:12,marginBottom:6,color:'var(--text)'}}>
+                  Sichtbare Felder für den Kunden ({form.visible_fields.length} gewählt):
+                </div>
+                <div style={{fontSize:11,color:'var(--muted)',marginBottom:10}}>
+                  Nur angehakte Felder erscheinen beim Kunden. Kontaktdaten (E-Mail/Telefon) und interne Bewertungen sind nie wählbar.
+                </div>
+                {(!form.visible_fields.includes('first_name')&&!form.visible_fields.includes('last_name'))&&(
+                  <div style={{padding:'6px 10px',background:'#fffbeb',border:'1px solid #fde68a',
+                    borderRadius:'var(--r-md)',fontSize:11,color:'#92400e',marginBottom:10}}>
+                    🔒 Anonyme Präsentation — ohne Namen zeigt der Kunde „Kandidat #1, #2, …".
+                  </div>
+                )}
+                <div style={{border:'1px solid var(--border)',borderRadius:'var(--r-md)',
+                  padding:'10px 12px',display:'flex',flexDirection:'column',gap:10}}>
+                  {SHOWCASE_FIELD_GROUPS.map(g=>(
+                    <div key={g.group}>
+                      <div style={{fontSize:10,fontWeight:700,color:'var(--muted)',
+                        textTransform:'uppercase',letterSpacing:'.06em',marginBottom:6}}>{g.group}</div>
+                      <div style={{display:'flex',flexWrap:'wrap',gap:6}}>
+                        {g.fields.map(([key,label])=>{
+                          const on=form.visible_fields.includes(key);
+                          return(
+                            <button key={key} type="button" onClick={()=>toggleField(key)}
+                              style={{fontSize:12,padding:'4px 10px',borderRadius:20,cursor:'pointer',
+                                border:'1px solid '+(on?'var(--blue)':'var(--border)'),
+                                background:on?'var(--blue-bg)':'transparent',
+                                color:on?'var(--blue)':'var(--muted)',fontWeight:on?600:500}}>
+                              {on?'✓ ':''}{label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
 
               <div style={{fontWeight:600,fontSize:12,marginBottom:8,color:'var(--text)'}}>
@@ -15092,8 +15185,8 @@ function CandidateShowcase({cvList, projects}){
                         </div>
                       </div>
                       <div style={{fontSize:10,padding:'2px 8px',borderRadius:20,fontWeight:600,
-                        background:cv.status==='selected'?'var(--green-bg)':cv.status==='test_done'?'var(--blue-bg)':'var(--surface-2)',
-                        color:cv.status==='selected'?'var(--green)':cv.status==='test_done'?'var(--blue)':'var(--muted)'}}>
+                        background:cv.status==='contract'?'var(--green-bg)':'var(--blue-bg)',
+                        color:cv.status==='contract'?'var(--green)':'var(--blue)'}}>
                         {cv.status}
                       </div>
                     </div>
@@ -15140,7 +15233,7 @@ function CandidateShowcase({cvList, projects}){
                 </a>
               </div>
               <div style={{fontSize:11,color:'var(--muted)'}}>
-                {preview.cv_ids.length} Kandidaten · erstellt {preview.created}
+                {preview.cv_ids.length} Kandidaten · erstellt {(preview.created_at||'').slice(0,10)}
                 {preview.note&&<div style={{marginTop:4,fontStyle:'italic'}}>{preview.note}</div>}
               </div>
             </div>
@@ -15185,7 +15278,7 @@ function CandidateShowcase({cvList, projects}){
                   <div style={{fontSize:11,color:'var(--muted)',marginTop:2,display:'flex',gap:10}}>
                     {proj&&<span>📋 {proj.name}</span>}
                     <span>👥 {scCvs.length} Kandidaten</span>
-                    <span>📅 {sc.created}</span>
+                    <span>📅 {(sc.created_at||'').slice(0,10)}</span>
                   </div>
                   {sc.note&&<div style={{fontSize:11,color:'var(--muted)',marginTop:3,fontStyle:'italic'}}>{sc.note}</div>}
                 </div>
@@ -19224,7 +19317,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
       accounts: JSON.parse(localStorage.getItem('jsr_accounts_v1')||'[]'),
       clients: clients, /* 25a: aus App-State */
       time: JSON.parse(localStorage.getItem('jsr_time_v1')||'[]'),
-      showcases: JSON.parse(localStorage.getItem('jsr_showcases_v1')||'[]'),
+      // Blocker 1: showcases liegen in Supabase (SoT) — nicht mehr ins localStorage-Backup.
       skills, absenceTypes, positions, holidays, workModels, vacationDefaults, pins,
     };
     const json = JSON.stringify(allData, null, 2);
@@ -19262,7 +19355,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
           catch(err){ console.error('[25a] importBackup clients', err); alert('Fehler beim Clients-Import: '+(err.message||'unbekannt')); }
         }
         if(data.time) localStorage.setItem('jsr_time_v1', JSON.stringify(data.time));
-        if(data.showcases) localStorage.setItem('jsr_showcases_v1', JSON.stringify(data.showcases));
+        // Blocker 1: showcases-Import entfällt — liegen in Supabase, nicht mehr im localStorage-Store.
         alert('Import erfolgreich. Seite wird neu geladen.');
         window.location.reload();
       }catch(err){
@@ -21170,13 +21263,11 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
               <div style={{padding:'12px 14px'}}>
                 {[
                   ['jsr_emp_v3','Mitarbeiter'],
-                  ['jsr_cvs_v1','CVs & Bewerber'],
                   ['jsr_plans_v3','Schulungspläne'],
                   ['jsr_payroll_v1','Lohndaten'],
                   ['jsr_projects_v1','Projekte'],
                   ['jsr_locations_v1','Standorte'],
                   ['jsr_time_v1','Zeiterfassung'],
-                  ['jsr_showcases_v1','Showcases'],
                 ].map(([key,label])=>{
                   const val = localStorage.getItem(key);
                   const size = val ? Math.round(val.length/1024*10)/10 : 0;
@@ -22479,10 +22570,11 @@ async function deletePayslipFromDB(slipId){
 
 // ── 4a-1: CVs CRUD on Supabase (Muster: 27b-Payslips load/sub/del + 25a-extra-Overflow) ──
 const CV_COLS = new Set([
+  'id',                                       // PK — muss durch, sonst upsert=Insert (UUID-Guard s.u.)
   'first_name','last_name','email','phone','city','status','project_id','target_role',
   'source','cv_date','age','gender','dialect','education','education_level','experience_years',
   'work_history','language_level','writing_level','languages_str','homeoffice_pref','available_from',
-  'dream','hobbies','travel_wish','photo_url','photo_color','better_email','better_phone',
+  'dream','hobbies','favorite_food','travel_wish','photo_url','photo_color','better_email','better_phone',
   'notes','is_structured','sales_potential',
   'test_answers','test_scores','audios','videos','ai_reasoning','extra',
 ]);

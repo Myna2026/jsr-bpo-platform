@@ -7,6 +7,7 @@
 <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -69,31 +70,42 @@ h1, h2 { font-family: 'Instrument Serif', serif; font-weight: 400; letter-spacin
 <script type="text/babel">
 const {useState,useEffect}=React;
 
+const SB_URL = 'https://msdiyjxckmpvuomnhvjp.supabase.co';
+const SB_KEY = 'sb_publishable_exKYOG6Znhj_JlO0v6erQQ_q0HWWiyl';
+const sb = window.supabase.createClient(SB_URL, SB_KEY);
+
 function lc(l){return l==='C2'||l==='Muttersprachler'?'#059669':l==='C1'?'#16a34a':l==='B2'?'#2563eb':l==='B1'?'#d97706':l==='A2'?'#dc2626':'#9ca3af';}
 function lw(l){return{Muttersprachler:100,C2:100,C1:87,B2:73,B1:58,A2:42,A1:25}[l]||30;}
 function wc(w){return w==='Sehr gut'?'#059669':w==='Gut'?'#2563eb':w==='Mittel'?'#d97706':w==='Schwach'?'#dc2626':'#9ca3af';}
 function sc(s){return s>=90?'#059669':s>=75?'#2563eb':s>=60?'#d97706':'#dc2626';}
+const SLBL={grammar:'Grammatik',vocab:'Wortschatz',listening:'Hören',verstehen:'Verstehen',schreiben:'Schreiben',reading:'Lesen',writing:'Schreiben'};
 function eduBadge(e){
   if(!e) return null;
-  const map={master:{label:'Master',bg:'#ede9fe',col:'#7c3aed'},bachelor:{label:'Bachelor',bg:'#E4EEF0',col:'#0F5661'},in_progress:{label:'Studium laufend',bg:'#fef3c7',col:'#d97706'},apprenticeship:{label:'Berufsausbildung',bg:'#f0fdf4',col:'#059669'}};
+  const map={master:{label:'Master',bg:'#ede9fe',col:'#7c3aed'},bachelor:{label:'Bachelor (laufend)',bg:'#E4EEF0',col:'#0F5661'},bachelor_done:{label:'Bachelor',bg:'#E4EEF0',col:'#0F5661'},in_progress:{label:'Studium laufend',bg:'#fef3c7',col:'#d97706'},school:{label:'Schule',bg:'#f0fdf4',col:'#059669'},apprenticeship:{label:'Berufsausbildung',bg:'#f0fdf4',col:'#059669'}};
   const d=map[e];
   return d?<span className="badge" style={{background:d.bg,color:d.col}}>🎓 {d.label}</span>:null;
 }
 
+// §11: get_showcase liefert nur Erlaubnisliste ∩ visible_fields (HR-Auswahl). Jede
+// Sektion ist &&-guarded → rendert nur, wenn HR das Feld freigeschaltet hat. Hart
+// gesperrte Felder (notes, is_structured, sales_potential, better_*, email, phone)
+// kommen nie im Payload — daher bewusst KEINE Blöcke dafür.
 function Card({cv,idx}){
-  const [exp,setExp]=useState(false);
   const scores=cv.test_scores||{};
   const scoreVals=Object.values(scores).map(Number);
   const avg=scoreVals.length?Math.round(scoreVals.reduce((a,b)=>a+b,0)/scoreVals.length):null;
-  const SLBL={grammar:'Grammatik',vocab:'Wortschatz',listening:'Hören',verstehen:'Verstehen',schreiben:'Schreiben',reading:'Lesen',writing:'Schreiben'};
   const wHistory=(cv.work_history||'').split('\n').filter(Boolean);
+  // Namen-Fallback: ohne Vor-/Nachname (anonyme Präsentation) → „Kandidat #N".
+  const hasName=cv.first_name||cv.last_name;
+  const displayName=hasName?[cv.first_name,cv.last_name].filter(Boolean).join(' '):'Kandidat #'+(idx+1);
+  const avatarText=hasName?((cv.first_name||'?')[0]+(cv.last_name||'?')[0]):'👤';
 
   return(
     <div className="card">
       <div className="top" style={{background:cv.photo_color||'linear-gradient(135deg,#0F5661,#0B454E)'}}>
         <div className="av" style={{background:cv.photo_url?'transparent':'rgba(255,255,255,.15)'}}>
           {cv.photo_url?<img src={cv.photo_url} style={{width:'100%',height:'100%',borderRadius:'50%',objectFit:'cover'}}/>
-            :(cv.first_name||'?')[0]+(cv.last_name||'?')[0]}
+            :avatarText}
         </div>
         <div style={{display:'flex',flexDirection:'column',alignItems:'flex-end',gap:6}}>
           <div style={{background:'rgba(0,0,0,.25)',borderRadius:20,padding:'3px 10px',
@@ -108,22 +120,24 @@ function Card({cv,idx}){
 
       <div className="body">
 
-        {/* Name */}
+        {/* Name (mit Anonym-Fallback) */}
         <div>
-          <div className="name">{cv.first_name} {cv.last_name}</div>
+          <div className="name">{displayName}</div>
           <div className="sub">{[cv.age&&cv.age+' Jahre',cv.gender,cv.city].filter(Boolean).join(' · ')}</div>
         </div>
 
         <div className="divider"/>
 
         {/* Deutsch Sprechen */}
-        <div>
-          <div className="lbl">Deutsch — Sprechen</div>
-          <div className="bar-wrap">
-            <span className="level" style={{color:lc(cv.language_level)}}>{cv.language_level||'—'}</span>
-            <div className="bar-bg"><div className="bar-fill" style={{width:lw(cv.language_level)+'%',background:lc(cv.language_level)}}/></div>
+        {cv.language_level&&(
+          <div>
+            <div className="lbl">Deutsch — Sprechen</div>
+            <div className="bar-wrap">
+              <span className="level" style={{color:lc(cv.language_level)}}>{cv.language_level}</span>
+              <div className="bar-bg"><div className="bar-fill" style={{width:lw(cv.language_level)+'%',background:lc(cv.language_level)}}/></div>
+            </div>
           </div>
-        </div>
+        )}
 
         {/* Deutsch Schrift */}
         {cv.writing_level&&(
@@ -155,34 +169,28 @@ function Card({cv,idx}){
           </div>
         )}
 
-        <div className="divider"/>
-
-        {/* Bildung & Badges */}
-        <div>
-          <div className="lbl">Bildung & Profil</div>
-          <div style={{display:'flex',flexWrap:'wrap',gap:3,marginBottom:6}}>
-            {eduBadge(cv.education_level||cv.education)}
-            {cv.better_phone&&<span className="badge" style={{background:'#E4EEF0',color:'#0F5661'}}>📞 Telefonstärke</span>}
-            {cv.better_email&&<span className="badge" style={{background:'#E4EEF0',color:'#0F5661'}}>✉ Schriftstärke</span>}
-            {cv.is_structured&&<span className="badge" style={{background:'#dcfce7',color:'#059669'}}>✓ Strukturiert</span>}
-            {cv.sales_potential&&<span className="badge" style={{background:'#fef3c7',color:'#d97706'}}>⭐ Sales-Potenzial</span>}
+        {/* Bildung */}
+        {(cv.education_level||cv.education)&&(
+          <div>
+            <div className="lbl">Bildung</div>
+            {cv.education_level&&<div style={{display:'flex',flexWrap:'wrap',gap:3,marginBottom:6}}>{eduBadge(cv.education_level)}</div>}
+            {(cv.education&&typeof cv.education==='string'&&cv.education.length>3)&&(
+              <div style={{fontSize:12,color:'#374151',marginTop:2}}>🎓 {cv.education}</div>
+            )}
           </div>
-          {(cv.education&&typeof cv.education==='string'&&cv.education.length>3)&&(
-            <div style={{fontSize:12,color:'#374151',marginTop:2}}>🎓 {cv.education}</div>
-          )}
-        </div>
+        )}
 
         {/* Sprachen */}
-        {cv.languages_str&&(
+        {(cv.languages_str||cv.dialect)&&(
           <div>
             <div className="lbl">Sprachen</div>
-            <div style={{fontSize:12,color:'#374151',lineHeight:1.7}}>{cv.languages_str}</div>
+            {cv.languages_str&&<div style={{fontSize:12,color:'#374151',lineHeight:1.7}}>{cv.languages_str}</div>}
             {cv.dialect&&<div style={{fontSize:11,color:'#6b7280',marginTop:3}}>💬 Dialekt: <strong>{cv.dialect}</strong></div>}
           </div>
         )}
 
         {/* Berufserfahrung */}
-        {(cv.experience_years||cv.work_history)&&(
+        {(cv.experience_years||wHistory.length>0)&&(
           <div>
             <div className="lbl">Berufserfahrung {cv.experience_years?'('+cv.experience_years+' Jahre)':''}</div>
             {wHistory.length>0&&(
@@ -194,27 +202,6 @@ function Card({cv,idx}){
                   </div>
                 ))}
               </div>
-            )}
-          </div>
-        )}
-
-        {/* Profil */}
-        {cv.notes&&(
-          <div>
-            <div className="lbl">Persönlichkeit & Stärken</div>
-            <div style={{fontSize:12,color:'#374151',lineHeight:1.7,
-              display:exp?'block':'-webkit-box',
-              WebkitLineClamp:exp?'unset':4,
-              WebkitBoxOrient:'vertical',
-              overflow:exp?'visible':'hidden'}}>
-              {cv.notes}
-            </div>
-            {cv.notes.length>220&&(
-              <button onClick={()=>setExp(e=>!e)}
-                style={{fontSize:11,color:'#7c3aed',background:'none',border:'none',
-                  cursor:'pointer',marginTop:4,padding:0,fontWeight:600}}>
-                {exp?'▲ Weniger':'▼ Mehr lesen'}
-              </button>
             )}
           </div>
         )}
@@ -236,15 +223,16 @@ function Card({cv,idx}){
         )}
 
         {/* Soft facts */}
-        {(cv.dream||cv.hobbies||cv.travel_wish)&&(
+        {(cv.dream||cv.hobbies||cv.favorite_food||cv.travel_wish)&&(
           <div className="softbox">
-            {cv.dream&&<div style={{fontSize:11,color:'#374151',marginBottom:cv.hobbies?4:0}}>🎯 <em>{cv.dream}</em></div>}
-            {cv.hobbies&&<div style={{fontSize:11,color:'#6b7280',marginBottom:cv.travel_wish?3:0}}>❤ {cv.hobbies}</div>}
+            {cv.dream&&<div style={{fontSize:11,color:'#374151',marginBottom:(cv.hobbies||cv.favorite_food||cv.travel_wish)?4:0}}>🎯 <em>{cv.dream}</em></div>}
+            {cv.hobbies&&<div style={{fontSize:11,color:'#6b7280',marginBottom:(cv.favorite_food||cv.travel_wish)?3:0}}>❤ {cv.hobbies}</div>}
+            {cv.favorite_food&&<div style={{fontSize:11,color:'#6b7280',marginBottom:cv.travel_wish?3:0}}>🍽 {cv.favorite_food}</div>}
             {cv.travel_wish&&<div style={{fontSize:11,color:'#6b7280'}}>✈ {cv.travel_wish}</div>}
           </div>
         )}
 
-        {/* Media */}
+        {/* Medien */}
         {((cv.audios&&cv.audios.length>0)||(cv.videos&&cv.videos.length>0))&&(
           <div>
             <div className="lbl">Medien</div>
@@ -276,14 +264,14 @@ function App(){
   useEffect(()=>{
     const token=new URLSearchParams(window.location.search).get('token');
     if(!token){setError('Kein gültiger Link.');return;}
-    try{
-      const showcases=JSON.parse(localStorage.getItem('jsr_showcases_v1')||'[]');
-      const sc=showcases.find(s=>s.token===token);
-      if(!sc){setError('Showcase nicht gefunden oder abgelaufen.');return;}
-      const cvs=JSON.parse(localStorage.getItem('jsr_cvs_v1')||'[]');
-      setShowcase(sc);
-      setCvList(cvs.filter(c=>sc.cv_ids.includes(c.id)));
-    }catch(e){setError('Ladefehler: '+e.message);}
+    (async ()=>{
+      // Öffentliche RPC (anon), SECURITY DEFINER, liefert nur die Whitelist. Token = Zugang.
+      const {data,error}=await sb.rpc('get_showcase',{p_token:token});
+      if(error){setError('Ladefehler: '+(error.message||'unbekannt'));return;}
+      if(!data){setError('Showcase nicht gefunden oder abgelaufen.');return;}
+      setShowcase(data);
+      setCvList(data.candidates||[]);
+    })();
   },[]);
 
   if(error) return(
@@ -299,15 +287,18 @@ function App(){
     </div>
   );
 
+  const n = cvList.length;
+  const countLabel = n === 1 ? '1 Kandidat' : n + ' Kandidaten';
+
   return(
     <div className="wrap">
       <div className="header">
         <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',flexWrap:'wrap',gap:16}}>
           <div style={{flex:1}}>
             <div style={{fontSize:11,fontWeight:700,color:'#7c3aed',textTransform:'uppercase',letterSpacing:'.08em',marginBottom:8}}>TIVE 360° — Kandidatenvorauswahl</div>
-            <h1 style={{fontSize:26,fontWeight:400,color:'#111827',marginBottom:6}}>{showcase.title}</h1>
+            <h1 style={{fontFamily:"'Inter',system-ui,sans-serif",fontSize:30,fontWeight:800,letterSpacing:'-0.02em',lineHeight:1.15,color:'#111827',marginBottom:6}}>{showcase.title}</h1>
             <div style={{fontSize:13,color:'#6b7280',marginBottom:showcase.note?12:0}}>
-              {cvList.length} Kandidat{cvList.length!==1?'en':''} · Erstellt {showcase.created}
+              {countLabel} · Erstellt {(showcase.created_at||'').slice(0,10)}
             </div>
             {showcase.note&&(
               <div style={{padding:'12px 16px',background:'#f0f9ff',borderRadius:10,
