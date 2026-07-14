@@ -14992,9 +14992,24 @@ const SHOWCASE_DEFAULT_FIELDS = ['first_name','last_name','age','city','experien
 function CandidateShowcase({cvList, projects}){
   const [showcases, setShowcases] = useState([]);
   const [showCreate, setShowCreate] = useState(false);
+  const [editId, setEditId] = useState(null);   // null = Erstellen, sonst = bearbeitete Showcase-ID
   const [form, setForm] = useState({title:'', project_id:'', note:'', selectedCvs:[], visible_fields:SHOWCASE_DEFAULT_FIELDS});
   const [preview, setPreview] = useState(null);
   const setF=(k,v)=>setForm(f=>({...f,[k]:v}));
+  const EMPTY_FORM = {title:'', project_id:'', note:'', selectedCvs:[], visible_fields:SHOWCASE_DEFAULT_FIELDS};
+
+  function openCreate(){ setForm(EMPTY_FORM); setEditId(null); setShowCreate(true); }
+  function openEdit(sc){
+    // Vorbelegen AUS DER DB-Zeile — visible_fields aus sc, NICHT der Default,
+    // sonst überschreibt HR beim Speichern seine eigene Auswahl.
+    setForm({
+      title: sc.title||'', project_id: sc.project_id||'', note: sc.note||'',
+      selectedCvs: sc.cv_ids||[],
+      visible_fields: sc.visible_fields||SHOWCASE_DEFAULT_FIELDS,
+    });
+    setEditId(sc.id); setShowCreate(true);
+  }
+  function closeModal(){ setShowCreate(false); setEditId(null); setForm(EMPTY_FORM); }
 
   // Showcases liegen in Supabase (Blocker 1). Laden + Realtime statt localStorage.
   async function loadShowcases(){
@@ -15011,7 +15026,10 @@ function CandidateShowcase({cvList, projects}){
   },[]);
 
   // Präsentierbar = nach interner Vorauswahl: selection1/selection2/contract.
-  const approvedCvs = cvList.filter(c=>['selection1','selection2','contract'].includes(c.status));
+  // Union mit bereits gewählten CVs: ein inzwischen weitergewanderter (z. B. active)
+  // Kandidat bleibt im Bearbeiten-Modus sicht- und abwählbar, sonst nicht entfernbar.
+  const approvedCvs = cvList.filter(c=>
+    ['selection1','selection2','contract'].includes(c.status) || form.selectedCvs.includes(c.id));
 
   function toggleCv(id){
     setForm(f=>({...f,
@@ -15029,10 +15047,22 @@ function CandidateShowcase({cvList, projects}){
     }));
   }
 
-  async function createShowcase(){
+  async function saveShowcase(){
     if(!form.title.trim()) return alert('Bitte Titel eingeben.');
-    if(!form.project_id) return alert('Bitte ein Projekt wählen.');   // project_id ist NOT NULL
+    if(!editId && !form.project_id) return alert('Bitte ein Projekt wählen.');   // Pflicht nur beim Erstellen
     if(form.selectedCvs.length===0) return alert('Mindestens einen Kandidaten wählen.');
+    if(editId){
+      // Token, id und project_id bleiben unangetastet — der verschickte Kunden-Link bleibt gültig.
+      const {error}=await sb.from('showcases')
+        .update({title:form.title, note:form.note, cv_ids:form.selectedCvs, visible_fields:form.visible_fields})
+        .eq('id', editId);
+      if(error){ alert('Fehler beim Speichern: '+(error.message||'unbekannt')); return; }
+      setShowcases(s=>s.map(x=>x.id===editId
+        ? {...x, title:form.title, note:form.note, cv_ids:form.selectedCvs, visible_fields:form.visible_fields}
+        : x));   // sofortiges Feedback; Realtime hält den Rest konsistent
+      closeModal();
+      return;
+    }
     // Token/id/created_at vergibt die DB (gen_random_bytes/uuid/now) — nicht clientseitig.
     // visible_fields = HR-Auswahl; DB-Funktion schneidet gegen die Erlaubnisliste (kann nur wegnehmen).
     const {data,error}=await sb.from('showcases')
@@ -15040,9 +15070,8 @@ function CandidateShowcase({cvList, projects}){
                cv_ids:form.selectedCvs, visible_fields:form.visible_fields})
       .select().single();
     if(error){ alert('Fehler beim Erstellen: '+(error.message||'unbekannt')); return; }
-    setShowCreate(false);
-    setForm({title:'',project_id:'',note:'',selectedCvs:[],visible_fields:SHOWCASE_DEFAULT_FIELDS});
     setShowcases(s=>[data,...s]);   // sofortiges Feedback; Realtime hält den Rest konsistent
+    closeModal();
   }
 
   function getLink(token){
@@ -15070,8 +15099,8 @@ function CandidateShowcase({cvList, projects}){
         <div className="modal-overlay">
           <div className="modal" style={{width:680,maxHeight:'90vh',overflowY:'auto'}}>
             <div className="modal-header">
-              <div style={{fontSize:15,fontWeight:700}}>🎯 Neuen Kandidaten-Showcase erstellen</div>
-              <button className="btn" onClick={()=>setShowCreate(false)}>×</button>
+              <div style={{fontSize:15,fontWeight:700}}>{editId?'✎ Showcase bearbeiten':'🎯 Neuen Kandidaten-Showcase erstellen'}</div>
+              <button className="btn" onClick={closeModal}>×</button>
             </div>
             <div className="modal-body">
               <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:12}}>
@@ -15082,9 +15111,11 @@ function CandidateShowcase({cvList, projects}){
                     placeholder="z.B. HC Schulungsgruppe Aug 2026"/>
                 </div>
                 <div className="form-group">
-                  <label className="form-label">Projekt *</label>
+                  <label className="form-label">Projekt {editId?'(fest)':'*'}</label>
                   <select className="form-select" value={form.project_id}
-                    onChange={e=>setF('project_id',e.target.value)}>
+                    onChange={e=>setF('project_id',e.target.value)}
+                    disabled={!!editId}
+                    style={editId?{background:'var(--surface-2)',color:'var(--muted)'}:undefined}>
                     <option value="">Projekt wählen…</option>
                     {projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
                   </select>
@@ -15195,9 +15226,11 @@ function CandidateShowcase({cvList, projects}){
               </div>
 
               <div style={{display:'flex',gap:10,justifyContent:'flex-end',marginTop:16}}>
-                <button className="btn" onClick={()=>setShowCreate(false)}>Abbrechen</button>
-                <button className="btn btn-primary" onClick={createShowcase}>
-                  🔗 Showcase erstellen ({form.selectedCvs.length} Kandidaten)
+                <button className="btn" onClick={closeModal}>Abbrechen</button>
+                <button className="btn btn-primary" onClick={saveShowcase}>
+                  {editId
+                    ? '💾 Änderungen speichern'
+                    : '🔗 Showcase erstellen ('+form.selectedCvs.length+' Kandidaten)'}
                 </button>
               </div>
             </div>
@@ -15249,7 +15282,7 @@ function CandidateShowcase({cvList, projects}){
             Kandidatengruppen für Kunden zusammenstellen und als Link teilen
           </div>
         </div>
-        <button className="btn btn-primary" onClick={()=>setShowCreate(true)}>
+        <button className="btn btn-primary" onClick={openCreate}>
           + Neuen Showcase erstellen
         </button>
       </div>
@@ -15289,6 +15322,7 @@ function CandidateShowcase({cvList, projects}){
                     📋 Link kopieren
                   </button>
                   <button className="btn btn-sm" onClick={()=>setPreview(sc)}>👁 Vorschau</button>
+                  <button className="btn btn-sm" onClick={()=>openEdit(sc)}>✎ Bearbeiten</button>
                   <a href={getLink(sc.token)} target="_blank"
                     className="btn btn-sm" style={{textDecoration:'none'}}>
                     🔗 Öffnen
