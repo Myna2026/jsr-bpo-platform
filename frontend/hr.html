@@ -7127,7 +7127,22 @@ function PayrollView({employees, projects, showToast}){
     return ()=>{ try{ sb.removeChannel(chan); }catch(e){} };
   },[]);
 
-  const activeEmps = employees.filter(e=>e&&e.status==='active');
+  // Lohnlauf-Eligibility datumsgetrieben, NICHT über den Live-Status — sonst ändern
+  // sich historische Monate rückwirkend (ein jetzt Gekündigter fiele aus Vergangenheits-
+  // monaten). Ein zum 15.03. Gekündigter erscheint im März, ab April nicht mehr.
+  const [_pyY,_pyM]=selMonth.split('-').map(Number);
+  const monthStart=new Date(_pyY,_pyM-1,1), monthEnd=new Date(_pyY,_pyM,0);
+  const startOf=e=>e.contract?.start||e.contract_start||e.start_date||e.hire_date||null;
+  const endOf  =e=>e.termination_date||e.terminated_at||null;
+  // Bezahlbare Mitarbeiter-Phasen (inactive + CV-Funnel bewusst raus). training_planned
+  // rein: Vertrag ist unterschrieben, das contract.start-Gate regelt den Rest.
+  const PAID_PHASES=new Set(['contract','training_planned','training','active','terminated']);
+  const activeEmps = employees.filter(e=>{
+    if(!e||!PAID_PHASES.has(e.status)) return false;
+    const sd=startOf(e); if(sd&&new Date(sd)>monthEnd) return false;               // noch nicht eingetreten
+    if(e.status==='terminated'){ const ed=endOf(e); if(ed&&new Date(ed)<monthStart) return false; } // vor diesem Monat ausgetreten
+    return true;                                                                    // fehlt ein Datum → drin lassen, nie eine Zahlung verschlucken
+  });
 
   const workDays = useMemo(()=>{
     const [y,m]=selMonth.split('-').map(Number);
@@ -7846,7 +7861,7 @@ function PayrollView({employees, projects, showToast}){
           {months.map(m=><option key={m} value={m}>{fmtMonth(m)}</option>)}
         </select>
         <select className="form-select" style={{width:200}} value={selEmp} onChange={e=>setSelEmp(e.target.value)}>
-          <option value='all'>Alle aktiven MA ({activeEmps.length})</option>
+          <option value='all'>Alle MA im Lohnlauf ({activeEmps.length})</option>
           {activeEmps.map(e=><option key={e.id} value={e.id}>{e.first_name} {e.last_name}</option>)}
         </select>
         <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
@@ -7888,6 +7903,11 @@ function PayrollView({employees, projects, showToast}){
                 const slip=getSlip(emp.id,selMonth);
                 const locked=isLocked(slip);
                 const hasContract=!!emp.hourly_rate;
+                // Eintritts-/Austrittsmonat: voller Betrag bleibt, aber sichtbarer Hinweis (kein Auto-Pro-rata).
+                const _sd=startOf(emp), _ed=endOf(emp);
+                const enteredThisMonth=_sd&&new Date(_sd)>=monthStart&&new Date(_sd)<=monthEnd;
+                const exitedThisMonth =emp.status==='terminated'&&_ed&&new Date(_ed)>=monthStart&&new Date(_ed)<=monthEnd;
+                const deDate=d=>new Date(d).toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit',year:'numeric'});
                 // 27c-Fix: existiert ein persistierter Slip → dessen Werte zeigen (Tabelle = DB-Wahrheit).
                 // Kein Slip → live-calcSalary nur als Vorschau, und nur bei Vertrag.
                 const displayBase       = slip ? slip.base             : (hasContract ? s.base            : null);
@@ -7900,6 +7920,8 @@ function PayrollView({employees, projects, showToast}){
                       <div style={{fontWeight:600,fontSize:13}}>{emp.first_name} {emp.last_name}</div>
                       <div style={{fontSize:10,color:'var(--muted)'}}>#{emp.staff_number} · {emp.position}</div>
                       {!hasContract&&<div style={{fontSize:10,color:'var(--red)',fontWeight:600}}>⚠ Kein Vertrag</div>}
+                      {enteredThisMonth&&<div style={{fontSize:10,color:'var(--amber)',fontWeight:600}}>⚠ Eintritt am {deDate(_sd)} — Betrag anteilig prüfen</div>}
+                      {exitedThisMonth&&<div style={{fontSize:10,color:'var(--amber)',fontWeight:600}}>⚠ Austritt am {deDate(_ed)} — Betrag anteilig prüfen</div>}
                     </td>
                     <td style={{fontFamily:'var(--mono)',fontSize:13,fontWeight:700,textAlign:'right',color:displayBase!=null?'var(--blue)':'var(--muted)'}}>
                       {displayBase!=null?eur(displayBase):'—'}

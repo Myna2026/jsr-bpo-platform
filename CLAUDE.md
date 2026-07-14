@@ -766,6 +766,22 @@ werden, dass:
 Risiko bei Nicht-Beachtung: Gehälter sind unstimmig, Mitarbeiter werden
 zu viel oder zu wenig bezahlt.
 
+### Lohnlauf-Zugehörigkeit über Beschäftigungszeiträume (offen: `inactive`)
+Der Lohnlauf (`PayrollView`) bestimmt die Monats-Zugehörigkeit eines
+Mitarbeiters seit dem Datums-Fix **datumsgetrieben** (Eintritt =
+`contract.start`, Austritt = `termination_date`), nicht mehr über den
+Live-`status`. Damit bleiben historische Monate stabil und ein im
+Austrittsmonat Gekündigter wird noch abgerechnet.
+
+**Ungelöst:** `inactive` (Elternzeit, Langzeitkrankheit) hat keinen
+eigenen Zeitraum. Ein *aktuell* inaktiver Mitarbeiter fällt darum aus
+**allen** Monaten des Lohnlaufs — auch aus denen, in denen er aktiv war.
+Das ist dieselbe Krankheit wie der behobene Hauptbug (Status statt
+Historie), nur für einen anderen Status. Saubere Lösung braucht echte
+**Beschäftigungszeiträume** (z. B. `inactive_since`/`inactive_until` oder
+allgemein eine Statushistorie mit Von-Bis), nicht einen einzelnen
+Live-Statuswert. Eigener Vorhaben-Schnitt, vor Produktivgang zu klären.
+
 ## Auth-Konsolidierung — offene Go-Live-Blocker
 
 Kontext: Login/Rollen/Portale laufen bereits über Supabase (`app_users` +
