@@ -250,6 +250,18 @@ begin
 end $$;
 
 
+-- ----------------------------------------------------------------------------
+-- 9) Dedup-Schutz für GDoc-Sync (4a-3): partielle unique-Indizes.
+--    Echte Duplikate kollidieren hart (23505), leere/NULL bleiben erlaubt
+--    (mehrere NULL sind zulaessig). Der Frontend-Bulk-Insert dedupt zusaetzlich
+--    per JS-Vorfilterung; diese Indizes sind das Netz gegen Parallel-Sync.
+-- ----------------------------------------------------------------------------
+create unique index if not exists idx_cvs_phone_unique
+  on public.cvs(phone) where phone is not null and phone <> '';
+create unique index if not exists idx_cvs_email_unique
+  on public.cvs(email) where email is not null and email <> '';
+
+
 -- ============================================================================
 -- FERTIG. Danach: Frontend-Umbau (CVsView/RecruitingKanban/GDoc-Sync → sb.from
 -- ('cvs'); client.html ShowcasesView → sb.rpc('list_my_showcases'); showcase.html

@@ -1331,10 +1331,10 @@ async function syncGoogleDoc(cfg, dryRun){
     work_hours: ci('hours',   7),  // H Arbeitszeit
   };
 
-  // Load existing CVs for dedup
-  let existing = [];
-  try{ existing = JSON.parse(localStorage.getItem('jsr_cvs_v1')||'[]'); }catch(e){}
-  const existingPhones = new Set(existing.map(c=>(c.phone||'').replace(/\s/g,'').replace(/^\+/,'')));
+  // 4a-3: Dedup gegen DB (cvs.phone), nicht localStorage
+  const {data:existingRows} = await sb.from('cvs').select('phone');
+  const existingPhones = new Set((existingRows||[]).map(c=>(c.phone||'').replace(/\s/g,'').replace(/^\+/,'')).filter(Boolean));
+  const payloads = [];
 
   const today = new Date().toISOString().slice(0,10);
   let added = 0;
@@ -1385,59 +1385,29 @@ async function syncGoogleDoc(cfg, dryRun){
     if(ccExp&&ccExp.toLowerCase()!=='nein'&&ccExp!=='0'&&ccExp!=='') workHistory += 'CC-Erfahrung: '+ccExp;
     if(ccName) workHistory += (workHistory?' · ':'')+ccName;
 
-    const cv = {
-      id:             'cv_gs_'+Date.now()+'_'+i,
-      status:         'cv_inbound',
-      source:         'Google Sheet',
-      cv_date:        cvDate,
-      first_name:     firstName,
-      last_name:      lastName,
-      phone:          phone,
-      email:          '',
-      language_level: level,
-      work_hours:     workHoursVal,
-      available_from: startDate,
-      work_history:   workHistory,
-      notes:          'Import: '+new Date().toLocaleDateString('de-DE')+(rawDate?' · Eingang: '+rawDate:''),
-      photo_color:    '#7c3aed',
-    };
-    existing.push(cv);
-    added++;
+    // 4a-3: DB-Payload — keine id (uuid), work_hours→extra, available_from strikt (Rohtext→extra), '' → null
+    const availDate = dateOrNull(startDate);
+    payloads.push({
+      status:'cv_inbound', source:'Google Sheet', cv_date:cvDate,
+      first_name:nz(firstName), last_name:nz(lastName), phone:nz(phone),
+      language_level:nz(level), available_from:availDate,
+      work_history:nz(workHistory),
+      notes:nz('Import: '+new Date().toLocaleDateString('de-DE')+(rawDate?' · Eingang: '+rawDate:'')),
+      photo_color:'#7c3aed',
+      extra:{ work_hours:workHoursVal, ...(!availDate&&startDate?{available_text:startDate}:{}) },
+    });
   });
 
-  if(added>0){
-    localStorage.setItem('jsr_cvs_v1', JSON.stringify(existing));
-    localStorage.setItem('jsr_gdoc_last_sync', new Date().toISOString());
-    localStorage.setItem('jsr_gdoc_last_count', String(added));
-  } else {
-    localStorage.setItem('jsr_gdoc_last_sync', new Date().toISOString());
-    localStorage.setItem('jsr_gdoc_last_count', '0');
-  }
+  // 4a-3: Bulk-Insert in cvs (Per-Row-Fallback bei Konflikt). Fehler → hoch (Button zeigt ihn).
+  const {inserted} = await bulkInsertCvs(payloads);
+  added = inserted;
+  localStorage.setItem('jsr_gdoc_last_sync', new Date().toISOString());
+  localStorage.setItem('jsr_gdoc_last_count', String(added));
 
   return added;
 }
 
-// ── AUTO-SCHEDULER: 08:00 / 12:00 / 17:00 ──────────────────────────────────
-(function scheduleGDocSync(){
-  const SYNC_HOURS = [8, 12, 17];
-  function msUntilNext(){
-    const now = new Date();
-    for(const h of SYNC_HOURS){
-      const next = new Date(now); next.setHours(h,0,0,0);
-      if(next > now) return next - now;
-    }
-    const tomorrow = new Date(now); tomorrow.setDate(tomorrow.getDate()+1); tomorrow.setHours(8,0,0,0);
-    return tomorrow - now;
-  }
-  function doSync(){
-    const cfg = JSON.parse(localStorage.getItem('jsr_gdoc_sync')||'{}');
-    syncGoogleDoc(cfg, false)
-      .then(n=>{ if(n>0){ console.log('[GDoc] '+n+' neue Bewerber'); window.dispatchEvent(new Event('jsr_cvs_updated')); }})
-      .catch(e=>console.warn('[GDoc Sync Fehler]', e.message));
-    setTimeout(doSync, msUntilNext());
-  }
-  setTimeout(doSync, msUntilNext());
-})();
+// 4a-3: Auto-Scheduler entfernt — GDoc-Sync nur noch manuell (Button / GdocSyncWidget / CvSyncView).
 </script><script type="text/babel">// ══════════════════════════════════════════════════════════════════════════════
 // VACATION ENTITLEMENT ENGINE
 // Calculates vacation days based on contract start, seniority, admin config
@@ -22512,6 +22482,30 @@ const CV_DATE_COLS    = new Set(['cv_date','available_from']);
 const CV_NOTNULL_COLS = new Set(['status']); // NOT NULL → '' behalten, NICHT nach null
 let   CV_WARNED_FIELDS = new Set();
 
+// 4a-3: GDoc-Bulk-Insert umgeht saveCvToDB → Normalisierung + Insert-Robustheit hier.
+const nz = (v) => (v===''||v==null) ? null : v;                 // leerer Text/undefined → null
+const dateOrNull = (v) => {                                     // nur echtes Volldatum → sonst null (kein 22P02)
+  const s=String(v||'').trim();
+  if(/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const m=s.match(/^(\d{1,2})[.\/](\d{1,2})[.\/](\d{4})$/);
+  return m ? m[3]+'-'+m[2].padStart(2,'0')+'-'+m[1].padStart(2,'0') : null;
+};
+// Bulk-Insert; bei Konflikt Fallback auf Einzel-Zeilen, damit EINE Dublette (23505,
+// phone ODER email) nicht den ganzen Batch killt. Echte Fehler reichen hoch.
+async function bulkInsertCvs(payloads){
+  if(!payloads || !payloads.length) return {inserted:0, dupSkipped:0};
+  const {error} = await sb.from('cvs').insert(payloads);
+  if(!error) return {inserted:payloads.length, dupSkipped:0};
+  let inserted=0, dupSkipped=0;
+  for(const p of payloads){
+    const {error:e1} = await sb.from('cvs').insert(p);
+    if(!e1) inserted++;
+    else if(e1.code==='23505') dupSkipped++;
+    else throw new Error(dbErrMsg(e1));
+  }
+  return {inserted, dupSkipped};
+}
+
 // Alias-Bridge (4a-1): DB-Spalte ist project_id; Konsumenten lesen bis 4a-2 noch target_project.
 function cvWithAlias(c){ return c ? {...c, target_project: c.project_id} : c; }
 // Feldnamen-Map vor Payload-Build: target_project → project_id (Master-Spalte).
@@ -23574,7 +23568,7 @@ function AiEndpointView(){
 }
 // ══ CV-Sync aus öffentlichem Google Sheet (Feature 20) ══
 function loadCvSyncConfig(){
-  const DEF={enabled:false, sheet_url:'', csv_url:'', auto_sync_on_login:false,
+  const DEF={enabled:false, sheet_url:'', csv_url:'',
     mapping:{name:'Name',email:'Email',phone:'Telefon',skill:'Skill',project:'Projekt',date:'Datum'},
     last_sync_at:null, last_sync_count:0, last_sync_skipped:0, last_error:null};
   try{ const p=JSON.parse(localStorage.getItem('jsr_cv_sync_config_v1')||'null'); if(!p) return DEF;
@@ -23645,9 +23639,10 @@ async function syncCvsFromSheet(){
   const projByName=(nm)=>{ if(!nm) return ''; const n=nm.trim().toLowerCase(); if(!n) return '';
     let p=projects.find(x=>(x.name||'').toLowerCase()===n); if(p) return p.id;
     p=projects.find(x=>{const xn=(x.name||'').toLowerCase(); return xn&&(xn.includes(n)||n.includes(xn));}); return p?p.id:''; };
-  let existing=[]; try{ existing=JSON.parse(localStorage.getItem('jsr_cvs_v1')||'[]'); }catch(e){ existing=[]; }
-  const seen=new Set(existing.map(x=>(x.email||'').trim().toLowerCase()).filter(Boolean));
-  let imported=0, skipped=0; const ts=Date.now(); const added=[];
+  // 4a-3: Dedup gegen DB (cvs.email)
+  const {data:existingRows} = await sb.from('cvs').select('email');
+  const seen=new Set((existingRows||[]).map(x=>(x.email||'').trim().toLowerCase()).filter(Boolean));
+  let imported=0, skipped=0; const payloads=[];
   rows.forEach((r,i)=>{
     const email=(r[M.email]||'').trim();
     if(!email){ skipped++; return; }
@@ -23655,14 +23650,18 @@ async function syncCvsFromSheet(){
     const full=(r[M.name]||'').trim(); const sp=full.split(/\s+/).filter(Boolean);
     const first=sp.shift()||''; const last=sp.join(' ');
     const skill=(r[M.skill]||'').trim();
-    added.push({ id:'cvgs_'+ts+'_'+i, first_name:first, last_name:last, email:email,
-      phone:(r[M.phone]||'').trim(), city:'', target_project:projByName(r[M.project]||''),
-      target_role:'Agent', cv_skills:skill?[skill]:[], status:'cv_inbound',
-      cv_date:parseCvDate(r[M.date]||''), source:'Google Sheet',
-      photo_url:'', audios:[], videos:[], test_scores:{}, test_answers:{}, notes:'' });
-    seen.add(email.toLowerCase()); imported++;
+    // 4a-3: DB-Payload — keine id (uuid), target_project→project_id, cv_skills→extra, '' → null
+    payloads.push({ first_name:nz(first), last_name:nz(last), email:nz(email),
+      phone:nz((r[M.phone]||'').trim()), city:null, project_id:projByName(r[M.project]||'')||null,
+      target_role:'Agent', status:'cv_inbound', cv_date:parseCvDate(r[M.date]||''), source:'Google Sheet',
+      notes:null, audios:[], videos:[], test_scores:{}, test_answers:{}, extra:(skill?{cv_skills:[skill]}:{}) });
+    seen.add(email.toLowerCase());
   });
-  if(added.length){ try{ localStorage.setItem('jsr_cvs_v1', JSON.stringify(existing.concat(added))); }catch(e){} }
+  // 4a-3: Bulk-Insert in cvs (Per-Row-Fallback). Echter DB-Fehler → im {error}-Contract zurück.
+  let inserted=0, dupSkipped=0;
+  try{ const res=await bulkInsertCvs(payloads); inserted=res.inserted; dupSkipped=res.dupSkipped; }
+  catch(e){ const msg=e.message||'DB'; finish({last_error:'DB-Import: '+msg}); return {imported:0, skipped, total:rows.length, preview:rows.slice(0,5), error:msg}; }
+  imported = inserted; skipped += dupSkipped;
   finish({last_error:null, last_sync_count:imported, last_sync_skipped:skipped});
   return {imported, skipped, total:rows.length, preview:rows.slice(0,5), error:null};
 }
@@ -23718,10 +23717,7 @@ function CvSyncView({setCvList, projects}){
           <div style={{fontSize:11,color:'var(--muted)',marginTop:6}}>„Skill" → CV-Skills · „Projekt" → Projekt-Zuordnung (Klartext → intern gematcht) · „Datum" → Eingangsdatum.</div>
         </div>
 
-        <label style={{display:'flex',alignItems:'center',gap:10,cursor:'pointer',marginTop:14}}>
-          <input type="checkbox" checked={!!cfg.auto_sync_on_login} onChange={e=>up({auto_sync_on_login:e.target.checked})} style={{width:16,height:16}}/>
-          <span style={{fontSize:14,fontWeight:600}}>Automatisch bei Login syncen</span>
-        </label>
+        {/* 4a-3: Auto-Sync-bei-Login-Checkbox entfernt — funktionslos ohne Auto-Sync */}
 
         <div style={{display:'flex',alignItems:'center',gap:12,marginTop:16}}>
           <button className="btn btn-primary" disabled={busy||!csvUrl} onClick={runSync}>{busy?'⏳ Synchronisiere…':'☁ Jetzt syncen'}</button>
@@ -23808,7 +23804,7 @@ function App(){
         employee_id: await matchEmployeeToUserSb(session.user.email, au.staff_number),  // 25a: Auto-Match über Supabase
         email: session.user.email
       });
-      try{ const _cvcfg=loadCvSyncConfig(); if(_cvcfg.enabled&&_cvcfg.auto_sync_on_login){ syncCvsFromSheet().then(r=>{ if(r&&r.imported){ loadCvsFromDB().then(setCvList); } }).catch(()=>{}); } }catch(_e){}
+      // 4a-3: Login-Auto-Sync entfernt — GDoc-Sync nur manuell.
     }catch(e){ gatingRef.current=false; setPortalDenied(false); setAuthMsg('Verbindungsfehler beim Laden des Profils.'); }
   }
 
