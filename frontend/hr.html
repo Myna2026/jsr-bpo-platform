@@ -15856,7 +15856,12 @@ const LANGUAGE_TEST_QUESTIONS = [
         }
       }
     } else {
-      setEmployees(es=>es.map(e=>e.id===dragging?{...e,status:newStatus,status_changed:new Date().toISOString().slice(0,10)}:e));
+      const emp=(employees||[]).find(e=>e.id===dragging);
+      if(emp){
+        const updated={...emp,status:newStatus,status_changed:new Date().toISOString().slice(0,10)};
+        try{ await saveEmployeeToDB(updated); setEmployees(es=>es.map(e=>e.id===updated.id?updated:e)); }
+        catch(e){ showToast&&showToast('⚠ '+(e.message||'DB'),'error'); }
+      }
     }
     setDragging(null);
     setDragType(null);
@@ -15867,7 +15872,12 @@ const LANGUAGE_TEST_QUESTIONS = [
       const cv=(cvList||[]).find(c=>c.id===itemId);
       if(cv){ try{ await saveCvToDB({...cv,status:'cv_confirmed',cv_confirmed_at:new Date().toISOString().slice(0,10)}); }catch(e){ showToast&&showToast('⚠ '+(e.message||'DB'),'error'); } }
     } else {
-      setEmployees(es=>es.map(e=>e.id===itemId?{...e,status:'cv_confirmed',cv_confirmed_at:new Date().toISOString().slice(0,10)}:e));
+      const emp=(employees||[]).find(e=>e.id===itemId);
+      if(emp){
+        const updated={...emp,status:'cv_confirmed',cv_confirmed_at:new Date().toISOString().slice(0,10)};
+        try{ await saveEmployeeToDB(updated); setEmployees(es=>es.map(e=>e.id===updated.id?updated:e)); }
+        catch(e){ showToast&&showToast('⚠ '+(e.message||'DB'),'error'); }
+      }
     }
   }
 
@@ -15893,7 +15903,9 @@ const LANGUAGE_TEST_QUESTIONS = [
           :<EmployeeModal
               emp={selectedItem}
               projects={projects||[]}
-              onSave={updatedEmp=>{
+              onSave={async updatedEmp=>{
+                try{ await saveEmployeeToDB(updatedEmp); }
+                catch(e){ showToast&&showToast('⚠ '+(e.message||'DB'),'error'); return; }
                 setEmployees(es=>es.map(e=>e.id===updatedEmp.id?updatedEmp:e));
                 setSelectedItem(null);
               }}
@@ -16023,7 +16035,7 @@ const LANGUAGE_TEST_QUESTIONS = [
   );
 }
 
-function OnboardingView({employees, setEmployees}){
+function OnboardingView({employees, setEmployees, showToast}){
   const [selId, setSelId] = useState(null);
   const [hwModal, setHwModal] = useState(null);
   const [empModal, setEmpModal] = useState(null); // {emp, tab} // emp for hardware date modal
@@ -16074,12 +16086,18 @@ function OnboardingView({employees, setEmployees}){
     return cfg[s]||null;
   }
 
-  function markHwDone(emp){
-    setEmployees(es=>es.map(e=>e.id===emp.id?{...e,hw_done:true,hw_done_at:new Date().toISOString().slice(0,10),hardware:'yes'}:e));
+  async function markHwDone(emp){
+    const updated={...emp,hw_done:true,hw_done_at:new Date().toISOString().slice(0,10),hardware:'yes'};
+    try{ await saveEmployeeToDB(updated); }
+    catch(e){ showToast&&showToast('⚠ Speichern fehlgeschlagen: '+dbErrMsg(e),'error'); return; }
+    setEmployees(es=>es.map(e=>e.id===updated.id?updated:e));
   }
 
-  function saveHwDate(emp, date){
-    setEmployees(es=>es.map(e=>e.id===emp.id?{...e,hw_deadline:date}:e));
+  async function saveHwDate(emp, date){
+    const updated={...emp,hw_deadline:date};
+    try{ await saveEmployeeToDB(updated); }
+    catch(e){ showToast&&showToast('⚠ Speichern fehlgeschlagen: '+dbErrMsg(e),'error'); return; }
+    setEmployees(es=>es.map(e=>e.id===updated.id?updated:e));
     setHwModal(null);
   }
 
@@ -16117,7 +16135,11 @@ function OnboardingView({employees, setEmployees}){
         employees={employees}
         projects={[]}
         initialTab={empModal.tab||'hr'}
-        onSave={updated=>{setEmployees(es=>es.map(e=>e.id===updated.id?updated:e));setEmpModal(null);}}
+        onSave={async updated=>{
+          try{ await saveEmployeeToDB(updated); }
+          catch(e){ showToast&&showToast('⚠ Speichern fehlgeschlagen: '+dbErrMsg(e),'error'); return; }
+          setEmployees(es=>es.map(e=>e.id===updated.id?updated:e)); setEmpModal(null);
+        }}
         onClose={()=>setEmpModal(null)}
       />}
 
@@ -24156,18 +24178,37 @@ function App(){
     catch(e){ console.error('[25a] saveEmployee', e); showToast('⚠ Speichern fehlgeschlagen: '+dbErrMsg(e), 'error'); }
     setModal(null);
   }
-  function saveAbsences(emp, keepOpen=false){
+  // Block 1: pessimistisch — erst nach Supabase speichern, State nur bei Erfolg,
+  // Toast + return bei Fehler. Ohne das ging jede Eingabe beim Reload verloren.
+  async function saveAbsences(emp, keepOpen=false){
+    try{ await saveEmployeeToDB(emp); }
+    catch(e){ showToast('⚠ Speichern fehlgeschlagen: '+dbErrMsg(e),'error'); return; }
     setEmployees(es=>es.map(e=>e.id===emp.id?emp:e));
     if(!keepOpen) setAbsenceModal(null);
     else setAbsenceModal(emp);
   }
-  function confirmTerminate(date, reason){
-    setEmployees(es=>es.map(e=>e.id===terminateModal.id?{...e,status:'terminated',terminated_at:date,termination_reason:reason}:e));
+  async function confirmTerminate(date, reason){
+    const emp={...terminateModal,status:'terminated',terminated_at:date,termination_reason:reason};
+    try{ await saveEmployeeToDB(emp); }
+    catch(e){ showToast('⚠ Kündigung fehlgeschlagen: '+dbErrMsg(e),'error'); return; }
+    setEmployees(es=>es.map(e=>e.id===emp.id?emp:e));
     setTerminateModal(null);
   }
-  function saveBonus(emp){setEmployees(es=>es.map(e=>e.id===emp.id?emp:e));setBonusModal(null);}
-  function saveReferral(emp){setEmployees(es=>es.map(e=>e.id===emp.id?emp:e));setReferralModal(null);}
-  function saveQuality(emp){setEmployees(es=>es.map(e=>e.id===emp.id?emp:e));setQualityModal(null);}
+  async function saveBonus(emp){
+    try{ await saveEmployeeToDB(emp); }
+    catch(e){ showToast('⚠ Speichern fehlgeschlagen: '+dbErrMsg(e),'error'); return; }
+    setEmployees(es=>es.map(e=>e.id===emp.id?emp:e)); setBonusModal(null);
+  }
+  async function saveReferral(emp){
+    try{ await saveEmployeeToDB(emp); }
+    catch(e){ showToast('⚠ Speichern fehlgeschlagen: '+dbErrMsg(e),'error'); return; }
+    setEmployees(es=>es.map(e=>e.id===emp.id?emp:e)); setReferralModal(null);
+  }
+  async function saveQuality(emp){
+    try{ await saveEmployeeToDB(emp); }
+    catch(e){ showToast('⚠ Speichern fehlgeschlagen: '+dbErrMsg(e),'error'); return; }
+    setEmployees(es=>es.map(e=>e.id===emp.id?emp:e)); setQualityModal(null);
+  }
   async function promoteToEmployee(cv){
     // Transfer ALL relevant CV fields to employee
     // Salary/hours/schedule ONLY from contract
@@ -24522,7 +24563,7 @@ function App(){
           {view==='orgchart'&&<OrgChart projects={projects} employees={employees} orgCharts={orgCharts} setOrgCharts={setOrgCharts}/>}
           {view==='skillmatrix'&&<SkillMatrix employees={employees} projects={projects}/>}
           {view==='kanban'&&<RecruitingKanban employees={employees} setEmployees={setEmployees} cvList={cvList} setCvList={setCvList} projects={projects} onPromoteToEmployee={promoteToEmployee} showToast={showToast}/>}
-          {view==='onboarding'&&<OnboardingView employees={employees} setEmployees={setEmployees}/>}
+          {view==='onboarding'&&<OnboardingView employees={employees} setEmployees={setEmployees} showToast={showToast}/>}
           {view==='cvs'&&<CVsView cvList={cvList} setCvList={setCvList} projects={projects} onPromoteToEmployee={promoteToEmployee} testQuestions={testQuestions} showToast={showToast}/>}
           {view==='showcase'&&(
             <div>
