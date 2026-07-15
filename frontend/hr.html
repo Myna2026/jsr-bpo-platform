@@ -23108,6 +23108,8 @@ function VacationRequestsView({employees, setEmployees, showToast}){
   const [detail, setDetail] = useState(null);           // T2: geklickter Antrag (from/to editierbar)
   const [rejectModal, setRejectModal] = useState(null); // T3a: abzulehnender Antrag
   const [rejectReason, setRejectReason] = useState('');
+  const [rejectFrom, setRejectFrom] = useState('');     // Schnitt 2: optionaler Gegenvorschlag
+  const [rejectTo, setRejectTo] = useState('');
   const mapReq = r => ({...r, from:r.from_date, to:r.to_date, emp_id:r.employee_id, emp_name:r.employee_name, submitted:(r.created_at||'').slice(0,10)});
   function workdays(fromStr,toStr){
     if(!fromStr||!toStr) return 0;
@@ -23131,7 +23133,7 @@ function VacationRequestsView({employees, setEmployees, showToast}){
 
   function allRequests(){ return requests; }   // schon gemappt + nach created_at sortiert
 
-  async function updateRequest(req, status, reason){
+  async function updateRequest(req, status, reason, counterProposal){
     // Schreib-Reihenfolge KRITISCH: erst die Absence an den Mitarbeiter (Supabase),
     // dann der Antrag-Status. Schlägt die Absence fehl → Antrag bleibt pending
     // (sichtbar, wiederholbar). Nie umgekehrt (genehmigt, aber Abwesenheit fehlt →
@@ -23156,20 +23158,22 @@ function VacationRequestsView({employees, setEmployees, showToast}){
     }
     // Erst NACH erfolgreicher Absence: Status setzen. Bei Genehmigung die (evtl. von HR
     // korrigierten) Daten mitschreiben, damit der Antrag den echten Zeitraum zeigt.
+    // status='counter' schreibt counter_proposal (kein Absence-Write, wartet auf MA).
     const {error}=await sb.from('vacation_requests')
       .update({status, reject_reason:reason||'', approved_by: status==='approved'?'HR':null,
-               ...(status==='approved'?{from_date:req.from, to_date:req.to, days:req.days}:{})})
+               ...(status==='approved'?{from_date:req.from, to_date:req.to, days:req.days}:{}),
+               ...(status==='counter'?{counter_proposal:counterProposal}:{})})
       .eq('id', req.id);
     if(error){ showToast&&showToast('⚠ Status-Update fehlgeschlagen: '+dbErrMsg(error),'error'); return; }
-    setRequests(rs=>rs.map(r=>r.id===req.id?{...r,status,reject_reason:reason||''}:r));   // Realtime bestätigt
-    showToast&&showToast(status==='approved'?'Urlaubsantrag genehmigt ✅':'Urlaubsantrag abgelehnt','info');
+    setRequests(rs=>rs.map(r=>r.id===req.id?{...r,status,reject_reason:reason||'',...(status==='counter'?{counter_proposal:counterProposal}:{})}:r));   // Realtime bestätigt
+    showToast&&showToast(status==='approved'?'Urlaubsantrag genehmigt ✅':status==='counter'?'Gegenvorschlag gesendet 🟠':'Urlaubsantrag abgelehnt','info');
   }
 
   const filtered=allRequests().filter(r=>filter==='all'||r.status===filter);
   const pendingCount=allRequests().filter(r=>r.status==='pending').length;
 
-  const statusColors={pending:'#d97706',approved:'#059669',rejected:'#dc2626'};
-  const statusLabels={pending:'⏳ Ausstehend',approved:'✅ Genehmigt',rejected:'❌ Abgelehnt'};
+  const statusColors={pending:'#d97706',approved:'#059669',rejected:'#dc2626',counter:'#ea580c'};
+  const statusLabels={pending:'⏳ Ausstehend',approved:'✅ Genehmigt',rejected:'❌ Abgelehnt',counter:'🟠 Zu klären'};
   const typeLabels={vacation:'🏖 Urlaub',special:'🟦 Sonderurlaub',unpaid:'❌ Unbez. Abwesenheit'};
 
   return(
@@ -23212,7 +23216,7 @@ function VacationRequestsView({employees, setEmployees, showToast}){
               {detail.status==='pending'&&(
                 <div className="modal-footer">
                   <button className="btn" style={{color:'var(--red)',border:'1px solid var(--red)'}}
-                    onClick={()=>{ setRejectReason(''); setRejectModal(detail); setDetail(null); }}>✗ Ablehnen</button>
+                    onClick={()=>{ setRejectReason(''); setRejectFrom(''); setRejectTo(''); setRejectModal(detail); setDetail(null); }}>✗ Ablehnen</button>
                   <button className="btn btn-primary" style={{background:'var(--green)',border:'none'}}
                     onClick={()=>{ if(!detail.from||!detail.to||detail.from>detail.to){alert('Ungültiger Zeitraum.');return;} updateRequest({...detail, days:workdays(detail.from,detail.to)},'approved'); setDetail(null); }}>✓ Genehmigen</button>
                 </div>
@@ -23229,13 +23233,29 @@ function VacationRequestsView({employees, setEmployees, showToast}){
             <div className="modal-header"><span className="modal-title">✗ Antrag ablehnen</span><button className="btn" onClick={()=>setRejectModal(null)}>×</button></div>
             <div className="modal-body">
               <div style={{fontSize:12,color:'var(--muted)',marginBottom:8}}>{rejectModal.emp_name} · {typeLabels[rejectModal.type]||rejectModal.type} · {rejectModal.from} – {rejectModal.to}</div>
-              <div className="form-group"><label className="form-label">Ablehnungsgrund *</label>
-                <textarea className="form-input" rows={3} value={rejectReason} onChange={e=>setRejectReason(e.target.value)} placeholder="Pflichtfeld — der Mitarbeiter sieht diesen Grund."/></div>
+              <div className="form-group"><label className="form-label">Grund / Begründung *</label>
+                <textarea className="form-input" rows={3} value={rejectReason} onChange={e=>setRejectReason(e.target.value)} placeholder="Pflichtfeld — der Mitarbeiter sieht diesen Text (auch beim Gegenvorschlag)."/></div>
+              <div style={{fontSize:11,color:'var(--muted)',margin:'6px 0 4px'}}>Optional: Gegenvorschlag — dann geht der Antrag als „🟠 Zu klären" zurück an den MA (statt Ablehnung).</div>
+              <div className="form-row">
+                <div className="form-group"><label className="form-label">Von</label><input className="form-input" type="date" value={rejectFrom} onChange={e=>setRejectFrom(e.target.value)}/></div>
+                <div className="form-group"><label className="form-label">Bis</label><input className="form-input" type="date" value={rejectTo} onChange={e=>setRejectTo(e.target.value)}/></div>
+              </div>
             </div>
             <div className="modal-footer">
               <button className="btn" onClick={()=>setRejectModal(null)}>Abbrechen</button>
-              <button className="btn" style={{background:'var(--red)',color:'#fff',border:'none'}}
-                onClick={()=>{ if(!rejectReason.trim()){alert('Bitte einen Grund angeben.');return;} updateRequest(rejectModal,'rejected',rejectReason.trim()); setRejectModal(null); }}>✗ Ablehnen</button>
+              <button className="btn" style={{background:(rejectFrom&&rejectTo)?'var(--amber)':'var(--red)',color:'#fff',border:'none'}}
+                onClick={()=>{
+                  if(!rejectReason.trim()){alert('Bitte einen Grund/Vorschlag angeben.');return;}
+                  if(rejectFrom&&rejectTo){
+                    if(rejectFrom>rejectTo){alert('Gegenvorschlag: „Von" darf nicht nach „Bis" liegen.');return;}
+                    updateRequest(rejectModal,'counter',rejectReason.trim(),{from:rejectFrom,to:rejectTo});
+                  } else if(rejectFrom||rejectTo){
+                    alert('Für einen Gegenvorschlag bitte Von UND Bis setzen.');return;
+                  } else {
+                    updateRequest(rejectModal,'rejected',rejectReason.trim());
+                  }
+                  setRejectModal(null);
+                }}>{(rejectFrom&&rejectTo)?'🟠 Gegenvorschlag senden':'✗ Ablehnen'}</button>
             </div>
           </div>
         </div>
@@ -23308,7 +23328,7 @@ function VacationRequestsView({employees, setEmployees, showToast}){
                     </button>
                     <button className="btn btn-sm"
                       style={{color:'var(--red)',border:'1px solid var(--red)'}}
-                      onClick={(ev)=>{ev.stopPropagation();setRejectReason('');setRejectModal(req);}}>
+                      onClick={(ev)=>{ev.stopPropagation();setRejectReason('');setRejectFrom('');setRejectTo('');setRejectModal(req);}}>
                       ✗ Ablehnen
                     </button>
                   </div>
