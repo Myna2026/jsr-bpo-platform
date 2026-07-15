@@ -782,6 +782,30 @@ Historie), nur für einen anderen Status. Saubere Lösung braucht echte
 allgemein eine Statushistorie mit Von-Bis), nicht einen einzelnen
 Live-Statuswert. Eigener Vorhaben-Schnitt, vor Produktivgang zu klären.
 
+### AbsenceOverview `getYearStats` zählt nur Einzeltage (offen)
+Die Jahres-Tabelle in `AbsenceOverview` (`getYearStats`) zählt Abwesenheiten
+ausschließlich über `a.date` (Einzeltag-Modell). Die aus dem Urlaubsantrag-
+Flow erzeugten **Zeitraum**-Absences (`from`/`to`, kein `date`) werden dort
+**nicht** gezählt — Krank/Urlaub/Sonderurlaub/Unbezahlt-Summen und „Urlaub
+offen" bleiben für genehmigte Anträge zu niedrig. Der Monatskalender + die
+Liste „Kommende Abwesenheiten" wurden bereits range-aware gemacht
+(`a.start||a.from||a.date` … `s<=ds&&en>=ds`); `getYearStats` fehlt noch.
+Fix: die Tage eines Zeitraums innerhalb des Jahres zählen (Werktage,
+konsistent zu `days`). Direkt nach Schnitt 1 des Urlaubs-Features angehen.
+
+### Abwesenheits-Kalender rendert nur die ersten 10 MA (offen)
+Das Monats-Grid in `AbsenceOverview` mappt `activeEmps.slice(0,10)` → bei mehr
+als 10 sichtbaren Mitarbeitern fehlen die restlichen Zeilen komplett (nur die
+ersten 10 werden gezeichnet). Aktuell unkritisch (wenige MA), aber vor
+Produktivgang: Slice entfernen oder Paginierung/Scroll ergänzen.
+
+### Urlaubs-Genehmigung prüft den Mitarbeiter-Status nicht (offen)
+`VacationRequestsView.updateRequest` genehmigt ohne Status-Check — auch für
+`terminated`/`inactive` Mitarbeiter lässt sich Urlaub genehmigen und eine
+Absence schreiben. Vor Produktivgang: Genehmigung auf beschäftigte Status
+beschränken (bzw. Antrag für gekündigte/inaktive MA gar nicht erst zulassen
+oder sichtbar warnen).
+
 ## Auth-Konsolidierung — offene Go-Live-Blocker
 
 Kontext: Login/Rollen/Portale laufen bereits über Supabase (`app_users` +
