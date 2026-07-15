@@ -23117,6 +23117,12 @@ function VacationRequestsView({employees, setEmployees, showToast}){
     while(d<=end){ const dw=d.getDay(); if(dw>=1&&dw<=5) n++; d.setDate(d.getDate()+1); }
     return n;
   }
+  // Offboarding-Schnitt 1: Grenze = frühestes von Austrittsdatum und Vertragsende (null ignorieren).
+  function empExit(emp){
+    const t=emp&&(emp.termination_date||emp.terminated_at)||null;
+    const c=emp&&((emp.contract&&emp.contract.end)||emp.contract_end)||null;
+    return (t&&c)?(t<c?t:c):(t||c||null);
+  }
 
   async function reload(){
     const {data,error}=await sb.from('vacation_requests').select('*').order('created_at',{ascending:false});
@@ -23141,6 +23147,8 @@ function VacationRequestsView({employees, setEmployees, showToast}){
     if(status==='approved'){
       const emp=(employees||[]).find(e=>e.id===req.emp_id);
       if(!emp){ showToast&&showToast('⚠ Mitarbeiter nicht gefunden — nicht genehmigt','error'); return; }
+      const exA=empExit(emp);   // Offboarding-Schnitt 1: nicht über das Austritts-/Vertragsende genehmigen
+      if(exA && req.to > exA){ showToast&&showToast('⚠ Zeitraum liegt nach dem Austritts-/Vertragsende ('+exA+') — nicht genehmigt','error'); return; }
       const exists=(emp.absences||[]).some(a=>a.from_request===req.id);   // Idempotenz
       if(!exists){
         const updated={...emp, absences:[...(emp.absences||[]), {
@@ -23155,6 +23163,11 @@ function VacationRequestsView({employees, setEmployees, showToast}){
         catch(e){ showToast&&showToast('⚠ Abwesenheit fehlgeschlagen — Antrag bleibt offen: '+dbErrMsg(e),'error'); return; }
         setEmployees(es=>es.map(x=>x.id===updated.id?updated:x));
       }
+    }
+    if(status==='counter'){   // Offboarding-Schnitt 1: kein Gegenvorschlag nach dem Austritts-/Vertragsende
+      const cEmp=(employees||[]).find(e=>e.id===req.emp_id);
+      const exC=empExit(cEmp);
+      if(exC && counterProposal && counterProposal.to > exC){ showToast&&showToast('⚠ Gegenvorschlag liegt nach dem Austritts-/Vertragsende ('+exC+')','error'); return; }
     }
     // Erst NACH erfolgreicher Absence: Status setzen. Bei Genehmigung die (evtl. von HR
     // korrigierten) Daten mitschreiben, damit der Antrag den echten Zeitraum zeigt.
