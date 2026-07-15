@@ -23057,55 +23057,67 @@ function EmpHoursWidget({emp}){
 
 
 function VacationRequestsView({employees, setEmployees, showToast}){
-  const [requests, setRequests] = React.useState(()=>{
-    try{return JSON.parse(localStorage.getItem('jsr_vacation_requests_v1')||'{}');}
-    catch(e){return {};}
-  });
-  const [filter, setFilter] = React.useState('pending');
-
-  function reload(){
-    try{setRequests(JSON.parse(localStorage.getItem('jsr_vacation_requests_v1')||'{}'));}
-    catch(e){}
+  // Block 2: Anträge aus Supabase (vacation_requests) statt localStorage — cross-portal.
+  // Alias-Mapping auf die vom JSX erwarteten Feldnamen (from/to/emp_*/submitted).
+  const [requests, setRequests] = useState([]);
+  const [filter, setFilter] = useState('pending');
+  const [detail, setDetail] = useState(null);           // T2: geklickter Antrag (from/to editierbar)
+  const [rejectModal, setRejectModal] = useState(null); // T3a: abzulehnender Antrag
+  const [rejectReason, setRejectReason] = useState('');
+  const mapReq = r => ({...r, from:r.from_date, to:r.to_date, emp_id:r.employee_id, emp_name:r.employee_name, submitted:(r.created_at||'').slice(0,10)});
+  function workdays(fromStr,toStr){
+    if(!fromStr||!toStr) return 0;
+    let d=new Date(fromStr+'T12:00:00'), end=new Date(toStr+'T12:00:00'), n=0;
+    while(d<=end){ const dw=d.getDay(); if(dw>=1&&dw<=5) n++; d.setDate(d.getDate()+1); }
+    return n;
   }
 
-  function allRequests(){
-    const all=[];
-    Object.values(requests).forEach(empReqs=>{
-      empReqs.forEach(r=>all.push(r));
-    });
-    return all.sort((a,b)=>b.submitted.localeCompare(a.submitted));
+  async function reload(){
+    const {data,error}=await sb.from('vacation_requests').select('*').order('created_at',{ascending:false});
+    if(error){ console.error('[vacreq] load', error); return; }
+    setRequests((data||[]).map(mapReq));
   }
+  useEffect(()=>{
+    reload();
+    const ch=sb.channel('vacreq-b2')
+      .on('postgres_changes',{event:'*',schema:'public',table:'vacation_requests'},()=>reload())
+      .subscribe();
+    return ()=>{ sb.removeChannel(ch); };
+  },[]);
 
-  function updateRequest(req, status, reason){
-    const all=JSON.parse(localStorage.getItem('jsr_vacation_requests_v1')||'{}');
-    if(!all[req.emp_id]) return;
-    const idx=all[req.emp_id].findIndex(r=>r.id===req.id);
-    if(idx<0) return;
-    all[req.emp_id][idx]={...all[req.emp_id][idx],status,reject_reason:reason||''};
+  function allRequests(){ return requests; }   // schon gemappt + nach created_at sortiert
 
-    // If approved: add to employee absences
+  async function updateRequest(req, status, reason){
+    // Schreib-Reihenfolge KRITISCH: erst die Absence an den Mitarbeiter (Supabase),
+    // dann der Antrag-Status. Schlägt die Absence fehl → Antrag bleibt pending
+    // (sichtbar, wiederholbar). Nie umgekehrt (genehmigt, aber Abwesenheit fehlt →
+    // MA denkt er hat frei, im System ist er anwesend).
     if(status==='approved'){
-      const empList=JSON.parse(localStorage.getItem('jsr_employees_v1')||'[]');
-      const empIdx=empList.findIndex(e=>e.id===req.emp_id);
-      if(empIdx>=0){
-        const emp=empList[empIdx];
-        const absences=emp.absences||[];
-        absences.push({
-          start:req.from,
-          end:req.to,
-          type:req.type==='vacation'?'vacation':'absent',
-          days:req.days,
-          approved_by:'HR',
-          from_request:req.id,
-        });
-        empList[empIdx]={...emp,absences};
-        localStorage.setItem('jsr_employees_v1',JSON.stringify(empList));
-        setEmployees(empList);
+      const emp=(employees||[]).find(e=>e.id===req.emp_id);
+      if(!emp){ showToast&&showToast('⚠ Mitarbeiter nicht gefunden — nicht genehmigt','error'); return; }
+      const exists=(emp.absences||[]).some(a=>a.from_request===req.id);   // Idempotenz
+      if(!exists){
+        const updated={...emp, absences:[...(emp.absences||[]), {
+          type: req.type,                 // vacation | special | unpaid
+          from: req.from, to: req.to,
+          start: req.from, end: req.to,   // Kompat: Workforce (hr.html) liest start/end
+          days: req.days,
+          paid: req.type!=='unpaid',      // vacation + special bezahlt, unpaid nicht
+          approved: true, approved_by:'HR', from_request:req.id,
+        }]};
+        try{ await saveEmployeeToDB(updated); }
+        catch(e){ showToast&&showToast('⚠ Abwesenheit fehlgeschlagen — Antrag bleibt offen: '+dbErrMsg(e),'error'); return; }
+        setEmployees(es=>es.map(x=>x.id===updated.id?updated:x));
       }
     }
-
-    localStorage.setItem('jsr_vacation_requests_v1',JSON.stringify(all));
-    setRequests({...all});
+    // Erst NACH erfolgreicher Absence: Status setzen. Bei Genehmigung die (evtl. von HR
+    // korrigierten) Daten mitschreiben, damit der Antrag den echten Zeitraum zeigt.
+    const {error}=await sb.from('vacation_requests')
+      .update({status, reject_reason:reason||'', approved_by: status==='approved'?'HR':null,
+               ...(status==='approved'?{from_date:req.from, to_date:req.to, days:req.days}:{})})
+      .eq('id', req.id);
+    if(error){ showToast&&showToast('⚠ Status-Update fehlgeschlagen: '+dbErrMsg(error),'error'); return; }
+    setRequests(rs=>rs.map(r=>r.id===req.id?{...r,status,reject_reason:reason||''}:r));   // Realtime bestätigt
     showToast&&showToast(status==='approved'?'Urlaubsantrag genehmigt ✅':'Urlaubsantrag abgelehnt','info');
   }
 
@@ -23114,10 +23126,77 @@ function VacationRequestsView({employees, setEmployees, showToast}){
 
   const statusColors={pending:'#d97706',approved:'#059669',rejected:'#dc2626'};
   const statusLabels={pending:'⏳ Ausstehend',approved:'✅ Genehmigt',rejected:'❌ Abgelehnt'};
-  const typeLabels={vacation:'🏖 Urlaub',unpaid:'❌ Unbez. Abwesenheit'};
+  const typeLabels={vacation:'🏖 Urlaub',special:'🟦 Sonderurlaub',unpaid:'❌ Unbez. Abwesenheit'};
 
   return(
     <div>
+      {/* T2: Detail-Modal — Mini-Kalender, von/bis editierbar, Genehmigen/Ablehnen */}
+      {detail&&(()=>{
+        const base=new Date((detail.from||new Date().toISOString().slice(0,10))+'T12:00:00');
+        const y=base.getFullYear(), m=base.getMonth();
+        const dim=new Date(y,m+1,0).getDate();
+        const firstDow=(new Date(y,m,1).getDay()||7); // Mo=1..So=7
+        const emp=(employees||[]).find(e=>e.id===detail.emp_id);
+        return(
+          <div className="modal-overlay" onClick={()=>setDetail(null)}>
+            <div className="modal" style={{width:420,maxWidth:'96vw'}} onClick={e=>e.stopPropagation()}>
+              <div className="modal-header">
+                <span className="modal-title">🏖 Antrag — {emp?emp.first_name+' '+emp.last_name:detail.emp_name}</span>
+                <button className="btn" onClick={()=>setDetail(null)}>×</button>
+              </div>
+              <div className="modal-body">
+                <div style={{fontSize:12,color:'var(--muted)',marginBottom:10}}>
+                  {typeLabels[detail.type]||detail.type} · {workdays(detail.from,detail.to)} Arbeitstage{detail.note?' · '+detail.note:''}
+                </div>
+                <div style={{textAlign:'center',fontWeight:700,fontSize:13,marginBottom:6}}>{base.toLocaleDateString('de-DE',{month:'long',year:'numeric'})}</div>
+                <div style={{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:3,marginBottom:12}}>
+                  {['Mo','Di','Mi','Do','Fr','Sa','So'].map(d=><div key={d} style={{fontSize:9,textAlign:'center',color:'var(--muted)'}}>{d}</div>)}
+                  {Array.from({length:firstDow-1},(_,i)=><div key={'b'+i}/>)}
+                  {Array.from({length:dim},(_,i)=>{
+                    const ds=y+'-'+String(m+1).padStart(2,'0')+'-'+String(i+1).padStart(2,'0');
+                    const inRange=detail.from&&detail.to&&ds>=detail.from&&ds<=detail.to;
+                    return <div key={i} style={{textAlign:'center',fontSize:11,padding:'3px 0',borderRadius:4,
+                      background:inRange?'var(--blue-bg)':'transparent',color:inRange?'var(--blue)':'var(--text)',fontWeight:inRange?700:400}}>{i+1}</div>;
+                  })}
+                </div>
+                <div className="form-row">
+                  <div className="form-group"><label className="form-label">Von</label><input className="form-input" type="date" value={detail.from||''} onChange={e=>setDetail(d=>({...d,from:e.target.value}))}/></div>
+                  <div className="form-group"><label className="form-label">Bis</label><input className="form-input" type="date" value={detail.to||''} onChange={e=>setDetail(d=>({...d,to:e.target.value}))}/></div>
+                </div>
+                <div style={{fontSize:11,color:'var(--muted)',marginTop:4}}>HR kann den Zeitraum vor der Genehmigung korrigieren.</div>
+              </div>
+              {detail.status==='pending'&&(
+                <div className="modal-footer">
+                  <button className="btn" style={{color:'var(--red)',border:'1px solid var(--red)'}}
+                    onClick={()=>{ setRejectReason(''); setRejectModal(detail); setDetail(null); }}>✗ Ablehnen</button>
+                  <button className="btn btn-primary" style={{background:'var(--green)',border:'none'}}
+                    onClick={()=>{ if(!detail.from||!detail.to||detail.from>detail.to){alert('Ungültiger Zeitraum.');return;} updateRequest({...detail, days:workdays(detail.from,detail.to)},'approved'); setDetail(null); }}>✓ Genehmigen</button>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* T3a: Ablehnen-Modal — Pflicht-Grund → rejected (kein counter in Schnitt 1) */}
+      {rejectModal&&(
+        <div className="modal-overlay" onClick={()=>setRejectModal(null)}>
+          <div className="modal" style={{width:380,maxWidth:'96vw'}} onClick={e=>e.stopPropagation()}>
+            <div className="modal-header"><span className="modal-title">✗ Antrag ablehnen</span><button className="btn" onClick={()=>setRejectModal(null)}>×</button></div>
+            <div className="modal-body">
+              <div style={{fontSize:12,color:'var(--muted)',marginBottom:8}}>{rejectModal.emp_name} · {typeLabels[rejectModal.type]||rejectModal.type} · {rejectModal.from} – {rejectModal.to}</div>
+              <div className="form-group"><label className="form-label">Ablehnungsgrund *</label>
+                <textarea className="form-input" rows={3} value={rejectReason} onChange={e=>setRejectReason(e.target.value)} placeholder="Pflichtfeld — der Mitarbeiter sieht diesen Grund."/></div>
+            </div>
+            <div className="modal-footer">
+              <button className="btn" onClick={()=>setRejectModal(null)}>Abbrechen</button>
+              <button className="btn" style={{background:'var(--red)',color:'#fff',border:'none'}}
+                onClick={()=>{ if(!rejectReason.trim()){alert('Bitte einen Grund angeben.');return;} updateRequest(rejectModal,'rejected',rejectReason.trim()); setRejectModal(null); }}>✗ Ablehnen</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
         <div>
           <div style={{fontSize:15,fontWeight:700}}>🏖 Urlaubsanträge</div>
@@ -23152,7 +23231,7 @@ function VacationRequestsView({employees, setEmployees, showToast}){
           const emp=(employees||[]).find(e=>e.id===req.emp_id);
           return(
             <div key={req.id} className="card" style={{overflow:'hidden'}}>
-              <div style={{display:'grid',gridTemplateColumns:'1fr auto',gap:16,padding:'14px 16px'}}>
+              <div onClick={()=>setDetail({...req})} style={{display:'grid',gridTemplateColumns:'1fr auto',gap:16,padding:'14px 16px',cursor:'pointer'}}>
                 <div>
                   <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:6}}>
                     <span style={{fontWeight:700,fontSize:14}}>
@@ -23180,15 +23259,12 @@ function VacationRequestsView({employees, setEmployees, showToast}){
                   <div style={{display:'flex',flexDirection:'column',gap:6,justifyContent:'center'}}>
                     <button className="btn btn-sm"
                       style={{background:'var(--green)',color:'#fff',border:'none',fontWeight:700}}
-                      onClick={()=>updateRequest(req,'approved')}>
+                      onClick={(ev)=>{ev.stopPropagation();updateRequest(req,'approved');}}>
                       ✓ Genehmigen
                     </button>
                     <button className="btn btn-sm"
                       style={{color:'var(--red)',border:'1px solid var(--red)'}}
-                      onClick={()=>{
-                        const reason=window.prompt('Ablehnungsgrund:');
-                        if(reason!==null) updateRequest(req,'rejected',reason);
-                      }}>
+                      onClick={(ev)=>{ev.stopPropagation();setRejectReason('');setRejectModal(req);}}>
                       ✗ Ablehnen
                     </button>
                   </div>

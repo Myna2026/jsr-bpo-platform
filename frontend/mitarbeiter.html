@@ -946,6 +946,19 @@ function getEmpById(id){
 // total_worked_hours) — DB-Row bleibt kompatibel mit renderPayroll/renderHome.
 var PAYSLIPS_ME = [];
 
+// Block 2: eigene Urlaubsanträge aus Supabase (RLS liefert nur eigene). Flach,
+// mit from/to/submitted-Aliassen für die bestehenden Renderer. jsr_vacation_requests_v1 tot.
+var VACREQS_ME = [];
+function loadMyVacreqs(){
+  return sb.from('vacation_requests').select('*').order('created_at',{ascending:false}).then(function(r){
+    if(r.error){ console.error('[b2] vacreq load', r.error); return; }
+    VACREQS_ME = (r.data||[]).map(function(x){
+      return Object.assign({}, x, {from:x.from_date, to:x.to_date, submitted:(x.created_at||'').slice(0,10)});
+    });
+    try{ if(typeof renderUrlaub === 'function') renderUrlaub(); }catch(e){ console.error('[b2] renderUrlaub', e); }
+  });
+}
+
 function slipFromDB(row){
   if(!row) return null;
   return Object.assign({}, row, {
@@ -1094,6 +1107,11 @@ function gateSession(session){
               }
               renderCurrentViewOnRealtime();
             });
+            // Block 2: eigene Urlaubsanträge laden + Realtime (RLS filtert auf eigene)
+            loadMyVacreqs();
+            sb.channel('vacreq-me-b2')
+              .on('postgres_changes', {event:'*', schema:'public', table:'vacation_requests'}, function(){ loadMyVacreqs(); })
+              .subscribe();
           });
         });
     })
@@ -1323,21 +1341,17 @@ function calcVacation(){
   var ytd=parseFloat(ME.vacation_taken_ytd||0);
   var thisYr=new Date().getFullYear();
   var planned=0,taken=ytd,absentDays=0;
-  // 1. Lies vacation_requests im hr.html-Format: Object {[emp_id]:[reqs...]}
-  var reqsAll=ls('jsr_vacation_requests_v1')||{};
-  var myReqs=[];
-  if(Array.isArray(reqsAll)){
-    myReqs=reqsAll.filter(function(r){return r.emp_id===ME.id;});
-  }else if(reqsAll&&typeof reqsAll==='object'){
-    myReqs=reqsAll[ME.id]||[];
-  }
+  // 1. Block 2: eigene Anträge aus Supabase (VACREQS_ME)
+  var myReqs=VACREQS_ME;
   myReqs.forEach(function(r){
     if(!r.from||!r.to)return;
     var yr=parseInt(r.from.substring(0,4));
     if(yr!==thisYr)return;
     var days=r.days||calcVacReqDays(r.from,r.to);
+    // Saldo: NUR vacation zieht ab (taken/planned). special/unpaid sind bezahlt bzw.
+    // unbezahlt, aber kein Urlaubs-Saldo-Abzug.
     if(r.status==='approved'&&r.type==='vacation')taken+=days;
-    else if(r.status==='pending')planned+=days;
+    else if(r.status==='pending'&&r.type==='vacation')planned+=days;
     if(r.status==='approved'&&(r.type==='unpaid'||r.type==='special'))absentDays+=days;
   });
   // 2. Lies ME.absences[] — HR schreibt approved-Anträge dort (25h: kommt aus Supabase, Realtime aktualisiert)
@@ -1674,8 +1688,7 @@ function vacInRange(iso){
   return null;
 }
 function vacContext(){
-  var ctx={},allReqs=ls('jsr_vacation_requests_v1')||{};
-  var mine=Array.isArray(allReqs)?allReqs.filter(function(r){return r.emp_id===ME.id;}):(allReqs[ME.id]||[]);
+  var ctx={},mine=VACREQS_ME;   // Block 2: eigene Anträge aus Supabase
   mine.forEach(function(r){if(!r.from||!r.to||r.status==='rejected')return;var st=r.status==='approved'?'approved':'pending';vacEachDay(r.from,r.to,function(iso){if(ctx[iso]!=='approved')ctx[iso]=st;});});
   var abs = ME.absences || [];  // 25h+25i: ME ist Self-DB-Row, kein jsr_emp_v3-Fallback mehr
   abs.forEach(function(a){if(!a.from||!a.to)return;vacEachDay(a.from,a.to,function(iso){ctx[iso]='approved';});});
@@ -1745,17 +1758,15 @@ function vacModalBackdrop(e){if(e.target&&e.target.id==='vacModal')closeVacModal
 document.addEventListener('keydown',function(e){if(e.key==='Escape'){var m=document.getElementById('vacModal');if(m&&m.style.display!=='none')closeVacModal();}});
 
 function deleteVacRequest(id){
-  var allReqs=ls('jsr_vacation_requests_v1');
-  if(!allReqs)return;
-  var arr=Array.isArray(allReqs)?allReqs.filter(function(r){return r.emp_id===ME.id;}):(allReqs[ME.id]||[]);
   var req=null;
-  for(var i=0;i<arr.length;i++){if(arr[i].id===id){req=arr[i];break;}}
-  if(!req||req.emp_id!==ME.id||req.status!=='pending'){alert('Nur eigene, offene Anträge können gelöscht werden.');return;}
+  for(var i=0;i<VACREQS_ME.length;i++){if(VACREQS_ME[i].id===id){req=VACREQS_ME[i];break;}}
+  if(!req||req.status!=='pending'){alert('Nur eigene, offene Anträge können gelöscht werden.');return;}
   if(!confirm('Antrag vom '+fmtVacDate(req.from)+' wirklich löschen?'))return;
-  if(Array.isArray(allReqs)){allReqs=allReqs.filter(function(r){return r.id!==id;});}
-  else{allReqs[ME.id]=(allReqs[ME.id]||[]).filter(function(r){return r.id!==id;});}
-  lss('jsr_vacation_requests_v1',allReqs);
-  renderUrlaub();
+  // Block 2: Supabase-Delete (RLS erlaubt nur eigene pending). Realtime lädt neu.
+  sb.from('vacation_requests').delete().eq('id',id).then(function(r){
+    if(r.error){ alert('Löschen fehlgeschlagen: '+(r.error.message||'unbekannt')); return; }
+    loadMyVacreqs();
+  });
 }
 
 function renderUrlaub(){
@@ -1777,15 +1788,8 @@ function renderUrlaub(){
   html+='<div id="vacCal"></div>';
   html+='</div></div>';
 
-  // Antrags-Historie — Object-Format (hr.html-Standard) ODER Array (Legacy)
-  var allReqs=ls('jsr_vacation_requests_v1')||{};
-  var reqs=[];
-  if(Array.isArray(allReqs)){
-    reqs=allReqs.filter(function(r){return r.emp_id===ME.id;});
-  }else{
-    reqs=allReqs[ME.id]||[];
-  }
-  reqs.sort(function(a,b){return (b.submitted||b.created_at||'').localeCompare(a.submitted||a.created_at||'');});
+  // Antrags-Historie — Block 2: eigene Anträge aus Supabase (schon nach created_at sortiert)
+  var reqs=VACREQS_ME.slice();
 
   html+='<div class="card"><div class="card-header"><div class="card-title">Meine Anträge</div></div><div class="card-body card-body-tight">';
   if(reqs.length===0){
@@ -1823,9 +1827,9 @@ function renderUrlaub(){
   html+='<div id="vacModalSummary" class="vcal-modal-summary"></div>';
   html+='<div class="vcal-modal-label">Typ</div>';
   html+='<div class="vcal-radios">';
-  html+='<label class="vcal-radio"><input type="radio" name="vacType" value="vacation" checked> Urlaub</label>';
-  html+='<label class="vcal-radio"><input type="radio" name="vacType" value="unpaid"> Unbezahlt</label>';
-  html+='<label class="vcal-radio"><input type="radio" name="vacType" value="special"> Sonderfrei</label>';
+  html+='<label class="vcal-radio"><input type="radio" name="vacType" value="vacation" checked> 🏖 Urlaub</label>';
+  html+='<label class="vcal-radio"><input type="radio" name="vacType" value="special"> 🟦 Sonderurlaub (bezahlt)</label>';
+  html+='<label class="vcal-radio"><input type="radio" name="vacType" value="unpaid"> ❌ Unbezahlt</label>';
   html+='</div>';
   html+='<div class="vcal-modal-label">Notiz (optional)</div>';
   html+='<textarea id="vacNote" class="form-textarea" placeholder="Begründung oder Anmerkung..."></textarea>';
@@ -1853,37 +1857,24 @@ function submitVacationRequest(){
   if(type==='vacation'&&days>vac.remaining){
     if(!confirm('Achtung: Antrag überschreitet verfügbaren Urlaub ('+vac.remaining+' Tage). Trotzdem einreichen?'))return;
   }
-  // hr.html erwartet Object-Format: {[emp_id]: [requests...]}
-  var allReqs=ls('jsr_vacation_requests_v1');
-  if(!allReqs||Array.isArray(allReqs)){
-    // Migration: bei Array oder leer → Object
-    var oldArr=Array.isArray(allReqs)?allReqs:[];
-    allReqs={};
-    oldArr.forEach(function(r){
-      if(!r.emp_id)return;
-      if(!allReqs[r.emp_id])allReqs[r.emp_id]=[];
-      allReqs[r.emp_id].push(r);
-    });
-  }
-  if(!allReqs[ME.id])allReqs[ME.id]=[];
-  var newReq={
-    id:'vac_'+Date.now(),
-    emp_id:ME.id,
-    emp_name:(ME.first_name||'')+' '+(ME.last_name||''),
-    from:from,
-    to:to,
+  // Block 2: Antrag nach Supabase (RLS: eigene, pending). id/created_at von der DB.
+  var payload={
+    employee_id:ME.id,
+    employee_name:(ME.first_name||'')+' '+(ME.last_name||''),
+    from_date:from,
+    to_date:to,
     type:type,
     days:days,
     status:'pending',
-    note:note,
-    submitted:new Date().toISOString()
+    note:note
   };
-  allReqs[ME.id].push(newReq);
-  lss('jsr_vacation_requests_v1',allReqs);
-  vacSel={start:null,end:null};vacHover=null;
-  closeVacModal();
-  alert('Antrag eingereicht. HR wird benachrichtigt.');
-  renderUrlaub();
+  sb.from('vacation_requests').insert(payload).then(function(r){
+    if(r.error){ alert('Antrag fehlgeschlagen: '+(r.error.message||'unbekannt')); return; }
+    vacSel={start:null,end:null};vacHover=null;
+    closeVacModal();
+    alert('Antrag eingereicht. HR wird benachrichtigt.');
+    loadMyVacreqs();
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
