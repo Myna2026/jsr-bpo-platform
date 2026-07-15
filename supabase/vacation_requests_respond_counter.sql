@@ -20,6 +20,7 @@ declare
   v_from  date;
   v_to    date;
   v_days  integer;
+  v_exit  date;
 begin
   v_me := public.get_my_employee_id();
 
@@ -43,6 +44,15 @@ begin
     -- Gegenvorschlags-Daten; Fallback auf die ursprünglichen Antragsdaten
     v_from := coalesce((v_row.counter_proposal->>'from')::date, v_row.from_date);
     v_to   := coalesce((v_row.counter_proposal->>'to')::date,   v_row.to_date);
+
+    -- Offboarding-Schnitt 1: Grenze = frühestes von Austrittsdatum und Vertragsende
+    -- (least ignoriert NULL). Gesetzt und v_to danach → hart blocken (inklusiv).
+    select least(e.termination_date, nullif(e.contract->>'end','')::date)
+      into v_exit
+      from public.employees e where e.id = v_row.employee_id;
+    if v_exit is not null and v_to > v_exit then
+      raise exception 'Zeitraum liegt nach dem Austritts-/Vertragsende (%)', v_exit;
+    end if;
 
     -- Werktage (Mo–Fr) im Zeitraum — serverseitig, nicht dem Client vertrauen
     select count(*)::int into v_days
