@@ -22346,6 +22346,36 @@ async function loadEmployeesFromDB(){
     return data || [];
   }catch(e){ console.error('[25a] loadEmployeesFromDB', e); return []; }
 }
+
+// Etappe 2: Projekte relational aus Supabase laden + zum verschachtelten Consumer-Shape
+// zusammenbauen (skills[].profiles[], project_profiles[], trainings[] mit tkey->id).
+// Bei Fehler/leer -> null, damit der Caller den synchronen LS-Erstwert behaelt.
+async function loadProjectsFromDB(){
+  try{
+    const [pRes, skRes, spRes, prRes, trRes] = await Promise.all([
+      sb.from('projects').select('*'),
+      sb.from('project_skills').select('*'),
+      sb.from('project_skill_profiles').select('*'),
+      sb.from('project_profiles').select('*'),
+      sb.from('project_trainings').select('*'),
+    ]);
+    const err = pRes.error||skRes.error||spRes.error||prRes.error||trRes.error;
+    if(err){ console.error('[proj] loadProjectsFromDB', err); return null; }
+    const projs = pRes.data||[];
+    if(!projs.length) return null;
+    const skills=skRes.data||[], sprofs=spRes.data||[], pprofs=prRes.data||[], trains=trRes.data||[];
+    const bySeq=(a,b)=>(a.seq||0)-(b.seq||0);
+    return projs.map(p=>({
+      ...p,
+      skills: skills.filter(s=>s.project_id===p.id).sort(bySeq).map(s=>({
+        key:s.key, label:s.label, rate:s.rate, rate_training:s.rate_training,
+        profiles: sprofs.filter(x=>x.project_id===p.id&&x.skill_key===s.key).sort(bySeq).map(x=>x.label),
+      })),
+      project_profiles: pprofs.filter(x=>x.project_id===p.id).sort(bySeq).map(x=>x.label),
+      trainings: trains.filter(t=>t.project_id===p.id).sort(bySeq).map(t=>({id:t.tkey, name:t.name, weeks:t.weeks, seq:t.seq})),
+    }));
+  }catch(e){ console.error('[proj] loadProjectsFromDB', e); return null; }
+}
 // 25a/25b: 46 bekannte Schema-Spalten (38 aus 25a + 8 aus 25b).
 // created_at/updated_at sind DB-managed und werden nicht geschrieben.
 // Alles was NICHT in EMP_COLS steht wandert in `extra jsonb` + einmaliger console.warn.
@@ -24444,6 +24474,17 @@ function App(){
     })();
     const unsub = subscribeEmployees(setEmployees);
     return ()=>{ alive=false; if(unsub) unsub(); };
+  }, []);
+
+  // Etappe 2: Projekte aus Supabase nachladen (Hybrid — der synchrone LS/PROJECTS_INIT-
+  //           Lazy-Init bei 24320 bleibt Erstwert; null (Fehler/leer) -> LS behalten).
+  useEffect(()=>{
+    let alive=true;
+    (async()=>{
+      const dbProjects = await loadProjectsFromDB();
+      if(alive && dbProjects && dbProjects.length) setProjects(dbProjects);
+    })();
+    return ()=>{ alive=false; };
   }, []);
 
   // 25a: Client-Accounts aus Supabase laden + Realtime-Subscription
