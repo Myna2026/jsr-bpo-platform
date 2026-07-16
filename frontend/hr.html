@@ -5275,6 +5275,8 @@ function calcAlbanianPayroll(slip, cfg){
   const workDays   = parseInt(slip.work_days||22);
   const hoursPerDay= parseFloat(slip.hours_per_day||8);
   const monthTarget= workDays * hoursPerDay;
+  // Effektiver Stundensatz NUR für Zuschläge. Fix-MA ohne hourly_rate: aus gesnapshottetem fixed_salary/Monatssoll.
+  const effRate = hourlyRate>0 ? hourlyRate : (workDays>0 && hoursPerDay>0 ? parseFloat(slip.fixed_salary||0)/(workDays*hoursPerDay) : 0);
 
   // Hours breakdown from payroll data
   const rec = slip._rec || {};
@@ -5302,7 +5304,10 @@ function calcAlbanianPayroll(slip, cfg){
   const regularH = Math.max(0, monthTarget - Math.max(0, specialH - overtimeH));
 
   // Gross from regular hours
-  const grossRegular = Math.round(regularH * hourlyRate * 100) / 100;
+  // Fix-MA (Snapshot fixed_salary>0): voller Grundlohn = fixed_salary. Sonst regularH × Stundenlohn.
+  const grossRegular = parseFloat(slip.fixed_salary||0)>0
+    ? parseFloat(slip.fixed_salary)
+    : Math.round(regularH * hourlyRate * 100) / 100;
 
   // Surcharges by rate
   const saRate = Math.max(saP, isOT ? otP : 0);
@@ -5310,18 +5315,18 @@ function calcAlbanianPayroll(slip, cfg){
   const hoRate = Math.max(hoP, isOT ? otP : 0);
   const niRate = Math.max(niP, isOT ? otP : 0);
 
-  const surcharge20 = satH * hourlyRate * saP;   // Saturday 20%
-  const surcharge30 = otWeekday * hourlyRate * otP; // OT weekday 30%
-  const surcharge50 = (sunH + holH) * hourlyRate * suP; // Sun/Holiday 50%
+  const surcharge20 = satH * effRate * saP;   // Saturday 20%
+  const surcharge30 = otWeekday * effRate * otP; // OT weekday 30%
+  const surcharge50 = (sunH + holH) * effRate * suP; // Sun/Holiday 50%
   // Night might be any rate - simplified: night hours * night pct
-  const surchargeNight = nightH * hourlyRate * niP;
+  const surchargeNight = nightH * effRate * niP;
 
   // Adjust if Sa goes OT rate instead of Sa rate
-  const saActual = satH * hourlyRate * saRate;
-  const suActual = sunH * hourlyRate * suRate;
-  const hoActual = holH * hourlyRate * hoRate;
+  const saActual = satH * effRate * saRate;
+  const suActual = sunH * effRate * suRate;
+  const hoActual = holH * effRate * hoRate;
 
-  const totalSurcharge = Math.round((otWeekday * hourlyRate * otP + saActual + suActual + hoActual + surchargeNight) * 100) / 100;
+  const totalSurcharge = Math.round((otWeekday * effRate * otP + saActual + suActual + hoActual + surchargeNight) * 100) / 100;
 
   // Deductions from rec
   const absenceDays    = parseFloat(rec.deduction_absence_days || 0);
@@ -5423,6 +5428,8 @@ function calcFullPayslip(emp, month, salaryRec, employees, absences){
   let weekdays=0; const d=new Date(y,m-1,1);
   while(d.getMonth()===m-1){if(d.getDay()>0&&d.getDay()<6)weekdays++;d.setDate(d.getDate()+1);}
   const monthTarget = weekdays * hpd;
+  // Effektiver Stundensatz NUR für Zuschläge. Fix-MA ohne hourly_rate: aus Fixgehalt/Monatssoll.
+  const effRate = r>0 ? r : (weekdays>0 && hpd>0 ? parseFloat(emp.fixed_salary||0)/(weekdays*hpd) : 0);
 
   // ── SURCHARGE CONFIG ───────────────────────────────────────────────────────
   const sc = JSON.parse(localStorage.getItem('jsr_surcharge_cfg')||'{}');
@@ -5461,12 +5468,16 @@ function calcFullPayslip(emp, month, salaryRec, employees, absences){
 
   // ── REGULAR GROSS ─────────────────────────────────────────────────────────
   const regularHours = Math.max(0, monthTarget - absenceDays*hpd);
-  const grossRegular = Math.round(regularHours * r * 100)/100;
+  // Fix-MA: voller Grundlohn = fixed_salary (unabhängig von Stunden; Minderstunden-Abzug zurückgestellt).
+  // Stundenlöhner: regularHours × Stundenlohn wie bisher.
+  const grossRegular = (emp.salary_type==='fixed' && parseFloat(emp.fixed_salary||0)>0)
+    ? parseFloat(emp.fixed_salary)
+    : Math.round(regularHours * r * 100)/100;
 
   // ── SURCHARGE GROSS ───────────────────────────────────────────────────────
-  const gross20 = Math.round(h20 * r * saRate * 100)/100;
-  const gross30 = Math.round(h30 * r * otP    * 100)/100;
-  const gross50 = Math.round(h50 * r * suRate * 100)/100;
+  const gross20 = Math.round(h20 * effRate * saRate * 100)/100;
+  const gross30 = Math.round(h30 * effRate * otP    * 100)/100;
+  const gross50 = Math.round(h50 * effRate * suRate * 100)/100;
   const grossSurcharges = gross20 + gross30 + gross50;
 
   // ── BONUSES ───────────────────────────────────────────────────────────────
@@ -7175,6 +7186,9 @@ function PayrollView({employees, projects, showToast}){
     const guaranteedPct = parseFloat(emp.guaranteed_pct||100)/100;
     const deductMissing = !!emp.deduct_missing;
     const freeDays = parseInt(emp.free_days_month!=null?emp.free_days_month:2);
+    // Effektiver Stundensatz NUR für Zuschläge/Überstunden. Fix-MA ohne hourly_rate:
+    // aus Fixgehalt/Monatssoll ableiten (dynamisch pro Monat). Grundlohn (base) bleibt fixed_salary.
+    const effRate = r>0 ? r : (workDays>0 && h>0 ? fixedSalary/(workDays*h) : 0);
 
     let base = 0;
     if(salaryType==='fixed'&&fixedSalary>0){
@@ -7229,12 +7243,12 @@ function PayrollView({employees, projects, showToast}){
     const suRate = Math.max(suP, isOT?otP:0); // So 50% vs OT 30% → So gewinnt immer
     const hoRate = Math.max(hoP, isOT?otP:0);
     const niRate = Math.max(niP, isOT?otP:0);
-    const surcharges=r>0?Math.round((
-      otOnWeekday*r*otP +
-      saH*r*saRate +
-      suH*r*suRate +
-      hoH*r*hoRate +
-      niH*r*niRate
+    const surcharges=effRate>0?Math.round((
+      otOnWeekday*effRate*otP +
+      saH*effRate*saRate +
+      suH*effRate*suRate +
+      hoH*effRate*hoRate +
+      niH*effRate*niRate
     )*100)/100:0;
     // Absence deduction: days × daily rate (or manual tax field if set directly)
     const absenceDays=parseFloat(rec.deduction_absence_days||0);
@@ -7253,31 +7267,13 @@ function PayrollView({employees, projects, showToast}){
   function isLocked(slip){return slip&&slip.status==='paid';}
 
   async function createPayslip(emp){
-    if(!emp.hourly_rate){alert('Kein Stundenlohn im Vertrag für '+emp.first_name+'.');return;}
+    const _hasComp = parseFloat(emp.hourly_rate||0)>0 || (emp.salary_type==='fixed' && parseFloat(emp.fixed_salary||0)>0);
+    if(!_hasComp){alert('Keine Vergütungsbasis (weder Fixgehalt noch Stundenlohn) für '+emp.first_name+'.');return;}
     const existing=getSlip(emp.id,selMonth);
     if(existing&&isLocked(existing)){alert('Abrechnung bereits überwiesen und gesperrt.');return;}
-    // ── AUTO-SYNC: Stunden aus Workforce-Plan in salaryData übertragen ──
-    const ws=getWorkedStats(emp);
-    const wh=parseFloat(emp.work_hours||8);
-    setSalaryData(prev=>{
-      const md=[...(prev[selMonth]||[])];
-      const idx=md.findIndex(r=>r.emp_id===emp.id);
-      const existing_rec=idx>=0?md[idx]:{emp_id:emp.id,month:selMonth};
-      const synced={
-        ...existing_rec,
-        total_worked_hours: Math.round(ws.workedH*10)/10,
-        work_days_actual:   ws.workedDays,
-        saturday_hours:     Math.round(ws.satDays*wh*10)/10,
-        sunday_hours:       Math.round(ws.sunDays*wh*10)/10,
-        holiday_hours:      Math.round(ws.holidayDays*wh*10)/10,
-        overtime_hours:     Math.max(0,Math.round((ws.workedH-ws.target)*10)/10),
-        unpaid_pause_hours: ws.unpaidPauseH||0,
-        paid_pause_hours:   ws.paidPauseH||0,
-      };
-      if(idx>=0) md[idx]=synced; else md.push(synced);
-      localStorage.setItem('jsr_payroll_v1',JSON.stringify({...prev,[selMonth]:md}));
-      return{...prev,[selMonth]:md};
-    });
+    // Workforce-Auto-Sync entfernt: Ist-Stunden/Boni werden manuell im Bonus-Modal
+    // gepflegt (salaryData). Der frühere getWorkedStats(emp)-Aufruf war out-of-scope
+    // (Definition in WorkforcePlanningView) und warf seit e02d931 ReferenceError.
     const s=calcSalary(emp);
     // 27c: employee_id statt emp_id fuer DB. Kein emp:emp im Payload (savePayslipToDB droppt es).
     const slipData={
@@ -7286,7 +7282,7 @@ function PayrollView({employees, projects, showToast}){
       staff_number:emp.staff_number, position:emp.position,
       location:emp.location, project_id:emp.project_id,
       email:emp.email||'',
-      hourly_rate:emp.hourly_rate, work_hours:emp.work_hours, work_model:emp.work_model||'Vor Ort',
+      hourly_rate:emp.hourly_rate, fixed_salary:emp.fixed_salary, work_hours:emp.work_hours, work_model:emp.work_model||'Vor Ort',
       contract_start:emp.contract?.start||emp.contract_start||'',
       work_days:workDays, hours_per_day:s.hoursPerDay, gross_hours:s.grossHours,
       base:s.base, referral_bonus:s.referralBonus, target_bonus:s.targetBonus,
@@ -7356,7 +7352,7 @@ function PayrollView({employees, projects, showToast}){
   }
 
   async function createAllDrafts(){
-    const missing=activeEmps.filter(e=>e.hourly_rate&&!getSlip(e.id,selMonth));
+    const missing=activeEmps.filter(e=>(parseFloat(e.hourly_rate||0)>0||(e.salary_type==='fixed'&&parseFloat(e.fixed_salary||0)>0))&&!getSlip(e.id,selMonth));
     if(!missing.length){alert('Alle Abrechnungen bereits vorhanden.');return;}
     if(!window.confirm('Entwürfe für '+missing.length+' Mitarbeiter erstellen?')) return;
     // 27c: Q3(a) — Promise.all mit einzelnem catch pro Save, Summary-Toast am Ende.
@@ -7373,6 +7369,7 @@ function PayrollView({employees, projects, showToast}){
         deduction_tax: s.deductionTax, deduction_social: s.deductionSocial, deduction_other: s.deductionOther,
         total_deductions: s.totalDeductions, net: s.net,
         bonus_notes: s.rec?.notes||'', deduction_notes: s.rec?.deduction_notes||'',
+        _calc: calcFullPayslip(emp, selMonth, (salaryData[selMonth]||[]).find(x=>x.emp_id===emp.id)||{}, employees, []),
       };
       try{
         const saved = await savePayslipToDB(slipData);
@@ -7571,7 +7568,7 @@ function PayrollView({employees, projects, showToast}){
   const draftCount  = monthSlips.filter(s=>s.status==='draft').length;
   const confirmedCount = monthSlips.filter(s=>s.status==='confirmed').length;
   const paidCount   = monthSlips.filter(s=>s.status==='paid').length;
-  const missingCount= displayEmps.filter(e=>e.hourly_rate&&!getSlip(e.id,selMonth)).length;
+  const missingCount= displayEmps.filter(e=>(parseFloat(e.hourly_rate||0)>0||(e.salary_type==='fixed'&&parseFloat(e.fixed_salary||0)>0))&&!getSlip(e.id,selMonth)).length;
 
   function slipStatusBadge(slip){
     if(!slip) return <span style={{padding:'3px 9px',borderRadius:20,fontSize:10,fontWeight:700,background:'var(--red-bg)',color:'var(--red)',border:'1px solid rgba(239,68,68,.2)'}}>⚠ Fehlt</span>;
@@ -22622,7 +22619,7 @@ function subscribeClientAccounts(setter){
 const PAYSLIP_COLS = new Set([
   'employee_id','month','status',
   'first_name','last_name','staff_number','position','location','project_id','email',
-  'hourly_rate','work_hours','work_model','contract_start',
+  'hourly_rate','fixed_salary','work_hours','work_model','contract_start',
   'work_days','hours_per_day','gross_hours',
   'base','referral_bonus','target_bonus','special_bonus','total_bonuses','gross',
   'deduction_tax','deduction_social','deduction_other','total_deductions','net',
