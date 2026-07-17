@@ -21580,7 +21580,7 @@ function ProjectsAdminTab({projects, setProjects, clients}){
 
   function newProjectTemplate(){
     return {
-      id:'p_'+Date.now(),
+      id:'proj_'+Math.random().toString(16).slice(2,10)+Math.random().toString(16).slice(2,10),
       name:'', client:'', status:'active',
       location:'Tirana',
       color:'#0F5661',
@@ -21596,16 +21596,20 @@ function ProjectsAdminTab({projects, setProjects, clients}){
     };
   }
 
-  function save(form){
+  async function save(form){
     if(!form.name.trim()) return alert('Bitte Projektname eingeben.');
+    const ok = await saveProjectToDB(form);
+    if(!ok){ alert('Projekt konnte nicht gespeichert werden (siehe Konsole). Bitte erneut versuchen.'); return; }
     setProjects(ps=>ps.find(p=>p.id===form.id)?ps.map(p=>p.id===form.id?form:p):[...ps,form]);
     setShowModal(false);
     setEditProject(null);
   }
 
-  function deleteProject(id){
-    if(window.confirm('Projekt loeschen? Alle Mitarbeiter-Zuordnungen bleiben erhalten.'))
-      setProjects(ps=>ps.filter(p=>p.id!==id));
+  async function deleteProject(id){
+    if(!window.confirm('Projekt loeschen? Alle Mitarbeiter-Zuordnungen bleiben erhalten.')) return;
+    const ok = await deleteProjectFromDB(id);
+    if(!ok){ alert('Projekt konnte nicht geloescht werden (siehe Konsole).'); return; }
+    setProjects(ps=>ps.filter(p=>p.id!==id));
   }
 
   const STATUS_LABELS = {active:'Aktiv',paused:'Pausiert',ended:'Beendet',planned:'Geplant'};
@@ -22510,6 +22514,10 @@ async function loadProjectsFromDB(){
       ...p,
       skills: skills.filter(s=>s.project_id===p.id).sort(bySeq).map(s=>({
         key:s.key, label:s.label, rate:s.rate, rate_training:s.rate_training,
+        billing_type:s.billing_type, minute_rate:s.minute_rate, case_price:s.case_price,
+        case_aht_sec:s.case_aht_sec, cpo_amount:s.cpo_amount, cpo_per_hour:s.cpo_per_hour,
+        flat_per_agent:s.flat_per_agent, productive_hours:s.productive_hours,
+        efficiency_pct:s.efficiency_pct, training_mode:s.training_mode, training_flat:s.training_flat,
         profiles: sprofs.filter(x=>x.project_id===p.id&&x.skill_key===s.key).sort(bySeq).map(x=>x.label),
       })),
       project_profiles: pprofs.filter(x=>x.project_id===p.id).sort(bySeq).map(x=>x.label),
@@ -22517,6 +22525,80 @@ async function loadProjectsFromDB(){
     }));
   }catch(e){ console.error('[proj] loadProjectsFromDB', e); return null; }
 }
+
+// Etappe 3b: Projekt relational nach Supabase schreiben. Parent-upsert (Allowlist,
+// leere Strings -> null) + je Kindtabelle delete-then-insert, immer scoped auf
+// project.id. Bei irgendeinem Fehler -> false (Caller laesst das Modal offen),
+// sonst true. Persist-Effect (LS) bleibt als Cache unberuehrt.
+const PROJECT_COLS = new Set([
+  'id','name','client','status','location','rate_active','rate_training','billing_mode',
+  'monthly_flat','ai_translation_enabled','contract_start','contract_end',
+  'language_requirement','description','monthly_hours_per_agent',
+  'billing_type','minute_rate','case_price','case_aht_sec','cpo_amount','cpo_per_hour',
+  'flat_per_agent','productive_hours','efficiency_pct','training_mode','training_flat'
+]);
+async function saveProjectToDB(project){
+  if(!project||!project.id){ console.error('[proj] saveProjectToDB: project.id fehlt'); return false; }
+  const pid = project.id;
+  const clean = v => (v === '' ? null : v);
+  // 1. Parent-upsert (Allowlist, '' -> null)
+  const payload = {};
+  for(const k of PROJECT_COLS){
+    if(!(k in project)) continue;
+    payload[k] = clean(project[k]);
+  }
+  payload.id = pid;
+  {
+    const {error} = await sb.from('projects').upsert(payload);
+    if(error){ console.error('[proj] upsert projects', error); return false; }
+  }
+  // 2. Kindtabellen aus dem verschachtelten Shape ableiten
+  const skills = Array.isArray(project.skills) ? project.skills : [];
+  const skillRows = skills.map((s,i)=>({
+    project_id: pid, key: s.key, label: s.label,
+    rate: clean(s.rate), rate_training: clean(s.rate_training), seq: i,
+    billing_type: clean(s.billing_type), minute_rate: clean(s.minute_rate),
+    case_price: clean(s.case_price), case_aht_sec: clean(s.case_aht_sec),
+    cpo_amount: clean(s.cpo_amount), cpo_per_hour: clean(s.cpo_per_hour),
+    flat_per_agent: clean(s.flat_per_agent), productive_hours: clean(s.productive_hours),
+    efficiency_pct: clean(s.efficiency_pct), training_mode: clean(s.training_mode),
+    training_flat: clean(s.training_flat),
+  }));
+  const skillProfileRows = [];
+  skills.forEach(s=>{
+    (Array.isArray(s.profiles)?s.profiles:[]).forEach((label,pi)=>{
+      skillProfileRows.push({project_id: pid, skill_key: s.key, label, seq: pi});
+    });
+  });
+  const projProfileRows = (Array.isArray(project.project_profiles)?project.project_profiles:[])
+    .map((label,i)=>({project_id: pid, label, seq: i}));
+  const trainingRows = (Array.isArray(project.trainings)?project.trainings:[])
+    .map((t,i)=>({project_id: pid, tkey: t.id, name: t.name, weeks: t.weeks, seq: i}));
+  // 3. je Tabelle: erst delete (scoped), dann insert (nur wenn nicht leer)
+  const children = [
+    ['project_skills', skillRows],
+    ['project_skill_profiles', skillProfileRows],
+    ['project_profiles', projProfileRows],
+    ['project_trainings', trainingRows],
+  ];
+  for(const [table, rows] of children){
+    const del = await sb.from(table).delete().eq('project_id', pid);
+    if(del.error){ console.error('[proj] delete '+table, del.error); return false; }
+    if(rows.length){
+      const ins = await sb.from(table).insert(rows);
+      if(ins.error){ console.error('[proj] insert '+table, ins.error); return false; }
+    }
+  }
+  return true;
+}
+// Etappe 3b: Projekt loeschen. FK-Cascade (on delete cascade) raeumt alle
+// Kindtabellen mit. Fehler -> false.
+async function deleteProjectFromDB(id){
+  const {error} = await sb.from('projects').delete().eq('id', id);
+  if(error){ console.error('[proj] deleteProjectFromDB', error); return false; }
+  return true;
+}
+
 // 25a/25b: 46 bekannte Schema-Spalten (38 aus 25a + 8 aus 25b).
 // created_at/updated_at sind DB-managed und werden nicht geschrieben.
 // Alles was NICHT in EMP_COLS steht wandert in `extra jsonb` + einmaliger console.warn.
@@ -22526,6 +22608,7 @@ const EMP_COLS = new Set([
   'location','photo_url','about_text','interests','notes','salary_type','hourly_rate',
   'work_model','work_hours','shift_earliest','shift_latest','vacation_days',
   'fixed_salary','guaranteed_pct','deduct_missing','free_days_month','monthly_bonus','overtime_allowed','productive_pct',
+  'forecast_include','efficiency_override_pct',
   'absences','audios','videos','warnings','project_assignments','allowed_shifts',
   'bank','contract','extra',
   'abilities','bonuses','referrals','quality_ratings','hardware',
