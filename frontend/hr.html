@@ -21845,7 +21845,10 @@ function ProjectEditModal({project, onSave, onClose, clients}){
                   </div>
                 )}
                 {(form.billing_type||'hourly')==='hourly'&&(
-                  <div style={{fontSize:11,color:'var(--muted)',marginBottom:10}}>→ Stundensatz unter 'Stundensatz Aktiv (€/h)'</div>
+                  <div className="form-group" style={{marginBottom:10}}>
+                    <label className="form-label">Stundensatz (€/h)</label>
+                    <input className="form-input" type="number" min="0" value={form.rate_active||0} onChange={e=>setF('rate_active',Number(e.target.value))}/>
+                  </div>
                 )}
                 <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:10}}>
                   <div className="form-group"><label className="form-label">Schulungs-Abrechnung</label>
@@ -21869,41 +21872,11 @@ function ProjectEditModal({project, onSave, onClose, clients}){
                     <input className="form-input" type="number" min="0" placeholder="leer = 100" value={form.efficiency_pct??''} onChange={e=>setF('efficiency_pct',e.target.value===''?'':Number(e.target.value))}/></div>
                 </div>
               </div>
-              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:16}}>
-                <div className="form-group">
-                  <label className="form-label">Stundensatz Aktiv (€/h)</label>
-                  <input className="form-input" type="number" min="0" value={form.rate_active||0} onChange={e=>setF('rate_active',Number(e.target.value))}/>
-                </div>
-                <div className="form-group">
-                  <label className="form-label">Std/Agent/Monat</label>
-                  <input className="form-input" type="number" min="0" value={form.monthly_hours_per_agent||160} onChange={e=>setF('monthly_hours_per_agent',Number(e.target.value))}/>
-                </div>
-              </div>
-              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
-                <div className="form-group">
-                  <label className="form-label">Abrechnungsmodell</label>
-                  <select className="form-select" value={form.billing_mode||'productive_hours'} onChange={e=>setF('billing_mode',e.target.value)}>
-                    <option value="productive_hours">Produktivstunden</option>
-                    <option value="monthly_flat">Monatspauschale</option>
-                    <option value="per_agent">Pro Agent / Monat</option>
-                  </select>
-                </div>
-                {form.billing_mode==='monthly_flat'&&(
-                  <div className="form-group">
-                    <label className="form-label">Monatspauschale (€)</label>
-                    <input className="form-input" type="number" min="0" value={form.monthly_flat||0} onChange={e=>setF('monthly_flat',Number(e.target.value))}/>
-                  </div>
-                )}
-              </div>
-              <div style={{marginTop:12,padding:'12px 14px',background:'var(--surface-2)',borderRadius:'var(--r-md)',fontSize:12,color:'var(--muted)'}}>
-                <strong>Monatsumsatz-Vorschau:</strong> {
-                  form.billing_mode==='monthly_flat'
-                    ? (form.monthly_flat||0).toLocaleString('de-DE')+'€ Pauschale'
-                    : form.billing_mode==='per_agent'
-                      ? 'Berechnung nach Anzahl aktiver Agents × '+form.rate_active+'€'
-                      : (form.rate_active||0)+' €/h × '+(form.monthly_hours_per_agent||160)+' h/Agent'
-                }
-              </div>
+              {/* Etappe 4d-cleanup: Legacy-Abrechnungsfelder (rate_active/monthly_hours_per_agent/
+                  billing_mode/monthly_flat) + Monatsumsatz-Vorschau ausgeblendet — sie duplizierten
+                  die neue billing_type-Logik. rate_active wird jetzt oben im grauen Kasten bei
+                  billing_type='hourly' gepflegt. Werte bleiben im form-State erhalten (nicht gelöscht),
+                  werden also weiter gespeichert. */}
               </>)}
             </div>
           )}
@@ -22149,6 +22122,189 @@ function ProjectEditModal({project, onSave, onClose, clients}){
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+// Etappe 4d: Werktage (Mo-Fr) eines Monats 'YYYY-MM'. Global (analog PayrollView-workDays),
+// von ForecastView + kuenftig Payroll nutzbar. Feiertage bleiben unberuecksichtigt.
+function workdaysInMonth(ym){
+  if(!ym||ym.length<7) return 0;
+  const [y,m]=ym.split('-').map(Number);
+  let c=0;const d=new Date(y,m-1,1);
+  while(d.getMonth()===m-1){ const dw=d.getDay(); if(dw>0&&dw<6)c++; d.setDate(d.getDate()+1); }
+  return c;
+}
+
+// Etappe 4d: Forecast — geplanter Monatsumsatz je Projekt aus verfuegbaren
+// Produktivstunden × Abrechnungsmodell. Read-only Auswertung (kein Persist).
+function ForecastView({employees, projects}){
+  const [month, setMonth] = useState(()=>{
+    const n=new Date(); return n.getFullYear()+'-'+String(n.getMonth()+1).padStart(2,'0');
+  });
+  const months = useMemo(()=>{
+    const list=[];const now=new Date();
+    for(let i=-2;i<12;i++){ const d=new Date(now.getFullYear(),now.getMonth()+i,1); list.push(d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')); }
+    return list;
+  },[]);
+  const eur = v => (v==null ? '—' : Number(v).toLocaleString('de-DE',{minimumFractionDigits:2,maximumFractionDigits:2})+' €');
+  const h1  = v => Number(v||0).toLocaleString('de-DE',{minimumFractionDigits:1,maximumFractionDigits:1});
+  const fmtMonth = m => { const [y,mo]=m.split('-'); return new Date(y,mo-1,1).toLocaleDateString('de-DE',{month:'long',year:'numeric'}); };
+
+  // Abwesende Werktage (approved vacation/sick/unpaid) im gewaehlten Monat, ueberlappungssicher.
+  function absentWorkdaysInMonth(emp, ym){
+    const [y,m]=ym.split('-').map(Number);
+    const mStart=ym+'-01';
+    const last=new Date(y,m,0).getDate();
+    const mEnd=ym+'-'+String(last).padStart(2,'0');
+    const iso=dt=>dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');
+    const set=new Set();
+    (emp.absences||[]).forEach(a=>{
+      if(!a||!a.approved) return;
+      if(!['vacation','sick','unpaid'].includes(a.type)) return;
+      const from=a.from||a.start||a.date, to=a.to||a.end||a.date;
+      if(!from||!to) return;
+      const s=from<mStart?mStart:from, e=to>mEnd?mEnd:to;
+      if(s>e) return;
+      let d=new Date(s+'T12:00:00'); const end=new Date(e+'T12:00:00');
+      while(d<=end){ const dw=d.getDay(); if(dw>0&&dw<6) set.add(iso(d)); d.setDate(d.getDate()+1); }
+    });
+    return set.size;
+  }
+
+  const rows = useMemo(()=>{
+    const wd = workdaysInMonth(month);
+    const num = v => (v===''||v==null||isNaN(Number(v))) ? null : Number(v);
+    const emps = (employees||[]).filter(e=>e && e.forecast_include!==false && ['active','training'].includes(e.status));
+    return emps.map(e=>{
+      const proj = (projects||[]).find(p=>p.id===e.project_id) || null;
+      // Abrechnung: hat das Projekt Skills → Skill-Saetze (Match key ODER label, case-insensitiv),
+      // sonst Projekt-Saetze. Kein Skill gefunden trotz Skill-Liste → Projekt-Fallback.
+      let bill = proj, skillObj = null;
+      if(proj && Array.isArray(proj.skills) && proj.skills.length){
+        const ps=(e.project_skill||'').toString().toLowerCase();
+        skillObj = proj.skills.find(s=>((s.key||'').toLowerCase()===ps)||((s.label||'').toLowerCase()===ps)) || null;
+        bill = skillObj || proj;
+      }
+      const workHours = parseFloat(e.work_hours||8) || 8;
+      const availH = Math.max(0, wd*workHours - absentWorkdaysInMonth(e, month)*workHours);
+      const effPct = Number(e.efficiency_override_pct ?? (bill && bill.efficiency_pct) ?? 100) || 0;
+      const effH   = availH * effPct/100;
+      let revenue = null, rateLabel = '—';
+      if(e.status==='training'){
+        if((bill && bill.training_mode)==='flat'){ const tf=num(bill&&bill.training_flat); revenue=tf; rateLabel=tf==null?'—':'Pauschale'; }
+        else { const rt=num(bill&&bill.rate_training); revenue=rt==null?null:rt*effH; rateLabel=rt==null?'—':h1(rt)+' €/h Schulung'; }
+      } else {
+        const bt=(bill && bill.billing_type)||'hourly';
+        if(bt==='hourly'){ const r=num(bill&&(bill.rate ?? bill.rate_active)); revenue=r==null?null:r*effH; rateLabel=r==null?'—':h1(r)+' €/h'; }
+        else if(bt==='minute'){ const r=num(bill&&bill.minute_rate); revenue=r==null?null:effH*60*r; rateLabel=r==null?'—':h1(r)+' €/min'; }
+        else if(bt==='case'){ const cp=num(bill&&bill.case_price), aht=num(bill&&bill.case_aht_sec); revenue=(cp==null||aht==null||aht<=0)?null:(effH*3600/aht)*cp; rateLabel=(cp==null||aht==null)?'—':h1(cp)+' €/Case'; }
+        else if(bt==='cpo'){ const cph=num(bill&&bill.cpo_per_hour), ca=num(bill&&bill.cpo_amount); revenue=(cph==null||ca==null)?null:effH*cph*ca; rateLabel=(cph==null||ca==null)?'—':h1(ca)+' €/Abschluss'; }
+        else if(bt==='flat_per_agent'){ const fa=num(bill&&bill.flat_per_agent); revenue=fa; rateLabel=fa==null?'—':'Pauschale/MA'; }
+      }
+      return {
+        emp:e, projName: proj?proj.name:'(kein Projekt)', projId: proj?proj.id:'__none__',
+        skillLabel: skillObj?skillObj.label:(e.project_skill||'—'),
+        isTraining: e.status==='training', availH, effPct, effH, rateLabel, revenue,
+      };
+    });
+  },[employees,projects,month]);
+
+  const groups = useMemo(()=>{
+    const map=new Map();
+    rows.forEach(r=>{ if(!map.has(r.projId)) map.set(r.projId,{name:r.projName,rows:[]}); map.get(r.projId).rows.push(r); });
+    return Array.from(map.values()).sort((a,b)=>a.name.localeCompare(b.name));
+  },[rows]);
+  const grandTotal = rows.reduce((s,r)=>s+(r.revenue||0),0);
+  const grandHours = rows.reduce((s,r)=>s+r.effH,0);
+
+  return(
+    <div>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16,flexWrap:'wrap',gap:10}}>
+        <div>
+          <div style={{fontSize:14,fontWeight:600}}>Forecast — geplanter Umsatz</div>
+          <div style={{fontSize:12,color:'var(--muted)',marginTop:2}}>
+            Verfügbare Produktivstunden × Abrechnungsmodell je Projekt. Abwesenheiten (Urlaub/Krank/Unbezahlt) reduzieren die verfügbaren Stunden. Fehlende Sätze werden als „—" markiert, nicht als 0 gerechnet.
+          </div>
+        </div>
+        <select className="form-select" style={{maxWidth:220}} value={month} onChange={e=>setMonth(e.target.value)}>
+          {months.map(m=><option key={m} value={m}>{fmtMonth(m)}</option>)}
+        </select>
+      </div>
+
+      <div style={{display:'flex',gap:12,marginBottom:16,flexWrap:'wrap'}}>
+        <div className="card" style={{padding:'12px 18px',flex:'1 1 150px'}}>
+          <div style={{fontSize:11,color:'var(--muted)'}}>Werktage {fmtMonth(month)}</div>
+          <div style={{fontSize:22,fontWeight:700}}>{workdaysInMonth(month)}</div>
+        </div>
+        <div className="card" style={{padding:'12px 18px',flex:'1 1 150px'}}>
+          <div style={{fontSize:11,color:'var(--muted)'}}>Berücksichtigte MA</div>
+          <div style={{fontSize:22,fontWeight:700}}>{rows.length}</div>
+        </div>
+        <div className="card" style={{padding:'12px 18px',flex:'1 1 150px'}}>
+          <div style={{fontSize:11,color:'var(--muted)'}}>Effektive Std gesamt</div>
+          <div style={{fontSize:22,fontWeight:700}}>{h1(grandHours)} h</div>
+        </div>
+        <div className="card" style={{padding:'12px 18px',flex:'1 1 150px',background:'var(--blue-bg)'}}>
+          <div style={{fontSize:11,color:'var(--blue)'}}>Prognose-Umsatz</div>
+          <div style={{fontSize:22,fontWeight:800,color:'var(--blue)'}}>{eur(grandTotal)}</div>
+        </div>
+      </div>
+
+      {rows.length===0&&(
+        <div className="card" style={{padding:40,textAlign:'center',color:'var(--muted)'}}>
+          <div style={{fontSize:32,marginBottom:8}}>📈</div>
+          <div>Keine berücksichtigten Mitarbeiter in {fmtMonth(month)}.</div>
+          <div style={{fontSize:12,marginTop:4}}>Nur aktive / in Schulung mit „Im Forecast berücksichtigen".</div>
+        </div>
+      )}
+
+      {groups.map(g=>{
+        const sub=g.rows.reduce((s,r)=>s+(r.revenue||0),0);
+        return(
+          <div key={g.projId||g.name} className="card" style={{marginBottom:14,overflow:'hidden'}}>
+            <div style={{padding:'10px 16px',background:'var(--surface-2)',borderBottom:'1px solid var(--border)',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+              <div style={{fontWeight:700,fontSize:13}}>{g.name} <span style={{fontWeight:400,color:'var(--muted)',fontSize:12}}>· {g.rows.length} MA</span></div>
+              <div style={{fontSize:13,fontWeight:700,color:'var(--blue)'}}>{eur(sub)}</div>
+            </div>
+            <div style={{overflowX:'auto'}}>
+              <table style={{width:'100%'}}>
+                <thead>
+                  <tr>
+                    <th>Mitarbeiter</th><th>Skill</th><th>Status</th>
+                    <th style={{textAlign:'right'}}>Verfügb. h</th>
+                    <th style={{textAlign:'right'}}>Eff. %</th>
+                    <th style={{textAlign:'right'}}>Effektiv h</th>
+                    <th>Satz</th>
+                    <th style={{textAlign:'right'}}>Umsatz</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {g.rows.map(r=>(
+                    <tr key={r.emp.id}>
+                      <td>{r.emp.first_name} {r.emp.last_name}</td>
+                      <td style={{fontSize:12,color:'var(--muted)'}}>{r.skillLabel}</td>
+                      <td>{r.isTraining?'📚 Schulung':'⚡ Aktiv'}</td>
+                      <td style={{textAlign:'right'}}>{h1(r.availH)}</td>
+                      <td style={{textAlign:'right'}}>{r.effPct}%</td>
+                      <td style={{textAlign:'right'}}>{h1(r.effH)}</td>
+                      <td style={{fontSize:12,color:'var(--muted)'}}>{r.rateLabel}</td>
+                      <td style={{textAlign:'right',fontWeight:600,color:r.revenue==null?'var(--muted)':'inherit'}}>{eur(r.revenue)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        );
+      })}
+
+      {rows.length>0&&(
+        <div className="card" style={{padding:'14px 18px',display:'flex',justifyContent:'space-between',alignItems:'center',background:'var(--blue-bg)',border:'1px solid rgba(15,86,97,.15)'}}>
+          <div style={{fontWeight:700}}>Gesamt-Prognose {fmtMonth(month)}</div>
+          <div style={{fontSize:18,fontWeight:800,color:'var(--blue)'}}>{eur(grandTotal)}</div>
+        </div>
+      )}
     </div>
   );
 }
@@ -25165,7 +25321,9 @@ function App(){
             <div>
               <LocationsView employees={employees}/>
             </div>
-          )}          {view==='payroll'&&(
+          )}
+          {view==='forecast'&&<ForecastView employees={employees} projects={projects}/>}
+          {view==='payroll'&&(
             <div>
               <PayrollView employees={employees} projects={projects} showToast={showToast}/>
             </div>
