@@ -6954,7 +6954,9 @@ function OrgChart({projects, employees, orgCharts, setOrgCharts}){
       nodes[0].employees = [...nodes[0].employees, ...unmatched.map(e=>e.id)];
     }
 
-    setOrgCharts(prev=>({...prev,[selProj]:{id:selProj,nodes,rootId,auto_built:new Date().toISOString().slice(0,10)}}));
+    const built={id:selProj,nodes,rootId,auto_built:new Date().toISOString().slice(0,10)};
+    setOrgCharts(prev=>({...prev,[selProj]:built}));
+    saveOrgChartToDB(selProj, built);
   }
 
   const chart = orgCharts[selProj]||null;
@@ -6964,6 +6966,7 @@ function OrgChart({projects, employees, orgCharts, setOrgCharts}){
   function getNode(id){return nodes.find(n=>n.id===id);}
   function updateChart(newNodes){
     setOrgCharts(prev=>({...prev,[selProj]:{...prev[selProj],nodes:newNodes}}));
+    saveOrgChartToDB(selProj, {...(orgCharts[selProj]||{}), nodes:newNodes});
   }
   function addChildNode(parentId){
     const newId='node_'+Date.now();
@@ -22957,6 +22960,65 @@ async function saveTimeSessionToDB(session){
   return true;
 }
 
+// Etappe O2: Organigramm relational aus Supabase. loadOrgChartsFromDB baut aus den
+// flachen org_nodes das Frontend-Shape {project_id:{id,rootId,auto_built,nodes:[...]}}
+// zurueck (parent_id -> children[], parent_id null -> rootId). Bei Fehler/leer -> null.
+async function loadOrgChartsFromDB(){
+  try{
+    const {data, error} = await sb.from('org_nodes').select('*');
+    if(error){ console.error('[org] loadOrgChartsFromDB', error); return null; }
+    const rows = data||[];
+    if(!rows.length) return null;
+    const byProj = {};
+    rows.forEach(r=>{ (byProj[r.project_id]=byProj[r.project_id]||[]).push(r); });
+    const out = {};
+    Object.keys(byProj).forEach(pid=>{
+      const pr = byProj[pid].slice().sort((a,b)=>(a.seq||0)-(b.seq||0));
+      const nodes = pr.map(r=>({
+        id:r.id, title:r.title, subtitle:r.subtitle, color:r.color, skill:r.skill,
+        employees: Array.isArray(r.employees)?r.employees:[], children:[],
+      }));
+      const byId = {}; nodes.forEach(n=>{ byId[n.id]=n; });
+      pr.forEach(r=>{ if(r.parent_id && byId[r.parent_id]) byId[r.parent_id].children.push(r.id); });
+      const rootRow = pr.find(r=>!r.parent_id);
+      out[pid] = {
+        id: pid,
+        rootId: rootRow ? rootRow.id : (nodes[0]?nodes[0].id:null),
+        auto_built: (pr[0]||{}).auto_built || null,
+        nodes,
+      };
+    });
+    return out;
+  }catch(e){ console.error('[org] loadOrgChartsFromDB', e); return null; }
+}
+// Schreiben: delete-then-insert aller Nodes eines Projekts (scoped auf project_id).
+// children[] -> parent_id aufgeloest; Frontend-Node-IDs -> uuid (bestehende uuids bleiben),
+// seq = Reihenfolge. employees bleibt jsonb-Array.
+async function saveOrgChartToDB(projectId, chart){
+  if(!projectId) return false;
+  const nodes = (chart && Array.isArray(chart.nodes)) ? chart.nodes : [];
+  const uuidRx=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const newId=()=>(window.crypto&&crypto.randomUUID)?crypto.randomUUID():null;
+  const idMap={}; nodes.forEach(n=>{ idMap[n.id]= uuidRx.test(String(n.id))?String(n.id):newId(); });
+  const parentOf={}; nodes.forEach(n=>{ (n.children||[]).forEach(cid=>{ parentOf[cid]=n.id; }); });
+  const rows = nodes.map((n,i)=>({
+    id: idMap[n.id],
+    project_id: projectId,
+    parent_id: (parentOf[n.id] && idMap[parentOf[n.id]]) ? idMap[parentOf[n.id]] : null,
+    title: n.title??null, subtitle: n.subtitle??null, color: n.color??null, skill: n.skill??null,
+    employees: Array.isArray(n.employees)?n.employees:[],
+    seq: i,
+    auto_built: (chart && chart.auto_built) || null,
+  }));
+  const del = await sb.from('org_nodes').delete().eq('project_id', projectId);
+  if(del.error){ console.error('[org] saveOrgChartToDB delete', del.error); return false; }
+  if(rows.length){
+    const ins = await sb.from('org_nodes').insert(rows);
+    if(ins.error){ console.error('[org] saveOrgChartToDB insert', ins.error); return false; }
+  }
+  return true;
+}
+
 // 25a/25b: 46 bekannte Schema-Spalten (38 aus 25a + 8 aus 25b).
 // created_at/updated_at sind DB-managed und werden nicht geschrieben.
 // Alles was NICHT in EMP_COLS steht wandert in `extra jsonb` + einmaliger console.warn.
@@ -25011,6 +25073,13 @@ function App(){
   },[]);
   useEffect(()=>{localStorage.setItem('jsr_plans_v3',JSON.stringify(plans));},[plans]);
   useEffect(()=>{localStorage.setItem('jsr_org_v1',JSON.stringify(orgCharts));},[orgCharts]);
+  // Etappe O2: Organigramme aus Supabase laden (Hybrid — behaelt den synchronen
+  // LS-Erstwert, ueberschreibt nur bei DB-Treffern). localStorage bleibt write-through Cache.
+  useEffect(()=>{
+    let alive=true;
+    loadOrgChartsFromDB().then(org=>{ if(alive && org) setOrgCharts(org); });
+    return ()=>{ alive=false; };
+  },[]);
   useEffect(()=>{localStorage.setItem('jsr_forecast_v1',JSON.stringify(forecast));},[forecast]);
 
   // 25a: Employees aus Supabase laden + Realtime-Subscription
