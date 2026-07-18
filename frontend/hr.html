@@ -16610,16 +16610,20 @@ function TimeTracking({employees}){
 
   function clockIn(emp){
     if(getSession(emp)||getDoneSession(emp)){setPinError('Bereits gestempelt!');return;}
-    setSessions(ss=>[...ss,{
-      id:'ts'+Date.now(), emp_id:emp.id, date:today,
+    const newSession={
+      id:(window.crypto&&crypto.randomUUID)?crypto.randomUUID():'ts'+Date.now(),
+      emp_id:emp.id, date:today,
       clock_in:nowTime(), clock_out:null, hours:null,
       pauses:[], smokes:[],
       pause_active:null, smoke_active:null
-    }]);
+    };
+    setSessions(ss=>[...ss,newSession]);
+    saveTimeSessionToDB(newSession);
     setLoginEmp(null); setPin('');
   }
 
   function clockOut(emp){
+    let updated=null;
     setSessions(ss=>ss.map(s=>{
       if(s.emp_id!==emp.id||s.date!==today||s.clock_out) return s;
       const outStr=nowTime();
@@ -16627,27 +16631,33 @@ function TimeTracking({employees}){
       const pauseMins=(s.pauses||[]).reduce((a,p)=>a+(p.duration||0),0);
       const smokeMins=(s.smokes||[]).reduce((a,p)=>a+(p.duration||0),0);
       const net=Math.max(0,gross-pauseMins-smokeMins);
-      return {...s, clock_out:outStr,
+      updated={...s, clock_out:outStr,
         pause_active:null, smoke_active:null,
         hours:Math.round(net/6)/10,
         hours_gross:Math.round(gross/6)/10,
         pause_total:pauseMins, smoke_total:smokeMins};
+      return updated;
     }));
+    if(updated) saveTimeSessionToDB(updated);
     setLoginEmp(null); setPin('');
   }
 
   function startPause(emp, type){
     // type: 'pause' or 'smoke'
+    let updated=null;
     setSessions(ss=>ss.map(s=>{
       if(s.emp_id!==emp.id||s.date!==today||s.clock_out) return s;
       if(s.pause_active||s.smoke_active) return s; // already in a break
       const key = type==='pause'?'pause_active':'smoke_active';
-      return {...s, [key]:nowTime()};
+      updated={...s, [key]:nowTime()};
+      return updated;
     }));
+    if(updated) saveTimeSessionToDB(updated);
     setLoginEmp(null); setPin('');
   }
 
   function endPause(emp, type){
+    let updated=null;
     setSessions(ss=>ss.map(s=>{
       if(s.emp_id!==emp.id||s.date!==today||s.clock_out) return s;
       const key = type==='pause'?'pause_active':'smoke_active';
@@ -16656,8 +16666,10 @@ function TimeTracking({employees}){
       if(!start) return s;
       const dur = minutesBetween(start, nowTime());
       const entry = {start, end:nowTime(), duration:dur};
-      return {...s, [key]:null, [listKey]:[...(s[listKey]||[]),entry]};
+      updated={...s, [key]:null, [listKey]:[...(s[listKey]||[]),entry]};
+      return updated;
     }));
+    if(updated) saveTimeSessionToDB(updated);
     setLoginEmp(null); setPin('');
   }
 
@@ -22900,6 +22912,40 @@ async function savePerfEntryToDB(empId, kw, year, entries){
   return true;
 }
 
+// Etappe Z2: Zeiterfassung relational aus Supabase. loadTimeSessionsFromDB mappt
+// time_sessions -> bestehendes jsr_time_v1-Shape (session_date -> date). saveTimeSessionToDB
+// upsertet eine Session (date -> session_date). Bei Fehler -> null/false (Cache bleibt).
+async function loadTimeSessionsFromDB(){
+  try{
+    const {data, error} = await sb.from('time_sessions').select('*');
+    if(error){ console.error('[time] loadTimeSessionsFromDB', error); return null; }
+    return (data||[]).map(r=>({
+      id:r.id, emp_id:r.emp_id, date:r.session_date,
+      clock_in:r.clock_in, clock_out:r.clock_out, hours:r.hours, hours_gross:r.hours_gross,
+      pauses:r.pauses||[], smokes:r.smokes||[],
+      pause_active:r.pause_active, smoke_active:r.smoke_active,
+      pause_total:r.pause_total, smoke_total:r.smoke_total,
+    }));
+  }catch(e){ console.error('[time] loadTimeSessionsFromDB', e); return null; }
+}
+async function saveTimeSessionToDB(session){
+  if(!session||!session.id) return false;
+  const uuidRx=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if(!uuidRx.test(String(session.id))){ console.warn('[time] saveTimeSessionToDB: id kein uuid, DB-Write uebersprungen:', session.id); return false; }
+  if(!uuidRx.test(String(session.emp_id||''))){ console.warn('[time] saveTimeSessionToDB: emp_id kein uuid, DB-Write uebersprungen:', session.emp_id); return false; }
+  const payload={
+    id: session.id, emp_id: session.emp_id, session_date: session.date||null,
+    clock_in: session.clock_in??null, clock_out: session.clock_out??null,
+    hours: session.hours??null, hours_gross: session.hours_gross??null,
+    pauses: session.pauses||[], smokes: session.smokes||[],
+    pause_active: session.pause_active??null, smoke_active: session.smoke_active??null,
+    pause_total: session.pause_total??null, smoke_total: session.smoke_total??null,
+  };
+  const {error}=await sb.from('time_sessions').upsert(payload);
+  if(error){ console.error('[time] saveTimeSessionToDB', error); return false; }
+  return true;
+}
+
 // 25a/25b: 46 bekannte Schema-Spalten (38 aus 25a + 8 aus 25b).
 // created_at/updated_at sind DB-managed und werden nicht geschrieben.
 // Alles was NICHT in EMP_COLS steht wandert in `extra jsonb` + einmaliger console.warn.
@@ -24897,6 +24943,8 @@ function App(){
       if(cfg) localStorage.setItem('jsr_kpi_cfg_v1', JSON.stringify(cfg));
       const perf = await loadPerfDataFromDB();
       if(perf) localStorage.setItem('jsr_perf_v1', JSON.stringify(perf));
+      const times = await loadTimeSessionsFromDB();
+      if(times) localStorage.setItem('jsr_time_v1', JSON.stringify(times));
     })();
   },[]);
 

@@ -36,6 +36,11 @@ ssh "$SERVER" "mkdir -p $REMOTE_BASE/root"
 rsync -az --progress "$LOCAL_DIR/root-index.html" "$SERVER:$REMOTE_BASE/root/index.html"
 rsync -az --progress "$LOCAL_DIR/root-login.html" "$SERVER:$REMOTE_BASE/root/login.html"
 
+# stempel.html → HR-Subdomain (hr.tive360.de/stempel.html) + Root-Domain (tive360.de/stempel.html)
+echo "→ Stempeluhr..."
+rsync -az --progress "$LOCAL_DIR/stempel.html" "$SERVER:$REMOTE_BASE/hr/stempel.html"
+rsync -az --progress "$LOCAL_DIR/stempel.html" "$SERVER:$REMOTE_BASE/root/stempel.html"
+
 # assets/ (tive360-mark.svg = Logo + Favicon) → auf jede Subdomain-Root, weil
 # der Favicon-Pfad /assets/... pro Subdomain aufgelöst wird. Behebt die 404s.
 echo "→ Assets (Logo/Favicon)..."
