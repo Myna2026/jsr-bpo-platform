@@ -945,6 +945,8 @@ function getEmpById(id){
 // slipFromDB: Alias-Layer fuer Frontend-Renderer (emp_id, hours,
 // total_worked_hours) — DB-Row bleibt kompatibel mit renderPayroll/renderHome.
 var PAYSLIPS_ME = [];
+var PERF_ME = [];       // Perf: eigene kpi_entries (Supabase)
+var KPI_CFG_ME = [];    // Perf: kpi_config (Name/Einheit/thresholds)
 
 // Block 2: eigene Urlaubsanträge aus Supabase (RLS liefert nur eigene). Flach,
 // mit from/to/submitted-Aliassen für die bestehenden Renderer. jsr_vacation_requests_v1 tot.
@@ -999,6 +1001,34 @@ function subscribeMyPayslips(employeeId, onChange){
       })
     .subscribe();
   return function(){ try{ sb.removeChannel(chan); }catch(e){} };
+}
+
+// Perf: eigene KPI-Werte + Config aus Supabase (analog loadMyPayslipsFromDB).
+function loadMyPerfFromDB(employeeId){
+  return new Promise(function(resolve, reject){
+    if(!employeeId){ resolve({entries:[], cfg:[]}); return; }
+    Promise.all([
+      sb.from('kpi_entries').select('*').eq('emp_id', employeeId),
+      sb.from('kpi_config').select('*')
+    ]).then(function(res){
+      var eRes=res[0], cRes=res[1];
+      if(eRes.error){ console.error('[perf] loadMyPerfFromDB entries', eRes.error); reject(eRes.error); return; }
+      if(cRes.error){ console.error('[perf] loadMyPerfFromDB cfg', cRes.error); reject(cRes.error); return; }
+      resolve({entries: eRes.data||[], cfg: cRes.data||[]});
+    }, reject);
+  });
+}
+// Threshold-Auswertung analog hr.html evalKpi: erste passende Schwelle [min,max].
+function perfEvalKpi(kpi, value){
+  if(!kpi || !Array.isArray(kpi.thresholds)) return null;
+  var v=parseFloat(value); if(isNaN(v)) return null;
+  for(var i=0;i<kpi.thresholds.length;i++){ var t=kpi.thresholds[i]; if(v>=t.min && v<=t.max) return t; }
+  return null;
+}
+// Perf-Tab nur zeigen, wenn Werte existieren (Perms bleiben unangetastet, wenn Daten da sind).
+function applyPerfVisibility(){
+  if(PERF_ME && PERF_ME.length>0) return;
+  document.querySelectorAll('[data-view="Perf"]').forEach(function(el){ el.style.display='none'; });
 }
 
 var MY_PORTALS = [];
@@ -1116,6 +1146,10 @@ function gateSession(session){
               }
               renderCurrentViewOnRealtime();
             });
+            // Perf: eigene KPI-Werte + Config laden (einmalig beim Login)
+            loadMyPerfFromDB(ME.id)
+              .then(function(res){ PERF_ME=res.entries; KPI_CFG_ME=res.cfg; applyPerfVisibility(); renderCurrentViewOnRealtime(); })
+              .catch(function(err){ console.error('[perf] Perf-Load fehlgeschlagen', err); });
             // Block 2: eigene Urlaubsanträge laden + Realtime (RLS filtert auf eigene)
             loadMyVacreqs();
             sb.channel('vacreq-me-b2')
@@ -1528,6 +1562,23 @@ function renderHome(){
   html+='<div class="kpi"><div class="kpi-label">Letzter Lohn</div><div class="kpi-val" style="font-size:18px;">'+slipNet+'</div><div class="kpi-sub">'+slipMonth+'</div></div>';
   html+='</div>';
 
+  // Performance-Karte (nur wenn Werte existieren) — neueste erfasste Woche
+  if(PERF_ME && PERF_ME.length){
+    var pCfg={}; (KPI_CFG_ME||[]).forEach(function(c){pCfg[c.id]=c;});
+    var pw={}; PERF_ME.forEach(function(e){ var pk=e.year+'_'+e.kw; if(!pw[pk]) pw[pk]={year:e.year,kw:e.kw,byKpi:{}}; pw[pk].byKpi[e.kpi_id]=e.value; });
+    var pweeks=Object.keys(pw).map(function(k){return pw[k];}).sort(function(a,b){return b.year-a.year||b.kw-a.kw;});
+    var plast=pweeks[0];
+    html+='<div class="card" style="margin-bottom:14px;"><div class="card-header"><div class="card-title">📊 Performance · KW '+plast.kw+'/'+plast.year+'</div><button class="btn btn-sm" onclick="showView(\'Perf\')">Details</button></div><div class="card-body"><div class="kpi-grid">';
+    Object.keys(plast.byKpi).forEach(function(id){
+      var c=pCfg[id], v=plast.byKpi[id];
+      var name=(c&&c.name)?c.name:id, unit=(c&&c.unit)?c.unit:'';
+      var t=perfEvalKpi(c, v);
+      var sub=t?'<div class="kpi-sub" style="color:'+(t.color||'')+';">'+esc((t.icon||'')+' '+(t.label||''))+'</div>':'';
+      html+='<div class="kpi"><div class="kpi-label">'+esc(name)+'</div><div class="kpi-val">'+esc(v)+esc(unit)+'</div>'+sub+'</div>';
+    });
+    html+='</div></div></div>';
+  }
+
   // Schichtplan nächste 7 Tage
   html+='<div class="card"><div class="card-header"><div class="card-title">📅 Nächste 7 Tage</div><button class="btn btn-sm" onclick="showView(\'Shift\',document.querySelector([data-view=Shift]))">Alle anzeigen</button></div><div class="card-body">'+next7+'</div></div>';
 
@@ -1928,35 +1979,52 @@ function submitVacationRequest(){
 // PERF VIEW
 // ═══════════════════════════════════════════════════════════════════════════
 function renderPerf(){
-  var perfData=[];
-  try{perfData=JSON.parse(localStorage.getItem('jsr_perf_v1')||'{}')[ME.id]||[];}catch(e){}
+  var entries = PERF_ME || [];
   var html='';
 
-  if(!perfData.length){
+  if(!entries.length){
     html+='<div class="empty"><div class="empty-icon">📊</div><div>Noch keine Performance-Daten erfasst.</div><div style="margin-top:8px;font-size:11px;">KPIs werden wöchentlich vom Teamleiter eingepflegt.</div></div>';
     document.getElementById('vPerf').innerHTML=html;
     return;
   }
 
-  // Letzte Woche als KPI-Header
-  var last=perfData[perfData.length-1];
-  html+='<div class="card"><div class="card-header"><div class="card-title">Aktuelle Woche · KW '+last.kw+'/'+last.year+'</div></div><div class="card-body">';
-  html+='<div class="kpi-grid">';
-  Object.keys(last.values||{}).forEach(function(k){
-    var v=last.values[k];
-    html+='<div class="kpi"><div class="kpi-label">'+esc(k)+'</div><div class="kpi-val">'+esc(v)+'</div></div>';
+  var cfgById={}; (KPI_CFG_ME||[]).forEach(function(c){cfgById[c.id]=c;});
+  // Spalten = KPIs des MA (Reihenfolge des ersten Auftretens)
+  var kpiIds=[];
+  entries.forEach(function(e){ if(kpiIds.indexOf(e.kpi_id)<0) kpiIds.push(e.kpi_id); });
+  var cols=kpiIds.map(function(id){ var c=cfgById[id]; return {id:id, name:(c&&c.name)?c.name:id, unit:(c&&c.unit)?c.unit:'', thresholds:(c&&c.thresholds)?c.thresholds:[]}; });
+  // nach (year,kw) gruppieren, absteigend
+  var wkMap={};
+  entries.forEach(function(e){ var key=e.year+'_'+e.kw; if(!wkMap[key]) wkMap[key]={year:e.year,kw:e.kw,byKpi:{}}; wkMap[key].byKpi[e.kpi_id]=e.value; });
+  var weeks=Object.keys(wkMap).map(function(k){return wkMap[k];}).sort(function(a,b){return b.year-a.year||b.kw-a.kw;});
+  var recent=weeks.slice(0,4);
+
+  // Aktuelle Woche (neueste)
+  var last=weeks[0];
+  html+='<div class="card"><div class="card-header"><div class="card-title">Aktuelle Woche · KW '+last.kw+'/'+last.year+'</div></div><div class="card-body"><div class="kpi-grid">';
+  cols.forEach(function(col){
+    var v=last.byKpi[col.id];
+    if(v===undefined) return;
+    var t=perfEvalKpi(col, v);
+    var sub=t?'<div class="kpi-sub" style="color:'+(t.color||'')+';">'+esc((t.icon||'')+' '+(t.label||''))+'</div>':'';
+    html+='<div class="kpi"><div class="kpi-label">'+esc(col.name)+'</div><div class="kpi-val">'+esc(v)+esc(col.unit)+'</div>'+sub+'</div>';
   });
   html+='</div></div></div>';
 
-  // Verlauf
-  html+='<div class="card"><div class="card-header"><div class="card-title">Verlauf</div></div><div class="card-body card-body-tight"><div class="table-wrap"><table>';
+  // Verlauf (letzte 4 Wochen)
+  html+='<div class="card"><div class="card-header"><div class="card-title">Verlauf · letzte '+recent.length+' Woche'+(recent.length===1?'':'n')+'</div></div><div class="card-body card-body-tight"><div class="table-wrap"><table>';
   html+='<thead><tr><th>KW</th>';
-  var keys=Object.keys(last.values||{});
-  keys.forEach(function(k){html+='<th class="num" style="text-align:right;">'+esc(k)+'</th>';});
+  cols.forEach(function(col){ html+='<th class="num" style="text-align:right;">'+esc(col.name)+(col.unit?' <span class="muted">('+esc(col.unit)+')</span>':'')+'</th>'; });
   html+='</tr></thead><tbody>';
-  perfData.slice().reverse().forEach(function(p){
-    html+='<tr><td><strong>KW '+p.kw+'</strong> <span class="muted">'+p.year+'</span></td>';
-    keys.forEach(function(k){html+='<td class="num">'+esc((p.values||{})[k]||'—')+'</td>';});
+  recent.forEach(function(w){
+    html+='<tr><td><strong>KW '+w.kw+'</strong> <span class="muted">'+w.year+'</span></td>';
+    cols.forEach(function(col){
+      var v=w.byKpi[col.id];
+      if(v===undefined){ html+='<td class="num">—</td>'; return; }
+      var t=perfEvalKpi(col, v);
+      var style=t?' style="text-align:right;color:'+(t.color||'')+';font-weight:600;"':' style="text-align:right;"';
+      html+='<td class="num"'+style+'>'+esc(v)+esc(col.unit)+(t&&t.icon?' '+esc(t.icon):'')+'</td>';
+    });
     html+='</tr>';
   });
   html+='</tbody></table></div></div></div>';
