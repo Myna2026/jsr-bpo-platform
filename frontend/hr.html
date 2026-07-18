@@ -4927,7 +4927,7 @@ function qualityColor(q){
 }
 
 function TrainingPlanModal({plan, projects, employees, onSave, onClose}){
-  const [form, setForm]=useState(plan||{project_id:'p1',name:'',start_date:'',end_date:'',planned_count:8,mode:'Hybrid',skill_focus:'',confirmed_ids:[],notes:''});
+  const [form, setForm]=useState(plan||{project_id:'',name:'',start_date:'',end_date:'',planned_count:8,mode:'Hybrid',skill_focus:'',confirmed_ids:[],notes:''});
   const set=(k,v)=>setForm(f=>({...f,[k]:v}));
   const toggleConf=id=>set('confirmed_ids',form.confirmed_ids.includes(id)?form.confirmed_ids.filter(x=>x!==id):[...form.confirmed_ids,id]);
   const eligible=employees.filter(e=>['selected','in_system','presented','cv_received'].includes(e.status));
@@ -4942,6 +4942,7 @@ function TrainingPlanModal({plan, projects, employees, onSave, onClose}){
             <div className="form-group"><label className="form-label">Name</label><input className="form-input" value={form.name} onChange={e=>set('name',e.target.value)} placeholder="z.B. Holidaycheck Batch Feb 2025"/></div>
             <div className="form-group"><label className="form-label">Projekt</label>
               <select className="form-select" value={form.project_id} onChange={e=>set('project_id',e.target.value)}>
+                <option value="">— Projekt wählen —</option>
                 {projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
               </select>
             </div>
@@ -5116,7 +5117,13 @@ function TrainingPlanModal({plan, projects, employees, onSave, onClose}){
 
 function TrainingPlans({plans, setPlans, projects, employees}){
   const [modal, setModal]=useState(null);
-  function savePlan(form){if(form.id)setPlans(ps=>ps.map(p=>p.id===form.id?form:p));else setPlans(ps=>[...ps,{...form,id:'tp'+Date.now()}]);setModal(null);}
+  function savePlan(form){
+    const rec = form.id ? form : {...form, id:(window.crypto&&crypto.randomUUID)?crypto.randomUUID():'tp'+Date.now()};
+    if(form.id) setPlans(ps=>ps.map(p=>p.id===form.id?rec:p));
+    else setPlans(ps=>[...ps,rec]);
+    saveTrainingPlanToDB(rec);
+    setModal(null);
+  }
   return(
     <div>
       {modal&&<TrainingPlanModal plan={modal==='add'?null:modal} projects={projects} employees={employees} onSave={savePlan} onClose={()=>setModal(null)}/>}
@@ -23019,6 +23026,50 @@ async function saveOrgChartToDB(projectId, chart){
   return true;
 }
 
+// Etappe S2: Schulungsplaene relational aus Supabase. loadTrainingPlansFromDB liest
+// training_plans ins Frontend-Shape (1:1-Felder). saveTrainingPlanToDB upsertet einen
+// Plan (Allowlist der 14 Spalten; leere Strings -> null, damit date/FK nicht brechen).
+async function loadTrainingPlansFromDB(){
+  try{
+    const {data, error} = await sb.from('training_plans').select('*');
+    if(error){ console.error('[plan] loadTrainingPlansFromDB', error); return null; }
+    const rows = data||[];
+    if(!rows.length) return null;
+    return rows.map(r=>({
+      id:r.id, project_id:r.project_id, name:r.name,
+      start_date:r.start_date, end_date:r.end_date,
+      planned_count:r.planned_count, mode:r.mode, skill_focus:r.skill_focus,
+      primary_skill:r.primary_skill,
+      confirmed_ids: Array.isArray(r.confirmed_ids)?r.confirmed_ids:[],
+      avg_salary:r.avg_salary, status:r.status, notes:r.notes,
+    }));
+  }catch(e){ console.error('[plan] loadTrainingPlansFromDB', e); return null; }
+}
+async function saveTrainingPlanToDB(plan){
+  if(!plan||!plan.id) return false;
+  const uuidRx=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if(!uuidRx.test(String(plan.id))){ console.warn('[plan] saveTrainingPlanToDB: id kein uuid, DB-Write uebersprungen:', plan.id); return false; }
+  const clean = v => (v==='' ? null : v);
+  const payload={
+    id: plan.id,
+    project_id: clean(plan.project_id),
+    name: plan.name??null,
+    start_date: clean(plan.start_date),
+    end_date: clean(plan.end_date),
+    planned_count: (plan.planned_count===''||plan.planned_count==null)?null:plan.planned_count,
+    mode: plan.mode??null,
+    skill_focus: plan.skill_focus??null,
+    primary_skill: plan.primary_skill??null,
+    confirmed_ids: Array.isArray(plan.confirmed_ids)?plan.confirmed_ids:[],
+    avg_salary: (plan.avg_salary===''||plan.avg_salary==null)?null:plan.avg_salary,
+    status: plan.status??null,
+    notes: plan.notes??null,
+  };
+  const {error}=await sb.from('training_plans').upsert(payload);
+  if(error){ console.error('[plan] saveTrainingPlanToDB', error); return false; }
+  return true;
+}
+
 // 25a/25b: 46 bekannte Schema-Spalten (38 aus 25a + 8 aus 25b).
 // created_at/updated_at sind DB-managed und werden nicht geschrieben.
 // Alles was NICHT in EMP_COLS steht wandert in `extra jsonb` + einmaliger console.warn.
@@ -25072,6 +25123,13 @@ function App(){
     return ()=>{ alive=false; if(unsub) unsub(); };
   },[]);
   useEffect(()=>{localStorage.setItem('jsr_plans_v3',JSON.stringify(plans));},[plans]);
+  // Etappe S2: Schulungsplaene aus Supabase laden (Hybrid — behaelt den synchronen
+  // LS-Erstwert, ueberschreibt nur bei DB-Treffern). localStorage bleibt write-through Cache.
+  useEffect(()=>{
+    let alive=true;
+    loadTrainingPlansFromDB().then(pl=>{ if(alive && pl) setPlans(pl); });
+    return ()=>{ alive=false; };
+  },[]);
   useEffect(()=>{localStorage.setItem('jsr_org_v1',JSON.stringify(orgCharts));},[orgCharts]);
   // Etappe O2: Organigramme aus Supabase laden (Hybrid — behaelt den synchronen
   // LS-Erstwert, ueberschreibt nur bei DB-Treffern). localStorage bleibt write-through Cache.
