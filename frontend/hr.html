@@ -1493,8 +1493,10 @@ function calcVacationEntitlement(emp, forMonth){
 // ══════════════════════════════════════════════════════════════════════════════
 
 function getKpiCfg(){
-  try{ return JSON.parse(localStorage.getItem('jsr_kpi_cfg_v1')||'null')||getDefaultKpiCfg(); }
-  catch(e){ return getDefaultKpiCfg(); }
+  // Variante B: kein automatischer getDefaultKpiCfg()-Fallback mehr — leere Quelle
+  // liefert []. getDefaultKpiCfg() bleibt im Code (optional als "Vorlage einfuegen").
+  try{ return JSON.parse(localStorage.getItem('jsr_kpi_cfg_v1')||'[]')||[]; }
+  catch(e){ return []; }
 }
 function saveKpiCfg(cfg){ localStorage.setItem('jsr_kpi_cfg_v1', JSON.stringify(cfg)); }
 
@@ -1804,6 +1806,8 @@ function PerformanceView({employees, projects}){
       }
     });
     savePerfData(data);
+    // Etappe P2: dieselbe MA-Woche zusaetzlich nach Supabase (delete-then-insert)
+    savePerfEntryToDB(emp.id, selKw, selYear, (data[emp.id]||[]).filter(e=>e.kw===selKw&&e.year===selYear));
     // Reload
     const weekEntries = {};
     activeEmps.forEach(e=>{
@@ -1938,7 +1942,7 @@ function PerformanceView({employees, projects}){
       </div>
 
       {/* Ranking View */}
-      {rankView&&(
+      {kpiCfg.length>0&&rankView&&(
         <div style={{marginBottom:16}}>
           {projects.map(proj=>{
             const ranking = getRanking(proj.id);
@@ -1972,7 +1976,14 @@ function PerformanceView({employees, projects}){
         </div>
       )}
 
-      {/* Employee table */}
+      {/* Employee table — Empty-State wenn keine KPIs konfiguriert (Variante C) */}
+      {kpiCfg.length===0 ? (
+        <div className="card" style={{padding:40,textAlign:'center',color:'var(--muted)'}}>
+          <div style={{fontSize:32,marginBottom:8}}>📊</div>
+          <div style={{fontWeight:600}}>Noch keine KPIs angelegt</div>
+          <div style={{fontSize:12,marginTop:4}}>Lege Performance-Kennzahlen im Bereich System / Einstellungen an — dann erscheinen sie hier.</div>
+        </div>
+      ) : (
       <div className="card">
         <div className="table-responsive"><table>
           <thead><tr>
@@ -2040,6 +2051,7 @@ function PerformanceView({employees, projects}){
           </tbody>
         </table></div>
       </div>
+      )}
     </div>
   );
 }</script><script type="text/babel">function AbsenceModal({emp, onSave, onClose}){
@@ -19608,7 +19620,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
 
   const [payTab, setPayTab] = useState('al');
   const [kpiCfg, setKpiCfgState] = useState(()=>getKpiCfg());
-  function saveKpi(cfg){saveKpiCfg(cfg);setKpiCfgState([...cfg]);}
+  function saveKpi(cfg){saveKpiConfigToDB(cfg);saveKpiCfg(cfg);setKpiCfgState([...cfg]);}
   const [hwTypes, setHwTypesState] = useState(()=>{try{return JSON.parse(localStorage.getItem('jsr_hw_types')||'[]');}catch(e){return[];}});
   const saveHwTypes=t=>{localStorage.setItem('jsr_hw_types',JSON.stringify(t));setHwTypesState([...t]);};
   const DEF_FIX=[{id:'rk_miete',label:'Miete',amount:2500},{id:'rk_reinigung',label:'Reinigung Firma',amount:550},{id:'rk_datenschutz',label:'Datenschutztonne',amount:39},{id:'rk_inet1',label:'Internet (Ipko)',amount:292.70},{id:'rk_inet2',label:'Internet (Kujtesa)',amount:100}];
@@ -19960,7 +19972,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
             <span className="card-title">📊 KPI-Konfiguration pro Projekt & Skill</span>
             <button className="btn btn-primary btn-sm" onClick={()=>{
               const k=getKpiCfg();
-              const n=[...k,{id:'kpi_'+Date.now(),project_id:'',skill:'',name:'Neuer KPI',type:'number',unit:'%',
+              const n=[...k,{id:'kpi_'+Date.now(),project_id:'',skill:'',name:'Neuer KPI',type:'number',unit:'',
                 thresholds:[{min:80,max:100,label:'Sehr gut',color:'#065f46',bg:'#d1fae5',icon:'🌟'},
                   {min:60,max:79.9,label:'Gut',color:'#92400e',bg:'#fef3c7',icon:'👍'},
                   {min:0,max:59.9,label:'Ausbaufähig',color:'#991b1b',bg:'#fef2f2',icon:'⚠️'}]}];
@@ -20001,7 +20013,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
                       </select>
                       {/* Typ */}
                       <select className="form-select" style={{fontSize:11,width:70}} value={kpi.type||'number'}
-                        onChange={e=>{const u=kpis.map((k,j)=>j===i?{...k,type:e.target.value}:k);saveKpi(u);}}>
+                        onChange={e=>{const t=e.target.value;const du=t==='percent'?'%':t==='factor'?'×':'';const u=kpis.map((k,j)=>j===i?{...k,type:t,unit:du}:k);saveKpi(u);}}>
                         <option value="percent">%</option>
                         <option value="number">Zahl</option>
                         <option value="factor">Faktor</option>
@@ -22755,6 +22767,62 @@ async function deleteProjectFromDB(id){
   return true;
 }
 
+// Etappe P2: Performance relational aus Supabase. loadKpiConfigFromDB liefert das
+// KPI-Config-Array (Quelle fuer den getKpiCfg-Cache), loadPerfDataFromDB gruppiert die
+// Ist-Werte nach emp_id ins bestehende {emp_id:[{kw,year,kpi_id,value,entered_by,ts}]}.
+// Bei Fehler -> null (Cache bleibt), bei Erfolg -> (evtl. leeres) Ergebnis.
+async function loadKpiConfigFromDB(){
+  try{
+    const {data, error} = await sb.from('kpi_config').select('*');
+    if(error){ console.error('[perf] loadKpiConfigFromDB', error); return null; }
+    return (data||[]).map(r=>({
+      id:r.id, project_id:r.project_id, skill:r.skill, name:r.name,
+      type:r.type, unit:r.unit, thresholds:r.thresholds||[],
+    }));
+  }catch(e){ console.error('[perf] loadKpiConfigFromDB', e); return null; }
+}
+async function loadPerfDataFromDB(){
+  try{
+    const {data, error} = await sb.from('kpi_entries').select('*');
+    if(error){ console.error('[perf] loadPerfDataFromDB', error); return null; }
+    const out={};
+    (data||[]).forEach(r=>{
+      (out[r.emp_id]=out[r.emp_id]||[]).push({
+        kw:r.kw, year:r.year, kpi_id:r.kpi_id, value:r.value, entered_by:r.entered_by, ts:r.ts,
+      });
+    });
+    return out;
+  }catch(e){ console.error('[perf] loadPerfDataFromDB', e); return null; }
+}
+// Schreiben: kpi_config als Voll-Replace (Allowlist-Upsert + Prune entfernter ids, damit
+// Loeschungen im Editor persistieren — matcht die alte Voll-Replace-Semantik von saveKpiCfg).
+// kpi_entries pro MA-Woche delete-then-insert (kein Unique-Key -> vermeidet Duplikate).
+const KPI_CFG_COLS = ['id','project_id','skill','name','type','unit','thresholds'];
+async function saveKpiConfigToDB(cfg){
+  const rows=(cfg||[]).map(k=>{ const o={}; KPI_CFG_COLS.forEach(c=>{ o[c]= k[c]===undefined?null:k[c]; }); if(o.thresholds==null) o.thresholds=[]; return o; });
+  const {error}=await sb.from('kpi_config').upsert(rows);
+  if(error){ console.error('[perf] saveKpiConfigToDB upsert', error); return false; }
+  try{
+    const {data:ex}=await sb.from('kpi_config').select('id');
+    const keep=new Set(rows.map(r=>r.id));
+    const del=(ex||[]).map(r=>r.id).filter(id=>!keep.has(id));
+    if(del.length){ const {error:dErr}=await sb.from('kpi_config').delete().in('id', del); if(dErr) console.error('[perf] saveKpiConfigToDB prune', dErr); }
+  }catch(e){ console.error('[perf] saveKpiConfigToDB prune', e); }
+  return true;
+}
+async function savePerfEntryToDB(empId, kw, year, entries){
+  const uuidRx=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if(!uuidRx.test(String(empId||''))){ console.warn('[perf] savePerfEntryToDB: emp_id kein uuid, DB-Write uebersprungen:', empId); return false; }
+  const del=await sb.from('kpi_entries').delete().eq('emp_id',empId).eq('kw',kw).eq('year',year);
+  if(del.error){ console.error('[perf] savePerfEntryToDB delete', del.error); return false; }
+  const rows=(entries||[]).map(e=>({emp_id:empId, kw, year, kpi_id:e.kpi_id, value:e.value, entered_by:e.entered_by??null}));
+  if(rows.length){
+    const ins=await sb.from('kpi_entries').insert(rows);
+    if(ins.error){ console.error('[perf] savePerfEntryToDB insert', ins.error); return false; }
+  }
+  return true;
+}
+
 // 25a/25b: 46 bekannte Schema-Spalten (38 aus 25a + 8 aus 25b).
 // created_at/updated_at sind DB-managed und werden nicht geschrieben.
 // Alles was NICHT in EMP_COLS steht wandert in `extra jsonb` + einmaliger console.warn.
@@ -24736,46 +24804,23 @@ function App(){
     if(!localStorage.getItem('jsr_projects_v1')||JSON.parse(localStorage.getItem('jsr_projects_v1')||'[]').length===0){
       localStorage.setItem('jsr_projects_v1',JSON.stringify([{id:'proj_hc_a1b2c3d4',name:'Holidaycheck Support',status:'active',location:'al',project_profiles:['Projektleiter'],skills:[{key:'support',label:'Support',rate:28,rate_training:18,profiles:['Support Agent','Senior Support Agent','Team Lead Support','Support Trainer','Support QM']},{key:'sales',label:'Sales',rate:32,rate_training:20,profiles:['Sales Agent','Senior Sales Agent','Team Lead Sales','Sales Trainer','Sales QM']}]}]));
     }
-    if(!localStorage.getItem('jsr_kpi_cfg_v1')){
-      localStorage.setItem('jsr_kpi_cfg_v1',JSON.stringify([
-        {id:'kpi_csat',project_id:'proj_hc_a1b2c3d4',skill:'support',name:'CSAT Score',type:'percent',unit:'%',thresholds:[{min:90,max:100,label:'Excellent',color:'#064e3b',bg:'#ecfdf5',icon:'🤩'},{min:75,max:89.9,label:'Gut',color:'#065f46',bg:'#d1fae5',icon:'😊'},{min:0,max:74.9,label:'Ausbaufahig',color:'#991b1b',bg:'#fef2f2',icon:'😤'}]},
-        {id:'kpi_aht',project_id:'proj_hc_a1b2c3d4',skill:'support',name:'AHT (Sekunden)',type:'number',unit:'sek',thresholds:[{min:0,max:240,label:'Super',color:'#064e3b',bg:'#ecfdf5',icon:'🤩'},{min:241,max:360,label:'OK',color:'#065f46',bg:'#d1fae5',icon:'😊'},{min:361,max:9999,label:'Zu langsam',color:'#991b1b',bg:'#fef2f2',icon:'😤'}]},
-        {id:'kpi_fcr',project_id:'proj_hc_a1b2c3d4',skill:'support',name:'First Contact Resolution',type:'percent',unit:'%',thresholds:[{min:80,max:100,label:'Excellent',color:'#064e3b',bg:'#ecfdf5',icon:'🤩'},{min:65,max:79.9,label:'Gut',color:'#065f46',bg:'#d1fae5',icon:'😊'},{min:0,max:64.9,label:'Ausbaufahig',color:'#991b1b',bg:'#fef2f2',icon:'😤'}]},
-        {id:'kpi_cvr',project_id:'proj_hc_a1b2c3d4',skill:'sales',name:'CVR Conversion',type:'percent',unit:'%',thresholds:[{min:60,max:100,label:'Killer',color:'#064e3b',bg:'#ecfdf5',icon:'🤩'},{min:50,max:59.9,label:'Rockstar',color:'#065f46',bg:'#d1fae5',icon:'😎'},{min:40,max:49.9,label:'Gut',color:'#92400e',bg:'#fef3c7',icon:'😊'},{min:0,max:39.9,label:'Gas geben',color:'#991b1b',bg:'#fef2f2',icon:'😤'}]},
-      ]));
-    }
+    // Etappe P2: kpi_cfg-Seed entfernt — Quelle ist jetzt Supabase (kpi_config).
     if(!localStorage.getItem('jsr_payroll_cfg_al')){localStorage.setItem('jsr_payroll_cfg_al',JSON.stringify({kv_employer:35.08,kv_employee:30.00,pension_employee_pct:5,pension_employer_pct:5,tax_bracket1_max:250,tax_bracket2_max:450,tax_bracket1_pct:0,tax_bracket2_pct:8,tax_bracket3_pct:10,vacation_days_default:20}));}
     if(!localStorage.getItem('jsr_hw_types')){localStorage.setItem('jsr_hw_types',JSON.stringify([{id:'hw_headset',name:'Headset',icon:'🎧',description:'USB Headset'},{id:'hw_laptop',name:'Laptop',icon:'💻',description:'Firmenlaptop'},{id:'hw_mouse',name:'Maus',icon:'🖱',description:'Computermaus'}]));}
-    if(!localStorage.getItem('jsr_perf_v1')){
-      localStorage.setItem('jsr_perf_v1',JSON.stringify({
-        'emp_001':[
-          {kpi_id:'kpi_csat',kw:44,year:2024,value:92,ts:1},{kpi_id:'kpi_aht',kw:44,year:2024,value:218,ts:1},{kpi_id:'kpi_fcr',kw:44,year:2024,value:84,ts:1},
-          {kpi_id:'kpi_csat',kw:45,year:2024,value:88,ts:1},{kpi_id:'kpi_aht',kw:45,year:2024,value:235,ts:1},{kpi_id:'kpi_fcr',kw:45,year:2024,value:79,ts:1},
-          {kpi_id:'kpi_csat',kw:46,year:2024,value:94,ts:1},{kpi_id:'kpi_aht',kw:46,year:2024,value:201,ts:1},{kpi_id:'kpi_fcr',kw:46,year:2024,value:87,ts:1},
-          {kpi_id:'kpi_csat',kw:47,year:2024,value:91,ts:1},{kpi_id:'kpi_aht',kw:47,year:2024,value:224,ts:1},{kpi_id:'kpi_fcr',kw:47,year:2024,value:82,ts:1},
-          {kpi_id:'kpi_csat',kw:18,year:2025,value:95,ts:1},{kpi_id:'kpi_aht',kw:18,year:2025,value:198,ts:1},{kpi_id:'kpi_fcr',kw:18,year:2025,value:89,ts:1},
-          {kpi_id:'kpi_csat',kw:19,year:2025,value:90,ts:1},{kpi_id:'kpi_aht',kw:19,year:2025,value:241,ts:1},{kpi_id:'kpi_fcr',kw:19,year:2025,value:81,ts:1},
-        ],
-        'emp_003':[
-          {kpi_id:'kpi_csat',kw:44,year:2024,value:78,ts:1},{kpi_id:'kpi_aht',kw:44,year:2024,value:312,ts:1},{kpi_id:'kpi_fcr',kw:44,year:2024,value:67,ts:1},
-          {kpi_id:'kpi_csat',kw:45,year:2024,value:82,ts:1},{kpi_id:'kpi_aht',kw:45,year:2024,value:289,ts:1},{kpi_id:'kpi_fcr',kw:45,year:2024,value:71,ts:1},
-          {kpi_id:'kpi_csat',kw:46,year:2024,value:79,ts:1},{kpi_id:'kpi_aht',kw:46,year:2024,value:334,ts:1},{kpi_id:'kpi_fcr',kw:46,year:2024,value:65,ts:1},
-          {kpi_id:'kpi_csat',kw:18,year:2025,value:85,ts:1},{kpi_id:'kpi_aht',kw:18,year:2025,value:271,ts:1},{kpi_id:'kpi_fcr',kw:18,year:2025,value:74,ts:1},
-          {kpi_id:'kpi_csat',kw:19,year:2025,value:88,ts:1},{kpi_id:'kpi_aht',kw:19,year:2025,value:258,ts:1},{kpi_id:'kpi_fcr',kw:19,year:2025,value:76,ts:1},
-        ],
-        'emp_002':[
-          {kpi_id:'kpi_cvr',kw:44,year:2024,value:54,ts:1},{kpi_id:'kpi_cvr',kw:45,year:2024,value:61,ts:1},
-          {kpi_id:'kpi_cvr',kw:46,year:2024,value:58,ts:1},{kpi_id:'kpi_cvr',kw:47,year:2024,value:66,ts:1},
-          {kpi_id:'kpi_cvr',kw:18,year:2025,value:63,ts:1},{kpi_id:'kpi_cvr',kw:19,year:2025,value:57,ts:1},
-        ],
-        'emp_004':[
-          {kpi_id:'kpi_cvr',kw:44,year:2024,value:68,ts:1},{kpi_id:'kpi_cvr',kw:45,year:2024,value:72,ts:1},
-          {kpi_id:'kpi_cvr',kw:46,year:2024,value:65,ts:1},{kpi_id:'kpi_cvr',kw:47,year:2024,value:74,ts:1},
-          {kpi_id:'kpi_cvr',kw:18,year:2025,value:70,ts:1},{kpi_id:'kpi_cvr',kw:19,year:2025,value:76,ts:1},
-        ],
-      }));
-    }
+    // Etappe P2: perf-Seed entfernt — Quelle ist jetzt Supabase (kpi_entries).
     if(!localStorage.getItem('jsr_shift_cfg')){localStorage.setItem('jsr_shift_cfg',JSON.stringify({"proj_hc_sales":[{"id":"s1","label":"Frueh","value":"08:00-16:30","hours":8.0,"net":7.5,"split":false},{"id":"s2","label":"Frueh lang","value":"09:00-17:30","hours":8.5,"net":8.0,"split":false},{"id":"s3","label":"Spaet frueh","value":"11:30-20:00","hours":8.5,"net":8.0,"split":false},{"id":"s4","label":"Spaet","value":"13:30-22:00","hours":8.5,"net":8.0,"split":false},{"id":"s5","label":"Frueh kurz","value":"08:00-15:30","hours":7.5,"net":7.0,"split":false},{"id":"s6","label":"Split 08-12+16-20","value":"08:00-12:00","value2":"16:00-20:00","hours":8.0,"net":7.5,"split":true},{"id":"s7","label":"Split 08-12+18-22","value":"08:00-12:00","value2":"18:00-22:00","hours":8.0,"net":7.5,"split":true}],"proj_hc_support":[{"id":"s1","label":"Frueh lang","value":"08:00-17:30","hours":9.5,"net":9.0,"split":false},{"id":"s2","label":"Spaet frueh","value":"11:30-20:00","hours":8.5,"net":8.0,"split":false},{"id":"s3","label":"Split 08-12+16-20","value":"08:00-12:00","value2":"16:00-20:00","hours":8.0,"net":7.5,"split":true}],"proj_giga_all":[{"id":"s1","label":"Standard","value":"09:00-17:30","hours":8.5,"net":8.0,"split":false},{"id":"s2","label":"Spaet","value":"10:30-19:00","hours":8.5,"net":8.0,"split":false},{"id":"s3","label":"Split 09-13+17-21","value":"09:00-13:00","value2":"17:00-21:00","hours":8.0,"net":7.5,"split":true}]}));}
+  },[]);
+
+  // Etappe P2: Performance aus Supabase laden (kpi_config + kpi_entries) und in den
+  // localStorage-Cache spiegeln, damit die synchronen getKpiCfg()/getPerfData()-Leser
+  // unveraendert funktionieren. Supabase ist Source of Truth (kein Seed mehr).
+  useEffect(()=>{
+    (async()=>{
+      const cfg = await loadKpiConfigFromDB();
+      if(cfg) localStorage.setItem('jsr_kpi_cfg_v1', JSON.stringify(cfg));
+      const perf = await loadPerfDataFromDB();
+      if(perf) localStorage.setItem('jsr_perf_v1', JSON.stringify(perf));
+    })();
   },[]);
 
   // 25a: Employees kommen aus Supabase (Load + Realtime via useEffect unten)
