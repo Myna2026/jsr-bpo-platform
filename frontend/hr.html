@@ -7257,6 +7257,7 @@ function PayrollView({employees, projects, showToast}){
   const [wheelBonusByEmp, setWheelBonusByEmp] = useState({});  // G4: Glücksrad-Summe je MA im selMonth
   const [activeTab, setActiveTab] = useState('current'); // current | archive
   const [selMonth, setSelMonth] = useState(()=>{const d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');});
+  const [payMigBusy, setPayMigBusy] = useState(false);
   const [selEmp, setSelEmp] = useState('all');
   const [bonusModal, setBonusModal] = useState(null);
   const [bonusForm, setBonusForm] = useState({referral_bonus:0,target_bonus:0,special_bonus:0,notes:'',deduction_tax:0,deduction_social:0,deduction_other:0,deduction_notes:'',
@@ -7728,13 +7729,30 @@ function PayrollView({employees, projects, showToast}){
 
   function saveBonuses(){
     if(!bonusModal) return;
+    const entry={emp_id:bonusModal.id,month:selMonth,...bonusForm};
     setSalaryData(prev=>{
       const md=[...(prev[selMonth]||[])];const idx=md.findIndex(r=>r.emp_id===bonusModal.id);
-      const entry={emp_id:bonusModal.id,month:selMonth,...bonusForm};
       if(idx>=0)md[idx]=entry;else md.push(entry);
       return{...prev,[selMonth]:md};
     });
+    savePayrollInputToDB(entry);   // PI2: Lohn-Input write-through nach Supabase
     setBonusModal(null);
+  }
+
+  // PI2 Erst-Uebernahme: vorhandene localStorage-Lohn-Inputs (alle Monate) per Upsert
+  // nach (emp_id, month) in die DB schieben. Idempotent; localStorage bleibt unveraendert.
+  async function migratePayrollToDB(){
+    const recs=[];
+    Object.entries(salaryData).forEach(([month,arr])=>{
+      (arr||[]).forEach(r=>{ if(r&&r.emp_id) recs.push({...r, month:r.month||month}); });
+    });
+    if(!recs.length){ alert('Keine lokalen Lohn-Inputs gefunden.'); return; }
+    if(!window.confirm('In DB übernehmen (Upsert nach emp_id + Monat):\n· '+recs.length+' Lohn-Input-Einträge\n\nBestehende DB-Zeilen werden überschrieben. Fortfahren?')) return;
+    setPayMigBusy(true);
+    let ok=0, err=0;
+    try{ for(const r of recs){ if(await savePayrollInputToDB(r,true)) ok++; else err++; } }
+    finally{ setPayMigBusy(false); }
+    alert('Übernahme fertig.\nErfolgreich: '+ok+'\nFehler: '+err+(err?'\n\nDetails in der Konsole (F12).':''));
   }
 
   const displayEmps = selEmp==='all'?activeEmps:activeEmps.filter(e=>e.id===selEmp);
@@ -8050,6 +8068,7 @@ function PayrollView({employees, projects, showToast}){
         <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
           {missingCount>0&&<button className="btn btn-sm" onClick={createAllDrafts} style={{background:'var(--blue)',color:'white',border:'none'}}>📄 Alle Entwürfe ({missingCount})</button>}
           {draftCount>0&&<button className="btn btn-sm" onClick={confirmAll} style={{background:'var(--amber)',color:'white',border:'none'}}>✅ Alle bestätigen ({draftCount})</button>}
+          <button className="btn btn-sm" disabled={payMigBusy} onClick={migratePayrollToDB} title="Vorhandene lokale Lohn-Inputs in die Supabase-DB übernehmen">{payMigBusy?'⬆ Übernehme…':'⬆ In DB übernehmen'}</button>
           <label className="btn btn-sm" style={{cursor:'pointer',background:'var(--teal)',color:'white',border:'none'}}>
             🏦 Kontoauszug hochladen
             <input type="file" accept=".csv,.txt" style={{display:'none'}} onChange={handleBankCSV}/>
@@ -23473,6 +23492,48 @@ async function deleteSpaceFromDB(id){
   cfgToast(true); return true;
 }
 
+// Etappe PI2: Lohn-Inputs (payroll_inputs) aus Supabase. select('*') + JS-Gruppierung
+// (verkettete Filter unzuverlaessig). Rueckgabe { "YYYY-MM":[{emp_id,month,...}] } im
+// Frontend-Shape (salaryData), oder null bei leerer Tabelle (dann Cache NICHT ueberschreiben).
+async function loadPayrollInputsFromDB(){
+  try{
+    const {data, error} = await sb.from('payroll_inputs').select('*');
+    if(error){ console.error('[pay] loadPayrollInputsFromDB', error); return null; }
+    const rows = data||[];
+    if(!rows.length) return null;
+    const byMonth={};
+    rows.forEach(r=>{
+      if(!r.month) return;
+      if(!byMonth[r.month]) byMonth[r.month]=[];
+      byMonth[r.month].push({
+        emp_id:r.emp_id, month:r.month,
+        referral_bonus:r.referral_bonus??0, target_bonus:r.target_bonus??0, special_bonus:r.special_bonus??0,
+        deduction_tax:r.deduction_tax??0, deduction_social:r.deduction_social??0, deduction_other:r.deduction_other??0,
+        overtime_hours:r.overtime_hours??0, saturday_hours:r.saturday_hours??0, sunday_hours:r.sunday_hours??0,
+        holiday_hours:r.holiday_hours??0, night_hours:r.night_hours??0,
+        notes:r.notes||'', deduction_notes:r.deduction_notes||'',
+      });
+    });
+    return byMonth;
+  }catch(e){ console.error('[pay] loadPayrollInputsFromDB', e); return null; }
+}
+async function savePayrollInputToDB(rec, silent){
+  if(!rec||!rec.emp_id||!rec.month) return false;
+  const num=v=>(v===''||v==null)?null:Number(v);
+  const payload={
+    emp_id:rec.emp_id, month:rec.month,
+    referral_bonus:num(rec.referral_bonus), target_bonus:num(rec.target_bonus), special_bonus:num(rec.special_bonus),
+    deduction_tax:num(rec.deduction_tax), deduction_social:num(rec.deduction_social), deduction_other:num(rec.deduction_other),
+    overtime_hours:num(rec.overtime_hours), saturday_hours:num(rec.saturday_hours), sunday_hours:num(rec.sunday_hours),
+    holiday_hours:num(rec.holiday_hours), night_hours:num(rec.night_hours),
+    notes:rec.notes??null, deduction_notes:rec.deduction_notes??null,
+    updated_at:new Date().toISOString(),
+  };
+  const {error}=await sb.from('payroll_inputs').upsert(payload,{onConflict:'emp_id,month'});
+  if(error){ console.error('[pay] savePayrollInputToDB', error); if(!silent)cfgToast(false); return false; }
+  if(!silent) cfgToast(true); return true;
+}
+
 // Etappe C2: generische App-Configs (Key/Value jsonb) in app_config. Singleton-Blobs,
 // Whole-Read/Whole-Write. loadAllConfigsFromDB spiegelt beim Start alle Zeilen in den
 // localStorage-Cache (ein Aufruf statt N einzelne). saveConfigToDB upsertet einen Key.
@@ -25651,6 +25712,9 @@ function App(){
         localStorage.setItem('jsr_location_monthly_v1', JSON.stringify(locData.monthly));
         localStorage.setItem('jsr_spaces_v1', JSON.stringify(locData.spaces));
       }
+      // PI2: Lohn-Inputs (payroll_inputs) in den Cache spiegeln
+      const payIn = await loadPayrollInputsFromDB();
+      if(payIn) localStorage.setItem('jsr_payroll_v1', JSON.stringify(payIn));
     })();
   },[]);
 
