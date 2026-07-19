@@ -20112,6 +20112,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
   // Schnitt 1: RK nutzt die echten Standorte (getLocations) statt der eigenen jsr_rk_locations-Liste.
   const rkLocations = getLocations();
   const [rkLocId, setRkLocId] = useState(()=>{const ls=getLocations();return ls[0]?ls[0].id:'';});
+  const [rkMigBusy, setRkMigBusy] = useState(false);
   // Einmaliges Remapping: vorhandene Monats-/Overhead-Daten liegen unter alten rk_loc_*-IDs;
   // per Namensabgleich (rk_loc_tirana -> loc_tirana) auf die echten IDs umschluesseln.
   // Kein Treffer -> ueberspringen + in Konsole melden. Guard laeuft nur einmal.
@@ -20152,7 +20153,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
   const bumpOh = () => setRkOhV(v=>v+1);
   // Overhead: [{id, role, emp_id}] per location - stored in jsr_rk_overhead_<locId>
   const getRkOverhead=(locId)=>{try{return JSON.parse(localStorage.getItem('jsr_rk_overhead_'+locId)||'[]');}catch(e){return[];}};
-  const saveRkOverhead=(locId,data)=>{localStorage.setItem('jsr_rk_overhead_'+locId,JSON.stringify(data));};
+  const saveRkOverhead=(locId,data)=>{localStorage.setItem('jsr_rk_overhead_'+locId,JSON.stringify(data));saveRkOverheadDebounced(locId,data);};
   const OVERHEAD_ROLES=[
     {key:'managing_director', label:'Managing Director'},
     {key:'coo',               label:'COO'},
@@ -20163,7 +20164,46 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
   ];
   const rkFullKey=(y,m,locId)=>'jsr_rk_'+locId+'_'+y+'_'+String(m).padStart(2,'0');
   const getRkData=(y,m)=>{try{const d=JSON.parse(localStorage.getItem(rkFullKey(y,m,rkLocId))||'null');if(d)return d;}catch(e){}return{fix:rkCfg.fix.map(f=>({...f})),variable:rkCfg.variable.map(v=>({...v,amount:''}))};};
-  const saveRkData=(y,m,d)=>{localStorage.setItem(rkFullKey(y,m,rkLocId),JSON.stringify(d));};
+  const saveRkData=(y,m,d)=>{localStorage.setItem(rkFullKey(y,m,rkLocId),JSON.stringify(d));saveRkMonthlyToDB(rkLocId,y+'-'+String(m).padStart(2,'0'),d);};
+  // RK2 Erst-Uebernahme: vorhandene lokale Monatswerte (jsr_rk_<locId>_<y>_<m>) + Overhead
+  // (jsr_rk_overhead_<locId>) je echtem Standort per Upsert/Replace in die DB schieben.
+  async function migrateRkToDB(){
+    const locs=getLocations();
+    const monthlyMap={}, overheadJobs=[];
+    const keys=Object.keys(localStorage);
+    locs.forEach(loc=>{
+      const pref='jsr_rk_'+loc.id+'_';
+      keys.forEach(k=>{
+        if(k.indexOf(pref)!==0) return;
+        const mm=k.substring(pref.length).match(/^(\d{4})_(\d{2})$/); if(!mm) return;
+        let vals=null; try{ vals=JSON.parse(localStorage.getItem(k)); }catch(e){}
+        if(vals) monthlyMap[loc.id+'|'+mm[1]+'-'+mm[2]]={locId:loc.id, month:mm[1]+'-'+mm[2], values:vals};
+      });
+      let oh=null; try{ oh=JSON.parse(localStorage.getItem('jsr_rk_overhead_'+loc.id)||'null'); }catch(e){}
+      if(Array.isArray(oh)&&oh.length) overheadJobs.push({locId:loc.id, items:oh});
+    });
+    // Aktuell angezeigter Monat des gewaehlten Standorts: Fixkosten kommen aus dem Katalog-
+    // Default (rkCfg) und sind NICHT als Key gespeichert, solange nichts editiert/💾-gespeichert
+    // wurde. Effektiven Stand (getRkData) materialisieren, damit Sichtbares nicht verloren geht
+    // — nur wenn kein gespeicherter Key existiert (ueberschreibt keine echten Daten).
+    const curMonth=rkYear+'-'+String(rkMonth).padStart(2,'0');
+    const curKey=rkLocId+'|'+curMonth;
+    if(rkLocId && !monthlyMap[curKey]){
+      const eff=getRkData(rkYear,rkMonth);
+      const hasVal=(eff.fix||[]).some(f=>parseFloat(f.amount||0)>0)||(eff.variable||[]).some(v=>parseFloat(v.amount||0)>0);
+      if(hasVal) monthlyMap[curKey]={locId:rkLocId, month:curMonth, values:eff};
+    }
+    const monthlyJobs=Object.values(monthlyMap);
+    if(!monthlyJobs.length && !overheadJobs.length){ alert('Keine lokalen Raumkosten-Daten gefunden.'); return; }
+    if(!window.confirm('In DB übernehmen:\n· '+monthlyJobs.length+' Monats-Einträge\n· '+overheadJobs.length+' Overhead-Listen\n\nBestehende DB-Zeilen werden überschrieben. Fortfahren?')) return;
+    setRkMigBusy(true);
+    let ok=0, err=0;
+    try{
+      for(const j of monthlyJobs){ if(await _rkMonthlyUpsert(j.locId, j.month, j.values)) ok++; else err++; }
+      for(const j of overheadJobs){ if(await saveRkOverheadToDB(j.locId, j.items, true)) ok++; else err++; }
+    } finally { setRkMigBusy(false); }
+    alert('Übernahme fertig.\nErfolgreich: '+ok+'\nFehler: '+err+(err?'\n\nDetails in der Konsole (F12).':''));
+  }
   const [wcfg, setWcfg] = useState(()=>{
     try{const c=JSON.parse(localStorage.getItem('jsr_wheel_cfg')||'null');return c||{
       prizes:[
@@ -21093,6 +21133,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
                       onChange={e=>setRkYear(parseInt(e.target.value))}>
                       {[2024,2025,2026,2027].map(y=><option key={y} value={y}>{y}</option>)}
                     </select>
+                    <button className="btn btn-sm" disabled={rkMigBusy} onClick={migrateRkToDB} title="Vorhandene lokale Raumkosten (Monatswerte + Overhead) in die Supabase-DB übernehmen">{rkMigBusy?'⬆ Übernehme…':'⬆ In DB übernehmen'}</button>
                     <div style={{fontWeight:800,fontSize:15,color:'var(--blue)',marginLeft:8}}>
                       Gesamt: {grandTotal.toFixed(2)} €
                     </div>
@@ -23560,6 +23601,68 @@ async function savePayrollInputToDB(rec, silent){
   if(!silent) cfgToast(true); return true;
 }
 
+// Etappe RK2: Raumkosten (rk_monthly + rk_overhead) aus Supabase. select('*') + JS-Gruppierung.
+// Rueckgabe { monthly:{locId:{month:values}}, overhead:{locId:[{id,role,emp_id,custom_label}]} }
+// oder null bei leeren Tabellen (dann Cache NICHT ueberschreiben).
+async function loadRkFromDB(){
+  try{
+    const [mRes, oRes] = await Promise.all([
+      sb.from('rk_monthly').select('*'),
+      sb.from('rk_overhead').select('*'),
+    ]);
+    const err=mRes.error||oRes.error;
+    if(err){ console.error('[rk] loadRkFromDB', err); return null; }
+    const mRows=mRes.data||[], oRows=oRes.data||[];
+    if(!mRows.length && !oRows.length) return null;
+    const monthly={};
+    mRows.forEach(r=>{ if(!r.location_id||!r.month) return; if(!monthly[r.location_id]) monthly[r.location_id]={}; monthly[r.location_id][r.month]=r.values||{}; });
+    const overhead={};
+    oRows.slice().sort((a,b)=>(a.seq||0)-(b.seq||0)).forEach(r=>{
+      if(!r.location_id) return;
+      if(!overhead[r.location_id]) overhead[r.location_id]=[];
+      overhead[r.location_id].push({ id:r.id, role:r.role||'', emp_id:r.emp_id||'', custom_label:r.custom_label||'' });
+    });
+    return { monthly, overhead };
+  }catch(e){ console.error('[rk] loadRkFromDB', e); return null; }
+}
+// Monatswerte: awaitbarer Kern (kein Toast) + entprellter Wrapper (Toast) pro (locId|month).
+async function _rkMonthlyUpsert(locId, month, values){
+  const {error}=await sb.from('rk_monthly')
+    .upsert({location_id:locId, month, values:values||{}, updated_at:new Date().toISOString()},
+            {onConflict:'location_id,month'});
+  if(error){ console.error('[rk] rk_monthly upsert', error); return false; }
+  return true;
+}
+const _rkMonthlyTimers={};
+function saveRkMonthlyToDB(locId, month, values){
+  if(!locId||!month) return;
+  const k=locId+'|'+month;
+  clearTimeout(_rkMonthlyTimers[k]);
+  _rkMonthlyTimers[k]=setTimeout(async()=>{ cfgToast(await _rkMonthlyUpsert(locId, month, values)); }, 800);
+}
+// Overhead je Standort: delete-then-insert (seq aus Index; emp_id ''/leer -> null).
+async function saveRkOverheadToDB(locId, items, silent){
+  if(!locId) return false;
+  const del=await sb.from('rk_overhead').delete().eq('location_id', locId);
+  if(del.error){ console.error('[rk] rk_overhead delete', del.error); if(!silent)cfgToast(false); return false; }
+  const rows=(items||[]).map((it,i)=>({
+    location_id:locId, role:it.role||null, custom_label:it.custom_label||null,
+    emp_id:(it.emp_id===''||it.emp_id==null)?null:it.emp_id, seq:i,
+  }));
+  if(rows.length){
+    const ins=await sb.from('rk_overhead').insert(rows);
+    if(ins.error){ console.error('[rk] rk_overhead insert', ins.error); if(!silent)cfgToast(false); return false; }
+  }
+  if(!silent) cfgToast(true); return true;
+}
+// Entprellter Write-through (Overhead-Edits feuern pro Tastendruck) — Migration ruft direkt.
+const _rkOhTimers={};
+function saveRkOverheadDebounced(locId, items){
+  if(!locId) return;
+  clearTimeout(_rkOhTimers[locId]);
+  _rkOhTimers[locId]=setTimeout(()=>{ saveRkOverheadToDB(locId, items); }, 800);
+}
+
 // Etappe C2: generische App-Configs (Key/Value jsonb) in app_config. Singleton-Blobs,
 // Whole-Read/Whole-Write. loadAllConfigsFromDB spiegelt beim Start alle Zeilen in den
 // localStorage-Cache (ein Aufruf statt N einzelne). saveConfigToDB upsertet einen Key.
@@ -25741,6 +25844,19 @@ function App(){
       // PI2: Lohn-Inputs (payroll_inputs) in den Cache spiegeln
       const payIn = await loadPayrollInputsFromDB();
       if(payIn) localStorage.setItem('jsr_payroll_v1', JSON.stringify(payIn));
+      // RK2: Raumkosten (rk_monthly + rk_overhead) in den Cache spiegeln
+      const rkData = await loadRkFromDB();
+      if(rkData){
+        Object.entries(rkData.monthly).forEach(([locId,months])=>{
+          Object.entries(months).forEach(([month,vals])=>{
+            const [y,m]=month.split('-');
+            localStorage.setItem('jsr_rk_'+locId+'_'+y+'_'+m, JSON.stringify(vals));
+          });
+        });
+        Object.entries(rkData.overhead).forEach(([locId,items])=>{
+          localStorage.setItem('jsr_rk_overhead_'+locId, JSON.stringify(items));
+        });
+      }
     })();
   },[]);
 
