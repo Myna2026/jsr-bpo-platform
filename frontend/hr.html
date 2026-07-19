@@ -17933,6 +17933,7 @@ function LocationsView({employees}){
   const [selTab, setSelTab] = useState('overview');
   const [editLoc, setEditLoc] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
+  const [migBusy, setMigBusy] = useState(false);
   const [selMonth, setSelMonth] = useState(()=>{
     const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');
   });
@@ -17972,13 +17973,15 @@ function LocationsView({employees}){
   }
 
   function setMonthlyField(locId, month, field, val){
+    const newVals={ ...(getMonthlyExtra(locId,month)), [field]:val };
     setMonthlyCosts(prev=>({
       ...prev,
       [locId]: {
         ...(prev[locId]||{}),
-        [month]: { ...(getMonthlyExtra(locId,month)), [field]:val }
+        [month]: newVals
       }
     }));
+    saveLocationMonthlyToDB(locId, month, newVals);   // L2: entprellter DB-write-through
   }
 
   function getMonthlyTotal(locId, month){
@@ -18026,9 +18029,15 @@ function LocationsView({employees}){
   }
   function deactivateLoc(loc){
     if(!window.confirm('Standort "'+loc.name+'" als inaktiv setzen? Er verschwindet aus Dropdowns und Auswertungen, bleibt aber fuer historische Daten erhalten.')) return;
-    setLocations(ls=>ls.map(x=>x.id===loc.id?{...x,active:false}:x));
+    const upd={...loc,active:false};
+    setLocations(ls=>ls.map(x=>x.id===loc.id?upd:x));
+    saveLocationToDB(upd);
   }
-  function reactivateLoc(loc){ setLocations(ls=>ls.map(x=>x.id===loc.id?{...x,active:true}:x)); }
+  function reactivateLoc(loc){
+    const upd={...loc,active:true};
+    setLocations(ls=>ls.map(x=>x.id===loc.id?upd:x));
+    saveLocationToDB(upd);
+  }
   function deleteLoc(loc){
     const r=locRefs(loc);
     if(r.emps>0||r.spaces>0||r.costs){
@@ -18041,6 +18050,46 @@ function LocationsView({employees}){
     }
     if(!window.confirm('Standort "'+loc.name+'" endgueltig loeschen? Keine Referenzen gefunden — dies kann nicht rueckgaengig gemacht werden.')) return;
     setLocations(ls=>ls.filter(x=>x.id!==loc.id));
+    deleteLocationFromDB(loc.id);
+  }
+  // L2 Erst-Uebernahme: vorhandene localStorage-Standorte (+ Monatskosten + Spaces) per
+  // Upsert in die DB schieben. Idempotent (Upsert nach id); localStorage bleibt unveraendert.
+  async function migrateLocationsToDB(){
+    let spacesLocal=[]; try{ spacesLocal=JSON.parse(localStorage.getItem('jsr_spaces_v1')||'[]')||[]; }catch(e){}
+    const monthCount=Object.values(monthlyCosts).reduce((s,m)=>s+Object.keys(m||{}).length,0);
+    if(!window.confirm('In DB übernehmen (Upsert nach id):\n· '+locations.length+' Standorte\n· '+monthCount+' Monatskosten-Einträge\n· '+spacesLocal.length+' Spaces\n\nBestehende DB-Zeilen mit gleicher id werden überschrieben. Fortfahren?')) return;
+    // Alte Space-location_id ('tirana') auf echte Standort-id ('loc_tirana') mappen:
+    // 1. schon gueltige id -> behalten, 2. Namensabgleich, 3. 'loc_'+alteId. Sonst null.
+    const resolveLocId=(oldId)=>{
+      if(!oldId) return null;
+      const s=String(oldId).toLowerCase();
+      let m=locations.find(l=>String(l.id).toLowerCase()===s); if(m) return m.id;
+      m=locations.find(l=>String(l.name||'').toLowerCase()===s); if(m) return m.id;
+      m=locations.find(l=>String(l.id).toLowerCase()==='loc_'+s); if(m) return m.id;
+      return null;
+    };
+    setMigBusy(true);
+    let ok=0, err=0;
+    const skippedSpaces=[];
+    const remapped=[];
+    try{
+      for(const l of locations){ if(await saveLocationToDB(l)) ok++; else err++; }
+      for(const [locId,months] of Object.entries(monthlyCosts)){
+        for(const [month,vals] of Object.entries(months||{})){ if(await _locMonthlyUpsert(locId,month,vals)) ok++; else err++; }
+      }
+      for(const s of spacesLocal){
+        const rid=resolveLocId(s.location_id);
+        if(!rid){ skippedSpaces.push(s.name||s.id||'(unbenannt)'); remapped.push(s); continue; }
+        const fixed = rid===s.location_id ? s : {...s, location_id:rid};
+        remapped.push(fixed);
+        if(await saveSpaceToDB(fixed,true)) ok++; else err++;
+      }
+      // korrigierte location_ids zurueck in den Cache (self-heal, unabhaengig vom naechsten DB-Load)
+      try{ localStorage.setItem('jsr_spaces_v1', JSON.stringify(remapped)); }catch(e){}
+    } finally { setMigBusy(false); }
+    alert('Übernahme fertig.\nErfolgreich: '+ok+'\nFehler: '+err
+      +(skippedSpaces.length?'\n\nÜbersprungen (kein passender Standort): '+skippedSpaces.join(', '):'')
+      +(err?'\n\nDetails in der Konsole (F12).':''));
   }
   const totalSeats = locations.filter(l=>l.active).reduce((s,l)=>s+(l.capacity?.seats_total||0),0);
   const totalUsed = locations.filter(l=>l.active).reduce((s,l)=>s+getSeatsUsed(l),0);
@@ -18061,6 +18110,7 @@ function LocationsView({employees}){
           onSave={(form,isNew)=>{
             if(isNew){ setLocations(l=>[...l,form]); }
             else { setLocations(l=>l.map(x=>x.id===form.id?form:x)); }
+            saveLocationToDB(form);
             setEditLoc(null); setShowAdd(false);
           }}
         />
@@ -18080,7 +18130,10 @@ function LocationsView({employees}){
             </button>
           ))}
         </div>
-        <button className="btn btn-primary btn-sm" style={{marginLeft:'auto'}} onClick={()=>setShowAdd(true)}>
+        <button className="btn btn-sm" style={{marginLeft:'auto'}} disabled={migBusy}
+          onClick={migrateLocationsToDB} title="Vorhandene localStorage-Standorte in die Supabase-DB übernehmen">
+          {migBusy?'⬆ Übernehme…':'⬆ In DB übernehmen'}</button>
+        <button className="btn btn-primary btn-sm" onClick={()=>setShowAdd(true)}>
           + Standort hinzufügen
         </button>
       </div>
@@ -18372,6 +18425,16 @@ function LocationsView({employees}){
   const planRef = useRef(null);
 
   useEffect(()=>{localStorage.setItem('jsr_spaces_v1',JSON.stringify(spaces));},[spaces]);
+  // L2: Floor/Seat-Edits im Plan-Editor entprellt nach Supabase (saveSpace/Delete schreiben zusaetzlich direkt).
+  const _spInit=useRef(true);
+  useEffect(()=>{
+    if(_spInit.current){ _spInit.current=false; return; }
+    if(!selSpaceId) return;
+    const sp=spaces.find(s=>s.id===selSpaceId);
+    if(!sp) return;
+    const t=setTimeout(()=>saveSpaceToDB(sp,true),900);
+    return ()=>clearTimeout(t);
+  },[spaces]);
 
   // ── HELPERS ────────────────────────────────────────────────────────────
   const LOCS = locations||[{id:'tirana',name:'Tirana'},{id:'prishtina',name:'Prishtina'}];
@@ -18420,10 +18483,13 @@ function LocationsView({employees}){
   function saveSpace(form){
     if(!form.name||!form.location_id) return alert('Name und Standort sind Pflicht.');
     if(form.id){
-      setSpaces(ss=>ss.map(s=>s.id===form.id?{...s,...form}:s));
+      let updated=null;
+      setSpaces(ss=>ss.map(s=>{ if(s.id!==form.id) return s; updated={...s,...form}; return updated; }));
+      if(updated) saveSpaceToDB(updated);
     } else {
       const newSpace={...form,id:'sp_'+Date.now(),floors:[{name:'EG',plan_url:'',seats:[]}]};
       setSpaces(ss=>[...ss,newSpace]);
+      saveSpaceToDB(newSpace);
     }
     setSpaceModal(null);
   }
@@ -18664,7 +18730,7 @@ function LocationsView({employees}){
                   )}
                   <div style={{display:'flex',gap:6,marginTop:10}}>
                     <button className="btn btn-sm" style={{flex:1}} onClick={e=>{e.stopPropagation();setSpaceModal(space);}}>✏ Bearbeiten</button>
-                    <button className="btn btn-sm" style={{color:'var(--red)'}} onClick={e=>{e.stopPropagation();if(window.confirm('Space löschen?'))setSpaces(ss=>ss.filter(s=>s.id!==space.id));}}>×</button>
+                    <button className="btn btn-sm" style={{color:'var(--red)'}} onClick={e=>{e.stopPropagation();if(window.confirm('Space löschen?')){setSpaces(ss=>ss.filter(s=>s.id!==space.id));deleteSpaceFromDB(space.id);}}}>×</button>
                   </div>
                 </div>
               );
@@ -23319,6 +23385,94 @@ async function saveTrainingPlanToDB(plan){
   return true;
 }
 
+// Etappe L2: Standorte relational aus Supabase (locations + location_monthly + spaces).
+// Verkettete Filter sind hier unzuverlaessig -> select('*') + JS-Filterung (wie loadProjectsFromDB).
+// loadLocationsFromDB liefert {locations[], monthly{locId:{month:values}}, spaces[]} im Frontend-Shape,
+// oder null wenn die locations-Tabelle leer ist (dann Cache NICHT ueberschreiben).
+async function loadLocationsFromDB(){
+  try{
+    const [locRes, monRes, spRes] = await Promise.all([
+      sb.from('locations').select('*'),
+      sb.from('location_monthly').select('*'),
+      sb.from('spaces').select('*'),
+    ]);
+    const err = locRes.error||monRes.error||spRes.error;
+    if(err){ console.error('[loc] loadLocationsFromDB', err); return null; }
+    const locs = locRes.data||[];
+    if(!locs.length) return null;   // DB leer -> localStorage-Cache erhalten
+    const locations = locs.map(r=>({
+      id:r.id, name:r.name, country:r.country, flag:r.flag, color:r.color,
+      address:r.address, active:r.active!==false,
+      capacity: r.capacity||{total_sqm:0,seats_total:0,seats_used:0},
+      costs_fixed: r.costs_fixed||{},
+      costs_custom: Array.isArray(r.costs_custom)?r.costs_custom:[],
+      notes: r.notes||''
+    }));
+    const monthly = {};
+    (monRes.data||[]).forEach(m=>{
+      if(!m.location_id||!m.month) return;
+      if(!monthly[m.location_id]) monthly[m.location_id]={};
+      monthly[m.location_id][m.month] = m.values||{};
+    });
+    const spaces = (spRes.data||[]).map(s=>({
+      id:s.id, location_id:s.location_id, name:s.name, description:s.description||'',
+      sqm:s.sqm, floors: Array.isArray(s.floors)?s.floors:[]
+    }));
+    return { locations, monthly, spaces };
+  }catch(e){ console.error('[loc] loadLocationsFromDB', e); return null; }
+}
+async function saveLocationToDB(loc){
+  if(!loc||!loc.id) return false;
+  const payload={
+    id: loc.id, name: loc.name??null, country: loc.country??null, flag: loc.flag??null,
+    color: loc.color??null, address: loc.address??null, active: loc.active!==false,
+    capacity: loc.capacity||{}, costs_fixed: loc.costs_fixed||{},
+    costs_custom: Array.isArray(loc.costs_custom)?loc.costs_custom:[], notes: loc.notes??null,
+  };
+  const {error}=await sb.from('locations').upsert(payload);
+  if(error){ console.error('[loc] saveLocationToDB', error); cfgToast(false); return false; }
+  cfgToast(true); return true;
+}
+async function deleteLocationFromDB(id){
+  if(!id) return false;
+  const {error}=await sb.from('locations').delete().eq('id', id);
+  if(error){ console.error('[loc] deleteLocationFromDB', error); cfgToast(false); return false; }
+  cfgToast(true); return true;
+}
+// Monatskosten: awaitbarer Kern (kein Toast) + entprellter Wrapper (Toast) pro (locId|month).
+async function _locMonthlyUpsert(locId, month, values){
+  const {error}=await sb.from('location_monthly')
+    .upsert({location_id:locId, month, values:values||{}, updated_at:new Date().toISOString()},
+            {onConflict:'location_id,month'});
+  if(error){ console.error('[loc] location_monthly upsert', error); return false; }
+  return true;
+}
+const _locMonthlyTimers={};
+function saveLocationMonthlyToDB(locId, month, values){
+  if(!locId||!month) return;
+  const k=locId+'|'+month;
+  clearTimeout(_locMonthlyTimers[k]);
+  _locMonthlyTimers[k]=setTimeout(async()=>{ cfgToast(await _locMonthlyUpsert(locId, month, values)); }, 800);
+}
+async function saveSpaceToDB(space, silent){
+  if(!space||!space.id) return false;
+  const payload={
+    id: space.id, location_id: space.location_id??null, name: space.name??null,
+    description: space.description??null,
+    sqm: (space.sqm===''||space.sqm==null)?null:Number(space.sqm),
+    floors: Array.isArray(space.floors)?space.floors:[],
+  };
+  const {error}=await sb.from('spaces').upsert(payload);
+  if(error){ console.error('[loc] saveSpaceToDB', error); if(!silent)cfgToast(false); return false; }
+  if(!silent) cfgToast(true); return true;
+}
+async function deleteSpaceFromDB(id){
+  if(!id) return false;
+  const {error}=await sb.from('spaces').delete().eq('id', id);
+  if(error){ console.error('[loc] deleteSpaceFromDB', error); cfgToast(false); return false; }
+  cfgToast(true); return true;
+}
+
 // Etappe C2: generische App-Configs (Key/Value jsonb) in app_config. Singleton-Blobs,
 // Whole-Read/Whole-Write. loadAllConfigsFromDB spiegelt beim Start alle Zeilen in den
 // localStorage-Cache (ein Aufruf statt N einzelne). saveConfigToDB upsertet einen Key.
@@ -25490,6 +25644,13 @@ function App(){
       if(times) localStorage.setItem('jsr_time_v1', JSON.stringify(times));
       // C2: alle app_config-Zeilen in den localStorage-Cache spiegeln (ein Aufruf)
       await loadAllConfigsFromDB();
+      // L2: Standorte (locations + location_monthly + spaces) in den Cache spiegeln
+      const locData = await loadLocationsFromDB();
+      if(locData){
+        localStorage.setItem('jsr_locations_v1', JSON.stringify(locData.locations));
+        localStorage.setItem('jsr_location_monthly_v1', JSON.stringify(locData.monthly));
+        localStorage.setItem('jsr_spaces_v1', JSON.stringify(locData.spaces));
+      }
     })();
   },[]);
 
@@ -26044,7 +26205,7 @@ function App(){
           {view==='cvsync'&&(<div><CvSyncView setCvList={setCvList} projects={projects}/></div>)}
           {view==='spaces'&&(
             <div>
-              <SpacesView employees={employees} projects={projects} locations={[{id:'tirana',name:'Tirana'},{id:'prishtina',name:'Prishtina'}]}/>
+              <SpacesView employees={employees} projects={projects} locations={getLocations()}/>
             </div>
           )}
           {view==='locations'&&(
