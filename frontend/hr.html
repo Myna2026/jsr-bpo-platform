@@ -20109,12 +20109,42 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
   const [rkYear,setRkYear]=useState(new Date().getFullYear());
   const [rkMonth,setRkMonth]=useState(new Date().getMonth()+1);
   const rkKey=(y,m)=>'jsr_rk_'+y+'_'+String(m).padStart(2,'0');
-  const [rkLocations, setRkLocationsRaw] = useState(()=>{
-    try{return JSON.parse(localStorage.getItem('jsr_rk_locations')||'null')||[{id:'rk_loc_tirana',name:'Tirana'},{id:'rk_loc_prishtina',name:'Prishtina'}];}
-    catch(e){return [{id:'rk_loc_tirana',name:'Tirana'},{id:'rk_loc_prishtina',name:'Prishtina'}];}
-  });
-  const saveRkLocations=locs=>{localStorage.setItem('jsr_rk_locations',JSON.stringify(locs));setRkLocationsRaw([...locs]);};
-  const [rkLocId, setRkLocId] = useState('rk_loc_tirana');
+  // Schnitt 1: RK nutzt die echten Standorte (getLocations) statt der eigenen jsr_rk_locations-Liste.
+  const rkLocations = getLocations();
+  const [rkLocId, setRkLocId] = useState(()=>{const ls=getLocations();return ls[0]?ls[0].id:'';});
+  // Einmaliges Remapping: vorhandene Monats-/Overhead-Daten liegen unter alten rk_loc_*-IDs;
+  // per Namensabgleich (rk_loc_tirana -> loc_tirana) auf die echten IDs umschluesseln.
+  // Kein Treffer -> ueberspringen + in Konsole melden. Guard laeuft nur einmal.
+  useEffect(()=>{
+    if(localStorage.getItem('jsr_rk_locmigrated_v1')) return;
+    let oldList=[]; try{ oldList=JSON.parse(localStorage.getItem('jsr_rk_locations')||'[]')||[]; }catch(e){}
+    const real=getLocations();
+    const resolve=(ol)=>{
+      const nm=String(ol&&ol.name||'').trim().toLowerCase();
+      let m=real.find(l=>String(l.name||'').trim().toLowerCase()===nm); if(m) return m.id;
+      const slug=String(ol&&ol.id||'').replace(/^rk_loc_/,'').toLowerCase();
+      m=real.find(l=>String(l.id).toLowerCase()==='loc_'+slug); if(m) return m.id;
+      return null;
+    };
+    const skipped=[];
+    const keys=Object.keys(localStorage);
+    oldList.forEach(ol=>{
+      const newId=resolve(ol);
+      if(!newId){ skipped.push(ol.name||ol.id); return; }
+      if(newId===ol.id) return;
+      const ohOld='jsr_rk_overhead_'+ol.id, ohNew='jsr_rk_overhead_'+newId;
+      if(localStorage.getItem(ohOld)!=null && localStorage.getItem(ohNew)==null) localStorage.setItem(ohNew, localStorage.getItem(ohOld));
+      const pref='jsr_rk_'+ol.id+'_';   // Monatsdaten jsr_rk_<oldId>_<y>_<m>
+      keys.forEach(k=>{
+        if(k.indexOf(pref)!==0) return;
+        const nk='jsr_rk_'+newId+'_'+k.substring(pref.length);
+        if(localStorage.getItem(nk)==null) localStorage.setItem(nk, localStorage.getItem(k));
+      });
+    });
+    if(skipped.length) console.warn('[rk-migrate] Übersprungen (kein passender Standort):', skipped.join(', '));
+    localStorage.setItem('jsr_rk_locmigrated_v1','1');
+    setRkOhV(v=>v+1);   // Re-Render, damit die umgeschluesselten Daten sofort erscheinen
+  },[]);
   const [rkOhV, setRkOhV] = useState(0); // version bump to force overhead re-render
   const DEF_SHIFT_CFG={"proj_hc_sales":[{"id":"s1","label":"Frueh","value":"08:00-16:30","hours":8.0,"net":7.5,"split":false},{"id":"s2","label":"Frueh lang","value":"09:00-17:30","hours":8.5,"net":8.0,"split":false},{"id":"s3","label":"Spaet frueh","value":"11:30-20:00","hours":8.5,"net":8.0,"split":false},{"id":"s4","label":"Spaet","value":"13:30-22:00","hours":8.5,"net":8.0,"split":false},{"id":"s5","label":"Frueh kurz","value":"08:00-15:30","hours":7.5,"net":7.0,"split":false},{"id":"s6","label":"Split 08-12+16-20","value":"08:00-12:00","value2":"16:00-20:00","hours":8.0,"net":7.5,"split":true},{"id":"s7","label":"Split 08-12+18-22","value":"08:00-12:00","value2":"18:00-22:00","hours":8.0,"net":7.5,"split":true}],"proj_hc_support":[{"id":"s1","label":"Frueh lang","value":"08:00-17:30","hours":9.5,"net":9.0,"split":false},{"id":"s2","label":"Spaet frueh","value":"11:30-20:00","hours":8.5,"net":8.0,"split":false},{"id":"s3","label":"Split 08-12+16-20","value":"08:00-12:00","value2":"16:00-20:00","hours":8.0,"net":7.5,"split":true}],"proj_giga_all":[{"id":"s1","label":"Standard","value":"09:00-17:30","hours":8.5,"net":8.0,"split":false},{"id":"s2","label":"Spaet","value":"10:30-19:00","hours":8.5,"net":8.0,"split":false},{"id":"s3","label":"Split 09-13+17-21","value":"09:00-13:00","value2":"17:00-21:00","hours":8.0,"net":7.5,"split":true}]};
   const [shiftCfg,setShiftCfgRaw]=useState(()=>{try{const s=JSON.parse(localStorage.getItem('jsr_shift_cfg')||'null');return s||DEF_SHIFT_CFG;}catch(e){return DEF_SHIFT_CFG;}});
@@ -21052,11 +21082,6 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
                           {loc.name}
                         </button>
                       ))}
-                      <button style={{padding:'4px 8px',borderRadius:6,fontSize:12,cursor:'pointer',
-                        fontFamily:'var(--font)',border:'1px dashed var(--border)',background:'transparent',color:'var(--muted)'}}
-                        onClick={()=>{const n=prompt('Name des Standorts:');if(n&&n.trim()){saveRkLocations([...rkLocations,{id:'rk_loc_'+Date.now(),name:n.trim()}]);}}}>
-                        + Standort
-                      </button>
                     </div>
                     <select className="form-select" style={{width:140}} value={rkMonth}
                       onChange={e=>setRkMonth(parseInt(e.target.value))}>
@@ -21197,7 +21222,8 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
                 <div>
                   {(()=>{
                     const overhead=getRkOverhead(rkLocId);
-                    const activeEmps=(employees||[]).filter(e=>e&&e.status==='active'&&e.location===rkLocations.find(l=>l.id===rkLocId)?.name?.toLowerCase());
+                    const rkLocName=(rkLocations.find(l=>l.id===rkLocId)?.name||'').toLowerCase();
+                    const activeEmps=(employees||[]).filter(e=>e&&e.status==='active'&&rkLocName&&(e.location||'').toLowerCase().includes(rkLocName));
                     const allActiveEmps=(employees||[]).filter(e=>e&&e.status==='active');
                     if(overhead.length===0) return(
                       <div style={{padding:'16px',textAlign:'center',color:'var(--muted)',fontSize:12}}>
