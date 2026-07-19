@@ -23167,6 +23167,119 @@ async function loadAllConfigsFromDB(){
   }catch(e){ console.error('[cfg] loadAllConfigsFromDB', e); return false; }
 }
 
+// ─── Etappe G2: Gluecksrad-Verteilungslogik ──────────────────────────────────
+// calculateSpinResult(empId,date): entscheidet fair + budgetgebremst ueber Gewinn/Hoehe
+// und speichert JEDEN Dreh in wheel_spins (auch 0 -> Wartestand). {amount,source,message}.
+// Gewinnhoehen-Verteilung: kleine Betraege haeufig, grosse selten.
+const WHEEL_AMOUNTS = [{v:0,w:50},{v:1,w:25},{v:2,w:15},{v:5,w:8},{v:10,w:4},{v:20,w:2},{v:50,w:1}];
+function _weightedPick(options){
+  const total=options.reduce((s,o)=>s+(o.w||0),0);
+  if(total<=0) return options[0].v;
+  let r=Math.random()*total;
+  for(const o of options){ if(r<o.w) return o.v; r-=o.w; }
+  return options[options.length-1].v;
+}
+// KPI-Einfluss aus dem bestehenden getPerfData()/getKpiCfg()-Cache: gute KPIs x1.15,
+// schlechte x0.85, keine Daten x1.0 (juengste bis zu 6 Eintraege gemittelt).
+function _wheelKpiFactor(empId){
+  try{
+    const perf=(typeof getPerfData==='function'?getPerfData():{})[empId]||[];
+    if(!perf.length) return 1.0;
+    const cfg=typeof getKpiCfg==='function'?getKpiCfg():[];
+    const byId={}; cfg.forEach(c=>{byId[c.id]=c;});
+    let sum=0,n=0;
+    perf.slice(-6).forEach(e=>{
+      const k=byId[e.kpi_id]; if(!k||!Array.isArray(k.thresholds)||!k.thresholds.length) return;
+      const v=parseFloat(e.value); if(isNaN(v)) return;
+      let idx=-1; for(let i=0;i<k.thresholds.length;i++){ const t=k.thresholds[i]; if(v>=t.min&&v<=t.max){idx=i;break;} }
+      if(idx<0) return;
+      sum+=(k.thresholds.length-idx)/k.thresholds.length; n++;   // 1=beste Stufe .. ~0=schlechteste
+    });
+    if(!n) return 1.0;
+    const g=sum/n;
+    return g>=0.66?1.15:(g<0.34?0.85:1.0);
+  }catch(e){ return 1.0; }
+}
+// Fairness-Gewicht: Basis 1.0 + 0.25/Woche ohne Gewinn + KPI-Faktor + Garantie ab 4 Wochen.
+// Hoeheres Gewicht -> kleineres 0-Gewicht in der Auswahl -> hoehere Gewinnchance.
+async function _wheelWeight(empId, day){
+  let weeksSinceWin=4;   // Default (noch nie gewonnen) -> Garantie-Niveau
+  try{
+    const lastWin=await sb.from('wheel_spins').select('spin_date').eq('emp_id',empId).gt('amount',0).order('spin_date',{ascending:false}).limit(1);
+    const lw=(lastWin.data&&lastWin.data[0])||null;
+    if(lw){
+      const d1=new Date(lw.spin_date+'T00:00:00'), d2=new Date(day+'T00:00:00');
+      weeksSinceWin=Math.max(0, Math.floor((d2-d1)/(7*24*3600*1000)));
+    }
+  }catch(e){}
+  let weight=1.0 + 0.25*weeksSinceWin;
+  weight*=_wheelKpiFactor(empId);
+  if(weeksSinceWin>=4) weight+=2.0;             // Garantie: deutlich erhoeht
+  return Math.max(0.1, weight);
+}
+async function calculateSpinResult(empId, date){
+  const uuidRx=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if(!uuidRx.test(String(empId||''))) return {amount:0, source:'none', message:'Mitarbeiter nicht erkannt.'};
+  const day = date || new Date().toISOString().slice(0,10);
+  const month = day.slice(0,7);
+  try{
+    // 1. Heute schon gedreht? (unique emp_id+spin_date)
+    const today=await sb.from('wheel_spins').select('*').eq('emp_id',empId).eq('spin_date',day).maybeSingle();
+    if(today.error){ console.error('[wheel] today', today.error); return {amount:0, source:'none', message:'Fehler beim Pruefen.'}; }
+    if(today.data){ return {amount:Number(today.data.amount)||0, source:today.data.source||'normal', message:'Heute schon gedreht — komm morgen wieder!', alreadySpun:true}; }
+
+    // 2. Laeuft an diesem Datum eine Sonderaktion?
+    const spRes=await sb.from('wheel_specials').select('*').lte('start_date',day).gte('end_date',day).order('created_at',{ascending:false}).limit(1);
+    if(spRes.error){ console.error('[wheel] specials', spRes.error); }
+    const special=(spRes.data&&spRes.data[0])||null;
+
+    let amount=0, source='normal', special_id=null;
+
+    if(special){
+      source='special'; special_id=special.id;
+      const sWins=await sb.from('wheel_spins').select('amount').eq('special_id',special.id);
+      const winRows=(sWins.data||[]).filter(r=>Number(r.amount)>0);
+      const awardedSum=winRows.reduce((s,r)=>s+Number(r.amount||0),0);
+      const rest=Number(special.total_amount||0)-awardedSum;
+      const tranche=Number(special.tranche_amount||0);
+      if(winRows.length>=Number(special.tranche_count||0) || tranche<=0 || rest<tranche){
+        amount=0;   // Tranchen/Topf ausgeschoepft
+      } else {
+        const w=await _wheelWeight(empId, day);
+        amount=_weightedPick([{v:0,w:Math.max(1,40/w)},{v:tranche,w:20}]);
+        if(amount>rest) amount=0;
+      }
+    } else {
+      // 3. Monatsbudget + Restbudget (Budget minus Summe aller Gewinne des Monats)
+      const bRes=await sb.from('wheel_budgets').select('amount').eq('month',month).maybeSingle();
+      const budget=Number((bRes.data&&bRes.data.amount)||0);
+      const [my,mm]=month.split('-').map(Number);
+      const nextMonth=(mm===12?(my+1)+'-01':my+'-'+String(mm+1).padStart(2,'0'))+'-01';
+      const mWins=await sb.from('wheel_spins').select('amount').gte('spin_date',month+'-01').lt('spin_date',nextMonth);
+      const spent=(mWins.data||[]).reduce((s,r)=>s+Number(r.amount||0),0);
+      const rest=budget-spent;
+      if(rest<=0){
+        amount=0;   // Topf leer
+      } else {
+        const w=await _wheelWeight(empId, day);
+        const opts=WHEEL_AMOUNTS.map(o=>o.v===0?{v:0,w:Math.max(1,o.w/w)}:o);
+        amount=_weightedPick(opts);
+        if(amount>rest) amount=Math.floor(rest);   // Budget-Bremse
+        if(amount<0) amount=0;
+      }
+    }
+
+    // 4. Dreh speichern (auch 0 -> Wartestand)
+    const ins=await sb.from('wheel_spins').insert({emp_id:empId, spin_date:day, amount, source, special_id});
+    if(ins.error){ console.error('[wheel] insert', ins.error); return {amount:0, source, message:'Konnte den Dreh nicht speichern.'}; }
+
+    return {
+      amount, source,
+      message: amount>0 ? ('🎉 Glückwunsch! Du hast '+amount+' € gewonnen!') : 'Kein Gewinn — deine Chance steigt!'
+    };
+  }catch(e){ console.error('[wheel] calculateSpinResult', e); return {amount:0, source:'none', message:'Unerwarteter Fehler.'}; }
+}
+
 // 25a/25b: 46 bekannte Schema-Spalten (38 aus 25a + 8 aus 25b).
 // created_at/updated_at sind DB-managed und werden nicht geschrieben.
 // Alles was NICHT in EMP_COLS steht wandert in `extra jsonb` + einmaliger console.warn.
