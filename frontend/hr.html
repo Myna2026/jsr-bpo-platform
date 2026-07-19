@@ -20113,6 +20113,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
   const rkLocations = getLocations();
   const [rkLocId, setRkLocId] = useState(()=>{const ls=getLocations();return ls[0]?ls[0].id:'';});
   const [rkMigBusy, setRkMigBusy] = useState(false);
+  const [rkDraft, setRkDraft] = useState(null);   // editierbarer State fuer aktuellen Standort/Monat (statt Render-Ableitung)
   // Einmaliges Remapping: vorhandene Monats-/Overhead-Daten liegen unter alten rk_loc_*-IDs;
   // per Namensabgleich (rk_loc_tirana -> loc_tirana) auf die echten IDs umschluesseln.
   // Kein Treffer -> ueberspringen + in Konsole melden. Guard laeuft nur einmal.
@@ -20165,6 +20166,10 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
   const rkFullKey=(y,m,locId)=>'jsr_rk_'+locId+'_'+y+'_'+String(m).padStart(2,'0');
   const getRkData=(y,m)=>{try{const d=JSON.parse(localStorage.getItem(rkFullKey(y,m,rkLocId))||'null');if(d)return d;}catch(e){}return{fix:rkCfg.fix.map(f=>({...f})),variable:rkCfg.variable.map(v=>({...v,amount:''}))};};
   const saveRkData=(y,m,d)=>{localStorage.setItem(rkFullKey(y,m,rkLocId),JSON.stringify(d));saveRkMonthlyToDB(rkLocId,y+'-'+String(m).padStart(2,'0'),d);};
+  // RK-Grid als editierbaren State halten (kein Ableiten aus localStorage bei jedem Render
+  // -> controlled inputs bleiben normal editierbar). Reload bei Standort-/Monats-/Katalog-
+  // Wechsel; saveRkData persistiert weiterhin localStorage + DB.
+  useEffect(()=>{ setRkDraft(getRkData(rkYear,rkMonth)); },[rkLocId,rkYear,rkMonth,rkCfg]);
   // RK2 Erst-Uebernahme: vorhandene lokale Monatswerte (jsr_rk_<locId>_<y>_<m>) + Overhead
   // (jsr_rk_overhead_<locId>) je echtem Standort per Upsert/Replace in die DB schieben.
   async function migrateRkToDB(){
@@ -21100,10 +21105,12 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
 
         {/* RAUMKOSTEN */}
         {activeSection==='raumkosten'&&(()=>{
-          const rkData=getRkData(rkYear,rkMonth);
+          const rkData=rkDraft||getRkData(rkYear,rkMonth);
           const fixTotal=rkData.fix.reduce((s,f)=>s+(parseFloat(f.amount)||0),0);
           const varTotal=rkData.variable.reduce((s,v)=>s+(parseFloat(v.amount)||0),0);
           const grandTotal=fixTotal+varTotal;
+          const deAmt=v=>(parseFloat(v)||0).toLocaleString('de-DE',{minimumFractionDigits:2,maximumFractionDigits:2});
+          const rkSaved=!!localStorage.getItem(rkFullKey(rkYear,rkMonth,rkLocId));   // false = nur Katalog-Vorschlagswerte
           return(
             <div>
               {/* Month selector */}
@@ -21135,11 +21142,18 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
                     </select>
                     <button className="btn btn-sm" disabled={rkMigBusy} onClick={migrateRkToDB} title="Vorhandene lokale Raumkosten (Monatswerte + Overhead) in die Supabase-DB übernehmen">{rkMigBusy?'⬆ Übernehme…':'⬆ In DB übernehmen'}</button>
                     <div style={{fontWeight:800,fontSize:15,color:'var(--blue)',marginLeft:8}}>
-                      Gesamt: {grandTotal.toFixed(2)} €
+                      Gesamt: {deAmt(grandTotal)} €
                     </div>
                   </div>
                 </div>
               </div>
+
+              {!rkSaved && (
+                <div style={{marginBottom:12,padding:'10px 14px',borderRadius:8,background:'var(--amber-bg,#fef3c7)',
+                  border:'1px solid var(--amber,#f59e0b)',color:'var(--amber,#b45309)',fontSize:12,fontWeight:600}}>
+                  ⚠ Vorschlagswerte aus dem Katalog — für diesen Standort/Monat noch nicht erfasst. Mit 💾 Speichern übernehmen.
+                </div>
+              )}
 
               {/* FIXKOSTEN */}
               <div className="card" style={{marginBottom:12}}>
@@ -21147,7 +21161,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
                   <span className="card-title">📌 Fixkosten</span>
                   <div style={{display:'flex',gap:8,alignItems:'center'}}>
                     <span style={{fontSize:12,fontWeight:700,color:'var(--muted)'}}>
-                      Σ {fixTotal.toFixed(2)} €
+                      Σ {deAmt(fixTotal)} €
                     </span>
                     <button className="btn btn-sm btn-primary" onClick={()=>{
                       const newId='rk_fix_'+Date.now();
@@ -21166,15 +21180,17 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
                           const newCfg={...rkCfg,fix:rkCfg.fix.map((f,j)=>j===i?{...f,label:e.target.value}:f)};
                           saveRkCfg(newCfg);
                           const upd={...rkData,fix:rkData.fix.map((f,j)=>j===i?{...f,label:e.target.value}:f)};
+                          setRkDraft(upd);
                           saveRkData(rkYear,rkMonth,upd);
                         }}/>
                       <div style={{display:'flex',alignItems:'center',gap:4}}>
-                        <input type="text" inputMode="decimal" className="form-input" min="0" step="0.01"
+                        <input type="number" min="0" step="0.01" className="form-input"
                           value={item.amount}
                           placeholder={rkCfg.fix[i]?.amount||'0'}
-                          style={{textAlign:'right',fontWeight:700,MozAppearance:'textfield',appearance:'none'}}
+                          style={{textAlign:'right',fontWeight:700,color:rkSaved?undefined:'var(--muted)'}}
                           onChange={e=>{
                             const upd={...rkData,fix:rkData.fix.map((f,j)=>j===i?{...f,amount:e.target.value}:f)};
+                            setRkDraft(upd);
                             saveRkData(rkYear,rkMonth,upd);
                           }}/>
                         <span style={{fontSize:12,color:'var(--muted)',whiteSpace:'nowrap'}}>€</span>
@@ -21195,7 +21211,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
                   <span className="card-title">📊 Variable Kosten (monatlich nach Verbrauch)</span>
                   <div style={{display:'flex',gap:8,alignItems:'center'}}>
                     <span style={{fontSize:12,fontWeight:700,color:'var(--muted)'}}>
-                      Σ {varTotal.toFixed(2)} €
+                      Σ {deAmt(varTotal)} €
                     </span>
                     <button className="btn btn-sm btn-primary" onClick={()=>{
                       const newId='rk_var_'+Date.now();
@@ -21214,16 +21230,19 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
                           const newCfg={...rkCfg,variable:rkCfg.variable.map((v,j)=>j===i?{...v,label:e.target.value}:v)};
                           saveRkCfg(newCfg);
                           const upd={...rkData,variable:rkData.variable.map((v,j)=>j===i?{...v,label:e.target.value}:v)};
+                          setRkDraft(upd);
                           saveRkData(rkYear,rkMonth,upd);
                         }}/>
                       <div style={{display:'flex',alignItems:'center',gap:4}}>
-                        <input type="text" inputMode="decimal" className="form-input"
+                        <input type="number" min="0" step="0.01" className="form-input"
                           value={item.amount===''?'':item.amount}
                           placeholder={rkCfg.variable[i]?.amount||'Betrag'}
-                          style={{textAlign:'right',fontWeight:700,MozAppearance:'textfield',appearance:'none',
+                          style={{textAlign:'right',fontWeight:700,
+                            color:rkSaved?undefined:'var(--muted)',
                             border:(!item.amount&&item.amount!==0)?'2px solid var(--orange, #f59e0b)':'1.5px solid var(--border)'}}
                           onChange={e=>{
                             const upd={...rkData,variable:rkData.variable.map((v,j)=>j===i?{...v,amount:e.target.value}:v)};
+                            setRkDraft(upd);
                             saveRkData(rkYear,rkMonth,upd);
                           }}/>
                         <span style={{fontSize:12,color:'var(--muted)',whiteSpace:'nowrap'}}>€</span>
