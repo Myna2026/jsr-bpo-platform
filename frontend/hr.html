@@ -19949,6 +19949,40 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
     try{return JSON.parse(localStorage.getItem('jsr_pins_v1')||'{}');}
     catch(e){return {};}
   });
+  const [pinMigBusy, setPinMigBusy] = useState(false);
+  // ST3a: PIN-Verwaltung schreibt in time_pins (localStorage bleibt Cache).
+  async function assignNewPin(emp){
+    for(let t=0;t<12;t++){
+      const code=String(Math.floor(1000+Math.random()*9000));
+      const res=await savePinToDB(emp.id, code);
+      if(res==='ok'){
+        setPins(pp=>({...pp,[emp.id]:{code,changed:new Date().toISOString().slice(0,10)}}));
+        alert(emp.first_name+' '+emp.last_name+' — Neuer PIN: '+code);
+        return;
+      }
+      if(res!=='duplicate'){ alert('Fehler beim Speichern des PINs.'); return; }
+    }
+    alert('Konnte keinen freien PIN finden — bitte erneut versuchen.');
+  }
+  async function removePin(emp){
+    if(!window.confirm(emp.first_name+' '+emp.last_name+' — PIN löschen?')) return;
+    await deletePinFromDB(emp.id);
+    setPins(pp=>{const n={...pp};delete n[emp.id];return n;});
+  }
+  async function migratePinsToDB(){
+    const entries=Object.entries(pins||{}).filter(([id,p])=>p&&p.code);
+    if(!entries.length){ alert('Keine lokalen PINs gefunden.'); return; }
+    if(!window.confirm('In DB übernehmen: '+entries.length+' PINs.\nBestehende DB-Einträge werden überschrieben. Fortfahren?')) return;
+    setPinMigBusy(true);
+    let ok=0, dup=0, err=0;
+    try{
+      for(const [id,p] of entries){
+        const res=await savePinToDB(id, p.code, p.changed);
+        if(res==='ok') ok++; else if(res==='duplicate') dup++; else err++;
+      }
+    } finally { setPinMigBusy(false); }
+    alert('Übernahme fertig.\nErfolgreich: '+ok+(dup?'\nDoppelte PINs (übersprungen): '+dup:'')+(err?'\nFehler: '+err:''));
+  }
 
   // Mount-Guard: die Persist-Effekte feuern beim Oeffnen der Einstellungen einmal —
   // dann KEIN DB-Write/Toast (nur bei echten Aenderungen). localStorage bleibt write-through.
@@ -21653,7 +21687,10 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
           <div className="card">
             <div className="card-header">
               <span className="card-title">🔢 Stempeluhr PINs</span>
-              <span style={{fontSize:11,color:'var(--muted)'}}>4-stellige PINs für die Stempeluhr pro Mitarbeiter</span>
+              <div style={{display:'flex',gap:8,alignItems:'center'}}>
+                <span style={{fontSize:11,color:'var(--muted)'}}>4-stellige PINs für die Stempeluhr pro Mitarbeiter</span>
+                <button className="btn btn-sm" disabled={pinMigBusy} onClick={migratePinsToDB} title="Vorhandene lokale PINs in die time_pins-Tabelle übernehmen">{pinMigBusy?'⬆ Übernehme…':'⬆ PINs in DB übernehmen'}</button>
+              </div>
             </div>
             <div style={{padding:'12px 14px',background:'var(--blue-bg)',margin:'0 0 0 0',
               borderBottom:'1px solid var(--border)',fontSize:12,color:'var(--blue)'}}>
@@ -21679,13 +21716,9 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
                         <td style={{fontSize:11,color:'var(--muted)'}}>{pin?.changed||'—'}</td>
                         <td>
                           <div style={{display:'flex',gap:6}}>
-                            <button className="btn btn-sm" onClick={()=>{
-                              const code = String(Math.floor(1000+Math.random()*9000));
-                              setPins(pp=>({...pp,[emp.id]:{code,changed:new Date().toISOString().slice(0,10)}}));
-                              alert(emp.first_name+' '+emp.last_name+' — Neuer PIN: '+code);
-                            }}>🔄 Neuer PIN</button>
+                            <button className="btn btn-sm" onClick={()=>assignNewPin(emp)}>🔄 Neuer PIN</button>
                             <button className="btn btn-sm" style={{color:'var(--red)'}}
-                              onClick={()=>setPins(pp=>{const n={...pp};delete n[emp.id];return n;})}>
+                              onClick={()=>removePin(emp)}>
                               ×
                             </button>
                           </div>
@@ -23680,6 +23713,38 @@ function saveRkOverheadDebounced(locId, items){
   if(!locId) return;
   clearTimeout(_rkOhTimers[locId]);
   _rkOhTimers[locId]=setTimeout(()=>{ saveRkOverheadToDB(locId, items); }, 800);
+}
+
+// Etappe ST3a: Stempel-PINs (time_pins) aus Supabase. RLS = nur management/hr/finance.
+// loadPinsFromDB -> {emp_id:{code,changed}} (Frontend-Shape jsr_pins_v1) oder null bei leer.
+async function loadPinsFromDB(){
+  try{
+    const {data, error} = await sb.from('time_pins').select('*');
+    if(error){ console.error('[pin] loadPinsFromDB', error); return null; }
+    const rows=data||[]; if(!rows.length) return null;
+    const out={};
+    rows.forEach(r=>{ if(r.emp_id) out[r.emp_id]={code:r.code, changed:r.changed}; });
+    return out;
+  }catch(e){ console.error('[pin] loadPinsFromDB', e); return null; }
+}
+// Upsert nach emp_id. Rueckgabe: 'ok' | 'duplicate' (unique(code) belegt) | 'error'.
+async function savePinToDB(empId, code, changed){
+  if(!empId||!code) return 'error';
+  const {error}=await sb.from('time_pins').upsert(
+    {emp_id:empId, code, changed: changed||new Date().toISOString().slice(0,10),
+     failed_attempts:0, locked_until:null, updated_at:new Date().toISOString()},
+    {onConflict:'emp_id'});
+  if(error){
+    if(error.code==='23505'||/duplicate|unique/i.test(error.message||'')) return 'duplicate';
+    console.error('[pin] savePinToDB', error); return 'error';
+  }
+  return 'ok';
+}
+async function deletePinFromDB(empId){
+  if(!empId) return false;
+  const {error}=await sb.from('time_pins').delete().eq('emp_id', empId);
+  if(error){ console.error('[pin] deletePinFromDB', error); cfgToast(false); return false; }
+  cfgToast(true); return true;
 }
 
 // Etappe C2: generische App-Configs (Key/Value jsonb) in app_config. Singleton-Blobs,
@@ -25876,6 +25941,9 @@ function App(){
           localStorage.setItem('jsr_rk_overhead_'+locId, JSON.stringify(items));
         });
       }
+      // ST3a: Stempel-PINs (time_pins) in den Cache spiegeln (nur wenn HR-Rolle lesen darf)
+      const pinsDb = await loadPinsFromDB();
+      if(pinsDb) localStorage.setItem('jsr_pins_v1', JSON.stringify(pinsDb));
     })();
   },[]);
 
