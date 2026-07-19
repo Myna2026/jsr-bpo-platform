@@ -19589,9 +19589,9 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
   });
 
   useEffect(()=>{localStorage.setItem('jsr_skills_v1',JSON.stringify(skills));},[skills]);
-  useEffect(()=>{localStorage.setItem('jsr_absence_types_v1',JSON.stringify(absenceTypes));},[absenceTypes]);
+  useEffect(()=>{localStorage.setItem('jsr_absence_types_v1',JSON.stringify(absenceTypes));saveConfigToDB('jsr_absence_types_v1',absenceTypes);},[absenceTypes]);
   useEffect(()=>{localStorage.setItem('jsr_positions_v1',JSON.stringify(positions));},[positions]);
-  useEffect(()=>{localStorage.setItem('jsr_holidays_v1',JSON.stringify(holidays));},[holidays]);
+  useEffect(()=>{localStorage.setItem('jsr_holidays_v1',JSON.stringify(holidays));saveConfigToDB('jsr_holidays_v1',holidays);},[holidays]);
   useEffect(()=>{localStorage.setItem('jsr_work_models_v1',JSON.stringify(workModels));},[workModels]);
   useEffect(()=>{localStorage.setItem('jsr_vacation_defaults_v1',JSON.stringify(vacationDefaults));},[vacationDefaults]);
   useEffect(()=>{localStorage.setItem('jsr_pins_v1',JSON.stringify(pins));},[pins]);
@@ -19727,6 +19727,9 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
     catch(e){return {year1_days:18,year2_days:20,seniority:[]};}
   });
   function saveVcfg(u){const n={...vcfg,...u};setVcfg(n);localStorage.setItem('jsr_vacation_cfg',JSON.stringify(n));}
+  // C2: vacation_cfg hat keinen persist-Effekt (inline setItem an vielen Stellen) —
+  // ein Effekt auf [vcfg] als DB-Funnel (localStorage bleibt via inline write-through).
+  useEffect(()=>{saveConfigToDB('jsr_vacation_cfg',vcfg);},[vcfg]);
 
   const [payTab, setPayTab] = useState('al');
   const [kpiCfg, setKpiCfgState] = useState(()=>getKpiCfg());
@@ -21654,16 +21657,23 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
                         background:'var(--surface-2)',borderBottom:'1px solid var(--border)',
                         display:'flex',justifyContent:'space-between',alignItems:'center'}}>
                         <span>📍 {loc} — {filtered.length} Feiertage {yearSel}</span>
-                        <button className="btn btn-sm btn-primary" style={{fontSize:10}}
-                          onClick={()=>{
-                            const d=window.prompt('Datum (YYYY-MM-DD):');
-                            const n=window.prompt('Bezeichnung:');
-                            if(d&&n){
+                        <div style={{display:'flex',gap:6,alignItems:'center'}}>
+                          <input type="date" id={'hol_date_'+loc} className="form-input" style={{fontSize:11,padding:'2px 6px',width:150}}/>
+                          <input id={'hol_name_'+loc} className="form-input" placeholder="Bezeichnung" style={{fontSize:11,padding:'2px 6px',width:140}}/>
+                          <button className="btn btn-sm btn-primary" style={{fontSize:10,whiteSpace:'nowrap'}}
+                            onClick={()=>{
+                              const dEl=document.getElementById('hol_date_'+loc);
+                              const nEl=document.getElementById('hol_name_'+loc);
+                              const d=((dEl&&dEl.value)||'').trim();
+                              const n=((nEl&&nEl.value)||'').trim();
+                              if(!d){alert('Bitte ein gültiges Datum über den Kalender wählen.');return;}
+                              if(!n){alert('Bitte eine Bezeichnung für den Feiertag eingeben.');return;}
                               const upd={...holidays,[loc]:[...(holidays[loc]||[]),{date:d,name:n}]};
                               setHolidays(upd);
                               localStorage.setItem('jsr_holidays_v1',JSON.stringify(upd));
-                            }
-                          }}>+ Feiertag</button>
+                              if(dEl)dEl.value='';if(nEl)nEl.value='';
+                            }}>+ Feiertag</button>
+                        </div>
                       </div>
                       {filtered.sort((a,b)=>a.date.localeCompare(b.date)).map((hol,i)=>(
                         <div key={i} style={{display:'flex',alignItems:'center',gap:12,
@@ -23068,6 +23078,31 @@ async function saveTrainingPlanToDB(plan){
   const {error}=await sb.from('training_plans').upsert(payload);
   if(error){ console.error('[plan] saveTrainingPlanToDB', error); return false; }
   return true;
+}
+
+// Etappe C2: generische App-Configs (Key/Value jsonb) in app_config. Singleton-Blobs,
+// Whole-Read/Whole-Write. loadAllConfigsFromDB spiegelt beim Start alle Zeilen in den
+// localStorage-Cache (ein Aufruf statt N einzelne). saveConfigToDB upsertet einen Key.
+async function loadConfigFromDB(key){
+  try{
+    const {data, error} = await sb.from('app_config').select('value').eq('key', key).maybeSingle();
+    if(error){ console.error('[cfg] loadConfigFromDB', key, error); return null; }
+    return data ? data.value : null;
+  }catch(e){ console.error('[cfg] loadConfigFromDB', key, e); return null; }
+}
+async function saveConfigToDB(key, value){
+  if(!key) return false;
+  const {error} = await sb.from('app_config').upsert({key, value, updated_at:new Date().toISOString()});
+  if(error){ console.error('[cfg] saveConfigToDB', key, error); return false; }
+  return true;
+}
+async function loadAllConfigsFromDB(){
+  try{
+    const {data, error} = await sb.from('app_config').select('*');
+    if(error){ console.error('[cfg] loadAllConfigsFromDB', error); return false; }
+    (data||[]).forEach(r=>{ try{ localStorage.setItem(r.key, JSON.stringify(r.value)); }catch(e){} });
+    return true;
+  }catch(e){ console.error('[cfg] loadAllConfigsFromDB', e); return false; }
 }
 
 // 25a/25b: 46 bekannte Schema-Spalten (38 aus 25a + 8 aus 25b).
@@ -25069,6 +25104,8 @@ function App(){
       if(perf) localStorage.setItem('jsr_perf_v1', JSON.stringify(perf));
       const times = await loadTimeSessionsFromDB();
       if(times) localStorage.setItem('jsr_time_v1', JSON.stringify(times));
+      // C2: alle app_config-Zeilen in den localStorage-Cache spiegeln (ein Aufruf)
+      await loadAllConfigsFromDB();
     })();
   },[]);
 
