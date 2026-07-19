@@ -945,6 +945,12 @@ function getEmpById(id){
 // slipFromDB: Alias-Layer fuer Frontend-Renderer (emp_id, hours,
 // total_worked_hours) — DB-Row bleibt kompatibel mit renderPayroll/renderHome.
 var PAYSLIPS_ME = [];
+var WHEEL_SPINS_ME = [];  // Glücksrad: eigene wheel_spins (Supabase, self-read)
+function loadMyWheelFromDB(){
+  if(!ME||!ME.id) return Promise.resolve();
+  return sb.from('wheel_spins').select('*').eq('emp_id',ME.id).order('spin_date',{ascending:false})
+    .then(function(r){ if(r.error){ console.error('[wheel] loadMyWheelFromDB', r.error); return; } WHEEL_SPINS_ME=r.data||[]; });
+}
 var PERF_ME = [];       // Perf: eigene kpi_entries (Supabase)
 var KPI_CFG_ME = [];    // Perf: kpi_config (Name/Einheit/thresholds)
 
@@ -1181,6 +1187,7 @@ function gateSession(session){
             loadMyPerfFromDB(ME.id)
               .then(function(res){ PERF_ME=res.entries; KPI_CFG_ME=res.cfg; applyPerfVisibility(); renderCurrentViewOnRealtime(); })
               .catch(function(err){ console.error('[perf] Perf-Load fehlgeschlagen', err); });
+            loadMyWheelFromDB();   // Glücksrad-Historie (eigene Dreh-Ergebnisse)
             // Block 2: eigene Urlaubsanträge laden + Realtime (RLS filtert auf eigene)
             loadMyVacreqs();
             sb.channel('vacreq-me-b2')
@@ -2610,8 +2617,8 @@ function getWheelCfg(){
   ],active_days:[1,2,3,4,5]};
 }
 function isWheelSpunToday(){
-  var wins=ls('jsr_wheel_wins')||[],today=isoDate(new Date());
-  return wins.some(function(w){return w.emp_id===ME.id&&w.date===today;});
+  var today=isoDate(new Date());
+  return (WHEEL_SPINS_ME||[]).some(function(s){return s.spin_date===today;});
 }
 // Gewichteter Random-Pick: Wahrscheinlichkeit proportional zu segment.weight
 function pickWeightedIndex(segments){
@@ -2627,6 +2634,9 @@ function pickWeightedIndex(segments){
   return segments.length-1;
 }
 
+// Deutsches Geldformat: glatte Betraege ohne Nachkommastellen (1 €, 50 €, 1.000 €),
+// krumme mit Komma und 2 Stellen (2,50 €).
+function wheelEur(v){var n=parseFloat(v)||0;return n.toLocaleString('de-DE',{minimumFractionDigits:(n===Math.round(n))?0:2,maximumFractionDigits:2})+' €';}
 function renderMoti(){
   var cfg=getWheelCfg();
   var spunToday=isWheelSpunToday();
@@ -2648,21 +2658,21 @@ function renderMoti(){
   html+='</div></div>';
 
   // History
-  var wins=(ls('jsr_wheel_wins')||[]).filter(function(w){return w.emp_id===ME.id;});
-  wins.sort(function(a,b){return (b.date||'').localeCompare(a.date||'');});
-  var totalWon=wins.reduce(function(s,w){return s+(parseFloat(w.value)||0);},0);
+  var wins=(WHEEL_SPINS_ME||[]).slice();
+  wins.sort(function(a,b){return (b.spin_date||'').localeCompare(a.spin_date||'');});
+  var totalWon=wins.reduce(function(s,w){return s+(parseFloat(w.amount)||0);},0);
 
-  html+='<div class="card"><div class="card-header"><div class="card-title">🏆 Meine Gewinne</div><div class="card-sub">Insgesamt '+wins.length+'× gedreht · '+totalWon.toFixed(2)+' € gewonnen</div></div><div class="card-body card-body-tight">';
+  html+='<div class="card"><div class="card-header"><div class="card-title">🏆 Meine Gewinne</div><div class="card-sub">Insgesamt '+wins.length+'× gedreht · '+wheelEur(totalWon)+' gewonnen</div></div><div class="card-body card-body-tight">';
   if(wins.length===0){
-    html+='<div class="empty"><div class="empty-icon">🎰</div><div>Noch keine Gewinne.</div><div style="margin-top:6px;font-size:11px;">Dreh das Rad jeden Tag für eine Chance auf bis zu 10 €!</div></div>';
+    html+='<div class="empty"><div class="empty-icon">🎰</div><div>Noch keine Gewinne.</div><div style="margin-top:6px;font-size:11px;">Dreh das Rad jeden Tag für eine Chance auf einen Bonus!</div></div>';
   }else{
-    html+='<div class="table-wrap"><table><thead><tr><th>Datum</th><th>Gewinn</th><th>Status</th></tr></thead><tbody>';
+    html+='<div class="table-wrap"><table><thead><tr><th>Datum</th><th>Gewinn</th><th>Quelle</th></tr></thead><tbody>';
     wins.forEach(function(w){
-      var dateStr=w.date?new Date(w.date).toLocaleDateString('de-AT',{day:'2-digit',month:'2-digit',year:'numeric'}):'—';
-      var value=parseFloat(w.value)||0;
-      var winBadge=value>0?'<span class="badge badge-green">+'+value.toFixed(2)+' €</span>':'<span class="badge badge-muted">Kein Gewinn</span>';
-      var payStatus=w.paid?'<span class="badge badge-blue">✓ Ausgezahlt</span>':value>0?'<span class="badge badge-amber">Offen</span>':'—';
-      html+='<tr><td>'+dateStr+'</td><td>'+winBadge+'</td><td>'+payStatus+'</td></tr>';
+      var dateStr=w.spin_date?new Date(w.spin_date+'T00:00:00').toLocaleDateString('de-AT',{day:'2-digit',month:'2-digit',year:'numeric'}):'—';
+      var value=parseFloat(w.amount)||0;
+      var winBadge=value>0?'<span class="badge badge-green">+'+wheelEur(value)+'</span>':'<span class="badge badge-muted">Kein Gewinn</span>';
+      var srcBadge=w.source==='special'?'<span class="badge badge-blue">Sonderaktion</span>':(value>0?'<span class="badge badge-amber">Glücksrad</span>':'—');
+      html+='<tr><td>'+dateStr+'</td><td>'+winBadge+'</td><td>'+srcBadge+'</td></tr>';
     });
     html+='</tbody></table></div>';
   }
@@ -2681,6 +2691,7 @@ var _wheelTargetAngle=0;
 var _wheelStartTime=0;
 var _wheelDuration=4500;
 var _wheelWinIdx=0;
+var _wheelServerResult=null;   // G3a: Ergebnis von sb.rpc('spin_wheel')
 
 function drawWheel(){
   var canvas=document.getElementById('wheelCanvas');
@@ -2774,32 +2785,45 @@ function lighten(hex,amt){
   return '#'+r.toString(16).padStart(2,'0')+g.toString(16).padStart(2,'0')+b.toString(16).padStart(2,'0');
 }
 
+// G3a: Der Server (RPC spin_wheel) entscheidet Gewinn/Hoehe autoritativ; das Rad
+// dreht visuell und landet auf einem passenden Segment (sonst 0-Segment).
 function spinWheel(){
   if(_wheelSpinning)return;
   if(isWheelSpunToday()){alert('Du hast heute bereits gedreht. Komm morgen wieder!');return;}
-  var cfg=getWheelCfg();
-  var segs=cfg.segments;
-  var n=segs.length;
-  // Gewichteter Pick (kompatibel zu HR-prizes mit weight)
-  _wheelWinIdx=pickWeightedIndex(segs);
-  // Geometrie:
-  // - Segmente werden bei (i*ang - PI/2) gezeichnet, also Segment 0 oben startet
-  // - Segment-Mitte: (i+0.5)*ang - PI/2
-  // - Pointer ist bei -PI/2 (oben)
-  // - Nach Rotation um _wheelAngle CW soll Segment-Mitte bei -PI/2 sein:
-  //   (winIdx+0.5)*ang - PI/2 + _wheelAngle ≡ -PI/2 (mod 2*PI)
-  //   _wheelAngle = -(winIdx+0.5)*ang (mod 2*PI)
-  // Plus 5-7 volle Drehungen für visuellen Spin:
-  var segAngle=Math.PI*2/n;
-  var fullSpins = 5+Math.floor(Math.random()*3); // 5..7 volle Drehungen
-  _wheelTargetAngle = fullSpins*Math.PI*2 - (_wheelWinIdx+0.5)*segAngle;
-  _wheelAngle=0;
-  _wheelStartTime=performance.now();
-  _wheelSpinning=true;
   var btn=document.getElementById('spinBtn');
   if(btn){btn.disabled=true;btn.style.opacity='0.5';btn.textContent='Dreht...';}
-  document.getElementById('wheelResult').innerHTML='';
-  requestAnimationFrame(animateWheel);
+  var resEl=document.getElementById('wheelResult'); if(resEl)resEl.innerHTML='';
+  sb.rpc('spin_wheel').then(function(res){
+    if(res.error){
+      console.error('[wheel] spin_wheel', res.error);
+      if(btn){btn.disabled=false;btn.style.opacity='1';btn.textContent='🎯 Jetzt drehen';}
+      alert('Drehen fehlgeschlagen. Bitte später erneut versuchen.'); return;
+    }
+    var r=res.data||{};
+    if(r.alreadySpun){
+      if(btn)btn.style.display='none';
+      if(resEl)resEl.innerHTML='<div class="wheel-result-banner">✓ '+esc(r.message||'Heute schon gedreht — morgen wieder!')+'</div>';
+      return;
+    }
+    _wheelServerResult=r;
+    var cfg=getWheelCfg(), segs=cfg.segments, n=segs.length;
+    // Segment passend zum Server-Betrag (sonst 0-Segment, sonst erstes)
+    var idx=segs.findIndex(function(s){return Number(s.value)===Number(r.amount);});
+    if(idx<0) idx=segs.findIndex(function(s){return Number(s.value)===0;});
+    if(idx<0) idx=0;
+    _wheelWinIdx=idx;
+    var segAngle=Math.PI*2/n;
+    var fullSpins=5+Math.floor(Math.random()*3);
+    _wheelTargetAngle=fullSpins*Math.PI*2-(_wheelWinIdx+0.5)*segAngle;
+    _wheelAngle=0;
+    _wheelStartTime=performance.now();
+    _wheelSpinning=true;
+    requestAnimationFrame(animateWheel);
+  }, function(err){
+    console.error('[wheel] spin_wheel', err);
+    if(btn){btn.disabled=false;btn.style.opacity='1';btn.textContent='🎯 Jetzt drehen';}
+    alert('Drehen fehlgeschlagen. Bitte später erneut versuchen.');
+  });
 }
 
 function animateWheel(t){
@@ -2822,32 +2846,21 @@ function animateWheel(t){
 }
 
 function finishSpin(){
-  var cfg=getWheelCfg();
-  var win=cfg.segments[_wheelWinIdx];
-  if(!win){console.error('No win at index',_wheelWinIdx);return;}
-  // Save win
-  var wins=ls('jsr_wheel_wins')||[];
-  wins.push({
-    emp_id:ME.id,
-    emp_name:(ME.first_name||'')+' '+(ME.last_name||''),
-    date:isoDate(new Date()),
-    value:win.value,
-    label:win.label,
-    paid:false,
-    created_at:new Date().toISOString()
-  });
-  lss('jsr_wheel_wins',wins);
-  // Show result
+  var r=_wheelServerResult||{amount:0,source:'normal',message:'Kein Gewinn — deine Chance steigt!'};
+  var val=parseFloat(r.amount)||0;
+  // Ergebnis (vom Server) anzeigen
   var resultEl=document.getElementById('wheelResult');
   if(resultEl){
-    var val=parseFloat(win.value)||0;
     if(val>0){
-      resultEl.innerHTML='<div class="wheel-win-anim">🎉 <strong>'+esc(win.label)+'</strong> gewonnen!</div><div style="font-size:11px;color:var(--muted);margin-top:6px;">Wird mit dem nächsten Lohnzettel ausgezahlt.</div>';
+      resultEl.innerHTML='<div class="wheel-win-anim">🎉 <strong>'+wheelEur(val)+'</strong> gewonnen!</div><div style="font-size:11px;color:var(--muted);margin-top:6px;">'+esc(r.message||'')+' Wird mit dem nächsten Lohnzettel ausgezahlt.</div>';
     }else{
-      resultEl.innerHTML='<div class="wheel-win-anim" style="background:var(--surface-2);color:var(--muted);">Heute leider kein Gewinn. Morgen wieder!</div>';
+      resultEl.innerHTML='<div class="wheel-win-anim" style="background:var(--surface-2);color:var(--muted);">'+esc(r.message||'Heute leider kein Gewinn. Morgen wieder!')+'</div>';
     }
   }
-  // Button-Update statt full re-render (sonst springt das Rad zurück)
+  // Lokalen Cache fortschreiben (Server hat bereits in wheel_spins gespeichert),
+  // damit isWheelSpunToday sofort greift + die Historie den Dreh kennt. Kein Re-Render
+  // (sonst springt das Rad zurueck) — Historie aktualisiert beim naechsten Oeffnen.
+  (WHEEL_SPINS_ME=WHEEL_SPINS_ME||[]).unshift({emp_id:ME.id, spin_date:isoDate(new Date()), amount:val, source:r.source||'normal'});
   var btn=document.getElementById('spinBtn');
   if(btn)btn.style.display='none';
 }

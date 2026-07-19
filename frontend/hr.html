@@ -19567,6 +19567,163 @@ function ClientAccountsTab({projects, clients, setClients}){
   );
 }
 
+// G3b: Glücksrad-Verwaltung — Monatsbudget, Sonderaktionen, Gewinn-Liste (Supabase).
+function WheelAdminView({employees}){
+  const now=new Date();
+  const [month,setMonth]=useState(now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0'));
+  const [budget,setBudget]=useState('');
+  const [spent,setSpent]=useState(0);
+  const [specials,setSpecials]=useState([]);
+  const [wins,setWins]=useState([]);
+  const [sf,setSf]=useState({id:null,label:'',start_date:'',end_date:'',total_amount:'',tranche_amount:'',tranche_count:''});
+  const [saved,setSaved]=useState('');
+  const [exportMonth,setExportMonth]=useState('');   // '' = alle Monate
+  const eur=v=>{const n=Number(v||0);return n.toLocaleString('de-DE',{minimumFractionDigits:(n===Math.round(n))?0:2,maximumFractionDigits:2})+' €';};
+  const empName=id=>{const e=(employees||[]).find(x=>x&&x.id===id);return e?((e.first_name||'')+' '+(e.last_name||'')).trim():'—';};
+  const empStaff=id=>{const e=(employees||[]).find(x=>x&&x.id===id);return e?(e.staff_number||''):'';};
+  function mb(m){const [y,mo]=m.split('-').map(Number);return {start:m+'-01',next:(mo===12?(y+1)+'-01':y+'-'+String(mo+1).padStart(2,'0'))+'-01',prev:(mo===1?(y-1)+'-12':y+'-'+String(mo-1).padStart(2,'0'))};}
+  // Muster wie loadProjectsFromDB: reines select('*') + Filtern/Sortieren in JS
+  // (verkettete Server-Methoden .maybeSingle()/.order()/.limit() vermeiden — sie
+  //  liefern mit dem hier genutzten Client teils kein Ergebnis).
+  async function loadAll(){
+    const {start,next,prev}=mb(month);
+    const [bRes, sRes, cRes] = await Promise.all([
+      sb.from('wheel_budgets').select('*'),
+      sb.from('wheel_spins').select('*'),
+      sb.from('wheel_specials').select('*'),
+    ]);
+    if(bRes.error) console.error('[wheel] budgets', bRes.error);
+    if(sRes.error) console.error('[wheel] spins', sRes.error);
+    if(cRes.error) console.error('[wheel] specials', cRes.error);
+    const budgets=bRes.data||[];
+    const cur=budgets.find(x=>x.month===month);
+    if(cur){ setBudget(cur.amount); } else { const p=budgets.find(x=>x.month===prev); setBudget(p?p.amount:''); }
+    const spins=sRes.data||[];
+    setSpent(spins.filter(s=>s.spin_date>=start && s.spin_date<next).reduce((a,r)=>a+Number(r.amount||0),0));
+    setWins(spins.filter(s=>Number(s.amount)>0).sort((a,b)=>(b.spin_date||'').localeCompare(a.spin_date||'')));
+    setSpecials((cRes.data||[]).slice().sort((a,b)=>(b.created_at||'').localeCompare(a.created_at||'')));
+  }
+  useEffect(()=>{ loadAll(); },[month]);
+  async function saveBudget(){
+    const amt=parseFloat(budget); if(isNaN(amt)){alert('Bitte ein gültiges Budget eingeben.');return;}
+    const {error}=await sb.from('wheel_budgets').upsert({month, amount:amt});
+    if(error){ console.error('[wheel] saveBudget', error); alert('Budget speichern fehlgeschlagen.'); return; }
+    setSaved('budget'); setTimeout(()=>setSaved(''),2000); loadAll();
+  }
+  async function saveSpecial(){
+    if(!sf.label||!sf.start_date||!sf.end_date){alert('Label, Von und Bis sind Pflicht.');return;}
+    const payload={label:sf.label,start_date:sf.start_date,end_date:sf.end_date,
+      total_amount:sf.total_amount===''?null:Number(sf.total_amount),
+      tranche_amount:sf.tranche_amount===''?null:Number(sf.tranche_amount),
+      tranche_count:sf.tranche_count===''?null:parseInt(sf.tranche_count)};
+    let res;
+    if(sf.id){ res=await sb.from('wheel_specials').update(payload).eq('id',sf.id); }
+    else { res=await sb.from('wheel_specials').insert(payload); }
+    if(res.error){ console.error('[wheel] saveSpecial', res.error); alert('Sonderaktion speichern fehlgeschlagen.'); return; }
+    setSf({id:null,label:'',start_date:'',end_date:'',total_amount:'',tranche_amount:'',tranche_count:''});
+    loadAll();
+  }
+  async function delSpecial(id){
+    if(!window.confirm('Sonderaktion löschen?'))return;
+    const {error}=await sb.from('wheel_specials').delete().eq('id',id);
+    if(error){ console.error('[wheel] delSpecial', error); alert('Löschen fehlgeschlagen.'); return; }
+    loadAll();
+  }
+  const perEmp={}; wins.forEach(w=>{ perEmp[w.emp_id]=(perEmp[w.emp_id]||0)+Number(w.amount||0); });
+  const budgetN=parseFloat(budget)||0, rest=budgetN-spent;
+  const months=[]; for(let i=0;i<12;i++){const d=new Date(now.getFullYear(),now.getMonth()-i,1);months.push(d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'));}
+  function exportCsv(){
+    const src=(wins||[]).filter(w=>!exportMonth || (w.spin_date||'').slice(0,7)===exportMonth);
+    const head=['Datum','Mitarbeiter','Personalnummer','Betrag','Quelle'];
+    const rows=[head].concat(src.map(w=>[
+      w.spin_date||'', empName(w.emp_id), empStaff(w.emp_id),
+      Number(w.amount||0).toLocaleString('de-DE',{useGrouping:false,minimumFractionDigits:0,maximumFractionDigits:2}),
+      w.source==='special'?'Sonderaktion':'Glücksrad'
+    ]));
+    const csv=String.fromCharCode(0xFEFF)+rows.map(r=>r.map(v=>'"'+String(v==null?'':v).replace(/"/g,'""')+'"').join(';')).join('\n');
+    const a=document.createElement('a'); a.href='data:text/csv;charset=utf-8,'+encodeURIComponent(csv);
+    a.download='Gluecksrad_Gewinne'+(exportMonth?'_'+exportMonth:'')+'.csv'; a.click();
+  }
+  return(
+    <div style={{marginBottom:16}}>
+      <div className="card" style={{marginBottom:12}}>
+        <div className="card-header" style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+          <span className="card-title">🎡 Glücksrad — Monatsbudget</span>
+          <select className="form-select" style={{width:140}} value={month} onChange={e=>setMonth(e.target.value)}>
+            {months.map(m=><option key={m} value={m}>{m}</option>)}
+          </select>
+        </div>
+        <div style={{padding:'14px 16px'}}>
+          <div style={{display:'flex',gap:10,alignItems:'flex-end',flexWrap:'wrap'}}>
+            <div className="form-group" style={{margin:0}}>
+              <label className="form-label">Budget {month} (€)</label>
+              <input className="form-input" type="number" min="0" style={{width:160}} value={budget} onChange={e=>setBudget(e.target.value)} placeholder="leer = Vormonat"/>
+            </div>
+            <button className="btn btn-primary" onClick={saveBudget}>Speichern</button>
+            {saved==='budget'&&<span style={{color:'var(--green)',fontWeight:700,fontSize:13}}>✓ Gespeichert</span>}
+          </div>
+          <div style={{display:'flex',gap:24,marginTop:16,flexWrap:'wrap',fontSize:13}}>
+            <div>Budget: <strong>{eur(budgetN)}</strong></div>
+            <div>Verbraucht: <strong style={{color:'var(--amber)'}}>{eur(spent)}</strong></div>
+            <div>Verbleibend: <strong style={{color:rest>=0?'var(--green)':'var(--red)'}}>{eur(rest)}</strong></div>
+          </div>
+        </div>
+      </div>
+      <div className="card" style={{marginBottom:12}}>
+        <div className="card-header"><span className="card-title">✨ Sonderaktionen</span></div>
+        <div style={{padding:'14px 16px'}}>
+          <div style={{display:'grid',gridTemplateColumns:'1.4fr 1fr 1fr .8fr .8fr .7fr auto',gap:8,alignItems:'end',marginBottom:12}}>
+            <div className="form-group" style={{margin:0}}><label className="form-label">Label</label><input className="form-input" value={sf.label} onChange={e=>setSf({...sf,label:e.target.value})}/></div>
+            <div className="form-group" style={{margin:0}}><label className="form-label">Von</label><input className="form-input" type="date" value={sf.start_date} onChange={e=>setSf({...sf,start_date:e.target.value})}/></div>
+            <div className="form-group" style={{margin:0}}><label className="form-label">Bis</label><input className="form-input" type="date" value={sf.end_date} onChange={e=>setSf({...sf,end_date:e.target.value})}/></div>
+            <div className="form-group" style={{margin:0}}><label className="form-label">Topf €</label><input className="form-input" type="number" min="0" value={sf.total_amount} onChange={e=>setSf({...sf,total_amount:e.target.value})}/></div>
+            <div className="form-group" style={{margin:0}}><label className="form-label">Tranche €</label><input className="form-input" type="number" min="0" value={sf.tranche_amount} onChange={e=>setSf({...sf,tranche_amount:e.target.value})}/></div>
+            <div className="form-group" style={{margin:0}}><label className="form-label">Anzahl</label><input className="form-input" type="number" min="0" value={sf.tranche_count} onChange={e=>setSf({...sf,tranche_count:e.target.value})}/></div>
+            <button className="btn btn-primary" onClick={saveSpecial}>{sf.id?'Update':'+ Anlegen'}</button>
+          </div>
+          {specials.length===0 && <div style={{fontSize:12,color:'var(--muted)'}}>Keine Sonderaktionen.</div>}
+          {specials.map(s=>(
+            <div key={s.id} style={{display:'flex',alignItems:'center',gap:10,padding:'6px 0',borderBottom:'1px solid var(--border)',fontSize:13,flexWrap:'wrap'}}>
+              <span style={{fontWeight:600,flex:1,minWidth:120}}>{s.label}</span>
+              <span style={{color:'var(--muted)'}}>{s.start_date} – {s.end_date}</span>
+              <span>{eur(s.tranche_amount)} × {s.tranche_count} · Topf {eur(s.total_amount)}</span>
+              <button className="btn btn-sm" onClick={()=>setSf({id:s.id,label:s.label||'',start_date:s.start_date||'',end_date:s.end_date||'',total_amount:s.total_amount==null?'':s.total_amount,tranche_amount:s.tranche_amount==null?'':s.tranche_amount,tranche_count:s.tranche_count==null?'':s.tranche_count})}>✎</button>
+              <button className="btn btn-sm" style={{color:'var(--red)'}} onClick={()=>delSpecial(s.id)}>×</button>
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="card" style={{marginBottom:12}}>
+        <div className="card-header" style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+          <span className="card-title">🏆 Gewinne</span>
+          <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
+            <select className="form-select" style={{width:150}} value={exportMonth} onChange={e=>setExportMonth(e.target.value)}>
+              <option value="">Alle Monate</option>
+              {months.map(m=><option key={m} value={m}>{m}</option>)}
+            </select>
+            <button className="btn btn-sm" onClick={exportCsv}>⬇ CSV</button>
+            <button className="btn btn-sm" onClick={loadAll}>↻ Aktualisieren</button>
+          </div>
+        </div>
+        <div className="table-responsive"><table style={{width:'100%'}}>
+          <thead><tr><th>Datum</th><th>Mitarbeiter</th><th style={{textAlign:'right'}}>Betrag</th><th>Quelle</th><th style={{textAlign:'right'}}>Σ MA gesamt</th></tr></thead>
+          <tbody>
+            {wins.length===0 && <tr><td colSpan={5} style={{textAlign:'center',padding:16,color:'var(--muted)'}}>Noch keine Gewinne.</td></tr>}
+            {wins.slice(0,100).map(w=>(
+              <tr key={w.id}>
+                <td>{w.spin_date}</td>
+                <td>{empName(w.emp_id)}</td>
+                <td style={{textAlign:'right',fontWeight:600}}>{eur(w.amount)}</td>
+                <td>{w.source==='special'?'Sonderaktion':'Glücksrad'}</td>
+                <td style={{textAlign:'right',color:'var(--muted)'}}>{eur(perEmp[w.emp_id])}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table></div>
+      </div>
+    </div>
+  );
+}
 function SystemSettingsTab({projects, setProjects, employees, clients}){
   const [activeSection, setActiveSection] = useState('skills');
 
@@ -21394,7 +21551,10 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
         {activeSection==='spinwheel'&&(
           <div>
 
-            {/* ── AKTIVE TAGE ── */}
+            {/* ── G3b: Budget / Sonderaktionen / Gewinne (neues System) ── */}
+            <WheelAdminView employees={employees}/>
+
+            {/* ── AKTIVE TAGE (Visual-Config, jsr_wheel_cfg) ── */}
             <div className="card" style={{marginBottom:12}}>
               <div className="card-header"><span className="card-title">📅 Aktive Drehtage</span></div>
               <div style={{padding:'14px 16px'}}>
@@ -21505,48 +21665,6 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
               </div>
             </div>
 
-            {/* ── GEWINNER-LISTE ── */}
-            <div className="card">
-              <div className="card-header">
-                <span className="card-title">🏆 Gewinner-Liste</span>
-                <button className="btn btn-sm" onClick={()=>{
-                  const bonuses=JSON.parse(localStorage.getItem('jsr_wheel_wins')||'[]');
-                  const rows=[['Datum','Mitarbeiter','Bezeichnung','Betrag (€)']].concat(
-                    bonuses.map(b=>[b.date,b.name||b.emp_name||'',b.label||'',b.amount||b.value||0])
-                  );
-                  const csv='\uFEFF'+rows.map(r=>r.map(v=>'"'+String(v).replace(/"/g,'""')+'"').join(';')).join('\n');
-                  const a=document.createElement('a');a.href='data:text/csv;charset=utf-8,'+encodeURIComponent(csv);
-                  a.download='Glucksrad_Gewinne.csv';a.click();
-                }}>⬇ CSV</button>
-              </div>
-              <div style={{padding:16}}>
-                {(()=>{
-                  const bonuses=JSON.parse(localStorage.getItem('jsr_wheel_wins')||'[]');
-                  if(!bonuses.length) return <div style={{color:'var(--muted)',fontSize:13,textAlign:'center',padding:16}}>Noch keine Gewinne erfasst.</div>;
-                  const byMonth={};
-                  bonuses.forEach(b=>{
-                    const m=(b.date||'').slice(0,7)||'Unbekannt';
-                    if(!byMonth[m])byMonth[m]=[];byMonth[m].push(b);
-                  });
-                  return Object.keys(byMonth).sort().reverse().map(m=>(
-                    <div key={m} style={{marginBottom:16}}>
-                      <div style={{fontWeight:700,fontSize:12,marginBottom:8,color:'var(--blue)',textTransform:'uppercase',letterSpacing:'.06em'}}>{m}</div>
-                      <div className="card" style={{marginBottom:0}}>
-                        {byMonth[m].map((b,i)=>(
-                          <div key={i} style={{padding:'8px 14px',borderBottom:'1px solid var(--border)',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-                            <div>
-                              <div style={{fontSize:13,fontWeight:600}}>{b.name||b.emp_name||'—'}</div>
-                              <div style={{fontSize:11,color:'var(--muted)'}}>{b.label} · {b.date}</div>
-                            </div>
-                            <div style={{fontFamily:'var(--mono)',fontWeight:700,color:'var(--green)'}}>+{parseFloat(b.amount||b.value||0).toFixed(2)} €</div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ));
-                })()}
-              </div>
-            </div>
 
           </div>
         )}
