@@ -462,7 +462,14 @@ function migrateProjectData(){
 
 
 // ── Constants ─────────────────────────────────────────────
-const LOCATIONS = ['Tirana','Prishtina'];
+const LOCATIONS = ['Tirana','Prishtina'];   // Legacy-Fallback (kein Direkt-Consumer; Dropdowns nutzen getLocationNames())
+// Einheitliche Standortquelle: aktive Standorte aus jsr_locations_v1 (LocationsView).
+// Fallback, wenn (noch) nichts gepflegt. getLocationNames() = nur Namen fuer Dropdowns.
+function getLocations(){
+  try{ const a=JSON.parse(localStorage.getItem('jsr_locations_v1')||'null'); if(Array.isArray(a)&&a.length) return a.filter(l=>l&&l.active!==false); }catch(e){}
+  return [{id:'loc_tirana',name:'Tirana',flag:'🇦🇱'},{id:'loc_prishtina',name:'Prishtina',flag:'🇽🇰'}];
+}
+function getLocationNames(){ return getLocations().map(l=>l&&l.name).filter(Boolean); }
 const SKILLS_ALL = ['Inbound Telefonie','Outbound Telefonie','Email Support','Chat Support','Beschwerdemanagement','Sales Outbound','Cross-Selling','CRM Systeme','Ticketing','Reisebuchung','Touristik Kenntnisse','Deutsch B2+','Englisch'];
 const STATUS_FLOW = [
   {key:'cv_inbound',    label:'CV Inbound',         icon:'📥', color:'#94a3b8', kanban:true,  terminal:false},
@@ -3229,7 +3236,7 @@ function EmployeeModal({emp, projects, onSave, onClose, initialTab, onTerminate}
                 <div className="form-group">
                   <label className="form-label">Standort</label>
                   <select className="form-select" value={form.location||'Tirana'} onChange={e=>set('location',e.target.value)}>
-                    <option>Tirana</option><option>Prishtina</option><option>Remote</option>
+                    {getLocationNames().map(n=><option key={n} value={n}>{n}</option>)}<option value="Remote">Remote</option>
                   </select>
                 </div>
               </div>
@@ -3299,7 +3306,7 @@ function EmployeeModal({emp, projects, onSave, onClose, initialTab, onTerminate}
                 <div className="form-group">
                   <label className="form-label">Standort</label>
                   <select className="form-select" value={form.location||'Tirana'} onChange={e=>set('location',e.target.value)} disabled={isTerminated}>
-                    <option>Tirana</option><option>Prishtina</option><option>Remote</option>
+                    {getLocationNames().map(n=><option key={n} value={n}>{n}</option>)}<option value="Remote">Remote</option>
                   </select>
                 </div>
                 <div className="form-group">
@@ -4452,7 +4459,7 @@ function EmployeeList({employees, projects, onEdit, onAdd, onAbsence, onBonus, o
             work_hours:String(row[13]||'8').trim(),
             hourly_rate:String(row[14]||'0').trim(),
             monthly_bonus:parseFloat(row[15])||0,
-            location:String(row[16]||'al').trim(),
+            location:String(row[16]||'').trim(),   // kein still gesetzter Standort — leer, wenn Spalte fehlt
             position:String(row[17]||'').trim(),
             work_weekend:String(row[18]||'').toLowerCase()==='ja',
             work_holidays:String(row[19]||'').toLowerCase()==='ja',
@@ -16638,7 +16645,7 @@ function TimeTracking({employees}){
 
   useEffect(()=>{localStorage.setItem('jsr_time_v1',JSON.stringify(sessions));},[sessions]);
 
-  const LOCATIONS = ['Tirana','Prishtina'];
+  const LOCATIONS = getLocationNames();
   const activeEmps = employees.filter(e=>e&&['active','training'].includes(e.status));
   const today = new Date().toISOString().slice(0,10);
 
@@ -18008,6 +18015,33 @@ function LocationsView({employees}){
     };
   }
 
+  // Referenzen eines Standorts (fuer sicheres Loeschen): MA (per Name), Spaces (location_id), Monatskosten.
+  function locRefs(loc){
+    const nm=(loc.name||'').trim().toLowerCase();
+    const emps=(employees||[]).filter(e=>e&&(e.location||'').trim().toLowerCase()===nm).length;
+    let spaces=0, costs=false;
+    try{ spaces=(JSON.parse(localStorage.getItem('jsr_spaces_v1')||'[]')||[]).filter(s=>s&&s.location_id===loc.id).length; }catch(e){}
+    try{ const mc=JSON.parse(localStorage.getItem('jsr_location_monthly_v1')||'{}'); costs=!!(mc&&mc[loc.id]&&Object.keys(mc[loc.id]).length); }catch(e){}
+    return {emps,spaces,costs};
+  }
+  function deactivateLoc(loc){
+    if(!window.confirm('Standort "'+loc.name+'" als inaktiv setzen? Er verschwindet aus Dropdowns und Auswertungen, bleibt aber fuer historische Daten erhalten.')) return;
+    setLocations(ls=>ls.map(x=>x.id===loc.id?{...x,active:false}:x));
+  }
+  function reactivateLoc(loc){ setLocations(ls=>ls.map(x=>x.id===loc.id?{...x,active:true}:x)); }
+  function deleteLoc(loc){
+    const r=locRefs(loc);
+    if(r.emps>0||r.spaces>0||r.costs){
+      alert('Standort "'+loc.name+'" ist noch referenziert:'
+        +(r.emps>0?'\n· '+r.emps+' Mitarbeiter':'')
+        +(r.spaces>0?'\n· '+r.spaces+' Space(s)':'')
+        +(r.costs?'\n· Monatskosten erfasst':'')
+        +'\n\nHartes Loeschen nicht moeglich — setze ihn stattdessen auf inaktiv (Historie bleibt erhalten).');
+      return;
+    }
+    if(!window.confirm('Standort "'+loc.name+'" endgueltig loeschen? Keine Referenzen gefunden — dies kann nicht rueckgaengig gemacht werden.')) return;
+    setLocations(ls=>ls.filter(x=>x.id!==loc.id));
+  }
   const totalSeats = locations.filter(l=>l.active).reduce((s,l)=>s+(l.capacity?.seats_total||0),0);
   const totalUsed = locations.filter(l=>l.active).reduce((s,l)=>s+getSeatsUsed(l),0);
   const totalFixedAll = locations.filter(l=>l.active).reduce((s,l)=>s+getFixedTotal(l),0);
@@ -18087,8 +18121,14 @@ function LocationsView({employees}){
                       <div style={{fontSize:12,color:'rgba(255,255,255,.7)'}}>{loc.country}{loc.address?' · '+loc.address:''}</div>
                     </div>
                   </div>
-                  <button className="btn btn-sm" style={{background:'rgba(255,255,255,.2)',color:'white',border:'1px solid rgba(255,255,255,.3)',borderRadius:999}}
-                    onClick={()=>setEditLoc(loc)}>✎ Bearbeiten</button>
+                  <div style={{display:'flex',gap:6}}>
+                    <button className="btn btn-sm" style={{background:'rgba(255,255,255,.2)',color:'white',border:'1px solid rgba(255,255,255,.3)',borderRadius:999}}
+                      onClick={()=>setEditLoc(loc)}>✎ Bearbeiten</button>
+                    <button className="btn btn-sm" style={{background:'rgba(255,255,255,.15)',color:'white',border:'1px solid rgba(255,255,255,.3)',borderRadius:999}}
+                      onClick={()=>deactivateLoc(loc)} title="Standort inaktiv setzen">⏸ Inaktiv</button>
+                    <button className="btn btn-sm" style={{background:'rgba(255,255,255,.15)',color:'white',border:'1px solid rgba(255,255,255,.3)',borderRadius:999}}
+                      onClick={()=>deleteLoc(loc)} title="Standort loeschen">🗑</button>
+                  </div>
                 </div>
                 <div style={{padding:'14px 16px'}}>
                   <div style={{display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:12,marginBottom:14}}>
@@ -18120,6 +18160,18 @@ function LocationsView({employees}){
               </div>
             );
           })}
+          {locations.some(l=>!l.active) && (
+            <div className="card" style={{padding:'12px 16px'}}>
+              <div style={{fontSize:13,fontWeight:700,color:'var(--muted)',marginBottom:8}}>⏸ Inaktive Standorte</div>
+              {locations.filter(l=>!l.active).map(loc=>(
+                <div key={loc.id} style={{display:'flex',alignItems:'center',gap:10,padding:'6px 0',borderTop:'1px solid var(--border)',fontSize:13}}>
+                  <span style={{flex:1}}>{loc.flag} {loc.name} <span style={{color:'var(--muted)'}}>· inaktiv</span></span>
+                  <button className="btn btn-sm" onClick={()=>reactivateLoc(loc)}>↻ Reaktivieren</button>
+                  <button className="btn btn-sm" style={{color:'var(--red)'}} onClick={()=>deleteLoc(loc)}>🗑 Löschen</button>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -21823,8 +21875,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
                 <div style={{display:'flex',gap:8}}>
                   <select id="hol_loc_sel" className="form-select" style={{width:140}}
                     defaultValue="Tirana">
-                    <option>Tirana</option>
-                    <option>Prishtina</option>
+                    {getLocationNames().map(n=><option key={n} value={n}>{n}</option>)}
                   </select>
                   <select id="hol_yr_sel" className="form-select" style={{width:90}}
                     defaultValue={new Date().getFullYear()}>
@@ -22093,8 +22144,7 @@ function ProjectEditModal({project, onSave, onClose, clients}){
                 <div className="form-group">
                   <label className="form-label">Standort</label>
                   <select className="form-select" value={form.location||'Tirana'} onChange={e=>setF('location',e.target.value)}>
-                    <option>Tirana</option>
-                    <option>Prishtina</option>
+                    {getLocationNames().map(n=><option key={n} value={n}>{n}</option>)}
                     <option>Beide</option>
                   </select>
                 </div>
@@ -22735,8 +22785,7 @@ function SuperAdminView({employees, projects, setProjects, clients, setClients})
                     <label className="form-label">Standort (optional)</label>
                     <select className="form-select" value={form.location||''} onChange={e=>setF('location',e.target.value)}>
                       <option value="">Alle Standorte</option>
-                      <option value="Tirana">🇦🇱 Tirana</option>
-                      <option value="Prishtina">🇽🇰 Prishtina</option>
+                      {getLocations().map(l=><option key={l.name} value={l.name}>{(l.flag?l.flag+' ':'')+l.name}</option>)}
                     </select>
                   </div>
                 </div>
