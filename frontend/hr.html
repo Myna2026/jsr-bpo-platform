@@ -352,6 +352,8 @@ textarea.form-input{resize:vertical;min-height:70px}
 @keyframes slideUp{from{transform:translateY(20px);opacity:0}to{transform:translateY(0);opacity:1}}
 
 @keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+@keyframes cfgFlash{0%{background-color:#34d399}100%{background-color:transparent}}
+.cfg-flash{animation:cfgFlash 2s ease-out}
 .cockpit-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px;margin-bottom:20px;}
 .cockpit-bottom-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;}
 @media(max-width:768px){.cockpit-bottom-grid{grid-template-columns:1fr;}}
@@ -6237,7 +6239,7 @@ function loadRoleCockpits(){
   localStorage.setItem('jsr_role_cockpits_v1', JSON.stringify(init));
   return init;
 }
-function saveRoleCockpits(obj){ localStorage.setItem('jsr_role_cockpits_v1', JSON.stringify(obj)); }
+function saveRoleCockpits(obj){ localStorage.setItem('jsr_role_cockpits_v1', JSON.stringify(obj)); saveConfigToDB('jsr_role_cockpits_v1', obj); }
 function cockpitForRole(roleKey){ const all=loadRoleCockpits(); const e=all[roleKey]; return e?e.widgets:(ROLE_DEFAULTS[roleKey]||null); }
 function roleForTeam(team){
   if(team && team.access==='all') return 'admin';
@@ -6291,7 +6293,7 @@ function loadHrAccessRoles(){
   if(!raw) return HR_ACCESS_ROLES_DEFAULT.slice();
   try{ const p=JSON.parse(raw); return (Array.isArray(p)&&p.length)?p:HR_ACCESS_ROLES_DEFAULT.slice(); }catch(e){ return HR_ACCESS_ROLES_DEFAULT.slice(); }
 }
-function saveHrAccessRoles(arr){ if(!Array.isArray(arr)||!arr.length)arr=['management']; if(arr.indexOf('management')<0)arr.unshift('management'); localStorage.setItem('jsr_hr_access_roles', JSON.stringify(arr)); }
+function saveHrAccessRoles(arr){ if(!Array.isArray(arr)||!arr.length)arr=['management']; if(arr.indexOf('management')<0)arr.unshift('management'); localStorage.setItem('jsr_hr_access_roles', JSON.stringify(arr)); saveConfigToDB('jsr_hr_access_roles', arr); }
 
 function Widget_MaPerProject({employees, projects}){
   const active=(employees||[]).filter(e=>e&&e.status==='active');
@@ -19588,12 +19590,15 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
     catch(e){return {};}
   });
 
-  useEffect(()=>{localStorage.setItem('jsr_skills_v1',JSON.stringify(skills));},[skills]);
-  useEffect(()=>{localStorage.setItem('jsr_absence_types_v1',JSON.stringify(absenceTypes));saveConfigToDB('jsr_absence_types_v1',absenceTypes);},[absenceTypes]);
-  useEffect(()=>{localStorage.setItem('jsr_positions_v1',JSON.stringify(positions));},[positions]);
-  useEffect(()=>{localStorage.setItem('jsr_holidays_v1',JSON.stringify(holidays));saveConfigToDB('jsr_holidays_v1',holidays);},[holidays]);
-  useEffect(()=>{localStorage.setItem('jsr_work_models_v1',JSON.stringify(workModels));},[workModels]);
-  useEffect(()=>{localStorage.setItem('jsr_vacation_defaults_v1',JSON.stringify(vacationDefaults));},[vacationDefaults]);
+  // Mount-Guard: die Persist-Effekte feuern beim Oeffnen der Einstellungen einmal —
+  // dann KEIN DB-Write/Toast (nur bei echten Aenderungen). localStorage bleibt write-through.
+  const _cfgMounted = useRef(false);
+  useEffect(()=>{localStorage.setItem('jsr_skills_v1',JSON.stringify(skills));if(_cfgMounted.current)saveConfigToDB('jsr_skills_v1',skills);},[skills]);
+  useEffect(()=>{localStorage.setItem('jsr_absence_types_v1',JSON.stringify(absenceTypes));if(_cfgMounted.current)saveConfigToDB('jsr_absence_types_v1',absenceTypes);},[absenceTypes]);
+  useEffect(()=>{localStorage.setItem('jsr_positions_v1',JSON.stringify(positions));if(_cfgMounted.current)saveConfigToDB('jsr_positions_v1',positions);},[positions]);
+  useEffect(()=>{localStorage.setItem('jsr_holidays_v1',JSON.stringify(holidays));if(_cfgMounted.current)saveConfigToDB('jsr_holidays_v1',holidays);},[holidays]);
+  useEffect(()=>{localStorage.setItem('jsr_work_models_v1',JSON.stringify(workModels));if(_cfgMounted.current)saveConfigToDB('jsr_work_models_v1',workModels);},[workModels]);
+  useEffect(()=>{localStorage.setItem('jsr_vacation_defaults_v1',JSON.stringify(vacationDefaults));if(_cfgMounted.current)saveConfigToDB('jsr_vacation_defaults_v1',vacationDefaults);},[vacationDefaults]);
   useEffect(()=>{localStorage.setItem('jsr_pins_v1',JSON.stringify(pins));},[pins]);
 
   // Backup
@@ -19672,7 +19677,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
     try{return JSON.parse(localStorage.getItem('jsr_referral_config_v1')||'null')||{tranche1_pct:50,tranche1_month:1,tranche2_pct:50,tranche2_month:4};}
     catch(e){return {tranche1_pct:50,tranche1_month:1,tranche2_pct:50,tranche2_month:4};}
   });
-  useEffect(()=>{localStorage.setItem('jsr_referral_config_v1',JSON.stringify(referralCfg));},[referralCfg]);
+  useEffect(()=>{localStorage.setItem('jsr_referral_config_v1',JSON.stringify(referralCfg));if(_cfgMounted.current)saveConfigToDB('jsr_referral_config_v1',referralCfg);},[referralCfg]);
 
   const SECTIONS = [
     {key:'_allgemein',  label:'── Allgemein ──',      divider:true},
@@ -19729,7 +19734,8 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
   function saveVcfg(u){const n={...vcfg,...u};setVcfg(n);localStorage.setItem('jsr_vacation_cfg',JSON.stringify(n));}
   // C2: vacation_cfg hat keinen persist-Effekt (inline setItem an vielen Stellen) —
   // ein Effekt auf [vcfg] als DB-Funnel (localStorage bleibt via inline write-through).
-  useEffect(()=>{saveConfigToDB('jsr_vacation_cfg',vcfg);},[vcfg]);
+  useEffect(()=>{if(_cfgMounted.current)saveConfigToDB('jsr_vacation_cfg',vcfg);},[vcfg]);
+  useEffect(()=>{_cfgMounted.current=true;},[]);
 
   const [payTab, setPayTab] = useState('al');
   const [kpiCfg, setKpiCfgState] = useState(()=>getKpiCfg());
@@ -19739,7 +19745,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
   const DEF_FIX=[{id:'rk_miete',label:'Miete',amount:2500},{id:'rk_reinigung',label:'Reinigung Firma',amount:550},{id:'rk_datenschutz',label:'Datenschutztonne',amount:39},{id:'rk_inet1',label:'Internet (Ipko)',amount:292.70},{id:'rk_inet2',label:'Internet (Kujtesa)',amount:100}];
   const DEF_VAR=[{id:'rk_wasser',label:'Wasser',amount:30},{id:'rk_strom',label:'Strom',amount:190},{id:'rk_versich',label:'Versicherung',amount:600},{id:'rk_kaffee',label:'Kaffee',amount:250},{id:'rk_trinkw',label:'Trinkwasser',amount:50},{id:'rk_taxi',label:'Taxi',amount:95},{id:'rk_drucker',label:'Drucker',amount:55}];
   const [rkCfg,setRkCfgRaw]=useState(()=>{try{return JSON.parse(localStorage.getItem('jsr_rk_cfg')||'null')||{fix:DEF_FIX,variable:DEF_VAR};}catch(e){return{fix:DEF_FIX,variable:DEF_VAR};}});
-  const saveRkCfg=c=>{localStorage.setItem('jsr_rk_cfg',JSON.stringify(c));setRkCfgRaw({...c});};
+  const saveRkCfg=c=>{localStorage.setItem('jsr_rk_cfg',JSON.stringify(c));saveConfigToDB('jsr_rk_cfg',c);setRkCfgRaw({...c});};
   const [rkYear,setRkYear]=useState(new Date().getFullYear());
   const [rkMonth,setRkMonth]=useState(new Date().getMonth()+1);
   const rkKey=(y,m)=>'jsr_rk_'+y+'_'+String(m).padStart(2,'0');
@@ -19752,7 +19758,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
   const [rkOhV, setRkOhV] = useState(0); // version bump to force overhead re-render
   const DEF_SHIFT_CFG={"proj_hc_sales":[{"id":"s1","label":"Frueh","value":"08:00-16:30","hours":8.0,"net":7.5,"split":false},{"id":"s2","label":"Frueh lang","value":"09:00-17:30","hours":8.5,"net":8.0,"split":false},{"id":"s3","label":"Spaet frueh","value":"11:30-20:00","hours":8.5,"net":8.0,"split":false},{"id":"s4","label":"Spaet","value":"13:30-22:00","hours":8.5,"net":8.0,"split":false},{"id":"s5","label":"Frueh kurz","value":"08:00-15:30","hours":7.5,"net":7.0,"split":false},{"id":"s6","label":"Split 08-12+16-20","value":"08:00-12:00","value2":"16:00-20:00","hours":8.0,"net":7.5,"split":true},{"id":"s7","label":"Split 08-12+18-22","value":"08:00-12:00","value2":"18:00-22:00","hours":8.0,"net":7.5,"split":true}],"proj_hc_support":[{"id":"s1","label":"Frueh lang","value":"08:00-17:30","hours":9.5,"net":9.0,"split":false},{"id":"s2","label":"Spaet frueh","value":"11:30-20:00","hours":8.5,"net":8.0,"split":false},{"id":"s3","label":"Split 08-12+16-20","value":"08:00-12:00","value2":"16:00-20:00","hours":8.0,"net":7.5,"split":true}],"proj_giga_all":[{"id":"s1","label":"Standard","value":"09:00-17:30","hours":8.5,"net":8.0,"split":false},{"id":"s2","label":"Spaet","value":"10:30-19:00","hours":8.5,"net":8.0,"split":false},{"id":"s3","label":"Split 09-13+17-21","value":"09:00-13:00","value2":"17:00-21:00","hours":8.0,"net":7.5,"split":true}]};
   const [shiftCfg,setShiftCfgRaw]=useState(()=>{try{const s=JSON.parse(localStorage.getItem('jsr_shift_cfg')||'null');return s||DEF_SHIFT_CFG;}catch(e){return DEF_SHIFT_CFG;}});
-  const saveShiftCfg=cfg=>{localStorage.setItem('jsr_shift_cfg',JSON.stringify(cfg));setShiftCfgRaw({...cfg});};
+  const saveShiftCfg=cfg=>{localStorage.setItem('jsr_shift_cfg',JSON.stringify(cfg));saveConfigToDB('jsr_shift_cfg',cfg);setShiftCfgRaw({...cfg});};
   const bumpOh = () => setRkOhV(v=>v+1);
   // Overhead: [{id, role, emp_id}] per location - stored in jsr_rk_overhead_<locId>
   const getRkOverhead=(locId)=>{try{return JSON.parse(localStorage.getItem('jsr_rk_overhead_'+locId)||'[]');}catch(e){return[];}};
@@ -19781,7 +19787,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
       daily_draw_amount:10,
     };}catch(e){return {prizes:[],active_days:[1,2,3,4,5],daily_draw:true,daily_draw_amount:10};}
   });
-  function saveWcfg(c){localStorage.setItem('jsr_wheel_cfg',JSON.stringify(c));setWcfg({...c});}
+  function saveWcfg(c){localStorage.setItem('jsr_wheel_cfg',JSON.stringify(c));saveConfigToDB('jsr_wheel_cfg',c);setWcfg({...c});}
   const DAY_NAMES_W=['So','Mo','Di','Mi','Do','Fr','Sa'];
   const WHEEL_COLORS=['#22c55e','#3b82f6','#f59e0b','#ef4444','#8b5cf6','#ec4899','#14b8a6','#f97316','#64748b'];
 
@@ -19869,7 +19875,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
               <div style={{flex:1,fontSize:13,fontWeight:600}}>Vorlaufzeit für Erinnerung</div>
               <select
                 defaultValue={localStorage.getItem('jsr_contract_reminder_months')||'1'}
-                onChange={e=>localStorage.setItem('jsr_contract_reminder_months',e.target.value)}
+                onChange={e=>{localStorage.setItem('jsr_contract_reminder_months',e.target.value);saveConfigToDB('jsr_contract_reminder_months',parseInt(e.target.value)||1);}}
                 style={{padding:'7px 12px',border:'1.5px solid var(--border)',borderRadius:'var(--r)',
                   fontFamily:'var(--font)',fontSize:14,fontWeight:700,color:'var(--blue)',
                   background:'var(--blue-bg)',cursor:'pointer'}}>
@@ -19903,7 +19909,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
               <div style={{flex:1,fontSize:13,fontWeight:600}}>Vorlaufzeit für Erinnerung</div>
               <select
                 defaultValue={localStorage.getItem('jsr_contract_reminder_months')||'1'}
-                onChange={e=>localStorage.setItem('jsr_contract_reminder_months',e.target.value)}
+                onChange={e=>{localStorage.setItem('jsr_contract_reminder_months',e.target.value);saveConfigToDB('jsr_contract_reminder_months',parseInt(e.target.value)||1);}}
                 style={{padding:'7px 12px',border:'1.5px solid var(--border)',borderRadius:'var(--r)',
                   fontFamily:'var(--font)',fontSize:14,fontWeight:700,color:'var(--blue)',
                   background:'var(--blue-bg)',cursor:'pointer'}}>
@@ -20287,7 +20293,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
                                     onChange={e=>{
                                       const cur=JSON.parse(localStorage.getItem('jsr_ot_cfg')||'{}');
                                       cur[key]={...(cur[key]||{}),ot_pct:parseInt(e.target.value)||0};
-                                      localStorage.setItem('jsr_ot_cfg',JSON.stringify(cur));
+                                      localStorage.setItem('jsr_ot_cfg',JSON.stringify(cur));saveConfigToDB('jsr_ot_cfg',cur);
                                     }}
                                     style={{width:64,padding:'5px 8px',border:'1.5px solid var(--border)',
                                       borderRadius:'var(--r)',fontFamily:'var(--font)',fontSize:13,
@@ -20303,7 +20309,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
                                     onChange={e=>{
                                       const cur=JSON.parse(localStorage.getItem('jsr_ot_cfg')||'{}');
                                       cur[key]={...(cur[key]||{}),scenario_pct:parseInt(e.target.value)||0};
-                                      localStorage.setItem('jsr_ot_cfg',JSON.stringify(cur));
+                                      localStorage.setItem('jsr_ot_cfg',JSON.stringify(cur));saveConfigToDB('jsr_ot_cfg',cur);
                                     }}
                                     style={{width:64,padding:'5px 8px',border:'1.5px solid var(--border)',
                                       borderRadius:'var(--r)',fontFamily:'var(--font)',fontSize:13,
@@ -20335,7 +20341,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
               {key:'qm',label:'QM / Qualitätsmanagement',icon:'🔍',defStart:'10:00',defEnd:'18:00',desc:'Monitoring — immer ab 10:00'},
               {key:'trainer',label:'Trainer',icon:'📚',defStart:'08:00',defEnd:'16:00',desc:'Training & Einarbeitung'},
             ];
-            const _ohSave=c=>{localStorage.setItem('jsr_overhead_cfg_v1',JSON.stringify(c));};
+            const _ohSave=c=>{localStorage.setItem('jsr_overhead_cfg_v1',JSON.stringify(c));saveConfigToDB('jsr_overhead_cfg_v1',c);};
             const cfg=(()=>{try{return JSON.parse(localStorage.getItem('jsr_overhead_cfg_v1')||'{}');}catch(e){return{};}})();
             const setG=(k,v)=>{_ohSave({...cfg,[k]:v});if(setActiveSection) setActiveSection('overhead_cfg');};
             const setR=(rk,fk,v)=>{_ohSave({...cfg,roles:{...cfg.roles,[rk]:{...(cfg.roles?.[rk]||{}),[fk]:v}}});if(setActiveSection) setActiveSection('overhead_cfg');};
@@ -20437,7 +20443,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
           {activeSection==='lohncfg'&&(()=>{
           const cfgKey='jsr_payroll_cfg_'+payTab;
           const cfg=JSON.parse(localStorage.getItem(cfgKey)||'{}');
-          const lohnSave=(k,v)=>{const c=JSON.parse(localStorage.getItem(cfgKey)||'{}');c[k]=v;localStorage.setItem(cfgKey,JSON.stringify(c));};
+          const lohnSave=(k,v)=>{const c=JSON.parse(localStorage.getItem(cfgKey)||'{}');c[k]=v;localStorage.setItem(cfgKey,JSON.stringify(c));saveConfigToDB(cfgKey,c);};
           const DEFAULTS={
             al:{kv_employer:35.08,kv_employee:30.00,pension_employee_pct:5,pension_employer_pct:5,
               tax_bracket1_max:250,tax_bracket2_max:450,tax_bracket1_pct:0,tax_bracket2_pct:8,tax_bracket3_pct:10,vacation_days_default:20},
@@ -20537,7 +20543,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
                       onChange={e=>{
                         const cur=JSON.parse(localStorage.getItem('jsr_surcharge_cfg')||'{}');
                         cur[item.key]=parseFloat(e.target.value)||0;
-                        localStorage.setItem('jsr_surcharge_cfg',JSON.stringify(cur));
+                        localStorage.setItem('jsr_surcharge_cfg',JSON.stringify(cur));saveConfigToDB('jsr_surcharge_cfg',cur);
                       }}
                       style={{width:64,padding:'6px 8px',border:'1.5px solid var(--border)',borderRadius:'var(--r)',
                         fontFamily:'var(--font)',fontSize:14,fontWeight:700,textAlign:'right',
@@ -20974,7 +20980,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
                     <div className="card-header">
                       <span className="card-title">{projName} <span style={{marginLeft:8,fontSize:11,padding:'2px 8px',borderRadius:4,background:'var(--blue-bg)',color:'var(--blue)',fontWeight:700}}>{skillLabel}</span></span>
                       <div style={{display:'flex',gap:6}}>
-                        <button className="btn btn-sm btn-primary" onClick={()=>saveShiftCfg({...shiftCfg,[key]:[...shifts,{id:'sh_'+Date.now(),label:'Neue Schicht',value:'08:00-16:30',hours:8,net:7.5}]})}>+ Schicht</button>
+                        <button className="btn btn-sm btn-primary" onClick={()=>{const nid='sh_'+Date.now();saveShiftCfg({...shiftCfg,[key]:[...shifts,{id:nid,label:'Neue Schicht',value:'08:00-16:30',hours:8,net:7.5}]});flashNewEntry('cfgrow_'+nid);}}>+ Schicht</button>
                         <button className="btn btn-sm" style={{color:'var(--red)'}} onClick={()=>{if(!window.confirm('Loeschen?'))return;const u={...shiftCfg};delete u[key];saveShiftCfg(u);}}>x Eintrag</button>
                       </div>
                     </div>
@@ -20989,7 +20995,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
                           return(parseInt(m2[1])*60+parseInt(m2[2]))-(parseInt(m1[3])*60+parseInt(m1[4]));
                         })():0;
                         return(
-                          <div key={sh.id||i} style={{borderBottom:'1px solid var(--border)',background:isSplit?'rgba(59,130,246,.04)':'transparent'}}>
+                          <div key={sh.id||i} id={'cfgrow_'+(sh.id||i)} style={{borderBottom:'1px solid var(--border)',background:isSplit?'rgba(59,130,246,.04)':'transparent'}}>
                             <div style={{display:'grid',gridTemplateColumns:'160px 1fr auto auto auto',gap:8,padding:'10px 16px',alignItems:'center'}}>
                               <input className="form-input" value={sh.label} placeholder="Bezeichnung" style={{fontSize:12}}
                                 onChange={e=>saveShiftCfg({...shiftCfg,[key]:shifts.map((s,j)=>j===i?{...s,label:e.target.value}:s)})}/>
@@ -23090,11 +23096,42 @@ async function loadConfigFromDB(key){
     return data ? data.value : null;
   }catch(e){ console.error('[cfg] loadConfigFromDB', key, e); return null; }
 }
-async function saveConfigToDB(key, value){
-  if(!key) return false;
+// Zentrale Speicher-Rueckmeldung (global, ausserhalb React): kurzer Toast unten mittig.
+function cfgToast(ok){
+  let el=document.getElementById('cfg-toast');
+  if(!el){
+    el=document.createElement('div');
+    el.id='cfg-toast';
+    el.style.cssText='position:fixed;bottom:22px;left:50%;transform:translateX(-50%);z-index:99999;padding:10px 18px;border-radius:10px;font-size:13px;font-weight:700;color:#fff;box-shadow:0 4px 16px rgba(0,0,0,.18);opacity:0;transition:opacity .2s;pointer-events:none;';
+    document.body.appendChild(el);
+  }
+  el.textContent = ok ? '✓ Gespeichert' : '⚠ Konnte nicht gespeichert werden';
+  el.style.background = ok ? '#059669' : '#DC2626';
+  el.style.opacity='1';
+  clearTimeout(el._t);
+  el._t=setTimeout(()=>{ el.style.opacity='0'; }, ok?1800:3500);
+}
+// Neuen Listeneintrag nach dem Render kurz hervorheben (.cfg-flash) + hinscrollen.
+function flashNewEntry(domId){
+  requestAnimationFrame(()=>{
+    const el=document.getElementById(domId);
+    if(!el) return;
+    el.classList.remove('cfg-flash'); void el.offsetWidth; el.classList.add('cfg-flash');
+    try{ el.scrollIntoView({behavior:'smooth',block:'nearest'}); }catch(e){}
+  });
+}
+// Upsert pro Key entprellt (~800ms nach der letzten Aenderung) + Toast. localStorage
+// bleibt sofort (write-through), damit die UI nicht auf die DB wartet.
+const _cfgTimers = {};
+async function _saveConfigNow(key, value){
   const {error} = await sb.from('app_config').upsert({key, value, updated_at:new Date().toISOString()});
-  if(error){ console.error('[cfg] saveConfigToDB', key, error); return false; }
-  return true;
+  if(error){ console.error('[cfg] saveConfigToDB', key, error); cfgToast(false); return; }
+  cfgToast(true);
+}
+function saveConfigToDB(key, value){
+  if(!key) return;
+  clearTimeout(_cfgTimers[key]);
+  _cfgTimers[key]=setTimeout(()=>{ _saveConfigNow(key, value); }, 800);
 }
 async function loadAllConfigsFromDB(){
   try{
@@ -24149,7 +24186,7 @@ function TabPermsView({employees}){
   useEffect(()=>{
     const ids=new Set(active.map(e=>e.id));
     const pruned=perms.filter(p=>ids.has(p.emp_id));
-    if(pruned.length!==perms.length){ setPerms(pruned); localStorage.setItem('jsr_tab_perms_v1',JSON.stringify(pruned)); }
+    if(pruned.length!==perms.length){ setPerms(pruned); localStorage.setItem('jsr_tab_perms_v1',JSON.stringify(pruned)); saveConfigToDB('jsr_tab_perms_v1',pruned); }
   },[]);
   const [q,setQ]=useState('');
   const [loc,setLoc]=useState('all');
@@ -24166,7 +24203,7 @@ function TabPermsView({employees}){
       if(!entry){ entry={emp_id:empId,allowed_tabs:[...TAB_KEYS]}; next.push(entry); }
       const i=entry.allowed_tabs.indexOf(tab);
       if(i>=0)entry.allowed_tabs.splice(i,1); else entry.allowed_tabs.push(tab);
-      localStorage.setItem('jsr_tab_perms_v1',JSON.stringify(next));
+      localStorage.setItem('jsr_tab_perms_v1',JSON.stringify(next));saveConfigToDB('jsr_tab_perms_v1',next);
       return next;
     });
   }
@@ -24215,6 +24252,7 @@ function AISettingsView(){
   function toggle(){
     const next={dm_translation_enabled:!ai.dm_translation_enabled, updated_at:new Date().toISOString()};
     localStorage.setItem('jsr_ai_settings_v1', JSON.stringify(next));
+    saveConfigToDB('jsr_ai_settings_v1', next);
     setAi(next);
   }
   return (
@@ -24556,7 +24594,7 @@ function HrAccessView(){
   );
 }
 function loadAiConfig(){ var d={mode:'off',provider:'openai',endpoint:'',model:'gpt-4o-mini',timeout_ms:5000,cache_enabled:true}; try{ var v=JSON.parse(localStorage.getItem('jsr_ai_config_v1')||'null'); return v?Object.assign(d,v):d; }catch(e){ return d; } }
-function saveAiConfig(cfg){ try{ localStorage.setItem('jsr_ai_config_v1', JSON.stringify(cfg||{})); }catch(e){} }
+function saveAiConfig(cfg){ try{ localStorage.setItem('jsr_ai_config_v1', JSON.stringify(cfg||{})); saveConfigToDB('jsr_ai_config_v1', cfg||{}); }catch(e){} }
 async function translateMessage(text, sourceLang, targetLang){
   var cfg=loadAiConfig();
   if(cfg.mode==='off') return null;
@@ -24830,7 +24868,7 @@ function loadCvSyncConfig(){
   try{ const p=JSON.parse(localStorage.getItem('jsr_cv_sync_config_v1')||'null'); if(!p) return DEF;
     return {...DEF, ...p, mapping:{...DEF.mapping, ...(p.mapping||{})}}; }catch(e){ return DEF; }
 }
-function saveCvSyncConfig(cfg){ try{ localStorage.setItem('jsr_cv_sync_config_v1', JSON.stringify(cfg)); }catch(e){} }
+function saveCvSyncConfig(cfg){ try{ localStorage.setItem('jsr_cv_sync_config_v1', JSON.stringify(cfg)); saveConfigToDB('jsr_cv_sync_config_v1', cfg); }catch(e){} }
 
 function extractCsvUrl(sheetUrl){
   if(!sheetUrl) return null;
