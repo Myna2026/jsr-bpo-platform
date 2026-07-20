@@ -17355,6 +17355,46 @@ function ProjectProfitability({projects, employees, forecast, setForecast}){
   const [selProj, setSelProj] = useState(projects[0]?.id||'');
   const [editMonth, setEditMonth] = useState(null); // 'YYYY-MM' | null
   const [editForm, setEditForm] = useState({});
+  const [fcMigBusy, setFcMigBusy] = useState(false);
+  // FA2 Erst-Uebernahme: vorhandene lokale Ist-Zahlen (alle Monate/Projekte) per Upsert in die DB.
+  async function migrateForecastActualsToDB(){
+    const ma=forecast.monthly_actuals||{};
+    const valid=new Set(projects.map(p=>p.id));
+    const byName=new Map(projects.map(p=>[String(p.name||'').trim().toLowerCase(), p.id]));
+    // Alte Projekt-ID (z.B. dummy p1/p2) auf echte projects-ID mappen:
+    // 1. schon gueltig, 2. Name aus der Zelle (falls vorhanden), 3. Slug-Heuristik ueber den
+    //    invoice_nr-Praefix (HC-… -> proj_hc_…, GN-… -> proj_gn_…), 4. Teilstring-Match.
+    const resolveProj=(pid, vals)=>{
+      if(valid.has(pid)) return pid;
+      const nm=String((vals&&(vals.project_name||vals.project))||'').trim().toLowerCase();
+      if(nm && byName.has(nm)) return byName.get(nm);
+      const pref=String((vals&&vals.invoice_nr)||'').split('-')[0].trim().toLowerCase();
+      if(pref){ const hit=projects.find(p=>String(p.id).split('_')[1]===pref); if(hit) return hit.id; }
+      const sub=projects.find(p=>String(p.id).toLowerCase().includes(String(pid).toLowerCase()));
+      if(sub) return sub.id;
+      return null;
+    };
+    const jobs=[]; const skipped={};
+    Object.entries(ma).forEach(([month,byProj])=>{
+      Object.entries(byProj||{}).forEach(([pid,vals])=>{
+        if(!pid||!vals) return;
+        const rid=resolveProj(pid, vals);
+        if(!rid){ skipped[pid]=(skipped[pid]||0)+1; return; }
+        jobs.push({pid:rid, month, vals});
+      });
+    });
+    const skipLines=Object.entries(skipped).map(([pid,n])=>'· unbekanntes Projekt '+pid+' ('+n+' Einträge)');
+    if(!jobs.length && !skipLines.length){ alert('Keine lokalen Ist-Zahlen gefunden.'); return; }
+    if(!window.confirm('In DB übernehmen (Upsert nach Projekt + Monat):\n· '+jobs.length+' Ist-Zahlen-Einträge'
+      +(skipLines.length?'\n\nÜbersprungen (kein passendes Projekt):\n'+skipLines.join('\n'):'')
+      +'\n\nBestehende DB-Zeilen werden überschrieben. Fortfahren?')) return;
+    setFcMigBusy(true);
+    let ok=0, err=0;
+    try{ for(const j of jobs){ if(await saveForecastActualToDB(j.pid, j.month, j.vals, true)) ok++; else err++; } }
+    finally { setFcMigBusy(false); }
+    alert('Übernahme fertig.\nErfolgreich: '+ok+(err?'\nFehler: '+err:'')
+      +(skipLines.length?'\n\nÜbersprungen:\n'+skipLines.join('\n'):''));
+  }
   const setEF = (k,v) => setEditForm(f=>({...f,[k]:v}));
 
   const proj = projects.find(p=>p.id===selProj);
@@ -17388,22 +17428,21 @@ function ProjectProfitability({projects, employees, forecast, setForecast}){
   }
 
   function saveActual(){
+    const values={
+      revenue: Number(editForm.revenue)||0,
+      cost_personnel: Number(editForm.cost_personnel)||0,
+      cost_other: Number(editForm.cost_other)||0,
+      invoice_nr: editForm.invoice_nr||'',
+      notes: editForm.notes||'',
+    };
     setForecast(f=>({
       ...f,
       monthly_actuals: {
         ...f.monthly_actuals,
-        [editMonth]: {
-          ...(f.monthly_actuals?.[editMonth]||{}),
-          [selProj]: {
-            revenue: Number(editForm.revenue)||0,
-            cost_personnel: Number(editForm.cost_personnel)||0,
-            cost_other: Number(editForm.cost_other)||0,
-            invoice_nr: editForm.invoice_nr||'',
-            notes: editForm.notes||'',
-          }
-        }
+        [editMonth]: { ...(f.monthly_actuals?.[editMonth]||{}), [selProj]: values }
       }
     }));
+    saveForecastActualToDB(selProj, editMonth, values);   // FA2: write-through nach Supabase
     setEditMonth(null);
   }
 
@@ -17416,6 +17455,7 @@ function ProjectProfitability({projects, employees, forecast, setForecast}){
       }
       return {...f, monthly_actuals: newActuals};
     });
+    deleteForecastActualFromDB(selProj, month);   // FA2: Loeschung nach Supabase durchreichen
   }
 
   function fmtMonth(m){
@@ -17542,7 +17582,10 @@ function ProjectProfitability({projects, employees, forecast, setForecast}){
       <div className="card">
         <div className="card-header">
           <span className="card-title">📊 Monatliche Ist-Zahlen — {proj?.name}</span>
-          <span style={{fontSize:11,color:'var(--muted)'}}>Allgemeinkosten-Umlage: {fixedAllocation.toLocaleString('de-DE')} €/Mo automatisch berücksichtigt</span>
+          <div style={{display:'flex',gap:8,alignItems:'center'}}>
+            <span style={{fontSize:11,color:'var(--muted)'}}>Allgemeinkosten-Umlage: {fixedAllocation.toLocaleString('de-DE')} €/Mo automatisch berücksichtigt</span>
+            <button className="btn btn-sm" disabled={fcMigBusy} onClick={migrateForecastActualsToDB} title="Vorhandene lokale Ist-Zahlen in die forecast_actuals-Tabelle übernehmen">{fcMigBusy?'⬆ Übernehme…':'⬆ In DB übernehmen'}</button>
+          </div>
         </div>
         <table>
           <thead><tr>
@@ -23775,6 +23818,51 @@ async function deletePinFromDB(empId){
   cfgToast(true); return true;
 }
 
+// Etappe FA2: Wirtschaftlichkeits-Ist-Zahlen (forecast_actuals) aus Supabase.
+// select('*') + JS-Gruppierung. Rueckgabe { 'YYYY-MM': { project_id: {revenue,...} } }
+// (= forecast.monthly_actuals-Shape) oder null bei leerer Tabelle (Cache NICHT ueberschreiben).
+async function loadForecastActualsFromDB(){
+  try{
+    const {data, error} = await sb.from('forecast_actuals').select('*');
+    if(error){ console.error('[fc] loadForecastActualsFromDB', error); return null; }
+    const rows=data||[]; if(!rows.length) return null;
+    const out={};
+    rows.forEach(r=>{
+      if(!r.project_id||!r.month) return;
+      if(!out[r.month]) out[r.month]={};
+      out[r.month][r.project_id]={
+        revenue:r.revenue??0, cost_personnel:r.cost_personnel??0, cost_other:r.cost_other??0,
+        invoice_nr:r.invoice_nr||'', notes:r.notes||'',
+      };
+    });
+    return out;
+  }catch(e){ console.error('[fc] loadForecastActualsFromDB', e); return null; }
+}
+async function saveForecastActualToDB(projectId, month, values, silent){
+  if(!projectId||!month) return false;
+  const num=v=>(v===''||v==null)?null:Number(v);
+  const payload={
+    project_id:projectId, month,
+    revenue:num(values.revenue), cost_personnel:num(values.cost_personnel), cost_other:num(values.cost_other),
+    invoice_nr:values.invoice_nr??null, notes:values.notes??null,
+    updated_at:new Date().toISOString(),
+  };
+  const {error}=await sb.from('forecast_actuals').upsert(payload,{onConflict:'project_id,month'});
+  if(error){
+    // FK-Verletzung (23503): project_id fehlt in projects -> sauber melden, kein Crash
+    if(error.code==='23503') console.warn('[fc] saveForecastActualToDB: Projekt nicht in projects-Tabelle:', projectId);
+    else console.error('[fc] saveForecastActualToDB', error);
+    if(!silent) cfgToast(false); return false;
+  }
+  if(!silent) cfgToast(true); return true;
+}
+async function deleteForecastActualFromDB(projectId, month){
+  if(!projectId||!month) return false;
+  const {error}=await sb.from('forecast_actuals').delete().eq('project_id',projectId).eq('month',month);
+  if(error){ console.error('[fc] deleteForecastActualFromDB', error); cfgToast(false); return false; }
+  cfgToast(true); return true;
+}
+
 // Etappe C2: generische App-Configs (Key/Value jsonb) in app_config. Singleton-Blobs,
 // Whole-Read/Whole-Write. loadAllConfigsFromDB spiegelt beim Start alle Zeilen in den
 // localStorage-Cache (ein Aufruf statt N einzelne). saveConfigToDB upsertet einen Key.
@@ -25983,6 +26071,13 @@ function App(){
       try{ const k=localStorage.getItem('jsr_kb_v1'); if(k&&k!==JSON.stringify(kbData)) setKbData(JSON.parse(k)); }catch(e){}
       try{ const el=localStorage.getItem('jsr_el_v1'); if(el&&el!==JSON.stringify(elData)) setElData(JSON.parse(el)); }catch(e){}
       _appCfgMounted.current=true;
+      // FA2: NUR monthly_actuals aus forecast_actuals in den forecast-Cache mergen (fixed_costs/
+      // location_capacity/future_batches unberuehrt) + State re-hydrieren.
+      const fcActuals = await loadForecastActualsFromDB();
+      if(fcActuals){
+        try{ const fc=JSON.parse(localStorage.getItem('jsr_forecast_v1')||'null')||{}; fc.monthly_actuals=fcActuals; localStorage.setItem('jsr_forecast_v1', JSON.stringify(fc)); }catch(e){}
+        setForecast(f=>({...f, monthly_actuals:fcActuals}));
+      }
     })();
   },[]);
 
