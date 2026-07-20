@@ -6195,27 +6195,8 @@ function PayslipArchiveView({payslips, employees, projects, fmtMonth, eur, onOpe
 // ── Cockpit ───────────────────────────────────────────────
 
 
-function GdocSyncWidget(){
-  const [syncing,setSyncing]=useState(false);
-  const [syncMsg,setSyncMsg]=useState('');
-  const doSync=()=>{
-    setSyncing(true);setSyncMsg('');
-    const cfg=JSON.parse(localStorage.getItem('jsr_gdoc_sync')||'{}');
-    syncGoogleDoc(cfg,false)
-      .then(n=>{setSyncMsg('OK: '+n+' Bewerber');setSyncing(false);})
-      .catch(e=>{setSyncMsg('Fehler: '+e.message);setSyncing(false);});
-  };
-  return(
-    <div style={{display:'flex',alignItems:'center',gap:8}}>
-      <button onClick={doSync} disabled={syncing}
-        style={{padding:'5px 12px',borderRadius:'var(--r)',border:'1px solid var(--border)',
-          cursor:'pointer',fontSize:12,fontWeight:600,background:'var(--surface)',fontFamily:'var(--font)'}}>
-        {syncing?'Sync...':'Jetzt abrufen'}
-      </button>
-      {syncMsg&&<span style={{fontSize:11,color:syncMsg.startsWith('OK')?'var(--green)':'var(--red)',fontWeight:600}}>{syncMsg}</span>}
-    </div>
-  );
-}
+// GdocSyncWidget (Cockpit-Button) entfernt — war nirgends gemountet (toter Code). Der Google-
+// Sheet-Import läuft ausschließlich über das Admin-Panel „📋 Google Sheet Sync" (syncGoogleDoc).
 
 // ═══ COCKPIT-GRID + 8 Basis-Widgets (6b) ═══
 const WIDGET_ICONS = {
@@ -19962,6 +19943,29 @@ function WheelAdminView({employees}){
 function SystemSettingsTab({projects, setProjects, employees, clients}){
   const [activeSection, setActiveSection] = useState('skills');
 
+  // Datenbestand: echte Zeilen-Counts aus Supabase (SoT), nicht der localStorage-Cache.
+  // Lazy geladen, sobald der Backup-Bereich geöffnet wird. null = noch nicht/lädt, 'error' = Fehler.
+  const DB_STAT_TABLES = [
+    ['employees','Mitarbeiter'], ['cvs','Bewerber (CVs)'], ['projects','Projekte'],
+    ['locations','Standorte'], ['client_accounts','Kunden'], ['time_sessions','Zeiterfassung'],
+  ];
+  const [dbStats, setDbStats] = useState(null);
+  useEffect(()=>{
+    if(activeSection!=='backup' || dbStats!==null) return;
+    let alive=true;
+    (async()=>{
+      try{
+        const out={};
+        for(const [t] of DB_STAT_TABLES){
+          const {count, error} = await sb.from(t).select('*',{count:'exact',head:true});
+          out[t] = error ? null : (count||0);
+        }
+        if(alive) setDbStats(out);
+      }catch(e){ if(alive) setDbStats('error'); }
+    })();
+    return ()=>{ alive=false; };
+  },[activeSection]);
+
   // Skills
   const [skills, setSkills] = useState(()=>{
     try{return JSON.parse(localStorage.getItem('jsr_skills_v1')||'null')||SKILLS_ALL.map((s,i)=>({id:'sk'+i,name:s,category:'Allgemein',active:true}));}
@@ -20052,21 +20056,18 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
   useEffect(()=>{localStorage.setItem('jsr_vacation_defaults_v1',JSON.stringify(vacationDefaults));if(_cfgMounted.current)saveConfigToDB('jsr_vacation_defaults_v1',vacationDefaults);},[vacationDefaults]);
   useEffect(()=>{localStorage.setItem('jsr_pins_v1',JSON.stringify(pins));},[pins]);
 
-  // Backup
+  // Export lokaler Einstellungen (KEIN vollständiges Backup — die Wahrheit liegt in Supabase).
+  // employees/cvs/clients/showcases sind bewusst NICHT enthalten: sie liegen in der DB (SoT) und
+  // würden hier nur als stale/leerer localStorage-Cache Sicherheit vortäuschen. Projekte/Standorte/
+  // Zeiterfassung sind ebenfalls DB-gestützt; die hier exportierten Keys sind reine lokale Caches.
   function exportAllData(){
     const allData = {
       exported: new Date().toISOString(),
-      employees: JSON.parse(localStorage.getItem('jsr_employees_v1')||'[]'),
-      // 4a-4: cvs nicht mehr im Export — liegen in Supabase (DB-Backup). Ein leeres cvs zu exportieren täuschte Sicherheit vor.
+      kind: 'local-settings-only',   // Marker: kein DB-Backup
       plans: JSON.parse(localStorage.getItem('jsr_plans_v3')||'[]'),
       payroll: JSON.parse(localStorage.getItem('jsr_payroll_v1')||'{}'),
-      projects: JSON.parse(localStorage.getItem('jsr_projects_v1')||'[]'),
-      locations: JSON.parse(localStorage.getItem('jsr_locations_v1')||'[]'),
       roles: JSON.parse(localStorage.getItem('jsr_roles_v1')||'[]'),
       accounts: JSON.parse(localStorage.getItem('jsr_accounts_v1')||'[]'),
-      clients: clients, /* 25a: aus App-State */
-      time: JSON.parse(localStorage.getItem('jsr_time_v1')||'[]'),
-      // Blocker 1: showcases liegen in Supabase (SoT) — nicht mehr ins localStorage-Backup.
       skills, absenceTypes, positions, holidays, workModels, vacationDefaults, pins,
     };
     const json = JSON.stringify(allData, null, 2);
@@ -20074,7 +20075,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'TIVE360_Backup_'+new Date().toISOString().slice(0,10)+'.json';
+    a.download = 'TIVE360_Einstellungen_'+new Date().toISOString().slice(0,10)+'.json';
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -20082,30 +20083,23 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
   function importBackup(e){
     const file = e.target.files[0];
     if(!file) return;
+    // Sicherheit: Import schreibt AUSSCHLIESSLICH lokale Einstellungen (localStorage) zurück.
+    // KEIN einziger DB-Write. Das frühere Rückschreiben von employees/clients nach Supabase
+    // (saveEmployeeToDB/saveClientAccountToDB) wurde entfernt — es überschrieb Live-Daten mit
+    // Altständen. employees/clients/cvs/showcases liegen in der DB (SoT) und werden nie importiert.
+    if(!window.confirm('Lokale Einstellungen aus dieser Datei wiederherstellen?\n\nNur lokale Einstellungen (Pläne, Löhne, Rollen, Accounts, Skills, Feiertage …) werden überschrieben. Mitarbeiter, Kunden und CVs bleiben unberührt — die liegen in der Datenbank.')){
+      e.target.value=''; return;
+    }
     const reader = new FileReader();
     reader.onload = async ev => {
       try{
         const data = JSON.parse(ev.target.result);
-        // 25a: employees → Supabase (Rest bleibt localStorage bis eigene Sub-Features migrieren)
-        if(Array.isArray(data.employees)){
-          try{ for(const emp of data.employees){ await saveEmployeeToDB(emp); } }
-          catch(err){ console.error('[25a] importBackup employees', err); alert('Fehler beim Employees-Import: '+(err.message||'unbekannt')); }
-        }
-        // 4a-4: cvs-Import entfällt — CVs liegen in Supabase, nicht mehr im localStorage-Store.
+        // Etwaige employees/clients/cvs/showcases-Felder in einer Alt-Backup-Datei werden ignoriert.
         if(data.plans) localStorage.setItem('jsr_plans_v3', JSON.stringify(data.plans));
         if(data.payroll) localStorage.setItem('jsr_payroll_v1', JSON.stringify(data.payroll));
-        if(data.projects) localStorage.setItem('jsr_projects_v1', JSON.stringify(data.projects));
-        if(data.locations) localStorage.setItem('jsr_locations_v1', JSON.stringify(data.locations));
         if(data.roles) localStorage.setItem('jsr_roles_v1', JSON.stringify(data.roles));
         if(data.accounts) localStorage.setItem('jsr_accounts_v1', JSON.stringify(data.accounts));
-        // 25a: clients → Supabase (Rest bleibt localStorage bis eigene Sub-Features migrieren)
-        if(Array.isArray(data.clients)){
-          try{ for(const cl of data.clients){ await saveClientAccountToDB(cl); } }
-          catch(err){ console.error('[25a] importBackup clients', err); alert('Fehler beim Clients-Import: '+(err.message||'unbekannt')); }
-        }
-        if(data.time) localStorage.setItem('jsr_time_v1', JSON.stringify(data.time));
-        // Blocker 1: showcases-Import entfällt — liegen in Supabase, nicht mehr im localStorage-Store.
-        alert('Import erfolgreich. Seite wird neu geladen.');
+        alert('Lokale Einstellungen wiederhergestellt. Seite wird neu geladen.');
         window.location.reload();
       }catch(err){
         alert('Fehler beim Import: '+err.message);
@@ -20170,7 +20164,18 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
   });
   const [gdocTesting, setGdocTesting] = useState(false);
   const [gdocTestResult, setGdocTestResult] = useState(null);
-  function gdocSave(k,v){const n={...gdocCfg,[k]:v};setGdocCfg(n);localStorage.setItem('jsr_gdoc_sync',JSON.stringify(n));}
+  function gdocSave(k,v){const n={...gdocCfg,[k]:v};setGdocCfg(n);localStorage.setItem('jsr_gdoc_sync',JSON.stringify(n));saveConfigToDB('jsr_gdoc_sync',n);}
+  // Einmalige Übernahme nach app_config: falls lokal eine Config liegt, aber in der DB noch keine,
+  // einmal nachziehen (idempotent — loadConfigFromDB null → push, sonst nichts). loadAllConfigsFromDB
+  // spiegelt danach automatisch zurück.
+  useEffect(()=>{ (async()=>{
+    try{
+      const local = localStorage.getItem('jsr_gdoc_sync');
+      if(!local) return;
+      const inDb = await loadConfigFromDB('jsr_gdoc_sync');
+      if(inDb==null) saveConfigToDB('jsr_gdoc_sync', JSON.parse(local));
+    }catch(e){}
+  })(); },[]);
   async function gdocTest(){
     setGdocTesting(true);setGdocTestResult(null);
     try{const r=await syncGoogleDoc(gdocCfg,true);setGdocTestResult({ok:true,msg:'OK · '+r+' Einträge'});}
@@ -20505,30 +20510,30 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
               </div>
               <div className="form-row">
                 <div className="form-group"><label className="form-label">Google Sheet ID *</label>
-                  <input className="form-input" value={gdocCfg.doc_id||''} onChange={e=>{const c={...gdocCfg,doc_id:e.target.value};localStorage.setItem('jsr_gdoc_sync',JSON.stringify(c));setGdocCfg(c);}}
+                  <input className="form-input" value={gdocCfg.doc_id||''} onChange={e=>{const c={...gdocCfg,doc_id:e.target.value};localStorage.setItem('jsr_gdoc_sync',JSON.stringify(c));saveConfigToDB('jsr_gdoc_sync',c);setGdocCfg(c);}}
                     placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"/></div>
                 <div className="form-group"><label className="form-label">Tab-Name (Blatt)</label>
-                  <input className="form-input" value={gdocCfg.sheet_name||''} onChange={e=>{const c={...gdocCfg,sheet_name:e.target.value};localStorage.setItem('jsr_gdoc_sync',JSON.stringify(c));setGdocCfg(c);}} placeholder="Tabelle1"/></div>
+                  <input className="form-input" value={gdocCfg.sheet_name||''} onChange={e=>{const c={...gdocCfg,sheet_name:e.target.value};localStorage.setItem('jsr_gdoc_sync',JSON.stringify(c));saveConfigToDB('jsr_gdoc_sync',c);setGdocCfg(c);}} placeholder="Tabelle1"/></div>
                 <div className="form-group"><label className="form-label">Sheet GID (aus URL)</label>
-                  <input className="form-input" value={gdocCfg.gid||''} onChange={e=>{const c={...gdocCfg,gid:e.target.value};localStorage.setItem('jsr_gdoc_sync',JSON.stringify(c));setGdocCfg(c);}} placeholder="817355119"/></div>
+                  <input className="form-input" value={gdocCfg.gid||''} onChange={e=>{const c={...gdocCfg,gid:e.target.value};localStorage.setItem('jsr_gdoc_sync',JSON.stringify(c));saveConfigToDB('jsr_gdoc_sync',c);setGdocCfg(c);}} placeholder="817355119"/></div>
               </div>
               <div className="form-row">
                 <div className="form-group"><label className="form-label">Spalte: Name</label>
-                  <input className="form-input" value={gdocCfg.col_firstname||''} onChange={e=>{const c={...gdocCfg,col_firstname:e.target.value};localStorage.setItem('jsr_gdoc_sync',JSON.stringify(c));setGdocCfg(c);}} placeholder="C"/></div>
+                  <input className="form-input" value={gdocCfg.col_firstname||''} onChange={e=>{const c={...gdocCfg,col_firstname:e.target.value};localStorage.setItem('jsr_gdoc_sync',JSON.stringify(c));saveConfigToDB('jsr_gdoc_sync',c);setGdocCfg(c);}} placeholder="C"/></div>
                 <div className="form-group"><label className="form-label">Spalte: Telefon</label>
-                  <input className="form-input" value={gdocCfg.col_phone||''} onChange={e=>{const c={...gdocCfg,col_phone:e.target.value};localStorage.setItem('jsr_gdoc_sync',JSON.stringify(c));setGdocCfg(c);}} placeholder="C"/></div>
+                  <input className="form-input" value={gdocCfg.col_phone||''} onChange={e=>{const c={...gdocCfg,col_phone:e.target.value};localStorage.setItem('jsr_gdoc_sync',JSON.stringify(c));saveConfigToDB('jsr_gdoc_sync',c);setGdocCfg(c);}} placeholder="C"/></div>
                 <div className="form-group"><label className="form-label">Spalte: E-Mail</label>
-                  <input className="form-input" value={gdocCfg.col_email||''} onChange={e=>{const c={...gdocCfg,col_email:e.target.value};localStorage.setItem('jsr_gdoc_sync',JSON.stringify(c));setGdocCfg(c);}} placeholder="D"/></div>
+                  <input className="form-input" value={gdocCfg.col_email||''} onChange={e=>{const c={...gdocCfg,col_email:e.target.value};localStorage.setItem('jsr_gdoc_sync',JSON.stringify(c));saveConfigToDB('jsr_gdoc_sync',c);setGdocCfg(c);}} placeholder="D"/></div>
                 <div className="form-group"><label className="form-label">Spalte: Deutschniveau</label>
-                  <input className="form-input" value={gdocCfg.col_level||''} onChange={e=>{const c={...gdocCfg,col_level:e.target.value};localStorage.setItem('jsr_gdoc_sync',JSON.stringify(c));setGdocCfg(c);}} placeholder="E"/></div>
+                  <input className="form-input" value={gdocCfg.col_level||''} onChange={e=>{const c={...gdocCfg,col_level:e.target.value};localStorage.setItem('jsr_gdoc_sync',JSON.stringify(c));saveConfigToDB('jsr_gdoc_sync',c);setGdocCfg(c);}} placeholder="E"/></div>
               </div>
               <div className="form-row">
                 <div className="form-group"><label className="form-label">Spalte: Stadt</label>
-                  <input className="form-input" value={gdocCfg.col_city||''} onChange={e=>{const c={...gdocCfg,col_city:e.target.value};localStorage.setItem('jsr_gdoc_sync',JSON.stringify(c));setGdocCfg(c);}} placeholder="F"/></div>
+                  <input className="form-input" value={gdocCfg.col_city||''} onChange={e=>{const c={...gdocCfg,col_city:e.target.value};localStorage.setItem('jsr_gdoc_sync',JSON.stringify(c));saveConfigToDB('jsr_gdoc_sync',c);setGdocCfg(c);}} placeholder="F"/></div>
                 <div className="form-group"><label className="form-label">Spalte: Datum</label>
-                  <input className="form-input" value={gdocCfg.col_date||''} onChange={e=>{const c={...gdocCfg,col_date:e.target.value};localStorage.setItem('jsr_gdoc_sync',JSON.stringify(c));setGdocCfg(c);}} placeholder="G"/></div>
+                  <input className="form-input" value={gdocCfg.col_date||''} onChange={e=>{const c={...gdocCfg,col_date:e.target.value};localStorage.setItem('jsr_gdoc_sync',JSON.stringify(c));saveConfigToDB('jsr_gdoc_sync',c);setGdocCfg(c);}} placeholder="G"/></div>
                 <div className="form-group"><label className="form-label">Kopfzeile überspringen</label>
-                  <select className="form-select" value={gdocCfg.skip_header||'1'} onChange={e=>{const c={...gdocCfg,skip_header:e.target.value};localStorage.setItem('jsr_gdoc_sync',JSON.stringify(c));setGdocCfg(c);}}>
+                  <select className="form-select" value={gdocCfg.skip_header||'1'} onChange={e=>{const c={...gdocCfg,skip_header:e.target.value};localStorage.setItem('jsr_gdoc_sync',JSON.stringify(c));saveConfigToDB('jsr_gdoc_sync',c);setGdocCfg(c);}}>
                     <option value="0">Nein</option>
                     <option value="1">Ja (1 Zeile)</option>
                     <option value="2">2 Zeilen</option>
@@ -22092,29 +22097,31 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
           <div style={{display:'flex',flexDirection:'column',gap:16}}>
             <div className="card">
               <div className="card-header">
-                <span className="card-title">⬇ Vollständiges Backup exportieren</span>
+                <span className="card-title">⬇ Lokale Einstellungen exportieren</span>
               </div>
               <div style={{padding:'16px 14px'}}>
-                <p style={{fontSize:13,color:'var(--muted)',marginBottom:16,lineHeight:1.7}}>
-                  Exportiert alle Daten des Systems als JSON-Datei: Mitarbeiter, CVs, Löhne, Projekte, Standorte, Rollen, Accounts, Zeiterfassung, Einstellungen.
-                </p>
-                <button className="btn btn-primary" style={{background:'var(--green)'}} onClick={exportAllData}>
-                  ⬇ Backup jetzt herunterladen
-                </button>
-                <div style={{marginTop:12,fontSize:11,color:'var(--muted)'}}>
-                  Empfehlung: wöchentliches Backup, vor grossen Änderungen immer zuerst sichern.
+                <div style={{padding:'10px 14px',background:'var(--amber-bg,rgba(180,83,9,.1))',borderRadius:'var(--r-md)',
+                  border:'1px solid rgba(180,83,9,.25)',fontSize:12,color:'var(--amber,#b45309)',marginBottom:16,lineHeight:1.6}}>
+                  ⚠ <b>Kein vollständiges Backup.</b> Die eigentlichen Daten (Mitarbeiter, CVs, Kunden,
+                  Projekte, Zeiterfassung …) liegen in Supabase und werden dort automatisch täglich
+                  gesichert. Dieser Export enthält <b>nur lokale Einstellungen</b> (Pläne, Löhne,
+                  Rollen, Accounts, Skills, Positionen, Feiertage, Arbeitszeitmodelle, PINs).
                 </div>
+                <button className="btn btn-primary" style={{background:'var(--green)'}} onClick={exportAllData}>
+                  ⬇ Einstellungen herunterladen
+                </button>
               </div>
             </div>
 
             <div className="card">
               <div className="card-header">
-                <span className="card-title">⬆ Backup wiederherstellen</span>
+                <span className="card-title">⬆ Lokale Einstellungen wiederherstellen</span>
               </div>
               <div style={{padding:'16px 14px'}}>
                 <div style={{padding:'10px 14px',background:'var(--red-bg)',borderRadius:'var(--r-md)',
-                  border:'1px solid rgba(239,68,68,.2)',fontSize:12,color:'var(--red)',marginBottom:16}}>
-                  ⚠ Achtung: Import überschreibt alle aktuellen Daten. Vorher Backup erstellen!
+                  border:'1px solid rgba(239,68,68,.2)',fontSize:12,color:'var(--red)',marginBottom:16,lineHeight:1.6}}>
+                  ⚠ Überschreibt lokale Einstellungen aus einer Export-Datei. <b>Mitarbeiter, Kunden
+                  und CVs bleiben unberührt</b> — die liegen in der Datenbank und werden nie importiert.
                 </div>
                 <input type="file" accept=".json" onChange={importBackup}/>
               </div>
@@ -22122,31 +22129,23 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
 
             <div className="card">
               <div className="card-header">
-                <span className="card-title">📊 Datenspeicher-Status</span>
+                <span className="card-title">📊 Datenbestand (Supabase)</span>
               </div>
               <div style={{padding:'12px 14px'}}>
-                {[
-                  ['jsr_emp_v3','Mitarbeiter'],
-                  ['jsr_plans_v3','Schulungspläne'],
-                  ['jsr_payroll_v1','Lohndaten'],
-                  ['jsr_projects_v1','Projekte'],
-                  ['jsr_locations_v1','Standorte'],
-                  ['jsr_time_v1','Zeiterfassung'],
-                ].map(([key,label])=>{
-                  const val = localStorage.getItem(key);
-                  const size = val ? Math.round(val.length/1024*10)/10 : 0;
-                  let count = 0;
-                  try{const p=JSON.parse(val||'null');count=Array.isArray(p)?p.length:p?Object.keys(p).length:0;}catch(e){}
-                  return(
-                    <div key={key} style={{display:'flex',justifyContent:'space-between',
-                      padding:'7px 0',borderBottom:'1px solid var(--border)',fontSize:12}}>
-                      <span style={{fontWeight:500}}>{label}</span>
-                      <span style={{color:'var(--muted)',fontFamily:'var(--mono)'}}>
-                        {count} Einträge · {size} KB
-                      </span>
-                    </div>
-                  );
-                })}
+                <div style={{fontSize:11,color:'var(--muted)',marginBottom:10,lineHeight:1.5}}>
+                  Live-Zählung aus der Datenbank (Single Source of Truth) — nicht der lokale Cache.
+                </div>
+                {dbStats===null && <div style={{fontSize:12,color:'var(--muted)'}}>Zähle …</div>}
+                {dbStats==='error' && <div style={{fontSize:12,color:'var(--red)'}}>Konnte die DB-Zahlen nicht laden.</div>}
+                {dbStats&&dbStats!=='error' && DB_STAT_TABLES.map(([t,label])=>(
+                  <div key={t} style={{display:'flex',justifyContent:'space-between',
+                    padding:'7px 0',borderBottom:'1px solid var(--border)',fontSize:12}}>
+                    <span style={{fontWeight:500}}>{label}</span>
+                    <span style={{color:'var(--muted)',fontFamily:'var(--mono)'}}>
+                      {dbStats[t]==null ? '—' : dbStats[t]+' Einträge'}
+                    </span>
+                  </div>
+                ))}
               </div>
             </div>
           </div>
