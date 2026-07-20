@@ -4422,9 +4422,11 @@ function EmployeeModal({emp, projects, onSave, onClose, initialTab, onTerminate}
 // ── Terminate Confirm Modal ───────────────────────────────
 
 
-function EmployeeList({employees, projects, onEdit, onAdd, onAbsence, onBonus, onReferral, onQuality, onComm}){
+function EmployeeList({employees, projects, seedSearch, onEdit, onAdd, onAbsence, onBonus, onReferral, onQuality, onComm}){
   const [filter, setFilter] = useState('all');
   const [search, setSearch] = useState('');
+  // Datenqualität-Klick: Suche auf den betroffenen MA vorbelegen (Filter zurücksetzen, damit er sichtbar ist).
+  useEffect(()=>{ if(seedSearch){ setSearch(seedSearch); setFilter('all'); setShowTerminated(true); } },[seedSearch]);
   const [showTerminated, setShowTerminated] = useState(false);
   const [sortCol, setSortCol] = useState('last_name');
   const [sortDir, setSortDir] = useState('asc');
@@ -6510,7 +6512,141 @@ function CockpitGrid({employees, projects, plans, forecast, team}){
   );
 }
 
-function Cockpit({employees, projects, plans, forecast, onAbsence, team}){
+// ═══ DATENQUALITÄT: Cockpit-Panel — zeigt fehlende/widersprüchliche Daten nach Schweregrad ═══
+// Synchron aus Props (employees/projects/plans), async aus Supabase (offene Sessions, Standort-Kosten).
+// Klick auf Datensatz → onNavigate(view, query) (Mitarbeiter werden per Namens-Seed gefiltert).
+function DataQualityPanel({employees, projects, plans, onNavigate}){
+  // Immer aufgeklappt — kein Toggle (Klick-Events erreichen dieses Panel im Cockpit nicht;
+  // ein Bericht hinter einem Klick würde ohnehin übersehen). Befunde direkt sichtbar.
+  const [asyncState,setAsyncState]=useState({loading:true,openSessions:[],locsNoCost:[]});
+  useEffect(()=>{
+    let alive=true;
+    (async()=>{
+      try{
+        const [sessions,locData]=await Promise.all([loadTimeSessionsFromDB(),loadLocationsFromDB()]);
+        if(!alive) return;
+        const now=Date.now();
+        const openSessions=(sessions||[]).filter(s=>s&&s.clock_in&&!s.clock_out).filter(s=>{
+          const t=s.date?new Date(s.date).getTime():(s.clock_in?new Date(s.clock_in).getTime():now);
+          return isNaN(t)||(now-t)>86400000;
+        });
+        let locsNoCost=[];
+        if(locData&&Array.isArray(locData.locations)){
+          const monthly=locData.monthly||{};
+          locsNoCost=locData.locations.filter(l=>l&&l.active!==false).filter(l=>{
+            const hasFixed=l.costs_fixed&&Object.values(l.costs_fixed).some(v=>Number(v)>0);
+            const hasCustom=Array.isArray(l.costs_custom)&&l.costs_custom.length>0;
+            const hasMonthly=monthly[l.id]&&Object.keys(monthly[l.id]).length>0;
+            return !hasFixed&&!hasCustom&&!hasMonthly;
+          });
+        }
+        setAsyncState({loading:false,openSessions,locsNoCost});
+      }catch(e){ if(alive) setAsyncState({loading:false,openSessions:[],locsNoCost:[]}); }
+    })();
+    return ()=>{ alive=false; };
+  },[]);
+
+  const AGENT_POS=['Agent','Senior Agent','ASP'];
+  const ALL_POS=['Agent','Senior Agent','ASP','Teamleiter','Trainer','QM','Projektleiter','HR','Management','Finance','IT'];
+  const EMPLOYED=['active','training','training_planned','contract','inactive'];
+  const CONTRACTED=['active','training','contract','inactive'];
+
+  const findings=React.useMemo(()=>{
+    const nm=e=>((e.first_name||'')+' '+(e.last_name||'')).trim()||'(ohne Namen)';
+    const emp=(employees||[]).filter(e=>e&&EMPLOYED.includes(e.status));
+    const projIds=new Set((projects||[]).map(p=>p.id));
+    const openAssign=e=>(e.project_assignments||[]).filter(a=>a&&!a.end_date&&a.project_id);
+    const hasProj=e=>openAssign(e).length>0||(e.project_id&&(e.project_skill||e.skill));
+    const contractStart=e=>(e.contract&&e.contract.start)||e.contract_start;
+    const hasBank=e=>(e.bank&&e.bank.iban)||e.bank_account||e.bank_iban;
+    const hasSalary=e=>Number(e.fixed_salary)>0||Number(e.hourly_rate)>0;
+    const dupBy=(list,keyFn)=>{ const g={}; list.forEach(e=>{const k=keyFn(e); if(k)(g[k]=g[k]||[]).push(e);}); return Object.values(g).filter(a=>a.length>1).reduce((a,b)=>a.concat(b),[]); };
+    const F=[];
+    const add=(sev,key,label,items)=>{ if(items&&items.length) F.push({sev,key,label,items}); };
+    // MA-Items öffnen das Modal direkt am passenden Tab (kind:'emp',tab); übrige navigieren in die View.
+    const empItems=(list,tab)=>list.map(e=>({id:e.id,name:nm(e)+(e.staff_number?' · '+e.staff_number:''),nav:{kind:'emp',id:e.id,tab}}));
+    const viewItems=(list,view,nameFn)=>list.map(x=>({id:x.id,name:nameFn(x),nav:{kind:'view',view}}));
+    const projItems=list=>viewItems(list,'superadmin',p=>p.name||p.id);
+    const planItems=list=>viewItems(list,'superadmin',p=>p.title||p.name||('Plan '+String(p.id||'').slice(0,6)));
+
+    // 🔴 blockierend
+    add('red','agent_no_proj','Agent ohne aktive Projekt-/Skill-Zuweisung',empItems(emp.filter(e=>AGENT_POS.includes(e.position)&&!hasProj(e)),'projekt'));
+    add('red','dup_email','Doppelte E-Mail-Adressen',empItems(dupBy(emp,e=>(e.email||'').trim().toLowerCase()),'profil'));
+    add('red','dup_staff','Doppelte Personalnummern',empItems(dupBy(emp,e=>(e.staff_number||'').trim()),'hr'));
+    add('red','proj_no_rate','Projekt ohne Abrechnungssatz (Forecast rechnet nicht)',projItems((projects||[]).filter(p=>p&&(p.billing_mode==='monthly_flat'?!(Number(p.monthly_flat)>0):!(Number(p.rate_active)>0)))));
+    add('red','orphan_emp','Mitarbeiter zeigt auf gelöschtes Projekt',empItems(emp.filter(e=>e.project_id&&!projIds.has(e.project_id)),'projekt'));
+    add('red','open_sess','Offene Zeit-Sessions (eingestempelt, nie ausgestempelt)',asyncState.openSessions.map(s=>{const e=(employees||[]).find(x=>x.id===s.emp_id);return {id:s.id,name:(e?nm(e):'MA '+String(s.emp_id||'').slice(0,8))+(s.date?' · '+s.date:''),nav:{kind:'view',view:'timetracking'}};}));
+
+    // 🟡 sollte ergänzt werden
+    add('yellow','no_contract','Ohne Vertragsdaten (Beginn fehlt)',empItems(emp.filter(e=>CONTRACTED.includes(e.status)&&!contractStart(e)),'vertrag'));
+    add('yellow','no_salary','Ohne Gehalt hinterlegt',empItems(emp.filter(e=>CONTRACTED.includes(e.status)&&!hasSalary(e)),'gehalt'));
+    add('yellow','no_bank','Ohne Bankverbindung (IBAN fehlt)',empItems(emp.filter(e=>CONTRACTED.includes(e.status)&&!hasBank(e)),'bank'));
+    add('yellow','no_staffnum','Ohne Personalnummer',empItems(emp.filter(e=>CONTRACTED.includes(e.status)&&!(e.staff_number||'').trim()),'hr'));
+    add('yellow','dup_idnum','Doppelte Ausweisnummern',empItems(dupBy(emp,e=>(e.id_number||'').trim()),'profil'));
+    add('yellow','proj_no_skill','Projekt ohne Skills',projItems((projects||[]).filter(p=>p&&!(Array.isArray(p.skills)&&p.skills.length))));
+    add('yellow','plan_no_proj','Schulungsplan ohne Projekt',planItems((plans||[]).filter(p=>p&&!p.project_id)));
+    add('yellow','plan_no_period','Schulungsplan ohne Zeitraum',planItems((plans||[]).filter(p=>p&&!p.start_date)));
+    add('yellow','orphan_plan','Schulungsplan zeigt auf gelöschtes Projekt',planItems((plans||[]).filter(p=>p&&p.project_id&&!projIds.has(p.project_id))));
+    add('yellow','loc_no_cost','Standort ohne erfasste Kosten',asyncState.locsNoCost.map(l=>({id:l.id,name:l.name||l.id,nav:{kind:'view',view:'spaces'}})));
+
+    // 🔵 Hinweis
+    add('blue','no_birthday','Ohne Geburtsdatum',empItems(emp.filter(e=>!e.birthday),'profil'));
+    add('blue','pos_unknown','Position unbekannt/leer (Kategorie nicht ableitbar)',empItems(emp.filter(e=>!ALL_POS.includes(e.position)),'profil'));
+    add('blue','plan_no_part','Schulungsplan ohne Teilnehmer',planItems((plans||[]).filter(p=>p&&!(p.confirmed_ids&&p.confirmed_ids.length)&&!(Number(p.planned_count)>0))));
+
+    return F;
+  },[employees,projects,plans,asyncState]);
+
+  const bySev=s=>findings.filter(f=>f.sev===s);
+  const cnt=s=>bySev(s).reduce((a,f)=>a+f.items.length,0);
+  const SEV={red:{icon:'🔴',label:'Blockierend',color:'#dc2626'},yellow:{icon:'🟡',label:'Sollte ergänzt werden',color:'#b45309'},blue:{icon:'🔵',label:'Hinweis',color:'#2563eb'}};
+  const total=cnt('red')+cnt('yellow')+cnt('blue');
+
+  return (
+    <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--r-lg)',boxShadow:'var(--shadow-xs)',marginTop:12,overflow:'hidden'}}>
+      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'12px 14px',borderBottom:'1px solid var(--border)'}}>
+        <span style={{display:'flex',alignItems:'center',gap:8,fontSize:14,fontWeight:700,color:'var(--text)'}}>🩺 Datenqualität</span>
+        <span style={{display:'flex',alignItems:'center',gap:10,fontSize:12,fontFamily:'var(--mono)'}}>
+          {asyncState.loading&&<span style={{color:'var(--muted)'}}>prüfe …</span>}
+          {total===0&&!asyncState.loading?<span style={{color:'#059669',fontWeight:700}}>✓ sauber</span>:(
+            <React.Fragment>
+              <span style={{color:SEV.red.color,fontWeight:700}}>🔴 {cnt('red')}</span>
+              <span style={{color:SEV.yellow.color,fontWeight:700}}>🟡 {cnt('yellow')}</span>
+              <span style={{color:SEV.blue.color,fontWeight:700}}>🔵 {cnt('blue')}</span>
+            </React.Fragment>
+          )}
+        </span>
+      </div>
+      <div style={{padding:'4px 14px 14px'}}>
+        {total===0&&!asyncState.loading&&<div style={{fontSize:12,color:'var(--muted)',padding:'10px 0'}}>Keine Auffälligkeiten gefunden.</div>}
+        {['red','yellow','blue'].map(sev=>{
+          const list=bySev(sev); if(!list.length) return null;
+          return (
+            <div key={sev} style={{marginTop:10}}>
+              <div style={{fontSize:11,fontWeight:700,color:SEV[sev].color,textTransform:'uppercase',letterSpacing:'.04em',marginBottom:4}}>{SEV[sev].icon} {SEV[sev].label}</div>
+              {list.map(f=>(
+                <div key={f.key} style={{padding:'6px 0',borderBottom:'1px solid var(--border)'}}>
+                  <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',fontSize:13,marginBottom:3}}>
+                    <span style={{color:'var(--text)',fontWeight:600}}>{f.label}</span>
+                    <span style={{fontFamily:'var(--mono)',fontWeight:700,color:SEV[sev].color}}>{f.items.length}</span>
+                  </div>
+                  <div style={{display:'flex',flexWrap:'wrap',gap:'2px 10px',paddingLeft:2}}>
+                    {f.items.slice(0,12).map((it,ii)=>(
+                      <button type="button" key={it.id||ii} onClick={()=>onNavigate&&it.nav&&onNavigate(it.nav)} style={{fontSize:12,color:'var(--blue)',cursor:'pointer',padding:'2px 0',background:'none',border:'none',font:'inherit',textAlign:'left'}}>{it.name} ↗</button>
+                    ))}
+                    {f.items.length>12&&<span style={{fontSize:11,color:'var(--muted)',padding:'2px 0'}}>… und {f.items.length-12} weitere</span>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavigate}){
   // 27e: Payslips liegen in Supabase (Legacy-localStorage-Store nach Cleanup leer). Einmaliger Load fuer den Task-Count.
   const [payslipsDb, setPayslipsDb] = useState([]);
   useEffect(()=>{
@@ -6612,6 +6748,14 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team}){
 
       {/* 2) Widget-Grid */}
       <CockpitGrid employees={employees} projects={projects} plans={plans} forecast={forecast} team={team}/>
+
+      {/* 2b Datenqualität — nur für privilegierte Rollen */}
+      {(()=>{
+        const sess=JSON.parse(sessionStorage.getItem('jsr_team')||localStorage.getItem('jsr_session_v1')||'{}');
+        const isPriv=!sess.access||(sess.access==='all'||sess.access?.includes?.('superadmin'));
+        if(!isPriv) return null;
+        return <DataQualityPanel employees={employees} projects={projects} plans={plans} onNavigate={onNavigate}/>;
+      })()}
 
       {/* 3) Auslaufende Vertraege — kompakt */}
       {(()=>{
@@ -26111,6 +26255,7 @@ function App(){
     return ()=>{ try{ sub.subscription.unsubscribe(); }catch(e){} };
   }, []);
   const [view, setView] = useState('cockpit');
+  const [empSeed, setEmpSeed] = useState(''); // Datenqualität-Klick → Mitarbeiter-Suche vorbelegen
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const isMobile = () => window.innerWidth < 768;
   const [showToast, toastEl] = useToast();
@@ -26219,6 +26364,7 @@ function App(){
     catch(e){return FORECAST_INIT;}
   });
   const [modal, setModal] = useState(null);
+  const [modalTab, setModalTab] = useState('hr'); // Ziel-Tab beim Öffnen des MA-Modals (Datenqualität-Deeplink)
   const [absenceModal, setAbsenceModal] = useState(null);
   const [terminateModal, setTerminateModal] = useState(null);
   const [bonusModal, setBonusModal] = useState(null);
@@ -26693,10 +26839,14 @@ function App(){
       <div className="mobile-fab-area">
         {view==='employees'&&<button className="fab" onClick={()=>setModal('add')}>＋</button>}
       </div>
-      {modal&&modal!=='add'&&<EmployeeModal emp={modal} projects={projects} onSave={saveEmployee} onClose={()=>setModal(null)} onTerminate={e=>{setModal(null);setTerminateModal(e);}}/>}
+      {modal&&modal!=='add'&&<EmployeeModal emp={modal} initialTab={modalTab} projects={projects} onSave={saveEmployee} onClose={()=>setModal(null)} onTerminate={e=>{setModal(null);setTerminateModal(e);}}/>}
           {modal==='add'&&<EmployeeModal emp={null} projects={projects} onSave={saveEmployee} onClose={()=>setModal(null)} onTerminate={null}/>}
 
-          {view==='cockpit'&&<Cockpit employees={employees} projects={projects} team={team} plans={plans} forecast={forecast} onAbsence={e=>setAbsenceModal(e)}/>}
+          {view==='cockpit'&&<Cockpit employees={employees} projects={projects} team={team} plans={plans} forecast={forecast} onAbsence={e=>setAbsenceModal(e)} onNavigate={(nav)=>{
+            if(!nav) return;
+            if(nav.kind==='emp'){ const e=employees.find(x=>x.id===nav.id); if(e){ setModalTab(nav.tab||'hr'); setModal(e); } }
+            else if(nav.kind==='view'){ setView(nav.view); if(nav.view==='employees'&&nav.query) setEmpSeed(nav.query); }
+          }}/>}
           {view==='wissen_system'&&<SystemManualView hasAccess={hasAccess}/>}
           {view==='productivity'&&<ProductivityView employees={employees} projects={projects} setEmployees={setEmployees}/>}
       {view==='performance'&&<PerformanceView employees={employees} projects={projects}/>}
@@ -26708,7 +26858,7 @@ function App(){
           <WorkforcePlanningView employees={employees} projects={projects} showToast={showToast}/>
           </div>
         )}
-          {view==='employees'&&<EmployeeList employees={employees} projects={projects} onEdit={e=>setModal(e)} onAdd={()=>setModal('add')} onAbsence={e=>setAbsenceModal(e)} onBonus={e=>setBonusModal(e)} onReferral={e=>setReferralModal(e)} onQuality={e=>setQualityModal(e)} onComm={e=>setCommModal([e])}/>}
+          {view==='employees'&&<EmployeeList employees={employees} projects={projects} seedSearch={empSeed} onEdit={e=>{setModalTab('hr');setModal(e);}} onAdd={()=>setModal('add')} onAbsence={e=>setAbsenceModal(e)} onBonus={e=>setBonusModal(e)} onReferral={e=>setReferralModal(e)} onQuality={e=>setQualityModal(e)} onComm={e=>setCommModal([e])}/>}
           {view==='timetracking'&&(
             <div>
               <div style={{background:'linear-gradient(135deg,#0F5661,#7c3aed)',borderRadius:'var(--r-lg)',padding:'20px 24px',marginBottom:16,display:'flex',alignItems:'center',justifyContent:'space-between',cursor:'pointer',boxShadow:'0 4px 20px rgba(15,86,97,.3)'}}
