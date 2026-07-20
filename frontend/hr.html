@@ -20135,7 +20135,33 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
   const [kpiCfg, setKpiCfgState] = useState(()=>getKpiCfg());
   function saveKpi(cfg){saveKpiConfigToDB(cfg);saveKpiCfg(cfg);setKpiCfgState([...cfg]);}
   const [hwTypes, setHwTypesState] = useState(()=>{try{return JSON.parse(localStorage.getItem('jsr_hw_types')||'[]');}catch(e){return[];}});
-  const saveHwTypes=t=>{localStorage.setItem('jsr_hw_types',JSON.stringify(t));setHwTypesState([...t]);};
+  const saveHwTypes=t=>{localStorage.setItem('jsr_hw_types',JSON.stringify(t));saveConfigToDB('jsr_hw_types',t);setHwTypesState([...t]);};
+  const [cfgRestBusy, setCfgRestBusy] = useState(false);
+  // Erst-Uebernahme App-Config-Rest: hw_types/test_q/kb/el (JSON) + logo (roher String) -> app_config.
+  async function migrateAppConfigRest(){
+    const items=[
+      ['jsr_hw_types','Hardware-Typen',true],
+      ['jsr_test_q_v1','Sprachtest-Fragen',true],
+      ['jsr_kb_v1','Wissensbasis',true],
+      ['jsr_el_v1','E-Learning',true],
+      ['jsr_logo_url','Logo',false],
+    ];
+    const present=items.filter(([k])=>localStorage.getItem(k)!=null);
+    if(!present.length){ alert('Keine lokalen App-Inhalte gefunden.'); return; }
+    if(!window.confirm('In DB übernehmen (app_config):\n'+present.map(([,l])=>'· '+l).join('\n')+'\n\nBestehende DB-Werte werden überschrieben. Fortfahren?')) return;
+    setCfgRestBusy(true);
+    let ok=0, err=0;
+    try{
+      for(const [k,label,isJson] of present){
+        let val; const raw=localStorage.getItem(k);
+        if(isJson){ try{ val=JSON.parse(raw); }catch(e){ err++; continue; } }
+        else { val=raw; }   // Logo: Base64-String direkt als jsonb-Value
+        const {error}=await sb.from('app_config').upsert({key:k, value:val, updated_at:new Date().toISOString()});
+        if(error){ console.error('[cfg-rest]',k,error); err++; } else ok++;
+      }
+    } finally { setCfgRestBusy(false); }
+    alert('Übernahme fertig.\nErfolgreich: '+ok+(err?'\nFehler: '+err:''));
+  }
   const DEF_FIX=[{id:'rk_miete',label:'Miete',amount:2500},{id:'rk_reinigung',label:'Reinigung Firma',amount:550},{id:'rk_datenschutz',label:'Datenschutztonne',amount:39},{id:'rk_inet1',label:'Internet (Ipko)',amount:292.70},{id:'rk_inet2',label:'Internet (Kujtesa)',amount:100}];
   const DEF_VAR=[{id:'rk_wasser',label:'Wasser',amount:30},{id:'rk_strom',label:'Strom',amount:190},{id:'rk_versich',label:'Versicherung',amount:600},{id:'rk_kaffee',label:'Kaffee',amount:250},{id:'rk_trinkw',label:'Trinkwasser',amount:50},{id:'rk_taxi',label:'Taxi',amount:95},{id:'rk_drucker',label:'Drucker',amount:55}];
   const [rkCfg,setRkCfgRaw]=useState(()=>{try{return JSON.parse(localStorage.getItem('jsr_rk_cfg')||'null')||{fix:DEF_FIX,variable:DEF_VAR};}catch(e){return{fix:DEF_FIX,variable:DEF_VAR};}});
@@ -20292,7 +20318,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
           <div className="card-header"><span className="card-title">🖼 Unternehmenslogo</span></div>
           <div style={{padding:16}}>
             <div style={{fontSize:12,color:'var(--muted)',marginBottom:14}}>
-              Wird im HR-Portal und im Bewerber-Portal angezeigt. PNG oder SVG, empfohlen: 200×60px, max 1 MB.
+              Wird im HR-Portal und im Bewerber-Portal angezeigt. PNG oder SVG, empfohlen: 200×60px, max 200 KB.
             </div>
             {(()=>{
               const logo=localStorage.getItem('jsr_logo_url')||'';
@@ -20311,10 +20337,11 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
                       <input type="file" accept="image/png,image/svg+xml,image/jpeg,image/webp" style={{display:'none'}}
                         onChange={e=>{
                           const file=e.target.files[0];if(!file)return;
-                          if(file.size>1024*1024){alert('Datei zu groß — max 1 MB');return;}
+                          if(file.size>200*1024){alert('Logo darf max. 200 KB groß sein — bitte verkleinern');return;}
                           const reader=new FileReader();
                           reader.onload=ev=>{
                             localStorage.setItem('jsr_logo_url',ev.target.result);
+                            saveConfigToDB('jsr_logo_url',ev.target.result);
                             window.dispatchEvent(new Event('storage'));
                             e.target.closest('div').parentNode.parentNode.parentNode.parentNode.parentNode.parentNode.parentNode.parentNode.forceUpdate?.();
                             alert('Logo gespeichert — bitte Seite neu laden.');
@@ -20323,7 +20350,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
                         }}/>
                     </label>
                     {logo&&<button className="btn btn-sm" style={{color:'var(--red)'}}
-                      onClick={()=>{localStorage.removeItem('jsr_logo_url');alert('Logo entfernt — bitte Seite neu laden.');}}>
+                      onClick={()=>{localStorage.removeItem('jsr_logo_url');saveConfigToDB('jsr_logo_url','');alert('Logo entfernt — bitte Seite neu laden.');}}>
                       × Logo entfernen
                     </button>}
                   </div>
@@ -21573,6 +21600,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
             <div className="card-header">
               <span className="card-title">🖥 Hardware-Typen</span>
               <div style={{display:'flex',gap:6}}>
+                <button className="btn btn-sm" disabled={cfgRestBusy} onClick={migrateAppConfigRest} title="Hardware-Typen, Sprachtest-Fragen, Wissensbasis, E-Learning und Logo in app_config übernehmen">{cfgRestBusy?'⬆ Übernehme…':'⬆ In DB übernehmen'}</button>
                 <button className="btn btn-sm" onClick={()=>saveHwTypes([{id:'hw_headset',name:'Headset',icon:'🎧',description:'USB/3.5mm Headset'},{id:'hw_laptop',name:'Laptop',icon:'💻',description:'Firmenlaptop'},{id:'hw_mouse',name:'Maus',icon:'🖱',description:'Computermaus'},{id:'hw_keyboard',name:'Tastatur',icon:'⌨️',description:'Externe Tastatur'},{id:'hw_monitor',name:'Monitor',icon:'🖥',description:'Externer Monitor'}])}>Standard laden</button>
                 <button className="btn btn-primary btn-sm" onClick={()=>saveHwTypes([...hwTypes,{id:'hw_'+Date.now(),name:'',icon:'🖥',description:''}])}>+ Typ anlegen</button>
               </div>
@@ -23798,7 +23826,11 @@ async function loadAllConfigsFromDB(){
   try{
     const {data, error} = await sb.from('app_config').select('*');
     if(error){ console.error('[cfg] loadAllConfigsFromDB', error); return false; }
-    (data||[]).forEach(r=>{ try{ localStorage.setItem(r.key, JSON.stringify(r.value)); }catch(e){} });
+    (data||[]).forEach(r=>{ try{
+      // jsr_logo_url ist ein roher String (Base64-Bild) -> NICHT JSON.stringify (sonst verquotet)
+      const v = (r.key==='jsr_logo_url' && typeof r.value==='string') ? r.value : JSON.stringify(r.value);
+      localStorage.setItem(r.key, v);
+    }catch(e){} });
     return true;
   }catch(e){ console.error('[cfg] loadAllConfigsFromDB', e); return false; }
 }
@@ -25908,6 +25940,7 @@ function App(){
   // Etappe P2: Performance aus Supabase laden (kpi_config + kpi_entries) und in den
   // localStorage-Cache spiegeln, damit die synchronen getKpiCfg()/getPerfData()-Leser
   // unveraendert funktionieren. Supabase ist Source of Truth (kein Seed mehr).
+  const _appCfgMounted = useRef(false);   // Guard: App-Config-Rest (test_q/kb/el) erst nach Re-Hydrierung nach DB schreiben
   useEffect(()=>{
     (async()=>{
       const cfg = await loadKpiConfigFromDB();
@@ -25944,6 +25977,12 @@ function App(){
       // ST3a: Stempel-PINs (time_pins) in den Cache spiegeln (nur wenn HR-Rolle lesen darf)
       const pinsDb = await loadPinsFromDB();
       if(pinsDb) localStorage.setItem('jsr_pins_v1', JSON.stringify(pinsDb));
+      // App-Config-Rest: test_q/kb/el aus frisch gespiegeltem Cache re-hydrieren (nur bei Abweichung),
+      // danach DB-Writes der Persist-Effekte freigeben. (hw_types/logo laufen ueber User-Aktionen.)
+      try{ const t=localStorage.getItem('jsr_test_q_v1'); if(t&&t!==JSON.stringify(testQuestions)) setTestQuestions(JSON.parse(t)); }catch(e){}
+      try{ const k=localStorage.getItem('jsr_kb_v1'); if(k&&k!==JSON.stringify(kbData)) setKbData(JSON.parse(k)); }catch(e){}
+      try{ const el=localStorage.getItem('jsr_el_v1'); if(el&&el!==JSON.stringify(elData)) setElData(JSON.parse(el)); }catch(e){}
+      _appCfgMounted.current=true;
     })();
   },[]);
 
@@ -25987,9 +26026,9 @@ function App(){
   const [commModal, setCommModal] = useState(null);
 
   // 25a: employees persistieren nicht mehr nach jsr_emp_v3 (Supabase ist SoT)
-  useEffect(()=>{localStorage.setItem('jsr_test_q_v1',JSON.stringify(testQuestions));},[testQuestions]);
-  useEffect(()=>{localStorage.setItem('jsr_kb_v1',JSON.stringify(kbData));},[kbData]);
-  useEffect(()=>{localStorage.setItem('jsr_el_v1',JSON.stringify(elData));},[elData]);
+  useEffect(()=>{localStorage.setItem('jsr_test_q_v1',JSON.stringify(testQuestions));if(_appCfgMounted.current)saveConfigToDB('jsr_test_q_v1',testQuestions);},[testQuestions]);
+  useEffect(()=>{localStorage.setItem('jsr_kb_v1',JSON.stringify(kbData));if(_appCfgMounted.current)saveConfigToDB('jsr_kb_v1',kbData);},[kbData]);
+  useEffect(()=>{localStorage.setItem('jsr_el_v1',JSON.stringify(elData));if(_appCfgMounted.current)saveConfigToDB('jsr_el_v1',elData);},[elData]);
   // 4a-1: CVs aus Supabase laden + Realtime. localStorage-Persist entfällt (Supabase ist SoT).
   useEffect(()=>{
     let alive=true;
