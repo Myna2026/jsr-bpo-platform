@@ -694,7 +694,7 @@ const PROJECTS_INIT = [
    trainings:[{id:'t4',name:'Onboarding & Grundlagen',weeks:1,seq:1},{id:'t5',name:'Produktschulung Giganetz',weeks:2,seq:2}]},
   {id:'proj_cd_c9d0e1f2',name:'Condor Holidays',client:'Condor GmbH',status:'active',location:'Tirana',rate_training:18,rate_active:24,skills:[{key:'support',label:'Support',rate:24}],
    billing_mode:'productive_hours', monthly_flat:0, ai_translation_enabled:false, trainings:[]},
-  {id:'proj_fb_a3b4c5d6',name:'Fabletics',client:'Fabletics Inc.',status:'active',location:'Prishtina',rate_training:16,rate_active:22,skills:[{key:'support',label:'Support',rate:22}],
+  {id:'proj_fb_a3b4c5d6',name:'Fabletics',client:'Fabletics Inc.',status:'active',location:'Prishtina',rate_training:16,rate_active:22,skills:[{key:'support',label:'Support',rate:22},{key:'crm',label:'CRM',rate:22}],
    billing_mode:'monthly_flat', monthly_flat:3200, ai_translation_enabled:false, trainings:[]},
 ];
 
@@ -20899,7 +20899,8 @@ function WheelAdminView({employees}){
 // (Bestand hat Hoheit); kein Treffer → neu mit fortlaufender staff_number (höchste +1, min. 1004).
 // Schreibt über saveEmployeeToDB (RLS via Admin-Session; extra-Overflow + Boolean-Coercion inkl.).
 function MaImportView({projects}){
-  const PROJ_MAP={proj_hc:'proj_hc_a1b2c3d4', proj_giga:'proj_gn_e5f6a7b8', DGN:'proj_gn_e5f6a7b8'};
+  const PROJ_MAP={proj_hc:'proj_hc_a1b2c3d4', proj_giga:'proj_gn_e5f6a7b8', DGN:'proj_gn_e5f6a7b8',
+    fabletics:'proj_fb_a3b4c5d6', proj_fb:'proj_fb_a3b4c5d6', HLX:'proj_cd_c9d0e1f2', proj_cd:'proj_cd_c9d0e1f2'};
   const GIGA='proj_gn_e5f6a7b8';
   const [raw,setRaw]=useState(null);
   const [fileName,setFileName]=useState('');
@@ -20907,6 +20908,7 @@ function MaImportView({projects}){
   const [busy,setBusy]=useState(false);
   const [result,setResult]=useState(null);
   const [err,setErr]=useState('');
+  const [xlsxSkips,setXlsxSkips]=useState(null); // {empty:int, example:[names]} aus dem Excel-Parser
 
   const nz=v=>{ const s=(v==null?'':String(v)).trim(); return s||null; };
   const toBool=v=>v===true||v==='yes'||v==='ja'||v==='true'||v===1;
@@ -20925,12 +20927,72 @@ function MaImportView({projects}){
   const normIban=v=>(v==null?'':String(v)).replace(/\s/g,'').toUpperCase();
   const isEmpty=v=>v==null||(typeof v==='string'&&v.trim()==='');
 
+  // Excel-Datumsserie → ISO. 25569 = Tage 1900→1970 (inkl. 1900-Schaltjahr-Bug). UTC vermeidet TZ-Verschiebung.
+  const serialToISO=n=>{ const d=new Date(Math.round((n-25569)*86400*1000)); const p=x=>(x<10?'0':'')+x; return d.getUTCFullYear()+'-'+p(d.getUTCMonth()+1)+'-'+p(d.getUTCDate()); };
+  // Datumszelle → ISO 'YYYY-MM-DD' bzw. Roh-Text (mapRow.parseDate nimmt ISO + DD.MM.YYYY).
+  const xlsxDate=v=>{
+    if(v==null||v==='') return null;
+    if(v instanceof Date){ const p=x=>(x<10?'0':'')+x; return v.getFullYear()+'-'+p(v.getMonth()+1)+'-'+p(v.getDate()); }
+    if(typeof v==='number') return (v>20000&&v<80000)?serialToISO(v):null; // plausible Datumsserie
+    return String(v).trim();
+  };
+  // Zeitzelle → 'HH:MM' (Excel-Zeit = Bruchteil eines Tages).
+  const xlsxTime=v=>{
+    if(v==null||v==='') return null;
+    const p=x=>(x<10?'0':'')+x;
+    if(typeof v==='number'){ const mins=Math.round(v*24*60); return p(Math.floor(mins/60)%24)+':'+p(mins%60); }
+    if(v instanceof Date) return p(v.getHours())+':'+p(v.getMinutes());
+    return String(v).trim();
+  };
+  // Blatt „👤 Mitarbeiter" parsen: Kopf = Zeile 2, Daten ab Zeile 5, Spalten NACH NAMEN.
+  // Skills/Projekt vorbereiten, Leer- und Beispielzeilen (Albanitë Hetemi) überspringen + zählen.
+  function parseMitarbeiterSheet(wb){
+    const sheetName=(wb.SheetNames||[]).find(n=>/Mitarbeiter/i.test(n))||wb.SheetNames[0];
+    const ws=wb.Sheets[sheetName];
+    if(!ws) throw new Error('Blatt „👤 Mitarbeiter" nicht gefunden.');
+    const aoa=XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:null,blankrows:true});
+    const header=(aoa[1]||[]).map(h=>(h==null?'':String(h).trim())); // Zeile 2
+    const EX=normName('Albanitë','Hetemi');
+    const rows=[], skipExample=[]; let skipEmpty=0;
+    for(let i=4;i<aoa.length;i++){ // ab Zeile 5
+      const arr=aoa[i]; if(!arr) continue;
+      const o={}; header.forEach((h,ci)=>{ if(h) o[h]=arr[ci]; });
+      const fn=nz(o.first_name), ln=nz(o.last_name), staff=nz(o.staff_number);
+      if(!fn && !(ln&&ln.length>=2)){ if(staff) skipEmpty++; continue; }         // Leerzeile (nur Personalnr.)
+      if(normName(fn,ln)===EX){ skipExample.push(((fn||'')+' '+(ln||'')).trim()); continue; } // Beispielzeile
+      o.birthday=xlsxDate(o.birthday); o.hire_date=xlsxDate(o.hire_date); o.contract_end=xlsxDate(o.contract_end);
+      o.shift_earliest=xlsxTime(o.shift_earliest); o.shift_latest=xlsxTime(o.shift_latest);
+      // Skill-Regeln: Fabletics „backoffice" → crm; „all" → leer (Condor pauschal aufs Projekt).
+      const pid=(nz(o.project_id)||'').toString();
+      let sk=(nz(o.project_skill)||'').toString();
+      if((pid==='fabletics'||pid==='proj_fb') && sk.toLowerCase()==='backoffice') sk='crm';
+      if(sk.toLowerCase()==='all') sk='';
+      o.project_skill=sk||null;
+      rows.push(o);
+    }
+    return {rows, skipEmpty, skipExample};
+  }
+
   function onFile(e){
     const f=e.target.files[0]; if(!f) return;
-    setErr('');setPreview(null);setResult(null);setRaw(null);setFileName('');
+    setErr('');setPreview(null);setResult(null);setRaw(null);setFileName('');setXlsxSkips(null);
+    const isXlsx=/\.xlsx$/i.test(f.name);
     const r=new FileReader();
-    r.onload=ev=>{ try{ const d=JSON.parse(ev.target.result); if(!d||!d.quellen) throw new Error('Erwartete Struktur {quellen:{…}} fehlt.'); setRaw(d); setFileName(f.name); }catch(x){ setErr('Datei ist kein gültiges JSON: '+(x.message||x)); } };
-    r.readAsText(f);
+    r.onload=ev=>{ try{
+      if(isXlsx){
+        const wb=XLSX.read(new Uint8Array(ev.target.result),{type:'array'});
+        const parsed=parseMitarbeiterSheet(wb);
+        if(!parsed.rows.length) throw new Error('Keine verwertbaren Datenzeilen gefunden ('+parsed.skipEmpty+' leer, '+parsed.skipExample.length+' Beispiel).');
+        setRaw({quellen:{[f.name]:{kurzname:'TIA', mitarbeiter:parsed.rows}}});
+        setXlsxSkips({empty:parsed.skipEmpty, example:parsed.skipExample});
+        setFileName(f.name);
+      } else {
+        const d=JSON.parse(ev.target.result);
+        if(!d||!d.quellen) throw new Error('Erwartete Struktur {quellen:{…}} fehlt.');
+        setRaw(d); setFileName(f.name);
+      }
+    }catch(x){ setErr((isXlsx?'Excel konnte nicht gelesen werden: ':'Datei ist kein gültiges JSON: ')+((x&&x.message)||x)); } };
+    if(isXlsx) r.readAsArrayBuffer(f); else r.readAsText(f);
   }
 
   // Mappt EINE Quellzeile → DB-Record (ohne staff_number). null = überspringen
@@ -21073,10 +21135,11 @@ function MaImportView({projects}){
         <div className="card-header"><span className="card-title">📥 Mitarbeiter-Import (aktualisierend)</span></div>
         <div style={{padding:'16px 14px'}}>
           <div style={{padding:'10px 14px',background:'var(--blue-bg)',borderRadius:'var(--r-md)',fontSize:12,color:'var(--blue)',marginBottom:14,lineHeight:1.6,border:'1px solid rgba(15,86,97,.15)'}}>
-            Wähle die Datei <b>bpo_mitarbeiter_compact.json</b>. Abgleich per <b>Name</b> (bei Namensgleichheit per IBAN). Treffer → nur <b>leere Felder ergänzen</b> (Bestand hat Hoheit, nichts wird überschrieben). Kein Treffer → <b>neu</b> mit fortlaufender Nummer (alte → <code>staff_number_old</code>). New1 → Giganetz + „Schulung". <b>Erst Vorschau, dann Bestätigung.</b>
+            Wähle <b>bpo_mitarbeiter_compact.json</b> <b>oder</b> eine <b>.xlsx</b>-Vorlage (Blatt „👤 Mitarbeiter", Kopf Zeile 2, Daten ab Zeile 5). Abgleich per <b>Name</b> (bei Namensgleichheit per IBAN). Treffer → nur <b>leere Felder ergänzen</b> (Bestand hat Hoheit, nichts wird überschrieben). Kein Treffer → <b>neu</b> mit fortlaufender Nummer (alte → <code>staff_number_old</code>). Excel: Datumsserien + Text-Daten werden nach ISO gewandelt, leere &amp; Beispielzeilen übersprungen. <b>Erst Vorschau, dann Bestätigung.</b>
           </div>
-          <input type="file" accept=".json,application/json" onChange={onFile}/>
+          <input type="file" accept=".json,application/json,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={onFile}/>
           {fileName&&<div style={{marginTop:10,fontSize:12,color:'var(--muted)'}}>Geladen: <b>{fileName}</b></div>}
+          {xlsxSkips&&<div style={{marginTop:6,fontSize:12,color:'var(--muted)'}}>Aus Excel übersprungen: <b>{xlsxSkips.empty}</b> leere Zeilen (nur Personalnr.){xlsxSkips.example.length>0&&<span> · <b>{xlsxSkips.example.length}</b> Beispielzeile(n): {xlsxSkips.example.join(', ')}</span>}</div>}
           {err&&<div style={{marginTop:10,fontSize:12,color:'var(--red)'}}>⚠ {err}</div>}
           <div style={{marginTop:14}}>
             <button className="btn btn-primary" disabled={!raw||busy} onClick={analyze}>{busy&&!preview?'Analysiere…':'Vorschau erstellen'}</button>
