@@ -473,6 +473,7 @@ td.muted{color:var(--muted);}
 /* ═══════════ EMPTY STATES ═══════════ */
 .empty{padding:30px;text-align:center;color:var(--muted);font-size:13px;}
 .empty-icon{font-size:32px;opacity:.5;margin-bottom:8px;}
+@keyframes welcomePop{from{opacity:0;transform:scale(.9)}to{opacity:1;transform:scale(1)}}
 </style>
 <!-- Supabase JS v2 (UMD → window.supabase.createClient) -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
@@ -1121,13 +1122,14 @@ function gateSession(session){
   if(AUTH_GATING || !session || !session.user) return;
   AUTH_GATING = true;
   var authUser = session.user;
-  sb.from('app_users').select('role_keys, full_name, staff_number, active, employee_id')
+  sb.from('app_users').select('role_keys, full_name, staff_number, active, employee_id, must_change_pw')
     .eq('user_id', authUser.id).single()
     .then(function(r){
       if(r.error || !r.data){ AUTH_GATING=false; denied('Kein Benutzerprofil gefunden. Bitte an HR/Management wenden.'); return; }
       var au=r.data;
       if(!au.active){ AUTH_GATING=false; denied('Dieser Account ist deaktiviert.'); return; }
       if(!au.role_keys || !au.role_keys.length){ AUTH_GATING=false; denied('Noch keine Rolle zugewiesen. Bitte an HR/Management wenden.'); return; }
+      if(au.must_change_pw){ AUTH_GATING=false; showForcePwDialog(session); return; }
       sb.from('roles_definitions').select('role_key, portals').in('role_key', au.role_keys)
         .then(function(rr){
           if(rr.error){ AUTH_GATING=false; denied(rr.error.message); return; }
@@ -1140,6 +1142,7 @@ function gateSession(session){
             ME = me;
             buildPortalSwitcher(MY_PORTALS);
             boot();
+            showWelcomePopup(ME && ME.first_name);
             // 25h: Realtime auf eigene Row — HR-Aenderungen (absences, warnings, status) live
             subscribeOwnEmployee(ME.id, function(updated){
               Object.assign(ME, updated);
@@ -1304,6 +1307,61 @@ function applyTabPerms(){
   }
 }
 
+// Pflicht-Passwortwechsel beim Erstlogin (Vollbild, kein Weiterkommen). Nach Erfolg: Flag löschen + gateSession erneut.
+function showForcePwDialog(session){
+  if(document.getElementById('forcePwOverlay')) return;
+  var wrap=document.createElement('div');
+  wrap.id='forcePwOverlay';
+  wrap.style.cssText='position:fixed;inset:0;z-index:100000;background:var(--bg,#f8fafc);display:flex;align-items:center;justify-content:center;padding:20px';
+  wrap.innerHTML=
+    '<div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:16px;box-shadow:0 24px 70px rgba(0,0,0,.2);padding:32px 34px;max-width:420px;width:100%;box-sizing:border-box;text-align:center">'
+    +'<div style="font-size:38px">🔐</div>'
+    +'<div style="font-size:22px;font-weight:800;margin-top:6px">Bitte lege dein eigenes Passwort fest</div>'
+    +'<div style="font-size:13px;color:var(--muted);margin-top:8px;line-height:1.6">Du hast dich mit einem Start-Passwort angemeldet. Aus Sicherheitsgründen musst du jetzt ein eigenes Passwort setzen, bevor es weitergeht.</div>'
+    +'<input id="fpw1" type="password" placeholder="Neues Passwort (min. 8 Zeichen)" style="width:100%;box-sizing:border-box;margin-top:18px;padding:10px;border:1px solid var(--border,#e5e7eb);border-radius:8px;font-family:inherit">'
+    +'<input id="fpw2" type="password" placeholder="Passwort wiederholen" style="width:100%;box-sizing:border-box;margin-top:10px;padding:10px;border:1px solid var(--border,#e5e7eb);border-radius:8px;font-family:inherit">'
+    +'<div id="fpwErr" style="color:#dc2626;font-size:12px;margin-top:10px;min-height:14px"></div>'
+    +'<button id="fpwBtn" style="width:100%;margin-top:12px;padding:11px;border:none;border-radius:8px;background:var(--accent,#0F5661);color:#fff;font-weight:700;font-family:inherit;cursor:pointer">Passwort festlegen &amp; weiter →</button>'
+    +'<button id="fpwCancel" style="width:100%;margin-top:8px;padding:8px;border:none;border-radius:8px;background:transparent;color:var(--muted,#6b7280);font-size:12px;font-family:inherit;cursor:pointer">Abbrechen &amp; abmelden</button>'
+    +'</div>';
+  document.body.appendChild(wrap);
+  var btn=document.getElementById('fpwBtn'), errEl=document.getElementById('fpwErr');
+  function submit(){
+    var p1=(document.getElementById('fpw1')||{}).value||'', p2=(document.getElementById('fpw2')||{}).value||'';
+    errEl.textContent='';
+    if(p1.length<8){ errEl.textContent='Mindestens 8 Zeichen.'; return; }
+    if(p1!==p2){ errEl.textContent='Passwörter stimmen nicht überein.'; return; }
+    btn.disabled=true; btn.textContent='Speichere…';
+    sb.auth.updateUser({password:p1}).then(function(r){
+      if(r.error){ errEl.textContent=r.error.message||'Fehler beim Setzen des Passworts.'; btn.disabled=false; btn.textContent='Passwort festlegen & weiter →'; return; }
+      sb.from('app_users').update({must_change_pw:false}).eq('user_id', session.user.id).then(function(r2){
+        if(r2.error){ errEl.textContent='Passwort gesetzt, Kennzeichen-Update fehlgeschlagen: '+(r2.error.message||'DB'); btn.disabled=false; btn.textContent='Passwort festlegen & weiter →'; return; }
+        try{ wrap.remove(); }catch(e){}
+        AUTH_GATING=false; gateSession(session);
+      });
+    });
+  }
+  btn.addEventListener('click', submit);
+  document.getElementById('fpw2').addEventListener('keydown', function(e){ if(e.key==='Enter') submit(); });
+  document.getElementById('fpwCancel').addEventListener('click', function(){ try{ sb.auth.signOut(); }catch(e){} try{ wrap.remove(); }catch(e){} location.reload(); });
+  setTimeout(function(){ try{ document.getElementById('fpw1').focus(); }catch(e){} }, 50);
+}
+// Kurzes mittiges Willkommens-Popup nach dem Login (auto-weg nach ~3s / bei Klick/Mausbewegung/Taste).
+function showWelcomePopup(firstName){
+  try{
+    var wrap=document.createElement('div');
+    wrap.style.cssText='position:fixed;inset:0;z-index:100000;display:flex;align-items:center;justify-content:center;pointer-events:none';
+    var box=document.createElement('div');
+    box.style.cssText='background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:18px;box-shadow:0 24px 70px rgba(0,0,0,.28);padding:28px 46px;text-align:center;animation:welcomePop .35s cubic-bezier(.2,.8,.2,1)';
+    var name=(firstName?String(firstName):'').replace(/[<>&]/g,'').trim();
+    box.innerHTML='<div style="font-size:38px">👋</div><div style="font-size:26px;font-weight:800;margin-top:6px">Hallo'+(name?' '+name:'')+'!</div>';
+    wrap.appendChild(box); document.body.appendChild(wrap);
+    var done=false;
+    function hide(){ if(done) return; done=true; try{ wrap.remove(); }catch(e){} window.removeEventListener('mousemove',hide); window.removeEventListener('click',hide); window.removeEventListener('keydown',hide); }
+    setTimeout(hide,3000);
+    window.addEventListener('mousemove',hide); window.addEventListener('click',hide); window.addEventListener('keydown',hide);
+  }catch(e){}
+}
 function boot(){
   migrateProjectData();
   ensureTeamGroups();
