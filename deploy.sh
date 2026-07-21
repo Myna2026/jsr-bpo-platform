@@ -1,48 +1,92 @@
 #!/bin/bash
-# TIVE 360° Deploy-Script
-# Pusht die Frontend-Files auf die Hetzner-VM
-
-set -e  # Bei Fehler abbrechen
+# TIVE 360° Deploy-Script — pusht die Frontend-Files auf die Hetzner-VM.
+#
+# Zwei Sicherungsstufen (System ist produktiv):
+#   Stufe 3  Vorab-Pruefung: balcheck/jsxcheck/macheck/fieldcheck laufen ZUERST.
+#            Ein Fehlschlag bricht sofort ab — es wird NICHTS uebertragen.
+#            Notausgang: ./deploy.sh --force  (Pruefung uebersprungen, mit Warnung)
+#   Stufe 1  Rollback: vor jedem Uebertragen wird der aktuelle Live-Stand nach
+#            /var/www/tive360/_backups/<Zeitstempel>/ gesichert (letzte 10 behalten).
+#            Zuruecksetzen mit ./rollback.sh
+set -e
 
 SERVER="root@178.104.147.208"
 LOCAL_DIR="./frontend"
 REMOTE_BASE="/var/www/tive360"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+CHECKS="$SCRIPT_DIR/scripts/checks"
+KEEP=10
+
+FORCE=0
+if [ "$1" = "--force" ]; then FORCE=1; fi
 
 echo "=== TIVE 360° Deploy ==="
 echo "Server: $SERVER"
 echo ""
 
-# hr.html → /var/www/tive360/hr/index.html
+# ── Stufe 3: Vorab-Pruefung ────────────────────────────────────────────────
+if [ "$FORCE" = "1" ]; then
+  echo "⚠  --force: VORAB-PRUEFUNG WIRD UEBERSPRUNGEN — kein Netz gegen kaputte Dateien."
+  echo "⚠  Nur im Notfall verwenden. Weiter in 2s…"
+  sleep 2
+  echo ""
+else
+  echo "→ Vorab-Pruefung (Abbruch bei Fehler)…"
+  run_check() {
+    label="$1"; shift
+    printf "  %-30s " "$label"
+    if "$@" > /tmp/tive_check.out 2>&1; then
+      echo "OK"
+    else
+      echo "FEHLGESCHLAGEN"
+      echo ""
+      echo "✗ ABBRUCH — Check '$label' ist gescheitert. Es wurde NICHTS uebertragen."
+      echo "────────────────────────────────────────────────────────────"
+      cat /tmp/tive_check.out
+      echo "────────────────────────────────────────────────────────────"
+      echo "Ursache beheben und erneut deployen."
+      echo "Falls die Baseline BEWUSST verschoben wurde: im jeweiligen Skript"
+      echo "(scripts/checks/) anpassen. Notausgang (nur im Notfall): ./deploy.sh --force"
+      exit 1
+    fi
+  }
+  run_check "balcheck.py  (hr.html)"           python3 "$CHECKS/balcheck.py"
+  run_check "jsxcheck.js  (hr.html)"           node    "$CHECKS/jsxcheck.js"
+  run_check "macheck.js   (mitarbeiter.html)"  node    "$CHECKS/macheck.js"
+  run_check "fieldcheck.py (Felder/Migration)" python3 "$CHECKS/fieldcheck.py"
+  echo "  → alle Checks bestanden."
+  echo ""
+fi
+
+# ── Stufe 1: Backup des aktuellen Live-Stands (vor dem Ueberschreiben) ──────
+echo "→ Backup des aktuellen Live-Stands…"
+PRUNE_FROM=$((KEEP + 1))
+TS=$(ssh "$SERVER" "ts=\$(date +%Y-%m-%d_%H%M%S); bk=$REMOTE_BASE/_backups/\$ts; mkdir -p \$bk; for d in hr mitarbeiter client root; do [ -d $REMOTE_BASE/\$d ] && cp -a $REMOTE_BASE/\$d \$bk/; done; ls -1dt $REMOTE_BASE/_backups/*/ 2>/dev/null | tail -n +$PRUNE_FROM | xargs -r rm -rf; echo \$ts")
+echo "  gesichert: $REMOTE_BASE/_backups/$TS  (die letzten $KEEP Staende bleiben erhalten)"
+echo ""
+
+# ── Uebertragen ────────────────────────────────────────────────────────────
 echo "→ HR-Portal..."
 rsync -az --progress "$LOCAL_DIR/hr.html" "$SERVER:$REMOTE_BASE/hr/index.html"
 
-# mitarbeiter.html → /var/www/tive360/mitarbeiter/index.html
 echo "→ Mitarbeiter-Portal..."
 rsync -az --progress "$LOCAL_DIR/mitarbeiter.html" "$SERVER:$REMOTE_BASE/mitarbeiter/index.html"
 
-# client.html → /var/www/tive360/client/index.html
 echo "→ Client-Portal..."
 rsync -az --progress "$LOCAL_DIR/client.html" "$SERVER:$REMOTE_BASE/client/index.html"
 
-# showcase.html → /var/www/tive360/client/showcase.html (öffentliche Token-Seite, login-los)
-# Caddy file_server liefert Geschwisterdateien direkt aus → client.tive360.de/showcase.html
 echo "→ Showcase (öffentlich)..."
 rsync -az --progress "$LOCAL_DIR/showcase.html" "$SERVER:$REMOTE_BASE/client/showcase.html"
 
-# root-index.html → /var/www/tive360/root/index.html (Marketing-Landing)
-# root-login.html → /var/www/tive360/root/login.html (universeller Login)
 echo "→ Root (Landing + Login)..."
 ssh "$SERVER" "mkdir -p $REMOTE_BASE/root"
 rsync -az --progress "$LOCAL_DIR/root-index.html" "$SERVER:$REMOTE_BASE/root/index.html"
 rsync -az --progress "$LOCAL_DIR/root-login.html" "$SERVER:$REMOTE_BASE/root/login.html"
 
-# stempel.html → HR-Subdomain (hr.tive360.de/stempel.html) + Root-Domain (tive360.de/stempel.html)
 echo "→ Stempeluhr..."
 rsync -az --progress "$LOCAL_DIR/stempel.html" "$SERVER:$REMOTE_BASE/hr/stempel.html"
 rsync -az --progress "$LOCAL_DIR/stempel.html" "$SERVER:$REMOTE_BASE/root/stempel.html"
 
-# assets/ (tive360-mark.svg = Logo + Favicon) → auf jede Subdomain-Root, weil
-# der Favicon-Pfad /assets/... pro Subdomain aufgelöst wird. Behebt die 404s.
 echo "→ Assets (Logo/Favicon)..."
 rsync -az --progress "$LOCAL_DIR/assets/" "$SERVER:$REMOTE_BASE/hr/assets/"
 rsync -az --progress "$LOCAL_DIR/assets/" "$SERVER:$REMOTE_BASE/mitarbeiter/assets/"
@@ -56,3 +100,6 @@ echo "  https://hr.tive360.de"
 echo "  https://mitarbeiter.tive360.de"
 echo "  https://client.tive360.de"
 echo "  https://client.tive360.de/showcase.html (öffentlich, Token)"
+echo ""
+echo "↩  Rollback bei Problemen:  ./rollback.sh"
+echo "   (dieser vorherige Stand ist gesichert als $TS)"
