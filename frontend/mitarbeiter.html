@@ -955,6 +955,39 @@ function loadMyWheelFromDB(){
 var PERF_ME = [];       // Perf: eigene kpi_entries (Supabase)
 var KPI_CFG_ME = [];    // Perf: kpi_config (Name/Einheit/thresholds)
 
+// Schritt 2: eigener Schichtplan aus shift_assignments (RLS self-read → nur eigene).
+// MY_SHIFTS ist ein flaches Objekt s_<empId>_<ds> → Zellobjekt {shift,net,...},
+// kompatibel zur bisherigen getPlan-Rückgabe. MY_SHIFTS_LOADED=false → getPlan
+// nutzt bis zum ersten Laden den localStorage-Fallback.
+var MY_SHIFTS = {};
+var MY_SHIFTS_LOADED = false;
+function loadMyShiftsFromDB(employeeId){
+  return new Promise(function(resolve, reject){
+    if(!employeeId){ MY_SHIFTS={}; MY_SHIFTS_LOADED=true; resolve(); return; }
+    sb.from('shift_assignments').select('*').eq('employee_id', employeeId)
+      .then(function(r){
+        if(r.error){ console.error('[shift] loadMyShiftsFromDB', r.error); reject(r.error); return; }
+        var m={};
+        (r.data||[]).forEach(function(row){
+          var ds=(''+row.work_date).slice(0,10);
+          var cell=(row.shift && typeof row.shift==='object') ? row.shift
+                   : (row.shift_value ? {shift:row.shift_value, label:row.label, net:row.net_hours, hours:row.gross_hours} : null);
+          if(cell) m['s_'+row.employee_id+'_'+ds]=cell;
+        });
+        MY_SHIFTS=m; MY_SHIFTS_LOADED=true; resolve();
+      }, reject);
+  });
+}
+function subscribeMyShifts(employeeId, onChange){
+  if(!employeeId) return function(){};
+  var chan = sb.channel('shifts-my-'+employeeId)
+    .on('postgres_changes',
+      {event:'*', schema:'public', table:'shift_assignments', filter:'employee_id=eq.'+employeeId},
+      function(p){ onChange(); })
+    .subscribe();
+  return function(){ try{ sb.removeChannel(chan); }catch(e){} };
+}
+
 // Block 2: eigene Urlaubsanträge aus Supabase (RLS liefert nur eigene). Flach,
 // mit from/to/submitted-Aliassen für die bestehenden Renderer. jsr_vacation_requests_v1 tot.
 var VACREQS_ME = [];
@@ -1185,6 +1218,13 @@ function gateSession(session){
                 }
               }
               renderCurrentViewOnRealtime();
+            });
+            // Schritt 2: eigener Schichtplan aus shift_assignments (RLS self-read) + Realtime
+            loadMyShiftsFromDB(ME.id)
+              .then(function(){ renderCurrentViewOnRealtime(); })
+              .catch(function(err){ console.error('[shift] Schicht-Load fehlgeschlagen', err); });
+            subscribeMyShifts(ME.id, function(){
+              loadMyShiftsFromDB(ME.id).then(function(){ renderCurrentViewOnRealtime(); }).catch(function(){});
             });
             // Perf: eigene KPI-Werte + Config laden (einmalig beim Login)
             loadMyPerfFromDB(ME.id)
@@ -1460,6 +1500,11 @@ function openMobileMenu(){toggleSidebar();}
 function getAdminHolidays(){try{var r=localStorage.getItem('jsr_holidays_v1');if(r)return Object.values(JSON.parse(r)).reduce(function(a,v){return a.concat(v);},[]).map(function(h){return h.date;});}catch(e){}return [];}
 
 function getPlan(empId,yr,mo){
+  // Schritt 2: Schichten kommen aus der DB (shift_assignments, self-read via RLS).
+  // MY_SHIFTS ist ein flaches s_<empId>_<ds>-Objekt über alle Monate; die Aufrufer
+  // indizieren per Datum (plan['s_'+id+'_'+ds]), daher ist yr/mo hier nicht nötig.
+  if(MY_SHIFTS_LOADED) return MY_SHIFTS;
+  // Fallback bis DB geladen (oder bei Fehler): bisheriges localStorage-Verhalten.
   var emp = getEmpById(empId) || ME;
   var pid=emp.project_id||ME.project_id||'';
   var sk=emp.project_skill||emp.primary_skill||ME.project_skill||ME.primary_skill||'all';
