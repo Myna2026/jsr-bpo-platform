@@ -54,6 +54,7 @@ abgeleitet (Single Source of Truth: nicht doppelt speichern).
 | Agent         | agent    |
 | Senior Agent  | agent    |
 | ASP           | agent    |
+| Supervisor    | agent    |
 | Teamleiter    | overhead |
 | Trainer       | overhead |
 | QM            | overhead |
