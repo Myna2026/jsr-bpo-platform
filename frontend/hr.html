@@ -1095,7 +1095,7 @@ const PRESET_ROLES = [
   },
 ];
 
-const DEFAULT_POSITIONS = ['Projektleiter','Teamleiter','Team Lead','Trainer','Quality Manager','Recruiter','HR Manager','Ansprechpartner']; // HR-Rollen — operative Job-Profile sind auf Projekt-Skills definiert
+const DEFAULT_POSITIONS = ['Projektleiter','Teamleiter','Supervisor','Team Lead','Trainer','Quality Manager','Recruiter','HR Manager','Ansprechpartner']; // HR-Rollen — operative Job-Profile sind auf Projekt-Skills definiert. Supervisor: unter Teamleiter, Kategorie agent (analog ASP)
 
 const DEFAULT_HOLIDAYS = {
   Tirana:[
@@ -6546,8 +6546,8 @@ function DataQualityPanel({employees, projects, plans, onNavigate}){
     return ()=>{ alive=false; };
   },[]);
 
-  const AGENT_POS=['Agent','Senior Agent','ASP'];
-  const ALL_POS=['Agent','Senior Agent','ASP','Teamleiter','Trainer','QM','Projektleiter','HR','Management','Finance','IT'];
+  const AGENT_POS=['Agent','Senior Agent','ASP','Supervisor'];
+  const ALL_POS=['Agent','Senior Agent','ASP','Supervisor','Teamleiter','Trainer','QM','Projektleiter','HR','Management','Finance','IT'];
   const EMPLOYED=['active','training','training_planned','contract','inactive'];
   const CONTRACTED=['active','training','contract','inactive'];
 
@@ -20084,6 +20084,253 @@ function WheelAdminView({employees}){
     </div>
   );
 }
+// ═══ MA-IMPORT (MERGE) aus bpo_mitarbeiter_compact.json ═══
+// Datei-Picker (Browser kann ~/Downloads nicht direkt lesen) → Vorschau → Bestätigung.
+// Abgleich per Name (bei Namensgleichheit per IBAN): Treffer → nur leere Felder ergänzen
+// (Bestand hat Hoheit); kein Treffer → neu mit fortlaufender staff_number (höchste +1, min. 1004).
+// Schreibt über saveEmployeeToDB (RLS via Admin-Session; extra-Overflow + Boolean-Coercion inkl.).
+function MaImportView({projects}){
+  const PROJ_MAP={proj_hc:'proj_hc_a1b2c3d4', proj_giga:'proj_gn_e5f6a7b8', DGN:'proj_gn_e5f6a7b8'};
+  const GIGA='proj_gn_e5f6a7b8';
+  const [raw,setRaw]=useState(null);
+  const [fileName,setFileName]=useState('');
+  const [preview,setPreview]=useState(null);
+  const [busy,setBusy]=useState(false);
+  const [result,setResult]=useState(null);
+  const [err,setErr]=useState('');
+
+  const nz=v=>{ const s=(v==null?'':String(v)).trim(); return s||null; };
+  const toBool=v=>v===true||v==='yes'||v==='ja'||v==='true'||v===1;
+  // Datum → ISO 'YYYY-MM-DD' oder null. Nimmt ISO und DD.MM.YYYY (auch D.M.YY, / als Trenner).
+  // Nicht-Datum (z.B. 'yes'), leer oder unplausibel → null (statt DB-400 zu provozieren).
+  const parseDate=v=>{
+    const s=(v==null?'':String(v)).trim(); if(!s) return null;
+    let y,mo,da, m=s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+    if(m){ y=+m[1]; mo=+m[2]; da=+m[3]; }
+    else { m=s.match(/^(\d{1,2})[.\/](\d{1,2})[.\/](\d{2,4})$/); if(!m) return null; da=+m[1]; mo=+m[2]; y=+m[3]; }
+    if(y<1900||y>2100||mo<1||mo>12||da<1||da>31) return null;
+    const p=n=>(n<10?'0':'')+n; return y+'-'+p(mo)+'-'+p(da);
+  };
+  // Name normalisiert: Kleinschreibung, Umlaute/Diakritika entfernt, Mehrfach-Leerzeichen → eins.
+  const normName=(f,l)=>(((f||'')+' '+(l||'')).toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim());
+  const normIban=v=>(v==null?'':String(v)).replace(/\s/g,'').toUpperCase();
+  const isEmpty=v=>v==null||(typeof v==='string'&&v.trim()==='');
+
+  function onFile(e){
+    const f=e.target.files[0]; if(!f) return;
+    setErr('');setPreview(null);setResult(null);setRaw(null);setFileName('');
+    const r=new FileReader();
+    r.onload=ev=>{ try{ const d=JSON.parse(ev.target.result); if(!d||!d.quellen) throw new Error('Erwartete Struktur {quellen:{…}} fehlt.'); setRaw(d); setFileName(f.name); }catch(x){ setErr('Datei ist kein gültiges JSON: '+(x.message||x)); } };
+    r.readAsText(f);
+  }
+
+  // Mappt EINE Quellzeile → DB-Record (ohne staff_number). null = überspringen
+  // (kein verwertbarer Name: kein first_name UND kein Nachname mit ≥2 Zeichen, z.B. Platzhalter „t").
+  function mapRow(r, src){
+    const fn=nz(r.first_name), ln=nz(r.last_name);
+    if(!fn && !(ln && ln.length>=2)) return null;
+    const isNew1=src==='New1';
+    const project_id=isNew1?GIGA:(PROJ_MAP[r.project_id]||nz(r.project_id));
+    const status=isNew1?'training':(nz(r.status)||'active');
+    const gender=r.gender==='female'?'f':(r.gender==='male'?'m':nz(r.gender));
+    const extra={};
+    if(nz(r.weekly_hours)!=null) extra.weekly_hours=r.weekly_hours;
+    if(nz(r.free_days_week_a)!=null) extra.free_days_week_a=r.free_days_week_a;
+    const rec={
+      staff_number_old:nz(r.staff_number), import_source:src,
+      first_name:fn||'', last_name:ln||'',
+      birthday:parseDate(r.birthday), gender, email:nz(r.email), phone:nz(r.phone), city:nz(r.city),
+      id_number:nz(r.id_number), status, position:nz(r.position), location:nz(r.location),
+      project_id, project_skill:nz(r.project_skill), hire_date:parseDate(r.hire_date),
+      salary_type:nz(r.salary_type)||(nz(r.fixed_salary)!=null?'fixed':null),
+      fixed_salary:nz(r.fixed_salary)!=null?Number(r.fixed_salary):null,
+      work_hours:nz(r.work_hours), work_model:nz(r.work_model),
+      overtime_allowed:nz(r.overtime_allowed)!=null?toBool(r.overtime_allowed):null,
+      work_saturday:nz(r.work_saturday)!=null?toBool(r.work_saturday):null,
+      work_split:nz(r.work_split)!=null?toBool(r.work_split):null,
+      shift_earliest:nz(r.shift_earliest), shift_latest:nz(r.shift_latest), language_level:nz(r.language_level),
+      contract:{ signed_at:parseDate(r.contract_signed), start:parseDate(r.hire_date), end:parseDate(r.contract_end) },
+      bank:{ name:nz(r.bank_name), iban:nz(r.bank_account), currency:nz(r.bank_currency) },
+    };
+    if(Object.keys(extra).length) rec.extra=extra;
+    return rec;
+  }
+
+  // Konfliktregel: das System hat Hoheit. Nur LEERE Bestandsfelder werden aus rec ergänzt,
+  // bestehende Werte nie überschrieben. Liefert {filled:[Feldnamen], payload:{id, …nur zu füllende}}.
+  const SCALARS=['first_name','last_name','birthday','gender','email','phone','city','id_number','status','position','location','project_id','project_skill','hire_date','salary_type','fixed_salary','work_hours','work_model','overtime_allowed','work_saturday','work_split','shift_earliest','shift_latest','language_level','staff_number_old','import_source'];
+  function computeFill(existing, rec){
+    // NOT-NULL-Spalten (first_name/last_name) immer mitgeben: saveEmployeeToDB nutzt upsert →
+    // die INSERT-Tuple (vor ON CONFLICT) muss gültig sein, sonst 23502. Werte = Bestand (unverändert).
+    const filled=[], payload={id:existing.id, first_name:existing.first_name, last_name:existing.last_name};
+    SCALARS.forEach(k=>{ if(isEmpty(existing[k]) && !isEmpty(rec[k])){ payload[k]=rec[k]; filled.push(k); } });
+    // contract/bank sind jsonb → ganzes Objekt neu schreiben, aber nur leere Subfelder befüllen.
+    const mergeObj=(exObj, recObj, keys, label)=>{
+      const ex=(exObj&&typeof exObj==='object'&&!Array.isArray(exObj))?exObj:{};
+      const m={...ex}; let ch=false;
+      keys.forEach(k=>{ if(isEmpty(m[k]) && !isEmpty(recObj[k])){ m[k]=recObj[k]; ch=true; filled.push(label+'.'+k); } });
+      return ch?m:null;
+    };
+    const mc=mergeObj(existing.contract, rec.contract||{}, ['signed_at','start','end'], 'contract'); if(mc) payload.contract=mc;
+    const mb=mergeObj(existing.bank, rec.bank||{}, ['name','iban','currency'], 'bank'); if(mb) payload.bank=mb;
+    const me=mergeObj(existing.extra, rec.extra||{}, Object.keys(rec.extra||{}), 'extra'); if(me) payload.extra=me;
+    return {filled, payload};
+  }
+
+  async function analyze(){
+    if(!raw) return;
+    setErr('');setBusy(true);setResult(null);
+    try{
+      // Vollständiger Bestand für Matching (Name/IBAN) + Leer-Feld-Ergänzung.
+      const {data:existing,error}=await sb.from('employees').select('*');
+      if(error) throw error;
+      let maxNum=0;
+      (existing||[]).forEach(e=>{ const m=String(e.staff_number||'').match(/\d+/g); if(m) m.forEach(x=>{ const v=parseInt(x,10); if(v>maxNum) maxNum=v; }); });
+      let nextNum = maxNum>=1000 ? maxNum+1 : 1004;
+      const byName={};
+      (existing||[]).forEach(e=>{ const k=normName(e.first_name,e.last_name); if(k){ (byName[k]=byName[k]||[]).push(e); } });
+      const srcObj=raw.quellen||{};
+      const news=[], updates=[], unchanged=[], skipped=[], ambiguous=[], writtenRecs=[];
+      const dispName=o=>((o.first_name||'')+' '+(o.last_name||'')).trim()||'(ohne Namen)';
+      Object.keys(srcObj).forEach(fname=>{
+        const entry=srcObj[fname];
+        const list=Array.isArray(entry)?entry:((entry&&Array.isArray(entry.mitarbeiter))?entry.mitarbeiter:[]);
+        const src=(entry&&entry.kurzname)?entry.kurzname:(fname.indexOf('New1')>=0?'New1':'New');
+        list.forEach(r=>{
+          const rec=mapRow(r, src);
+          if(!rec){ skipped.push({staff:nz(r.staff_number)||'?', last:nz(r.last_name)||'', src}); return; }
+          const key=normName(rec.first_name,rec.last_name);
+          const cands=byName[key]||[]; let match=null;
+          if(cands.length===1) match=cands[0];
+          else if(cands.length>1){
+            const si=normIban(rec.bank.iban);
+            const im=si?cands.filter(c=>normIban((c.bank||{}).iban)===si):[];
+            if(im.length===1) match=im[0]; else ambiguous.push({name:dispName(rec), n:cands.length});
+          }
+          if(match){
+            const {filled,payload}=computeFill(match, rec);
+            if(!filled.length) unchanged.push({name:dispName(match), staff:match.staff_number});
+            else { updates.push({name:dispName(match), staff:match.staff_number, filled, payload}); writtenRecs.push(rec); }
+          } else {
+            const staff=String(nextNum++);
+            news.push({name:dispName(rec), staff, payload:{...rec, staff_number:staff}});
+            writtenRecs.push(rec);
+          }
+        });
+      });
+      const projName=id=>{ const p=(projects||[]).find(x=>x.id===id); return p?p.name:(id||'—'); };
+      const byProj={}; news.forEach(x=>{ const k=projName(x.payload.project_id); byProj[k]=(byProj[k]||0)+1; });
+      const extraCounts={}; writtenRecs.forEach(r=>{ if(r.extra) Object.keys(r.extra).forEach(k=>{ extraCounts[k]=(extraCounts[k]||0)+1; }); });
+      const issues=[];
+      const cI=(lbl,arr)=>{ if(arr.length) issues.push(arr.length+'× '+lbl); };
+      cI('ohne E-Mail',writtenRecs.filter(r=>!r.email));
+      cI('ohne Position',writtenRecs.filter(r=>!r.position));
+      cI('Position „Supervisor" (neu aufgenommen)',writtenRecs.filter(r=>r.position==='Supervisor'));
+      cI('ohne IBAN',writtenRecs.filter(r=>!r.bank.iban));
+      const idc={}; writtenRecs.forEach(r=>{ if(r.id_number) idc[r.id_number]=(idc[r.id_number]||0)+1; });
+      const dup=Object.keys(idc).filter(k=>idc[k]>1);
+      if(dup.length) issues.push('Doppelte Ausweisnummer: '+dup.map(k=>k+' ('+idc[k]+'×)').join(', '));
+      ambiguous.forEach(a=>issues.push('Namensgleichheit ohne IBAN-Auflösung: '+a.name+' ('+a.n+' Bestandstreffer) → als NEU behandelt'));
+      const numFrom=news.length?news[0].staff:null, numTo=news.length?news[news.length-1].staff:null;
+      setPreview({news, updates, unchanged, skipped, ambiguous, numFrom, numTo, byProj, extraCounts, issues, maxNum});
+    }catch(x){ setErr('Analyse fehlgeschlagen: '+((x&&x.message)||x)); }
+    setBusy(false);
+  }
+
+  async function doImport(){
+    if(!preview) return;
+    // Kein Doppel-Import-Blocker mehr: Re-Import ist gewollt (Merge). Bestätigung mit Plan-Zusammenfassung.
+    const nNew=preview.news.length, nUpd=preview.updates.length;
+    if(nNew+nUpd===0){ window.alert('Nichts auszuführen: keine neuen und keine zu ergänzenden Datensätze.'); return; }
+    if(!window.confirm('Ausführen?\n'+nNew+' neu anlegen'+(nNew?' (Nr. '+preview.numFrom+'–'+preview.numTo+')':'')+'\n'+nUpd+' bestehende ergänzen (nur leere Felder)\n'+preview.unchanged.length+' unverändert · '+preview.skipped.length+' übersprungen')) return;
+    setBusy(true);setErr('');
+    let okNew=0, okUpd=0; const fails=[];
+    const run=async(list,tag,cnt)=>{
+      for(const it of list){
+        try{ await saveEmployeeToDB(it.payload); cnt(); }
+        catch(x){ fails.push(tag+' '+it.name+': '+[x&&x.message, x&&x.details, x&&x.hint, x&&x.code].filter(Boolean).join(' · ')); }
+      }
+    };
+    await run(preview.news,'NEU',()=>{okNew++;});
+    await run(preview.updates,'ERGÄNZT',()=>{okUpd++;});
+    setBusy(false);
+    setResult({okNew, okUpd, fails});
+    if(!fails.length){ setPreview(null); setRaw(null); setFileName(''); }
+  }
+
+  return (
+    <div style={{display:'flex',flexDirection:'column',gap:16}}>
+      <div className="card">
+        <div className="card-header"><span className="card-title">📥 Mitarbeiter-Import (aktualisierend)</span></div>
+        <div style={{padding:'16px 14px'}}>
+          <div style={{padding:'10px 14px',background:'var(--blue-bg)',borderRadius:'var(--r-md)',fontSize:12,color:'var(--blue)',marginBottom:14,lineHeight:1.6,border:'1px solid rgba(15,86,97,.15)'}}>
+            Wähle die Datei <b>bpo_mitarbeiter_compact.json</b>. Abgleich per <b>Name</b> (bei Namensgleichheit per IBAN). Treffer → nur <b>leere Felder ergänzen</b> (Bestand hat Hoheit, nichts wird überschrieben). Kein Treffer → <b>neu</b> mit fortlaufender Nummer (alte → <code>staff_number_old</code>). New1 → Giganetz + „Schulung". <b>Erst Vorschau, dann Bestätigung.</b>
+          </div>
+          <input type="file" accept=".json,application/json" onChange={onFile}/>
+          {fileName&&<div style={{marginTop:10,fontSize:12,color:'var(--muted)'}}>Geladen: <b>{fileName}</b></div>}
+          {err&&<div style={{marginTop:10,fontSize:12,color:'var(--red)'}}>⚠ {err}</div>}
+          <div style={{marginTop:14}}>
+            <button className="btn btn-primary" disabled={!raw||busy} onClick={analyze}>{busy&&!preview?'Analysiere…':'Vorschau erstellen'}</button>
+          </div>
+        </div>
+      </div>
+
+      {preview&&(
+        <div className="card">
+          <div className="card-header"><span className="card-title">👁 Vorschau — vor dem Schreiben prüfen</span></div>
+          <div style={{padding:'14px'}}>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(120px,1fr))',gap:10,marginBottom:14}}>
+              <div style={{background:'var(--surface-2)',borderRadius:8,padding:'10px 12px'}}><div style={{fontSize:11,color:'var(--muted)'}}>Neu</div><div style={{fontSize:20,fontWeight:700,fontFamily:'var(--mono)',color:'#059669'}}>{preview.news.length}</div>{preview.news.length>0&&<div style={{fontSize:10,color:'var(--muted)'}}>Nr. {preview.numFrom}–{preview.numTo}</div>}</div>
+              <div style={{background:'var(--surface-2)',borderRadius:8,padding:'10px 12px'}}><div style={{fontSize:11,color:'var(--muted)'}}>Ergänzt</div><div style={{fontSize:20,fontWeight:700,fontFamily:'var(--mono)',color:'var(--blue)'}}>{preview.updates.length}</div></div>
+              <div style={{background:'var(--surface-2)',borderRadius:8,padding:'10px 12px'}}><div style={{fontSize:11,color:'var(--muted)'}}>Unverändert</div><div style={{fontSize:20,fontWeight:700,fontFamily:'var(--mono)'}}>{preview.unchanged.length}</div></div>
+              <div style={{background:'var(--surface-2)',borderRadius:8,padding:'10px 12px'}}><div style={{fontSize:11,color:'var(--muted)'}}>Übersprungen</div><div style={{fontSize:20,fontWeight:700,fontFamily:'var(--mono)',color:'var(--amber,#b45309)'}}>{preview.skipped.length}</div></div>
+            </div>
+
+            {preview.updates.length>0&&(<div style={{marginBottom:14}}>
+              <div style={{fontSize:12,fontWeight:700,color:'var(--muted)',marginBottom:4}}>Bestehende ergänzen — nur leere Felder</div>
+              {preview.updates.slice(0,40).map((u,i)=>(<div key={i} style={{fontSize:12,padding:'3px 0',borderBottom:'1px solid var(--border)'}}><b>{u.name}</b> · {u.staff} <span style={{color:'var(--muted)'}}>→ {u.filled.join(', ')}</span></div>))}
+              {preview.updates.length>40&&<div style={{fontSize:11,color:'var(--muted)'}}>… und {preview.updates.length-40} weitere</div>}
+            </div>)}
+
+            {preview.skipped.length>0&&(<div style={{marginBottom:14}}>
+              <div style={{fontSize:12,fontWeight:700,color:'var(--muted)',marginBottom:4}}>Übersprungene Zeilen (kein verwertbarer Name)</div>
+              {preview.skipped.map((s,i)=>(<div key={i} style={{fontSize:12,padding:'2px 0',color:'var(--amber,#b45309)'}}>• {s.staff} · Nachname „{s.last||'—'}" · Quelle {s.src}</div>))}
+            </div>)}
+
+            {preview.news.length>0&&(<div style={{marginBottom:14}}>
+              <div style={{fontSize:12,fontWeight:700,color:'var(--muted)',marginBottom:4}}>Neu — pro Projekt</div>
+              {Object.keys(preview.byProj).map(k=>(<div key={k} style={{display:'flex',justifyContent:'space-between',fontSize:12,padding:'3px 0',borderBottom:'1px solid var(--border)'}}><span>{k}</span><span style={{fontFamily:'var(--mono)',fontWeight:700}}>{preview.byProj[k]}</span></div>))}
+            </div>)}
+
+            <div style={{fontSize:12,fontWeight:700,color:'var(--muted)',marginBottom:4}}>Felder ins Zusatzfeld (extra)</div>
+            <div style={{marginBottom:14,fontSize:12}}>
+              {Object.keys(preview.extraCounts).length?Object.keys(preview.extraCounts).map(k=>(<div key={k} style={{padding:'2px 0'}}><code>{k}</code> → {preview.extraCounts[k]}×</div>)):<div style={{color:'var(--muted)'}}>keine</div>}
+            </div>
+            <div style={{fontSize:12,fontWeight:700,color:'var(--muted)',marginBottom:4}}>Auffällige Datensätze</div>
+            <div style={{marginBottom:16,fontSize:12}}>
+              {preview.issues.length?preview.issues.map((s,i)=>(<div key={i} style={{padding:'2px 0',color:'var(--amber,#b45309)'}}>• {s}</div>)):<div style={{color:'#059669'}}>keine</div>}
+            </div>
+            <div style={{display:'flex',gap:10}}>
+              <button className="btn btn-primary" style={{background:'var(--green)'}} disabled={busy||(preview.news.length+preview.updates.length===0)} onClick={doImport}>{busy?'Läuft…':'✓ Ausführen ('+preview.news.length+' neu · '+preview.updates.length+' ergänzt)'}</button>
+              <button className="btn" disabled={busy} onClick={()=>{setPreview(null);}}>Abbrechen</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {result&&(
+        <div className="card">
+          <div className="card-header"><span className="card-title">Ergebnis</span></div>
+          <div style={{padding:'14px',fontSize:13}}>
+            <div style={{color:'#059669',fontWeight:700,marginBottom:6}}>✓ {result.okNew} neu angelegt · {result.okUpd} ergänzt.</div>
+            {result.fails.length>0&&(<div><div style={{color:'var(--red)',fontWeight:700,marginBottom:4}}>{result.fails.length} fehlgeschlagen (Details auch in der Browser-Konsole):</div>{result.fails.slice(0,8).map((s,i)=>(<div key={i} style={{fontSize:12,color:'var(--red)',padding:'1px 0',fontFamily:'var(--mono)'}}>{s}</div>))}{result.fails.length>8&&<div style={{fontSize:11,color:'var(--muted)'}}>… und {result.fails.length-8} weitere (meist derselbe Fehler)</div>}</div>)}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SystemSettingsTab({projects, setProjects, employees, clients}){
   const [activeSection, setActiveSection] = useState('skills');
 
@@ -20296,6 +20543,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
     {key:'referral',    label:'👥 Referral Logik'},
     {key:'pins',        label:'🔢 Stempeluhr PINs'},
     {key:'backup',       label:'💾 Datensicherung'},
+    {key:'ma_import',    label:'📥 MA-Import (Merge)'},
     {key:'migration25a', label:'⚡ Migration 25a → Supabase'},
     {key:'spinwheel',    label:'🎡 Glücksrad Gewinne'},
   ];
@@ -22295,6 +22543,9 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
           </div>
         )}
 
+        {/* ── MA-IMPORT (54) ── */}
+        {activeSection==='ma_import'&&(<MaImportView projects={projects}/>)}
+
         {/* ── MIGRATION 25a → SUPABASE ── */}
         {activeSection==='migration25a'&&(
           <div><div className="card">
@@ -24258,6 +24509,8 @@ const EMP_COLS = new Set([
   'project_skill','primary_skill','photo_color',
   // Verfuegbarkeit/Planung (Migration 2026-07-20 employees_availability) — vorher via extra:
   'work_weekend','work_holidays','work_saturday','work_sunday','work_split','work_notes','training_id',
+  // Import-Herkunft (Migration 2026-07-20 ma_import): alte Quellnummer + Quelldatei
+  'staff_number_old','import_source',
   'created_at','updated_at'
 ]);
 const EMP_DB_MANAGED = new Set(['created_at','updated_at']);
