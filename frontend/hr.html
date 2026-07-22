@@ -16992,9 +16992,23 @@ const LANGUAGE_TEST_QUESTIONS = [
   const [dragType, setDragType] = useState(null); // 'cv' | 'emp'
   const [selectedItem, setSelectedItem] = useState(null);
   const [filterProject, setFilterProject] = useState('all');
+  const [collapsed, setCollapsed] = useState(()=>{ try{const s=JSON.parse(localStorage.getItem('jsr_kanban_collapsed')||'null'); if(s&&typeof s==='object'&&!Array.isArray(s)) return s;}catch(e){} return {ruhend:true, beendet:true}; });
+  useEffect(()=>{ try{localStorage.setItem('jsr_kanban_collapsed',JSON.stringify(collapsed));}catch(e){} },[collapsed]);
 
   const KANBAN_COLS = STATUS_FLOW.filter(s=>s.kanban);
   const KANBAN_KEYS = new Set(KANBAN_COLS.map(c=>c.key));
+  // Phasen-Bündelung: 5 Gruppen statt 11 Feinstufen-Spalten. Der echte Status bleibt
+  // am Datensatz; Drag auf eine Gruppe → erste Feinstufe der Gruppe (Feinstufe genau
+  // im Kartendetail). Ruhend = nur parking, Beendet = nur Bewerbungs-Absagen (kein terminated_*).
+  const SF_BY_KEY={}; STATUS_FLOW.forEach(s=>{ SF_BY_KEY[s.key]=s; });
+  const KANBAN_GROUPS=[
+    {key:'eingang',    label:'Eingang',    icon:'📥', color:'#0891b2', statuses:['cv_inbound','cv_accepted','cv_confirmed']},
+    {key:'auswahl',    label:'Auswahl',    icon:'🗣', color:'#d97706', statuses:['invited','interview','selection1','selection2']},
+    {key:'onboarding', label:'Onboarding', icon:'📝', color:'#0F5661', statuses:['contract','training_planned','training']},
+    {key:'ruhend',     label:'Ruhend',     icon:'⏳', color:'#f59e0b', statuses:['parking'], collapsible:true},
+    {key:'beendet',    label:'Beendet',    icon:'⛔', color:'#dc2626', statuses:['rejected_by_us','rejected_by_employee','rejected_by_client','blacklist'], collapsible:true},
+  ];
+  const toggleCol=k=>setCollapsed(c=>({...c,[k]:!c[k]}));
 
   // Normalize old CV statuses to new STATUS_FLOW keys
   const STATUS_MAP = {
@@ -17013,27 +17027,37 @@ const LANGUAGE_TEST_QUESTIONS = [
       .map(e=>({...e, _type:'emp', status:normalizeStatus(e.status)})),
   ];
 
+  // Vorwaerts-Pipeline für den "→"-Knopf (nächste Feinstufe). parking/rejected/blacklist
+  // haben keine "nächste" Stufe → kein Knopf.
+  const FORWARD=['cv_inbound','cv_accepted','cv_confirmed','invited','interview','selection1','selection2','contract','training_planned','training','active'];
+  function nextStatus(s){ const i=FORWARD.indexOf(s); return (i>=0 && i<FORWARD.length-1) ? FORWARD[i+1] : null; }
+
+  // Zentrale Statuswechsel-Logik — für Drag UND den "→"-Knopf identisch.
+  async function moveTo(item, newStatus){
+    if(!item || !newStatus) return;
+    if(item._type==='cv'){
+      const cv=(cvList||[]).find(c=>c.id===item.id);
+      if(!cv) return;
+      if(newStatus==='active'){
+        // 4a-2: echte Promote (Employee anlegen + CV löschen), nicht nur status:'active'
+        if(window.confirm('CV von '+cv.first_name+' '+cv.last_name+' zu Mitarbeiter konvertieren?')){ onPromoteToEmployee&&onPromoteToEmployee(cv); }
+        return;
+      }
+      try{ await saveCvToDB({...cv,status:newStatus,status_changed:new Date().toISOString().slice(0,10)}); }
+      catch(e){ showToast&&showToast('⚠ '+(e.message||'DB'),'error'); }
+    } else {
+      const emp=(employees||[]).find(e=>e.id===item.id);
+      if(!emp) return;
+      const updated={...emp,status:newStatus,status_changed:new Date().toISOString().slice(0,10)};
+      try{ await saveEmployeeToDB(updated); setEmployees(es=>es.map(e=>e.id===updated.id?updated:e)); }
+      catch(e){ showToast&&showToast('⚠ '+(e.message||'DB'),'error'); }
+    }
+  }
+
   async function onDrop(newStatus){
     if(!dragging) return;
-    if(dragType==='cv'){
-      const cv=(cvList||[]).find(c=>c.id===dragging);
-      if(cv){
-        if(newStatus==='active'){
-          // 4a-2: echte Promote (Employee anlegen + CV löschen), nicht nur status:'active'
-          if(window.confirm('CV von '+cv.first_name+' '+cv.last_name+' zu Mitarbeiter konvertieren?')){ onPromoteToEmployee&&onPromoteToEmployee(cv); }
-        } else {
-          try{ await saveCvToDB({...cv,status:newStatus,status_changed:new Date().toISOString().slice(0,10)}); }
-          catch(e){ showToast&&showToast('⚠ '+(e.message||'DB'),'error'); }
-        }
-      }
-    } else {
-      const emp=(employees||[]).find(e=>e.id===dragging);
-      if(emp){
-        const updated={...emp,status:newStatus,status_changed:new Date().toISOString().slice(0,10)};
-        try{ await saveEmployeeToDB(updated); setEmployees(es=>es.map(e=>e.id===updated.id?updated:e)); }
-        catch(e){ showToast&&showToast('⚠ '+(e.message||'DB'),'error'); }
-      }
-    }
+    const item=allItems.find(x=>x.id===dragging && x._type===dragType);
+    await moveTo(item, newStatus);
     setDragging(null);
     setDragType(null);
   }
@@ -17050,6 +17074,48 @@ const LANGUAGE_TEST_QUESTIONS = [
         catch(e){ showToast&&showToast('⚠ '+(e.message||'DB'),'error'); }
       }
     }
+  }
+
+  // Eine Kanban-Karte (in jeder Feinstufen-Spalte wiederverwendet).
+  function renderCard(item){
+    const name=(item.first_name||'?')+' '+(item.last_name||'');
+    const isCV=item._type==='cv';
+    const sf=SF_BY_KEY[item.status];
+    const nx=nextStatus(item.status);
+    const since=item.last_status_change||item.cv_date;
+    const d = since ? Math.round((new Date()-new Date(since))/(864e5)) : null;
+    const ageC = d===null?null:(d>14?'var(--red)':d>7?'var(--amber)':'var(--dim)');
+    return(
+      <div key={item.id} draggable
+        onDragStart={e=>{e.stopPropagation();setDragging(item.id);setDragType(item._type);}}
+        onClick={()=>setSelectedItem(item)}
+        style={{padding:'6px 8px',background:'var(--card)',
+          border:'1px solid '+(isCV?'rgba(15,86,97,.3)':'rgba(5,150,105,.3)'),
+          borderRadius:'var(--r)',cursor:'grab',fontSize:11,boxShadow:'0 1px 3px rgba(0,0,0,.06)'}}>
+        <div style={{display:'flex',alignItems:'center',gap:4,marginBottom:3}}>
+          <span style={{fontSize:9,padding:'1px 5px',borderRadius:8,fontWeight:700,
+            background:isCV?'var(--blue-bg)':'var(--green-bg)',color:isCV?'var(--blue)':'var(--green)'}}>{isCV?'CV':'MA'}</span>
+          <span style={{fontWeight:600,flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{name}</span>
+          {d!==null&&<span style={{fontSize:9,color:ageC,fontWeight:d>7?700:400,whiteSpace:'nowrap'}}>{d===0?'Heute':d===1?'Gestern':d+'d'}{d>7?' ⚠':''}</span>}
+          {nx&&<button title={'→ '+(SF_BY_KEY[nx]?SF_BY_KEY[nx].label:nx)}
+            onClick={e=>{e.stopPropagation();moveTo(item,nx);}}
+            style={{flexShrink:0,width:20,height:20,borderRadius:6,border:'1px solid '+(sf?sf.color:'#94a3b8')+'55',
+              background:(sf?sf.color:'#94a3b8')+'18',color:sf?sf.color:'#475569',fontWeight:800,fontSize:12,cursor:'pointer',lineHeight:1,padding:0}}>→</button>}
+        </div>
+        {sf&&<div style={{marginBottom:3}}><span style={{fontSize:8.5,padding:'1px 6px',borderRadius:8,fontWeight:700,background:sf.color+'22',color:sf.color}}>{sf.label}</span></div>}
+        <div style={{color:'var(--muted)',fontSize:10,display:'flex',gap:4,flexWrap:'wrap'}}>
+          {item.language_level&&<span>{item.language_level}</span>}
+          {item.location&&<span>{item.location==='Tirana'?'🇦🇱':'🇽🇰'}</span>}
+          {item.primary_skill&&<span style={{background:'var(--surface-2)',borderRadius:6,padding:'0 4px'}}>{item.primary_skill}</span>}
+        </div>
+        {item.status==='cv_accepted'&&(
+          <button onClick={e=>{e.stopPropagation();confirmCV(item.id,item._type);}}
+            style={{marginTop:5,width:'100%',padding:'3px',border:'none',borderRadius:4,background:'var(--green)',color:'white',fontSize:10,fontWeight:700,cursor:'pointer'}}>
+            ✓ CV bestätigen
+          </button>
+        )}
+      </div>
+    );
   }
 
   return(
@@ -17096,87 +17162,63 @@ const LANGUAGE_TEST_QUESTIONS = [
         </div>
       </div>
 
-      <div style={{display:'flex',gap:8,overflowX:'auto',paddingBottom:12}}>
-        {KANBAN_COLS.map(col=>{
-          let colItems = allItems.filter(item=>item.status===col.key);
-          if(filterProject!=='all') colItems=colItems.filter(item=>
-            item.target_project===filterProject||item.project_id===filterProject
-          );
+      <div style={{display:'flex',gap:14,overflowX:'auto',paddingBottom:12,alignItems:'flex-start'}}>
+        {KANBAN_GROUPS.map(g=>{
+          const inGroup=it=> g.statuses.includes(it.status) && (filterProject==='all'||it.target_project===filterProject||it.project_id===filterProject);
+          const total=allItems.filter(inGroup).length;
 
-          return(
-            <div key={col.key}
-              style={{minWidth:165,flex:'0 0 165px'}}
-              onDragOver={e=>e.preventDefault()}
-              onDrop={()=>onDrop(col.key)}>
-
-              <div style={{padding:'6px 10px',borderRadius:'var(--r)',marginBottom:6,
-                background:col.color+'22',borderLeft:'3px solid '+col.color,
-                display:'flex',alignItems:'center',justifyContent:'space-between'}}>
-                <span style={{fontSize:11,fontWeight:700,color:col.color}}>
-                  {col.icon} {col.label}
-                </span>
-                <span style={{fontSize:10,background:'rgba(0,0,0,.08)',borderRadius:10,padding:'1px 6px',fontWeight:700}}>
-                  {colItems.length}
-                </span>
+          // Eingeklappt (nur Ruhend/Beendet) → schmaler Streifen mit Anzahl
+          if(g.collapsible && collapsed[g.key]){
+            return(
+              <div key={g.key} onClick={()=>toggleCol(g.key)}
+                onDragOver={e=>e.preventDefault()} onDrop={()=>onDrop(g.statuses[0])}
+                title={g.label+' öffnen'}
+                style={{flex:'0 0 auto',width:46,minHeight:130,cursor:'pointer',borderRadius:'var(--r)',
+                  background:g.color+'18',border:'1px solid '+g.color+'44',
+                  display:'flex',flexDirection:'column',alignItems:'center',padding:'8px 0',gap:6}}>
+                <span style={{fontSize:14}}>{g.icon}</span>
+                <span style={{fontSize:11,fontWeight:800,color:g.color,background:'#fff',borderRadius:10,padding:'1px 6px'}}>{total}</span>
+                <span style={{writingMode:'vertical-rl',transform:'rotate(180deg)',fontSize:11,fontWeight:700,color:g.color,letterSpacing:'.03em',marginTop:2}}>{g.label}</span>
               </div>
+            );
+          }
 
-              <div style={{minHeight:60,display:'flex',flexDirection:'column',gap:5}}>
-                {colItems.map(item=>{
-                  const name=(item.first_name||'?')+' '+(item.last_name||'');
-                  const isCV=item._type==='cv';
+          // Offen: Gruppenband oben, echte Feinstufen-Spalten darunter (einzeln bedropbar)
+          return(
+            <div key={g.key} style={{display:'flex',flexDirection:'column',gap:6,flex:'0 0 auto'}}>
+              <div onClick={()=>{ if(g.collapsible) toggleCol(g.key); }}
+                title={g.collapsible?'Zuklappen':''}
+                style={{padding:'5px 10px',borderRadius:'var(--r)',background:g.color+'22',borderLeft:'3px solid '+g.color,
+                  display:'flex',alignItems:'center',justifyContent:'space-between',cursor:g.collapsible?'pointer':'default'}}>
+                <span style={{fontSize:11.5,fontWeight:800,color:g.color,letterSpacing:'.02em'}}>{g.icon} {g.label.toUpperCase()}</span>
+                <span style={{fontSize:10,background:'rgba(0,0,0,.08)',borderRadius:10,padding:'1px 6px',fontWeight:700}}>{total}{g.collapsible?' ▾':''}</span>
+              </div>
+              <div style={{display:'flex',gap:8}}>
+                {g.statuses.map(sk=>{
+                  const sf=SF_BY_KEY[sk];
+                  let items=allItems.filter(item=>item.status===sk);
+                  if(filterProject!=='all') items=items.filter(item=>item.target_project===filterProject||item.project_id===filterProject);
                   return(
-                    <div key={item.id}
-                      draggable
-                      onDragStart={e=>{e.stopPropagation();setDragging(item.id);setDragType(item._type);}}
-                      onClick={()=>setSelectedItem(item)}
-                      style={{padding:'7px 9px',cursor:'pointer',
-                        background:'var(--card)',
-                        border:'1px solid '+(isCV?'rgba(15,86,97,.3)':'rgba(5,150,105,.3)'),
-                        borderRadius:'var(--r)',cursor:'grab',fontSize:11,
-                        boxShadow:'0 1px 3px rgba(0,0,0,.06)'}}>
-                      <div style={{display:'flex',alignItems:'center',gap:5,marginBottom:3}}>
-                        <span style={{fontSize:9,padding:'1px 5px',borderRadius:8,fontWeight:700,
-                          background:isCV?'var(--blue-bg)':'var(--green-bg)',
-                          color:isCV?'var(--blue)':'var(--green)'}}>
-                          {isCV?'CV':'MA'}
-                        </span>
-                        <span style={{fontWeight:600,flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
-                          {name}
-                        </span>
-                        {(()=>{
-                          const since=item.last_status_change||item.cv_date;
-                          if(!since) return null;
-                          const d=Math.round((new Date()-new Date(since))/(864e5));
-                          const col=d>14?'var(--red)':d>7?'var(--amber)':'var(--dim)';
-                          return<div style={{fontSize:9,color:col,fontWeight:d>7?700:400,marginTop:2}}>
-                            {d===0?'Heute':d===1?'Gestern':d+'d in Phase'}{d>7?' ⚠':''}
-                          </div>;
-                        })()}
+                    <div key={sk} style={{flex:'0 0 180px',width:180}}
+                      onDragOver={e=>e.preventDefault()} onDrop={()=>onDrop(sk)}>
+                      <div style={{padding:'4px 8px',borderRadius:'var(--r)',marginBottom:6,
+                        background:(sf?sf.color:'#94a3b8')+'14',
+                        display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+                        <span style={{fontSize:10.5,fontWeight:700,color:sf?sf.color:'#475569',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{sf?sf.label:sk}</span>
+                        <span style={{fontSize:9.5,background:'rgba(0,0,0,.06)',borderRadius:10,padding:'1px 6px',fontWeight:700,flexShrink:0}}>{items.length}</span>
                       </div>
-                      <div style={{color:'var(--muted)',fontSize:10,display:'flex',gap:4,flexWrap:'wrap'}}>
-                        {item.language_level&&<span>{item.language_level}</span>}
-                        {item.location&&<span>{item.location==='Tirana'?'🇦🇱':'🇽🇰'}</span>}
-                        {item.primary_skill&&<span style={{background:'var(--surface-2)',borderRadius:6,padding:'0 4px'}}>{item.primary_skill}</span>}
+                      <div style={{minHeight:60,display:'flex',flexDirection:'column',gap:5}}>
+                        {items.map(renderCard)}
+                        {items.length===0&&(
+                          <div style={{height:36,border:'1.5px dashed var(--border)',borderRadius:'var(--r)',
+                            display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,color:'var(--border)'}}>
+                            Ablegen
+                          </div>
+                        )}
                       </div>
-                      {col.key==='cv_accepted'&&(
-                        <button
-                          onClick={e=>{e.stopPropagation();confirmCV(item.id,item._type);}}
-                          style={{marginTop:5,width:'100%',padding:'3px',border:'none',
-                            borderRadius:4,background:'var(--green)',color:'white',
-                            fontSize:10,fontWeight:700,cursor:'pointer'}}>
-                          ✓ CV bestätigen
-                        </button>
-                      )}
                     </div>
                   );
                 })}
-                {colItems.length===0&&(
-                  <div style={{height:40,border:'1.5px dashed var(--border)',borderRadius:'var(--r)',
-                    display:'flex',alignItems:'center',justifyContent:'center',
-                    fontSize:10,color:'var(--border)'}}>
-                    Ablegen
-                  </div>
-                )}
               </div>
             </div>
           );
