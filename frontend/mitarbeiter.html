@@ -830,6 +830,23 @@ var PORTAL_LABELS = {client:'Client Portal', mitarbeiter:'Mitarbeiter Portal', h
 var PORTAL_URLS   = {client:'client.html', mitarbeiter:'mitarbeiter.html', hr:'hr.html'};
 var sb = window.supabase.createClient(SB_URL, SB_KEY);
 
+// Aktivitaets-Protokoll: CURRENT_USER wird in gateSession gesetzt. logActivity ist
+// fire-and-forget (kein await, Fehler geschluckt) — blockiert nie einen Vorgang.
+var CURRENT_USER = null;
+function logActivity(action, entity, id, label, details){
+  try{
+    var u = CURRENT_USER || {};
+    if(!u.id) console.warn('[activity_log] keine Identität (CURRENT_USER leer) — Eintrag wird von der RLS verworfen:', action, entity||'');
+    sb.from('activity_log').insert({
+      user_id: u.id || null, user_name: u.name || 'unbekannt',
+      action: action, entity: entity || null,
+      entity_id: (id != null) ? String(id) : null,
+      entity_label: label || null, details: details || null
+    }).then(function(r){ if(r && r.error) console.warn('[activity_log] insert error:', r.error.message); },
+            function(e){ console.warn('[activity_log] insert rejected:', (e&&e.message)||e); });
+  }catch(e){ console.warn('[activity_log]', (e&&e.message)||e); }
+}
+
 // ─── 25h: Employee Self-View direct Supabase read ────────────────────
 // Whitelist fuer Self-Edit: kein role_keys/status/hourly_rate/contract/etc.
 // email raus (Konsistenz mit auth.users), bank raus (HR/Payroll-Verification).
@@ -1195,7 +1212,7 @@ function passwordLogin(){
 }
 
 // Nach erfolgreichem Auth: Rolle + Portalzugriff pruefen, dann booten
-function gateSession(session){
+function gateSession(session, event){
   if(AUTH_GATING || !session || !session.user) return;
   AUTH_GATING = true;
   var authUser = session.user;
@@ -1204,6 +1221,7 @@ function gateSession(session){
     .then(function(r){
       if(r.error || !r.data){ AUTH_GATING=false; denied('Kein Benutzerprofil gefunden. Bitte an HR/Management wenden.'); return; }
       var au=r.data;
+      CURRENT_USER = { id: authUser.id, name: au.full_name || authUser.email }; // Identitaet fuers Protokoll
       if(!au.active){ AUTH_GATING=false; denied('Dieser Account ist deaktiviert.'); return; }
       if(!au.role_keys || !au.role_keys.length){ AUTH_GATING=false; denied('Noch keine Rolle zugewiesen. Bitte an HR/Management wenden.'); return; }
       if(au.must_change_pw){ AUTH_GATING=false; showForcePwDialog(session); return; }
@@ -1217,6 +1235,7 @@ function gateSession(session){
           buildME(au, authUser).then(function(me){
             if(!me){ AUTH_GATING=false; return; } // denied() wurde in buildME dispatched
             ME = me;
+            if(event==='SIGNED_IN') logActivity('login', 'session', authUser.id, au.full_name || authUser.email); // nur echte Logins
             buildPortalSwitcher(MY_PORTALS);
             boot();
             showWelcomePopup(ME && ME.first_name);
@@ -1488,7 +1507,8 @@ window.addEventListener('DOMContentLoaded',function(){
   // Bestehende Session wiederherstellen (INITIAL_SESSION) bzw. Magic-Link-Rueckkehr (SIGNED_IN).
   // setTimeout entkoppelt den Supabase-Aufruf vom Auth-Callback (empfohlen gg. Deadlocks).
   sb.auth.onAuthStateChange(function(event, session){
-    if(session && !AUTH_GATING){ setTimeout(function(){ gateSession(session); }, 0); }
+    if(session && session.user && (!CURRENT_USER || CURRENT_USER.id!==session.user.id)) CURRENT_USER = { id: session.user.id, name: session.user.email }; // Identität bei jeder Sitzung
+    if(session && !AUTH_GATING){ setTimeout(function(){ gateSession(session, event); }, 0); }
   });
 });
 

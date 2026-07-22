@@ -7843,6 +7843,7 @@ function OrgChart({projects, employees, orgCharts, setOrgCharts}){
 
 function PayrollView({employees, projects, showToast}){
   const [salaryData, setSalaryData] = useState(()=>{try{return JSON.parse(localStorage.getItem('jsr_payroll_v1')||'{}')}catch(e){return {};}});
+  useEffect(()=>{ const m={}; Object.entries(salaryData||{}).forEach(([month,arr])=>{ (arr||[]).forEach(r=>{ if(r&&r.emp_id) m[r.emp_id+'|'+(r.month||month)]=r; }); }); PAY_BY_KEY=m; },[salaryData]); // Snapshot fürs Protokoll-Diff
   const [payslips, setPayslips] = useState({});  // 27c: initial leer, Load in useEffect (Supabase-First)
   const [wheelBonusByEmp, setWheelBonusByEmp] = useState({});  // G4: Glücksrad-Summe je MA im selMonth
   const [activeTab, setActiveTab] = useState('current'); // current | archive
@@ -9655,6 +9656,13 @@ function SimpleShiftView({employees, projects, showToast}){
   const [staffModal,setStaffModal]=useState(false); // Sollbesetzung-Editor
   const [staffVer,setStaffVer]=useState(0);         // Re-Render nach Speichern
   const uidRef=React.useRef(null);
+  const shiftLogTimer=React.useRef(null);
+  // Grobes Protokoll: EIN Sammel-Eintrag pro Projekt/KW, debounced (nicht pro Zelle).
+  function noteShiftChange(){
+    if(shiftLogTimer.current) clearTimeout(shiftLogTimer.current);
+    const pn=(proj&&proj.name)||projId, k=isoWeek(weekStart);
+    shiftLogTimer.current=setTimeout(()=>{ logActivity('update','shift_assignment', projId+'|'+(effSkill||'all')+'|KW'+k, pn+' · KW '+k+(effSkill?' · '+effSkill:'')); }, 1500);
+  }
 
   useEffect(()=>{ (async()=>{try{const {data}=await sb.auth.getUser();if(data&&data.user)uidRef.current=data.user.id;}catch(e){}})(); },[]);
   useEffect(()=>{ try{if(projId)localStorage.setItem('jsr_shiftplan_proj',projId);}catch(e){} },[projId]);
@@ -9694,11 +9702,13 @@ function SimpleShiftView({employees, projects, showToast}){
     setCells(p=>({...p,[emp.id+'|'+ds]:cell})); setPop(null);
     await shiftUpsertCell(projId,effSkill,emp.id,ds,cell,uidRef.current);
     shiftBridgeLocal(projId,effSkill,emp.id,ds,cell);
+    noteShiftChange();
   }
   async function clearCell(emp,ds){
     setCells(p=>{const n={...p};delete n[emp.id+'|'+ds];return n;}); setPop(null);
     await shiftDeleteCell(projId,effSkill,emp.id,ds);
     shiftBridgeLocal(projId,effSkill,emp.id,ds,null);
+    noteShiftChange();
   }
   async function copyPrevWeek(){
     const prevDays=days.map(d=>addDays(d,-7));
@@ -9715,6 +9725,7 @@ function SimpleShiftView({employees, projects, showToast}){
     if(!todo.length){ showToast&&showToast('Nichts zu übernehmen','info'); return; }
     setCells(p=>{const n={...p};todo.forEach(t=>{n[t.emp.id+'|'+t.ds]=t.cell;});return n;});
     for(const t of todo){ await shiftUpsertCell(projId,effSkill,t.emp.id,t.ds,t.cell,uidRef.current); shiftBridgeLocal(projId,effSkill,t.emp.id,t.ds,t.cell); }
+    noteShiftChange();
     showToast&&showToast(todo.length+' Schichten aus Vorwoche übernommen','success');
   }
 
@@ -20898,6 +20909,98 @@ function WheelAdminView({employees}){
 // Abgleich per Name (bei Namensgleichheit per IBAN): Treffer → nur leere Felder ergänzen
 // (Bestand hat Hoheit); kein Treffer → neu mit fortlaufender staff_number (höchste +1, min. 1004).
 // Schreibt über saveEmployeeToDB (RLS via Admin-Session; extra-Overflow + Boolean-Coercion inkl.).
+// ═══ AKTIVITAETS-PROTOKOLL — Ansicht (nur management/hr/finance, RLS-gated) ═══
+function ActivityLogView({employees}){
+  const [rows,setRows]=useState(null);
+  const [err,setErr]=useState('');
+  const [fUser,setFUser]=useState('');
+  const [fType,setFType]=useState('all');   // all | login | change
+  const [fFrom,setFFrom]=useState('');
+  const [fTo,setFTo]=useState('');
+  const empById=React.useMemo(()=>{ const m={}; (employees||[]).forEach(e=>{ if(e&&e.id) m[e.id]=((e.first_name||'')+' '+(e.last_name||'')).trim(); }); return m; },[employees]);
+
+  async function load(){
+    setErr(''); setRows(null);
+    let q=sb.from('activity_log').select('*').order('created_at',{ascending:false}).limit(1000);
+    if(fFrom) q=q.gte('created_at', fFrom+'T00:00:00');
+    if(fTo)   q=q.lte('created_at', fTo+'T23:59:59');
+    const {data,error}=await q;
+    if(error){ setErr(error.message||'Zugriff verweigert'); setRows([]); return; }
+    setRows(data||[]);
+  }
+  useEffect(()=>{ load(); },[fFrom,fTo]);
+
+  const ACT={login:['Login','#0F5661'],create:['Angelegt','#059669'],update:['Geändert','#2563eb'],delete:['Gelöscht','#dc2626']};
+  const ENT={employee:'Mitarbeiter',project:'Projekt',payroll_input:'Lohn-Input',shift_assignment:'Schichtplan',session:'Login'};
+  const fmtDt=iso=>{ try{ const d=new Date(iso); const p=n=>(n<10?'0':'')+n; return p(d.getDate())+'.'+p(d.getMonth()+1)+'.'+d.getFullYear()+', '+p(d.getHours())+':'+p(d.getMinutes()); }catch(e){ return String(iso); } };
+
+  const users=React.useMemo(()=>{ const s=new Set(); (rows||[]).forEach(r=>{ if(r.user_name) s.add(r.user_name); }); return [...s].sort(); },[rows]);
+  const filtered=(rows||[]).filter(r=>{
+    if(fUser && r.user_name!==fUser) return false;
+    if(fType==='login' && r.action!=='login') return false;
+    if(fType==='change' && r.action==='login') return false;
+    return true;
+  });
+  const headOf=r=>{
+    if(r.action==='login') return 'Einloggen';
+    const ent=ENT[r.entity]||r.entity||'';
+    let label=r.entity_label||'';
+    if(r.entity==='payroll_input' && r.entity_id && empById[r.entity_id]) label=empById[r.entity_id]+(r.entity_label?' · '+r.entity_label.replace(/^Lohn /,''):'');
+    return ent+(label?' · '+label:'');
+  };
+  const detailLines=r=>{
+    const d=r.details; if(!d || typeof d!=='object') return [];
+    return Object.keys(d).map(k=>{
+      const v=d[k];
+      if(v && typeof v==='object' && ('alt' in v || 'neu' in v)){
+        const fmt=x=>(x==null||x==='')?'—':String(x);
+        return logLabel(k)+': '+fmt(v.alt)+' → '+fmt(v.neu);
+      }
+      return logLabel(k)+': '+(v==='geändert'?'geändert':String(v));
+    });
+  };
+
+  return (
+    <div style={{padding:'4px 2px 40px'}}>
+      <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',marginBottom:16}}>
+        <div style={{fontSize:20,fontWeight:800,marginRight:6}}>📋 Protokoll</div>
+        <select value={fType} onChange={e=>setFType(e.target.value)} className="form-select" style={{maxWidth:180}}>
+          <option value="all">Alle</option><option value="login">Nur Logins</option><option value="change">Nur Änderungen</option>
+        </select>
+        <select value={fUser} onChange={e=>setFUser(e.target.value)} className="form-select" style={{maxWidth:200}}>
+          <option value="">Alle Nutzer</option>
+          {users.map(u=><option key={u} value={u}>{u}</option>)}
+        </select>
+        <label style={{fontSize:12,color:'var(--muted)'}}>von <input type="date" value={fFrom} onChange={e=>setFFrom(e.target.value)} className="form-input" style={{width:150}}/></label>
+        <label style={{fontSize:12,color:'var(--muted)'}}>bis <input type="date" value={fTo} onChange={e=>setFTo(e.target.value)} className="form-input" style={{width:150}}/></label>
+        <button className="btn btn-sm" onClick={load}>Aktualisieren</button>
+      </div>
+      {rows===null ? <div className="empty">Lädt…</div>
+       : err ? <div className="empty" style={{color:'var(--red)'}}>⚠ {err}</div>
+       : filtered.length===0 ? <div className="empty">Keine Einträge im gewählten Filter.</div>
+       : (
+        <div className="card"><div className="card-body card-body-tight"><div className="table-wrap"><table>
+          <thead><tr><th>Datum/Uhrzeit</th><th>Nutzer</th><th>Aktion</th><th>Was</th></tr></thead>
+          <tbody>
+            {filtered.map(r=>{ const a=ACT[r.action]||[r.action,'#6b7280']; return (
+              <tr key={r.id}>
+                <td style={{whiteSpace:'nowrap',color:'var(--muted)',fontSize:12}}>{fmtDt(r.created_at)}</td>
+                <td style={{fontWeight:600,fontSize:12}}>{r.user_name}</td>
+                <td><span style={{fontSize:11,fontWeight:700,padding:'2px 8px',borderRadius:20,background:a[1]+'22',color:a[1]}}>{a[0]}</span></td>
+                <td style={{fontSize:12}}>
+                  <div>{headOf(r)}</div>
+                  {detailLines(r).map((ln,i)=><div key={i} style={{fontSize:11,color:'var(--muted)',marginTop:1}}>{ln}</div>)}
+                </td>
+              </tr>
+            ); })}
+          </tbody>
+        </table></div></div></div>
+       )}
+      <div style={{fontSize:11,color:'var(--muted)',marginTop:8}}>Bis 1000 Einträge (nach Zeitraum). Unveränderlich · nur für Management/HR/Finance sichtbar.</div>
+    </div>
+  );
+}
+
 function MaImportView({projects}){
   const PROJ_MAP={proj_hc:'proj_hc_a1b2c3d4', proj_giga:'proj_gn_e5f6a7b8', DGN:'proj_gn_e5f6a7b8',
     fabletics:'proj_fb_a3b4c5d6', proj_fb:'proj_fb_a3b4c5d6', HLX:'proj_cd_c9d0e1f2', proj_cd:'proj_cd_c9d0e1f2'};
@@ -24745,6 +24848,7 @@ const PROJECT_COLS = new Set([
 async function saveProjectToDB(project){
   if(!project||!project.id){ console.error('[proj] saveProjectToDB: project.id fehlt'); return false; }
   const pid = project.id;
+  const _detail = diffLog(PROJ_BY_ID[pid], project); // vor dem Upsert (alter State)
   const clean = v => (v === '' ? null : v);
   // 1. Parent-upsert (Allowlist, '' -> null)
   const payload = {};
@@ -24801,13 +24905,15 @@ async function saveProjectToDB(project){
       if(ins.error){ console.error('[proj] insert '+table, ins.error); return false; }
     }
   }
+  logActivity('update', 'project', pid, project.name || pid, _detail);
   return true;
 }
 // Etappe 3b: Projekt loeschen. FK-Cascade (on delete cascade) raeumt alle
 // Kindtabellen mit. Fehler -> false.
-async function deleteProjectFromDB(id){
+async function deleteProjectFromDB(id, label){
   const {error} = await sb.from('projects').delete().eq('id', id);
   if(error){ console.error('[proj] deleteProjectFromDB', error); return false; }
+  logActivity('delete', 'project', id, label || id);
   return true;
 }
 
@@ -25120,6 +25226,7 @@ async function loadPayrollInputsFromDB(){
 }
 async function savePayrollInputToDB(rec, silent){
   if(!rec||!rec.emp_id||!rec.month) return false;
+  const _payOld = PAY_BY_KEY[rec.emp_id+'|'+rec.month]; // alter Stand vor dem Upsert
   const num=v=>(v===''||v==null)?null:Number(v);
   const payload={
     emp_id:rec.emp_id, month:rec.month,
@@ -25132,7 +25239,14 @@ async function savePayrollInputToDB(rec, silent){
   };
   const {error}=await sb.from('payroll_inputs').upsert(payload,{onConflict:'emp_id,month'});
   if(error){ console.error('[pay] savePayrollInputToDB', error); if(!silent)cfgToast(false); return false; }
-  if(!silent) cfgToast(true); return true;
+  if(!silent){
+    // Bei Geld nachvollziehbar: geänderte Werte mit Vorher/Nachher (kein Extra-Read).
+    const keys=['referral_bonus','target_bonus','special_bonus','deduction_tax','deduction_social','deduction_other','overtime_hours','saturday_hours','sunday_hours','holiday_hours','night_hours'];
+    const pd={}; keys.forEach(k=>{ const a=_payOld?_payOld[k]:undefined; const b=payload[k]; if(JSON.stringify(a===undefined?null:a)!==JSON.stringify(b===undefined?null:b)) pd[k]={alt:(a===undefined?null:a),neu:(b===undefined?null:b)}; });
+    logActivity('update', 'payroll_input', rec.emp_id, 'Lohn '+rec.month, Object.keys(pd).length?pd:null);
+    cfgToast(true);
+  }
+  return true;
 }
 
 // Etappe RK2: Raumkosten (rk_monthly + rk_overhead) aus Supabase. select('*') + JS-Gruppierung.
@@ -25603,8 +25717,66 @@ function visibleExtraWarn(entity, field){
     setTimeout(function(){ try{ el.remove(); }catch(e){} }, 8000);
   }catch(e){}
 }
+// ── Aktivitaets-Protokoll ────────────────────────────────────────────────────
+// CURRENT_USER wird beim Login/Session-Restore in gate() gesetzt (id + Klartextname).
+// logActivity ist FIRE-AND-FORGET: kein await, Fehler werden geschluckt — das
+// Protokollieren darf den eigentlichen Vorgang NIE blockieren oder verlangsamen.
+let CURRENT_USER = null;
+function logActivity(action, entity, id, label, details){
+  try{
+    const u = CURRENT_USER || {};
+    if(!u.id) console.warn('[activity_log] keine Identität (CURRENT_USER leer) — Eintrag wird von der RLS verworfen:', action, entity||'');
+    sb.from('activity_log').insert({
+      user_id: u.id || null,
+      user_name: u.name || 'unbekannt',
+      action: action,
+      entity: entity || null,
+      entity_id: (id != null) ? String(id) : null,
+      entity_label: label || null,
+      details: details || null,
+    }).then(r=>{ if(r && r.error) console.warn('[activity_log] insert error:', r.error.message); },
+            e=>{ console.warn('[activity_log] insert rejected:', (e&&e.message)||e); });
+  }catch(e){ console.warn('[activity_log]', (e&&e.message)||e); }
+}
+
+// ── Feld-Diff fürs Protokoll — gegen den geladenen Frontend-State, KEIN Extra-Read ──
+let EMP_BY_ID = {};   // vom App-Effect aus dem employees-State gepflegt
+let PROJ_BY_ID = {};  // aus dem projects-State
+let PAY_BY_KEY = {};  // aus salaryData (PayrollView), Key emp_id|month
+// EINSCHLUSSLISTE: NUR diese operativen Felder werden mit Klartext (alt/neu) protokolliert
+// — hier braucht man den alten Wert zur Rekonstruktion. ALLE anderen Felder (auch künftige,
+// die dazukommen) → nur "geändert" ohne Werte. Grund: das Protokoll ist unveränderlich und
+// überdauert den Mitarbeiter-Datensatz; Personendaten im Klartext wären ein Löschkonzept-Problem.
+const LOG_PLAINTEXT = new Set(['vacation_days_quota','status','position','project_id','project_skill','location','work_model','work_hours','weekly_hours','work_saturday','work_sunday','work_holidays','work_split','shift_earliest','shift_latest','overtime_allowed']);
+// Rauschen/technisch/Arrays → gar nicht diffen.
+const LOG_SKIP = new Set(['id','created_at','updated_at','extra','absences','audios','videos','warnings','project_assignments','bonuses','referrals','quality_ratings','hardware','photo_url','photo_color','staff_number_old','import_source','skills','project_profiles','trainings']);
+const _logEmpty = v => v==null || v==='';
+// Diff old→new ueber die Keys von newObj. Objekte/Arrays → nur "geändert".
+function diffLog(oldObj, newObj){
+  if(!oldObj || !newObj) return null;
+  const changed = {};
+  Object.keys(newObj).forEach(k=>{
+    if(LOG_SKIP.has(k)) return;
+    const a = oldObj[k], b = newObj[k];
+    if(_logEmpty(a) && _logEmpty(b)) return;
+    if(JSON.stringify(a===undefined?null:a) === JSON.stringify(b===undefined?null:b)) return;
+    if(LOG_PLAINTEXT.has(k) && !(a && typeof a==='object') && !(b && typeof b==='object')){
+      changed[k] = { alt: a===undefined?null:a, neu: b===undefined?null:b };
+    } else {
+      changed[k] = 'geändert';   // alles außerhalb der Einschlussliste → automatisch auf der sicheren Seite
+    }
+  });
+  return Object.keys(changed).length ? changed : null;
+}
+// Deutsche Feldnamen fuer die Protokoll-Anzeige.
+const LOG_LABELS = { vacation_days_quota:'Urlaubstage', vacation_days:'Urlaubstage', position:'Position', status:'Status', location:'Standort', project_id:'Projekt', project_skill:'Skill', primary_skill:'Skill', work_hours:'Arbeitsstunden/Tag', work_model:'Arbeitsmodell', phone:'Telefon', email:'E-Mail', city:'Stadt', first_name:'Vorname', last_name:'Nachname', birthday:'Geburtstag', gender:'Geschlecht', bank:'Bankdaten', id_number:'Ausweisnummer', fixed_salary:'Gehalt', hourly_rate:'Stundenlohn', monthly_bonus:'Monatsbonus', contract:'Vertragsdaten', hire_date:'Eintritt', termination_date:'Austritt', shift_earliest:'Frühester Dienst', shift_latest:'Spätester Dienst', work_saturday:'Arbeitet Samstag', work_sunday:'Arbeitet Sonntag', work_holidays:'Arbeitet Feiertage', work_split:'Split erlaubt', work_weekend:'Arbeitet Wochenende', allowed_shifts:'Erlaubte Schichten', notes:'Notizen', name:'Name', status_reason:'Grund', language_level:'Sprachniveau', salary_type:'Lohnart', overtime_allowed:'Überstunden erlaubt', deduct_missing:'Fehlzeiten-Abzug',
+  referral_bonus:'Referral-Bonus', target_bonus:'Ziel-Bonus', special_bonus:'Sonderbonus', deduction_tax:'Abzug Steuer', deduction_social:'Abzug Sozial', deduction_other:'Abzug Sonstige', overtime_hours:'Überstunden', saturday_hours:'Samstag-Std.', sunday_hours:'Sonntag-Std.', holiday_hours:'Feiertag-Std.', night_hours:'Nacht-Std.' };
+function logLabel(k){ return LOG_LABELS[k] || k; }
+
 async function saveEmployeeToDB(emp){
   if(!emp) throw new Error('emp required');
+  const _wasNew = !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(emp.id||''));
+  const _detail = _wasNew ? null : diffLog(EMP_BY_ID[emp.id], emp); // vor dem Upsert erfassen (alter State)
   mapLegacyEmployeeFields(emp); // 25g: Legacy-Namen → Master-Namen vor Payload-Build
   const uuidRx=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const payload = {};
@@ -25647,12 +25819,14 @@ async function saveEmployeeToDB(emp){
   if(!uuidRx.test(String(emp.id||''))) delete payload.id;
   const {data, error} = await sb.from('employees').upsert(payload).select().single();
   if(error) throw error;
+  logActivity(_wasNew?'create':'update', 'employee', data.id, ((data.first_name||'')+' '+(data.last_name||'')).trim(), _detail);
   return data;
 }
-async function deleteEmployeeFromDB(id){
+async function deleteEmployeeFromDB(id, label){
   if(!id) throw new Error('id required');
   const {error} = await sb.from('employees').delete().eq('id', id);
   if(error) throw error;
+  logActivity('delete', 'employee', id, label || id);
   return true;
 }
 function subscribeEmployees(setter){
@@ -27470,7 +27644,7 @@ function App(){
   }
 
   // Nach erfolgreichem Auth: Rolle + Portalzugriff (hr) pruefen, dann einloggen
-  async function gate(session){
+  async function gate(session, event){
     if(gatingRef.current || !session || !session.user) return;
     gatingRef.current = true;
     try{
@@ -27479,6 +27653,8 @@ function App(){
       if(error || !au){ gatingRef.current=false; setPortalDenied(false); setAuthMsg('Kein Benutzerprofil gefunden. Bitte an HR/Management wenden.'); return; }
       if(!au.active){ gatingRef.current=false; setPortalDenied(false); setAuthMsg('Dieser Account ist deaktiviert.'); return; }
       if(!au.role_keys || !au.role_keys.length){ gatingRef.current=false; setPortalDenied(false); setAuthMsg('Noch keine Rolle zugewiesen. Bitte an HR/Management wenden.'); return; }
+      // Identitaet fuer das Aktivitaets-Protokoll cachen (auch bei Session-Restore).
+      CURRENT_USER = { id: session.user.id, name: au.full_name || session.user.email };
       recordKnownAppUser({email:session.user.email, name:au.full_name, roles:au.role_keys, staff_number:au.staff_number});
       const hrRoles=loadHrAccessRoles();
       if(!(au.role_keys||[]).some(function(r){return hrRoles.indexOf(r)>=0;})){ gatingRef.current=false; setHrDenied(session.user.email); return; }
@@ -27499,6 +27675,7 @@ function App(){
       };
       // Pflicht-Passwortwechsel beim Erstlogin: erst Dialog, dann handleLogin.
       if(au.must_change_pw){ gatingRef.current=false; setPendingPw({userId: session.user.id, login: loginPayload}); return; }
+      if(event==='SIGNED_IN') logActivity('login', 'session', session.user.id, au.full_name || session.user.email); // nur echte Logins, nicht Session-Restore
       handleLogin(loginPayload);
       // 4a-3: Login-Auto-Sync entfernt — GDoc-Sync nur manuell.
     }catch(e){ gatingRef.current=false; setPortalDenied(false); setAuthMsg('Verbindungsfehler beim Laden des Profils.'); }
@@ -27508,7 +27685,10 @@ function App(){
     // Session-Restore (INITIAL_SESSION) + Magic-Link-Rueckkehr (SIGNED_IN).
     // setTimeout entkoppelt den Supabase-Aufruf vom Auth-Callback (empfohlen).
     const {data:sub} = sb.auth.onAuthStateChange((event, session)=>{
-      if(session && !gatingRef.current){ setTimeout(()=>gate(session), 0); }
+      // Identität fürs Protokoll bei JEDER Sitzung setzen (INITIAL_SESSION, SIGNED_IN,
+      // TOKEN_REFRESHED …), nicht nur beim frischen Login. gate() verfeinert den Namen.
+      if(session && session.user && (!CURRENT_USER || CURRENT_USER.id!==session.user.id)) CURRENT_USER = { id: session.user.id, name: session.user.email };
+      if(session && !gatingRef.current){ setTimeout(()=>gate(session, event), 0); }
     });
     return ()=>{ try{ sub.subscription.unsubscribe(); }catch(e){} };
   }, []);
@@ -27522,6 +27702,7 @@ function App(){
     catch(e){return PROJECTS_INIT;}
   });
   useEffect(()=>{localStorage.setItem('jsr_projects_v1',JSON.stringify(projects));},[projects]);
+  useEffect(()=>{ const m={}; (projects||[]).forEach(p=>{ if(p&&p.id) m[p.id]=p; }); PROJ_BY_ID=m; },[projects]); // Snapshot fürs Protokoll-Diff
 
   useEffect(()=>{
     if(!localStorage.getItem('jsr_projects_v1')||JSON.parse(localStorage.getItem('jsr_projects_v1')||'[]').length===0){
@@ -27592,6 +27773,7 @@ function App(){
 
   // 25a: Employees kommen aus Supabase (Load + Realtime via useEffect unten)
   const [employees, setEmployees] = useState([]);
+  useEffect(()=>{ const m={}; (employees||[]).forEach(e=>{ if(e&&e.id) m[e.id]=e; }); EMP_BY_ID=m; },[employees]); // Snapshot fürs Protokoll-Diff
   const [showSyncFallbackBanner, setShowSyncFallbackBanner] = useState(false);
   // 25a: Client-Accounts analog
   const [clients, setClients] = useState([]);
@@ -27726,7 +27908,7 @@ function App(){
     );
   }
 
-  const hasAccess = (key) => { try{ const always=['start','daily_tasks','shiftplan','datacheck','locations','spaces','payroll','showcase','timetracking','superadmin','tabperms','aisettings','cockpits','hraccess','appusers','aiendpoint','cvsync','wissen_system']; if(always.includes(key)) return true; return !team||(team.access==='all'||team.access.includes(key));}catch(e){return true;} };
+  const hasAccess = (key) => { try{ const always=['start','daily_tasks','shiftplan','activity_log','datacheck','locations','spaces','payroll','showcase','timetracking','superadmin','tabperms','aisettings','cockpits','hraccess','appusers','aiendpoint','cvsync','wissen_system']; if(always.includes(key)) return true; return !team||(team.access==='all'||team.access.includes(key));}catch(e){return true;} };
 
   async function saveEmployee(form){
     let saved = form;
@@ -27949,6 +28131,7 @@ function App(){
       {key:'cockpits',label:'Cockpits',icon:'▦'},
       {key:'hraccess',label:'HR-Zugriff',icon:'🛡'},
       {key:'appusers',label:'App-User',icon:'👤'},
+      {key:'activity_log',label:'Protokoll',icon:'📋'},
     ]},
     {sec:'Akademie', items:[
       {key:'skillmatrix',  label:'Skill Matrix',  icon:'🎯'},
@@ -27973,6 +28156,7 @@ function App(){
       'cockpit':'<path fill-rule="evenodd" d="M3 6a3 3 0 0 1 3-3h2.25a3 3 0 0 1 3 3v2.25a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V6Zm9.75 0a3 3 0 0 1 3-3H18a3 3 0 0 1 3 3v2.25a3 3 0 0 1-3 3h-2.25a3 3 0 0 1-3-3V6ZM3 15.75a3 3 0 0 1 3-3h2.25a3 3 0 0 1 3 3V18a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3v-2.25Zm9.75 0a3 3 0 0 1 3-3H18a3 3 0 0 1 3 3V18a3 3 0 0 1-3 3h-2.25a3 3 0 0 1-3-3v-2.25Z" clip-rule="evenodd"/>',
       'start':'<path d="M11.47 3.841a.75.75 0 0 1 1.06 0l8.69 8.69a.75.75 0 1 0 1.06-1.061l-8.689-8.69a2.25 2.25 0 0 0-3.182 0l-8.69 8.69a.75.75 0 1 0 1.061 1.06l8.69-8.689Z"/><path d="m12 5.432 8.159 8.159c.03.03.06.058.091.086v6.198c0 1.035-.84 1.875-1.875 1.875H15a.75.75 0 0 1-.75-.75v-4.5a.75.75 0 0 0-.75-.75h-3a.75.75 0 0 0-.75.75V21a.75.75 0 0 1-.75.75H5.625a1.875 1.875 0 0 1-1.875-1.875v-6.198a2.29 2.29 0 0 0 .091-.086L12 5.432Z"/>',
       'daily_tasks':'<path fill-rule="evenodd" d="M7.502 6h7.128A3.375 3.375 0 0 1 18 9.375v9.375a3 3 0 0 0 3-3V6.108c0-1.505-1.125-2.811-2.664-2.94a48.972 48.972 0 0 0-.673-.05A3 3 0 0 0 15 1.5h-1.5a3 3 0 0 0-2.663 1.618c-.225.015-.45.032-.673.05C8.662 3.295 7.554 4.542 7.502 6ZM13.5 3A1.5 1.5 0 0 0 12 4.5h4.5A1.5 1.5 0 0 0 15 3h-1.5Z" clip-rule="evenodd"/><path fill-rule="evenodd" d="M3 9.375C3 8.339 3.84 7.5 4.875 7.5h9.75c1.036 0 1.875.84 1.875 1.875v11.25c0 1.035-.84 1.875-1.875 1.875h-9.75A1.875 1.875 0 0 1 3 20.625V9.375Zm7.06 3.316a.75.75 0 1 0-1.12-.997l-2.095 2.35-.71-.71a.75.75 0 0 0-1.06 1.061l1.25 1.25a.75.75 0 0 0 1.09-.033l2.646-2.921Z" clip-rule="evenodd"/>',
+      'activity_log':'<path fill-rule="evenodd" d="M2.625 6.75a1.125 1.125 0 1 1 2.25 0 1.125 1.125 0 0 1-2.25 0Zm4.875 0A.75.75 0 0 1 8.25 6h12a.75.75 0 0 1 0 1.5h-12a.75.75 0 0 1-.75-.75ZM2.625 12a1.125 1.125 0 1 1 2.25 0 1.125 1.125 0 0 1-2.25 0ZM7.5 12a.75.75 0 0 1 .75-.75h12a.75.75 0 0 1 0 1.5h-12A.75.75 0 0 1 7.5 12Zm-4.875 5.25a1.125 1.125 0 1 1 2.25 0 1.125 1.125 0 0 1-2.25 0Zm4.875 0a.75.75 0 0 1 .75-.75h12a.75.75 0 0 1 0 1.5h-12a.75.75 0 0 1-.75-.75Z" clip-rule="evenodd"/>',
       'datacheck':'<path fill-rule="evenodd" d="M7.502 6h7.128A3.375 3.375 0 0 1 18 9.375v9.375a3 3 0 0 0 3-3V6.108c0-1.505-1.125-2.811-2.664-2.94a48.972 48.972 0 0 0-.673-.05A3 3 0 0 0 15 1.5h-1.5a3 3 0 0 0-2.663 1.618c-.225.015-.45.032-.673.05C8.662 3.295 7.554 4.542 7.502 6ZM13.5 3A1.5 1.5 0 0 0 12 4.5h4.5A1.5 1.5 0 0 0 15 3h-1.5Z" clip-rule="evenodd"/><path fill-rule="evenodd" d="M3 9.375C3 8.339 3.84 7.5 4.875 7.5h9.75c1.036 0 1.875.84 1.875 1.875v11.25c0 1.035-.84 1.875-1.875 1.875h-9.75A1.875 1.875 0 0 1 3 20.625V9.375Zm9.586 4.594a.75.75 0 0 0-1.172-.938l-2.476 3.096-.908-.907a.75.75 0 0 0-1.06 1.06l1.5 1.5a.75.75 0 0 0 1.116-.062l3-3.75Z" clip-rule="evenodd"/>',
       'productivity':'<path fill-rule="evenodd" d="M15.22 6.268a.75.75 0 0 1 .968-.431l5.942 2.28a.75.75 0 0 1 .431.97l-2.28 5.94a.75.75 0 1 1-1.4-.537l1.63-4.251-1.086.484a11.2 11.2 0 0 0-5.45 5.173.75.75 0 0 1-1.199.19L9 12.312l-6.22 6.22a.75.75 0 0 1-1.06-1.061l6.75-6.75a.75.75 0 0 1 1.06 0l3.606 3.606a12.695 12.695 0 0 1 5.68-4.974l1.086-.483-4.251-1.632a.75.75 0 0 1-.432-.97Z" clip-rule="evenodd"/>',
       'performance':'<path fill-rule="evenodd" d="M5.166 2.621v.858c-1.035.148-2.059.33-3.071.543a.75.75 0 0 0-.584.859 6.753 6.753 0 0 0 6.138 5.6 6.73 6.73 0 0 0 2.743 1.346A6.707 6.707 0 0 1 9.279 15H8.54c-1.036 0-1.875.84-1.875 1.875V19.5h-.75a2.25 2.25 0 0 0-2.25 2.25c0 .414.336.75.75.75h15a.75.75 0 0 0 .75-.75 2.25 2.25 0 0 0-2.25-2.25h-.75v-2.625c0-1.036-.84-1.875-1.875-1.875h-.739a6.706 6.706 0 0 1-1.112-3.173 6.73 6.73 0 0 0 2.743-1.347 6.753 6.753 0 0 0 6.139-5.6.75.75 0 0 0-.585-.858 47.077 47.077 0 0 0-3.07-.543V2.62a.75.75 0 0 0-.658-.744 49.22 49.22 0 0 0-6.093-.377c-2.063 0-4.096.128-6.093.377a.75.75 0 0 0-.657.744Zm0 2.629c0 1.196.312 2.32.857 3.294A5.266 5.266 0 0 1 3.16 5.337a45.6 45.6 0 0 1 2.006-.343v.256Zm13.5 0v-.256c.674.1 1.343.214 2.006.343a5.265 5.265 0 0 1-2.863 3.207 6.72 6.72 0 0 0 .857-3.294Z" clip-rule="evenodd"/>',
@@ -28064,7 +28248,7 @@ function App(){
           {allNavSections.map(({sec, items}) => (
             <React.Fragment key={sec}>
               <div className="nav-section">{sec}</div>
-              {items.filter(n=>hasAccess(n.key)).map(n=>(
+              {items.filter(n=>hasAccess(n.key) && (n.key!=='activity_log' || ((team.role_keys||[]).some(r=>r==='management'||r==='hr'||r==='finance')))).map(n=>(
                 <div key={n.key} className={`ni ${view===n.key?'active':''}`} onClick={()=>{setView(n.key);if(isMobile())setSidebarOpen(false);}}>
                   <span style={{width:18,height:18,flexShrink:0,display:'inline-flex',alignItems:'center',justifyContent:'center'}} dangerouslySetInnerHTML={{__html:getIcon(n.key)}} />
                   <span className="ni-label">{n.label}</span>
@@ -28129,6 +28313,7 @@ function App(){
           {view==='cockpit'&&<Cockpit employees={employees} projects={projects} team={team} plans={plans} forecast={forecast} onAbsence={e=>setAbsenceModal(e)} onNavigate={dqNavigate}/>}
           {view==='datacheck'&&<DataQualityPanel employees={employees} projects={projects} plans={plans} onNavigate={dqNavigate}/>}
           {view==='wissen_system'&&<SystemManualView hasAccess={hasAccess}/>}
+          {view==='activity_log'&&<ActivityLogView employees={employees}/>}
           {view==='productivity'&&<ProductivityView employees={employees} projects={projects} setEmployees={setEmployees}/>}
       {view==='performance'&&<PerformanceView employees={employees} projects={projects}/>}
           {view==='mein-plan'&&isEmpUser&&myEmployee&&(
