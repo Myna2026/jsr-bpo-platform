@@ -855,7 +855,7 @@ var SB_URL = 'https://msdiyjxckmpvuomnhvjp.supabase.co';
 var SB_KEY = 'sb_publishable_exKYOG6Znhj_JlO0v6erQQ_q0HWWiyl';
 var PORTAL = 'mitarbeiter';                          // dieses Portal
 var PORTAL_LABELS = {client:'Client Portal', mitarbeiter:'Mitarbeiter Portal', hr:'HR Portal'};
-var PORTAL_URLS   = {client:'client.html', mitarbeiter:'mitarbeiter.html', hr:'hr.html'};
+var PORTAL_URLS   = {client:'https://client.tive360.de/', mitarbeiter:'https://mitarbeiter.tive360.de/', hr:'https://hr.tive360.de/'};
 var sb = window.supabase.createClient(SB_URL, SB_KEY);
 
 // Aktivitaets-Protokoll: CURRENT_USER wird in gateSession gesetzt. logActivity ist
@@ -904,23 +904,9 @@ function loadOwnEmployeeFromDB(employeeId, staffNumberFallback){
   });
 }
 
-function _buildMeFromLocalStorageOrDeny(au, authUser, denyMsg){
-  var emps = getEmployees();
-  var match = null;
-  if(au.staff_number){
-    for(var i=0;i<emps.length;i++){ if(String(emps[i].staff_number)===String(au.staff_number)){ match=emps[i]; break; } }
-  }
-  if(match){
-    console.warn('[DEPRECATED-25h] Supabase employees leer/unavailable → jsr_emp_v3 Fallback. Migration ausfuehren. (Removal ~2026-08-08)');
-    showSelfFallbackBannerOnBoot = true;
-    var me = Object.assign({}, match);
-    me.email = authUser.email;
-    me.role_keys = au.role_keys || [];
-    return me;
-  }
-  denied(denyMsg);
-  return null;
-}
+// _buildMeFromLocalStorageOrDeny entfernt: kein localStorage-Fallback mehr.
+// Er loeste Konten ohne employee_id/staff_number auf jsr_emp_v3-Seed-Testdaten auf
+// (erfundene Personen). Ohne DB-Datensatz gibt es jetzt keine Identitaet (siehe buildME).
 
 function saveOwnProfileToDB(employeeId, fields){
   if(!employeeId) return Promise.reject(new Error('employee_id required'));
@@ -1266,6 +1252,7 @@ function gateSession(session, event){
             if(event==='SIGNED_IN') logActivity('login', 'session', authUser.id, au.full_name || authUser.email); // nur echte Logins
             buildPortalSwitcher(MY_PORTALS);
             boot();
+            dmInitChat();   // Team-Chat: DB laden + Realtime + localStorage-Altlasten entfernen
             showWelcomePopup(ME && ME.first_name);
             // 25h: Realtime auf eigene Row — HR-Aenderungen (absences, warnings, status) live
             subscribeOwnEmployee(ME.id, function(updated){
@@ -1335,9 +1322,9 @@ function gateSession(session, event){
 
 // ME aus Auth-User + app_users bauen (ggf. mit lokalem Mitarbeiter-Datensatz mergen)
 function buildME(au, authUser){
-  // 25h: Prioritaet — 1) Supabase via employee_id, 2) via staff_number,
-  //                   3) localStorage-Fallback (mit Banner), 4) denied().
-  //     Bei Netzwerk-Error: erst localStorage probieren, dann milder denied().
+  // Identitaet NUR aus Supabase: 1) via employee_id, 2) via staff_number.
+  // KEIN localStorage-Fallback mehr (loeste zuvor auf Seed-Testdaten auf → fremde Personen).
+  // Ohne aufgeloesten Datensatz: keine Identitaet, klare Meldung, kein Schreibpfad.
   return loadOwnEmployeeFromDB(au.employee_id, au.staff_number).then(function(dbEmp){
     if(dbEmp){
       var me = Object.assign({}, dbEmp);
@@ -1345,12 +1332,12 @@ function buildME(au, authUser){
       me.role_keys = au.role_keys || [];
       return me;
     }
-    return _buildMeFromLocalStorageOrDeny(au, authUser,
-      'Ihr Konto ist noch nicht mit einem Mitarbeiter-Datensatz verlinkt. Bitte wenden Sie sich an HR (admin@tive360.de), um Ihr Portal freizuschalten.');
+    denied('Kein Mitarbeiter-Datensatz verknüpft — bitte im HR-Portal verknüpfen lassen.');
+    return null;
   }).catch(function(err){
     console.error('[25h] buildME network error', err);
-    return _buildMeFromLocalStorageOrDeny(au, authUser,
-      'Verbindungsfehler und kein lokaler Fallback verfuegbar. Bitte spaeter erneut versuchen.');
+    denied('Verbindungsfehler beim Laden deines Mitarbeiter-Datensatzes. Bitte später erneut versuchen.');
+    return null;
   });
 }
 
@@ -1612,8 +1599,38 @@ function getPlan(empId,yr,mo){
   return {};
 }
 
+// Urlaubsanspruch — DIESELBE Regel wie hr.html calcVacationEntitlement (1. Jahr anteilig ab Monat
+// nach Eintritt, Folgejahr voll, Austrittsjahr anteilig, contract.start→hire_date, halbe Tage).
+function vacQuotaFor(emp){
+  // ⚠ ZWEITE KOPIE dieser Regel in frontend/hr.html → calcVacationEntitlement (ca. Zeile 1685).
+  //   Bewusste Duplikation ueber Dateigrenzen (zwei getrennte Apps). Aenderungen an der Anspruchsregel
+  //   IMMER in BEIDEN Dateien vornehmen, sonst laufen HR- und MA-Portal auseinander.
+  try{
+    var startDate=(emp&&emp.contract&&emp.contract.start)||(emp&&emp.contract_start)||(emp&&emp.hire_date)||'';
+    if(!startDate) return 0;
+    var cfg=JSON.parse(localStorage.getItem('jsr_vacation_cfg')||'null')||{year1_days:18,year2_days:20,seniority:[]};
+    var y1=Number(cfg.year1_days)||18, y2=Number(cfg.year2_days)||20;
+    var start=new Date(startDate), startYear=start.getFullYear(), startMonth=start.getMonth()+1;
+    var refYear=new Date().getFullYear();
+    var termStr=(emp.termination_date||emp.employment_end||emp.terminated_at||'');
+    var term=termStr?new Date(termStr):null, termYear=term?term.getFullYear():null, termMonth=term?term.getMonth()+1:12;
+    if(refYear<startYear) return 0;
+    if(termYear!=null && refYear>termYear) return 0;
+    var isFirstYear=(refYear===startYear);
+    var firstMonth=isFirstYear?(startMonth+1):1;
+    var lastMonth=(termYear===refYear)?termMonth:12;
+    var months=Math.max(0,lastMonth-firstMonth+1);
+    var baseDays=isFirstYear?y1:y2;
+    if(!isFirstYear){
+      var yos=refYear-startYear;
+      (cfg.seniority||[]).slice().sort(function(a,b){return b.years_from-a.years_from;}).some(function(s){ if(yos>=(Number(s.years_from)||0)){ baseDays+=(Number(s.extra_days)||0); return true; } return false; });
+    }
+    var prorate=(isFirstYear||termYear===refYear)?(months/12):1;
+    return Math.round(baseDays*prorate*2)/2;
+  }catch(e){ return 0; }
+}
 function calcVacation(){
-  var quota=parseFloat(ME.vacation_days||ME.vacation_days_quota||20);
+  var quota=vacQuotaFor(ME);
   var carryover=parseFloat(ME.vacation_carryover_2025||0);
   var ytd=parseFloat(ME.vacation_taken_ytd||0);
   var thisYr=new Date().getFullYear();
@@ -1661,9 +1678,10 @@ function calcWorkedStats(){
   var todayIso=isoDate(new Date()),yr=new Date().getFullYear(),mo=new Date().getMonth()+1;
   var plan=getPlan(ME.id,yr,mo);
   var HFLAT=getAdminHolidays();
-  var canSat=ME.work_saturday===true||ME.work_saturday==='yes';
-  var canSun=ME.work_sunday===true||ME.work_sunday==='yes';
-  var canHol=ME.work_holidays===true||ME.work_holidays==='yes';
+  // Verfuegbarkeit invertiert: nicht gesetzt = planbar, nur explizit false/'no' sperrt.
+  var canSat=!(ME.work_saturday===false||ME.work_saturday==='no');
+  var canSun=!(ME.work_sunday===false||ME.work_sunday==='no');
+  var canHol=!(ME.work_holidays===false||ME.work_holidays==='no');
   var wH=parseFloat(ME.work_hours||8);
   var workedH=0,workDaysTotal=0,passedCount=0,planFuture=0;
   var d=new Date(yr,mo-1,1);
@@ -2024,7 +2042,7 @@ function vacContext(){
   var ctx={},mine=VACREQS_ME;   // Block 2: eigene Anträge aus Supabase
   mine.forEach(function(r){if(!r.from||!r.to||r.status==='rejected')return;var st=r.status==='approved'?'approved':'pending';vacEachDay(r.from,r.to,function(iso){if(ctx[iso]!=='approved')ctx[iso]=st;});});
   var abs = ME.absences || [];  // 25h+25i: ME ist Self-DB-Row, kein jsr_emp_v3-Fallback mehr
-  abs.forEach(function(a){if(!a.from||!a.to)return;vacEachDay(a.from,a.to,function(iso){ctx[iso]='approved';});});
+  abs.forEach(function(a){if(!a)return;var from=a.from||a.start||a.date,to=a.to||a.end||a.date;if(!from)return;vacEachDay(from,to||from,function(iso){ctx[iso]='approved';});});   // beide Formate (Einzeltag + Zeitraum)
   return ctx;
 }
 function renderVacMonth(y,m,today,todayIso,ctx){
@@ -2276,21 +2294,99 @@ function renderPerf(){
 // TEAM/CHAT VIEW
 // ═══════════════════════════════════════════════════════════════════════════
 // DM Store-Helfer
+// ═══ Team-Chat Datenlayer — Supabase (dm_threads/dm_participants/dm_messages/dm_reads)
+// In-Memory-Cache: die synchronen Accessors dmLoadThreads()/dmLoadMessages() bleiben,
+// liefern aber aus dem Cache -> gesamte Render-UI unveraendert. Geladen per DB, frisch
+// gehalten per Realtime. Identitaet = ME.id (employee_id); ohne -> keine Teilnahme.
 function dmThreadId(a,b){return [a,b].sort().join('_');}
-function dmLoadThreads(){var t=ls('jsr_dm_threads_v1');return Array.isArray(t)?t:[];}
-function dmSaveThreads(t){lss('jsr_dm_threads_v1',t);}
-function dmLoadMessages(){var m=ls('jsr_dm_messages_v1');return Array.isArray(m)?m:[];}
-function dmSaveMessages(m){lss('jsr_dm_messages_v1',m);}
-function dmGetThread(otherId){
-  var tid=dmThreadId(ME.id,otherId), threads=dmLoadThreads();
-  var t=threads.find(function(x){return x.thread_id===tid;});
-  if(!t){
-    t={thread_id:tid,participants:[ME.id,otherId].sort(),lang_prefs:{},updated_at:new Date().toISOString()};
-    t.lang_prefs[ME.id]={my_lang:'de',see_lang:'de'};
-    t.lang_prefs[otherId]={my_lang:'de',see_lang:'de'};
-    threads.push(t); dmSaveThreads(threads);
-  }
-  return t;
+function dmMe(){ return (ME&&ME.id)||null; }
+var DM_THREADS_RAW=[], DM_PARTS=[], DM_MSGS_RAW=[], DM_READS=[];
+var DM_THREAD_CACHE=[], DM_MSG_CACHE=[];
+var DM_LOADED=false, DM_LOADING=false, DM_RT=null, DM_RELOAD_PENDING=false;
+function dmBuildCaches(){
+  DM_THREAD_CACHE=(DM_THREADS_RAW||[]).map(function(t){
+    var parts=DM_PARTS.filter(function(p){return p.thread_id===t.id;});
+    var lp={}; parts.forEach(function(p){ lp[p.emp_id]={my_lang:p.my_lang||'de',see_lang:p.see_lang||'de'}; });
+    return { thread_id:t.id, is_group:!!t.is_group, group_name:t.name||'', group_creator:t.created_by||null,
+             participants:parts.map(function(p){return p.emp_id;}).sort(),
+             lang_prefs:lp, updated_at:t.updated_at };
+  });
+  var byId={}; DM_THREAD_CACHE.forEach(function(t){byId[t.thread_id]=t;});
+  DM_MSG_CACHE=(DM_MSGS_RAW||[]).map(function(m){
+    var t=byId[m.thread_id]||{};
+    var rb=DM_READS.filter(function(r){return r.message_id===m.id;}).map(function(r){return r.emp_id;});
+    var to=t.is_group?null:((t.participants||[]).filter(function(p){return p!==m.from_emp_id;})[0]||null);
+    var recRead=to?DM_READS.filter(function(r){return r.message_id===m.id&&r.emp_id===to;})[0]:null;
+    return { id:m.id, thread_id:m.thread_id, from_emp_id:m.from_emp_id, to_emp_id:to,
+             text_original:m.text_original, lang_original:m.lang_original, translations:m.translations||{},
+             sent_at:m.sent_at, read_by:rb, read_at:recRead?recRead.read_at:null };
+  });
+}
+function dmLoadThreads(){ return DM_THREAD_CACHE; }
+function dmLoadMessages(){ return DM_MSG_CACHE; }
+function dmSaveThreads(){}   // no-op: Threads sind DB-backed (RPCs)
+function dmSaveMessages(){}  // no-op: Nachrichten sind DB-backed (Insert)
+function dmReloadAll(){
+  if(!dmMe()){ DM_LOADED=true; return Promise.resolve(); }
+  DM_LOADING=true;
+  return Promise.all([
+    sb.from('dm_threads').select('*'),
+    sb.from('dm_participants').select('*'),
+    sb.from('dm_messages').select('*').order('sent_at',{ascending:true}),
+    sb.from('dm_reads').select('*')
+  ]).then(function(r){
+    DM_THREADS_RAW=(r[0]&&r[0].data)||[]; DM_PARTS=(r[1]&&r[1].data)||[];
+    DM_MSGS_RAW=(r[2]&&r[2].data)||[];    DM_READS=(r[3]&&r[3].data)||[];
+    dmBuildCaches(); DM_LOADED=true; DM_LOADING=false;
+  }).catch(function(e){ console.error('[dm] reload', e); DM_LOADING=false; });
+}
+function dmTeamVisible(){ var el=document.getElementById('vTeam'); return !!(el&&el.classList.contains('on')); }
+function dmUpdateNavBadge(){
+  var el=document.getElementById('navUnread'); if(!el) return;
+  var n=dmMe()?dmUnreadCount():0;
+  if(n>0){el.textContent=n;el.style.display='inline';} else el.style.display='none';
+}
+// Realtime -> Reload (entprellt). Beim Re-Render den Eingabe-Entwurf + Fokus erhalten.
+function dmScheduleReload(){
+  if(DM_RELOAD_PENDING) return; DM_RELOAD_PENDING=true;
+  setTimeout(function(){ DM_RELOAD_PENDING=false;
+    dmReloadAll().then(function(){
+      dmUpdateNavBadge();
+      if(dmTeamVisible()){
+        var ta=document.getElementById('dmInput'); var draft=ta?ta.value:null;
+        var hadFocus=!!(ta&&document.activeElement===ta);
+        renderTeam();
+        if(draft!=null){ var ta2=document.getElementById('dmInput'); if(ta2){ ta2.value=draft;
+          if(hadFocus){ ta2.focus(); try{ta2.selectionStart=ta2.selectionEnd=draft.length;}catch(e){} } } }
+      }
+    });
+  },150);
+}
+function dmSubscribe(){
+  if(DM_RT||!dmMe()||typeof sb==='undefined') return;
+  try{
+    DM_RT=sb.channel('dm-'+dmMe())
+      .on('postgres_changes',{event:'*',schema:'public',table:'dm_messages'},dmScheduleReload)
+      .on('postgres_changes',{event:'*',schema:'public',table:'dm_reads'},dmScheduleReload)
+      .on('postgres_changes',{event:'*',schema:'public',table:'dm_participants'},dmScheduleReload)
+      .on('postgres_changes',{event:'*',schema:'public',table:'dm_threads'},dmScheduleReload)
+      .subscribe();
+  }catch(e){ console.error('[dm] subscribe', e); }
+}
+// Beim Login aufrufen: Altlasten entfernen (nie uebertragene localStorage-Nachrichten),
+// DB laden, Realtime abonnieren.
+function dmInitChat(){
+  try{ localStorage.removeItem('jsr_dm_threads_v1'); localStorage.removeItem('jsr_dm_messages_v1'); localStorage.removeItem('jsr_team_groups_seeded_v2'); }catch(e){}
+  if(!dmMe()){ DM_LOADED=true; return; }
+  dmReloadAll().then(function(){ dmUpdateNavBadge(); if(dmTeamVisible()) renderTeam(); });
+  dmSubscribe();
+}
+function dmErrMsg(e){ return (e&&(e.message||e.error_description||e.msg))||'Unbekannter Fehler'; }
+// 1:1-Thread serverseitig oeffnen/anlegen (canChatWith wird im RPC geprueft). Gibt thread_id.
+function dmStartThreadRPC(otherId){
+  return sb.rpc('dm_start_thread',{p_other:otherId}).then(function(r){
+    if(r.error) throw r.error; return r.data;
+  });
 }
 // Kontakte = aktive MA im selben Projekt (außer ich)
 var ROLE_STYLES_CHAT = {
@@ -2330,9 +2426,11 @@ function dmRolePill(emp){
   return s?'<span class="dm-role-pill" style="background:'+s.color+';">'+s.label+'</span>':'';
 }
 function dmJoinGroup(threadId){
-  var threads=dmLoadThreads(), th=threads.find(function(x){return x.thread_id===threadId;}); if(!th)return;
-  if(th.participants.indexOf(ME.id)<0){ th.participants.push(ME.id); if(!th.lang_prefs)th.lang_prefs={}; th.lang_prefs[ME.id]={my_lang:'de',see_lang:'de'}; dmSaveThreads(threads); }
-  DM_GROUPSETTINGS=false; renderTeam();
+  sb.rpc('dm_join_group',{p_thread:threadId}).then(function(r){
+    if(r.error) throw r.error;
+    return dmReloadAll();
+  }).then(function(){ DM_GROUPSETTINGS=false; renderTeam(); })
+  .catch(function(e){ alert('Beitritt fehlgeschlagen: '+dmErrMsg(e)); });
 }
 function dmContacts(){
   var all=TEAM.filter(function(e){return e&&e.status==='active'&&canChatWith(ME,e);});
@@ -2386,6 +2484,21 @@ function dmInputKey(ev){if(ev.key==='Enter'&&!ev.shiftKey){ev.preventDefault();d
 function dmScrollBottom(){setTimeout(function(){var ml=document.getElementById('dmMsgs');if(ml)ml.scrollTop=ml.scrollHeight;},10);}
 
 function renderTeam(){
+  var vt=document.getElementById('vTeam'); if(!vt) return;
+  // Ohne verknuepften Mitarbeiterdatensatz keine Teilnahme — erklaeren statt leer bleiben.
+  if(!dmMe()){
+    vt.innerHTML='<div style="max-width:420px;margin:48px auto;text-align:center;color:var(--muted);">'
+      +'<div style="font-size:40px;margin-bottom:12px;">💬</div>'
+      +'<div style="font-size:15px;font-weight:700;color:var(--fg);margin-bottom:6px;">Kein Mitarbeiterdatensatz verknüpft</div>'
+      +'<div style="font-size:13px;line-height:1.5;">Dein Zugang ist noch keinem Mitarbeiter zugeordnet. Der Team-Chat nutzt die Mitarbeiter-Identität — bitte an HR wenden, um deinen Zugang zu verknüpfen.</div></div>';
+    return;
+  }
+  // Erstes Oeffnen: DB noch nicht geladen -> Ladezustand + Nachladen anstoßen.
+  if(!DM_LOADED){
+    vt.innerHTML='<div style="text-align:center;color:var(--muted);padding:48px;font-size:13px;">Lade Team-Chat…</div>';
+    if(!DM_LOADING){ dmReloadAll().then(function(){ dmSubscribe(); dmUpdateNavBadge(); if(dmTeamVisible()) renderTeam(); }); }
+    return;
+  }
   var html='<div class="chat-layout'+(DM_ACTIVE?' dm-open':'')+'">';
   html+='<div class="chat-list">';
   html+='<button class="dm-new-btn" onclick="dmOpenPicker()">+ Neue Nachricht</button>';
@@ -2465,20 +2578,27 @@ function dmThreadHtml(){
 }
 function dmOpen(threadId){
   DM_ACTIVE=threadId; DM_PICKER=false; DM_GROUPCREATE=false; DM_GROUPSETTINGS=false;
-  var msgs=dmLoadMessages(), changed=false;
-  msgs.forEach(function(m){
-    if(m.thread_id!==threadId||m.from_emp_id===ME.id)return;
-    if(m.to_emp_id===null){ if(!m.read_by)m.read_by=[]; if(m.read_by.indexOf(ME.id)<0){m.read_by.push(ME.id);changed=true;} }
-    else if(m.to_emp_id===ME.id&&!m.read_at){m.read_at=new Date().toISOString();changed=true;}
-  });
-  if(changed)dmSaveMessages(msgs);
   renderTeam();
+  // Ungelesene (nicht von mir, ich noch nicht in read_by) als gelesen markieren -> dm_reads.
+  var me=dmMe(); if(!me) return;
+  var rows=dmLoadMessages().filter(function(m){
+    return m.thread_id===threadId && m.from_emp_id!==me && (m.read_by||[]).indexOf(me)<0;
+  }).map(function(m){ return {message_id:m.id, emp_id:me}; });
+  if(!rows.length) return;
+  sb.from('dm_reads').upsert(rows,{onConflict:'message_id,emp_id',ignoreDuplicates:true}).then(function(r){
+    if(r.error){ console.error('[dm] mark read', r.error); return; }
+    return dmReloadAll().then(function(){ dmUpdateNavBadge(); if(dmTeamVisible()) renderTeam(); });
+  });
 }
 function dmBackToList(){DM_ACTIVE=null;renderTeam();}
 // Kontakt-Picker (neuen 1:1-Chat starten)
 function dmOpenPicker(){DM_PICKER=true;renderTeam();}
 function dmClosePicker(){DM_PICKER=false;renderTeam();}
-function dmStartDm(otherId){var t=dmGetThread(otherId);dmOpen(t.thread_id);}
+function dmStartDm(otherId){
+  dmStartThreadRPC(otherId).then(function(tid){
+    return dmReloadAll().then(function(){ dmOpen(tid); });
+  }).catch(function(e){ alert('Chat konnte nicht geoeffnet werden: '+dmErrMsg(e)); });
+}
 function dmPickerHtml(){
   var html='<div class="dm-picker-backdrop" onclick="dmClosePicker()"></div>';
   html+='<div class="dm-picker-pop">';
@@ -2518,30 +2638,33 @@ async function dmTranslateForMessage(msgId, threadId){
     var cfg=loadAiConfig(); if(cfg.mode==='off')return;
     var t=dmLoadThreads().find(function(x){return x.thread_id===threadId;}); if(!t)return;
     var msg=dmLoadMessages().find(function(x){return x.id===msgId;}); if(!msg)return;
-    var myLang=msg.lang_original||'de', targets={};
-    if(t.is_group){ (t.participants||[]).forEach(function(pid){ if(pid===ME.id)return; var sl=(t.lang_prefs&&t.lang_prefs[pid]&&t.lang_prefs[pid].see_lang)||'de'; if(sl!==myLang)targets[sl]=1; }); }
+    var myLang=msg.lang_original||'de', targets={}, me=dmMe();
+    if(t.is_group){ (t.participants||[]).forEach(function(pid){ if(pid===me)return; var sl=(t.lang_prefs&&t.lang_prefs[pid]&&t.lang_prefs[pid].see_lang)||'de'; if(sl!==myLang)targets[sl]=1; }); }
     else { var toId=dmOtherId(t); var sl=(t.lang_prefs&&t.lang_prefs[toId]&&t.lang_prefs[toId].see_lang)||'de'; if(sl!==myLang)targets[sl]=1; }
     var langs=Object.keys(targets); if(!langs.length)return;
-    var changed=false;
+    var merged=Object.assign({}, msg.translations||{}), changed=false;
     for(var i=0;i<langs.length;i++){
       var lang=langs[i];
-      if(cfg.cache_enabled && msg.translations && msg.translations[lang])continue;
+      if(cfg.cache_enabled && merged[lang])continue;
       var tr=await translateMessage(msg.text_original, myLang, lang);
-      if(tr){ var all=dmLoadMessages(); var m=all.find(function(x){return x.id===msgId;}); if(m){ if(!m.translations)m.translations={}; m.translations[lang]=tr; dmSaveMessages(all); msg=m; changed=true; } }
+      if(tr){ merged[lang]=tr; changed=true; }
     }
-    if(changed)renderTeam();
-  }catch(e){}
+    if(changed){
+      var rr=await sb.rpc('dm_set_translations',{p_msg:msgId, p_tr:merged});
+      if(rr&&rr.error){ console.error('[dm] translations', rr.error); return; }
+      await dmReloadAll(); renderTeam();
+    }
+  }catch(e){ console.error('[dm] translate', e); }
 }
 function dmToggleLangPop(){DM_LANGPOP=!DM_LANGPOP;renderTeam();}
 function dmCloseLangPop(){DM_LANGPOP=false;renderTeam();}
 function dmSetLang(field,val){
-  var t=dmActiveThread(); if(!t)return;
-  var threads=dmLoadThreads(), th=threads.find(function(x){return x.thread_id===DM_ACTIVE;}); if(!th)return;
-  if(!th.lang_prefs)th.lang_prefs={};
-  if(!th.lang_prefs[ME.id])th.lang_prefs[ME.id]={my_lang:'de',see_lang:'de'};
-  th.lang_prefs[ME.id][field]=val;
-  dmSaveThreads(threads);
-  renderTeam();
+  var me=dmMe(); if(!me||!DM_ACTIVE)return;
+  var patch={}; patch[field]=val;
+  sb.from('dm_participants').update(patch).eq('thread_id',DM_ACTIVE).eq('emp_id',me).then(function(r){
+    if(r.error){ alert('Sprache konnte nicht gespeichert werden: '+dmErrMsg(r.error)); return; }
+    return dmReloadAll().then(function(){ renderTeam(); });
+  });
 }
 function dmLangPopHtml(){
   var t=dmActiveThread(), lp=(t&&t.lang_prefs&&t.lang_prefs[ME.id])||{my_lang:'de',see_lang:'de'};
@@ -2560,35 +2683,18 @@ function dmLangPopHtml(){
 function _normSkill(s){return (s||'').toString().trim().toLowerCase();}
 function _capSkill(s){s=_normSkill(s);return s?s.charAt(0).toUpperCase()+s.slice(1):'';}
 function ensureTeamGroups(){
-  try{
-    if(!ME||!ME.project_id)return;
-    var skill=_normSkill(ME.project_skill); if(!skill)return;
-    var seeded=ls('jsr_team_groups_seeded_v2'); if(!Array.isArray(seeded))seeded=[];
-    if(seeded.some(function(x){return x.project_id===ME.project_id&&x.skill===skill;}))return;
-    var projects=ls('jsr_projects_v1')||[]; var proj=(Array.isArray(projects)?projects:[]).find(function(p){return p.id===ME.project_id;});
-    var pname=(proj&&proj.name)||'Projekt';
-    var members=TEAM.filter(function(e){return e&&e.status==='active'&&e.project_id===ME.project_id&&_normSkill(e.project_skill)===skill;}).map(function(e){return e.id;});
-    if(members.indexOf(ME.id)<0)members.push(ME.id);
-    var tid='grp_team_'+ME.project_id+'_'+skill;
-    var threads=dmLoadThreads();
-    if(!threads.some(function(t){return t.thread_id===tid;})){
-      var t={thread_id:tid,is_group:true,group_name:pname+' '+_capSkill(skill),group_creator:'system',group_created_at:new Date().toISOString(),project_id:ME.project_id,skill:skill,participants:members,lang_prefs:{},updated_at:new Date().toISOString()};
-      members.forEach(function(id){t.lang_prefs[id]={my_lang:'de',see_lang:'de'};});
-      threads.push(t); dmSaveThreads(threads);
-    }
-    seeded.push({project_id:ME.project_id,skill:skill}); lss('jsr_team_groups_seeded_v2',seeded);
-  }catch(e){}
+  // Neutralisiert (2026-07-26): war ein localStorage-Seeder fuer Projekt-Team-Gruppen,
+  // der nie cross-device wirkte. Automatische serverseitige Team-Gruppen ggf. spaeter als RPC.
 }
 function dmCreateGroup(name, memberIds){
   name=(name||'').trim(); if(!name){alert('Bitte Gruppen-Namen eingeben.');return;}
-  var members=(memberIds||[]).slice(); if(members.indexOf(ME.id)<0)members.push(ME.id);
-  if(members.length<2){alert('Bitte mindestens ein Mitglied wählen.');return;}
-  var tid='grp_'+Date.now()+'_'+Math.floor(Math.random()*1000);
-  var t={thread_id:tid,is_group:true,group_name:name,group_creator:ME.id,group_created_at:new Date().toISOString(),project_id:ME.project_id,skill:_normSkill(ME.project_skill),participants:members,lang_prefs:{},updated_at:new Date().toISOString()};
-  members.forEach(function(id){t.lang_prefs[id]={my_lang:'de',see_lang:'de'};});
-  var threads=dmLoadThreads(); threads.push(t); dmSaveThreads(threads);
-  DM_GROUPCREATE=false; DM_PICKER=false;
-  dmOpen(tid);
+  var members=(memberIds||[]).slice();   // andere Mitglieder; ME fügt der RPC selbst hinzu
+  if(members.length<1){alert('Bitte mindestens ein Mitglied wählen.');return;}
+  sb.rpc('dm_create_group',{p_name:name,p_members:members}).then(function(r){
+    if(r.error) throw r.error;
+    var tid=r.data;
+    return dmReloadAll().then(function(){ DM_GROUPCREATE=false; DM_PICKER=false; dmOpen(tid); });
+  }).catch(function(e){ alert('Gruppe konnte nicht erstellt werden: '+dmErrMsg(e)); });
 }
 function dmOpenGroupCreator(){DM_GROUPCREATE=true;DM_PICKER=false;renderTeam();}
 function dmCloseGroupCreator(){DM_GROUPCREATE=false;renderTeam();}
@@ -2617,34 +2723,34 @@ function dmGroupCreatorHtml(){
 function dmOpenGroupSettings(){DM_GROUPSETTINGS=true;renderTeam();}
 function dmCloseGroupSettings(){DM_GROUPSETTINGS=false;renderTeam();}
 function dmRenameGroup(){
-  var t=dmActiveThread(); if(!t||t.group_creator!==ME.id)return;
+  var t=dmActiveThread(); if(!t)return;
   var nm=((document.getElementById('grpRename')||{}).value||'').trim(); if(!nm)return;
-  var threads=dmLoadThreads(), th=threads.find(function(x){return x.thread_id===t.thread_id;}); if(!th)return;
-  th.group_name=nm; dmSaveThreads(threads); renderTeam();
+  sb.rpc('dm_rename_group',{p_thread:t.thread_id, p_name:nm}).then(function(r){
+    if(r.error) throw r.error; return dmReloadAll();
+  }).then(function(){ renderTeam(); })
+  .catch(function(e){ alert('Umbenennen fehlgeschlagen: '+dmErrMsg(e)); });
 }
 function dmRemoveGroupMember(empId){
-  var t=dmActiveThread(); if(!t||t.group_creator!==ME.id||empId===ME.id)return;
-  var threads=dmLoadThreads(), th=threads.find(function(x){return x.thread_id===t.thread_id;}); if(!th)return;
-  th.participants=th.participants.filter(function(p){return p!==empId;});
-  if(th.lang_prefs)delete th.lang_prefs[empId];
-  dmSaveThreads(threads); renderTeam();
+  var t=dmActiveThread(); if(!t||empId===dmMe())return;
+  sb.rpc('dm_remove_member',{p_thread:t.thread_id, p_emp:empId}).then(function(r){
+    if(r.error) throw r.error; return dmReloadAll();
+  }).then(function(){ renderTeam(); })
+  .catch(function(e){ alert('Entfernen fehlgeschlagen: '+dmErrMsg(e)); });
 }
 function dmAddGroupMember(empId){
   var t=dmActiveThread(); if(!t)return;
-  var threads=dmLoadThreads(), th=threads.find(function(x){return x.thread_id===t.thread_id;}); if(!th)return;
-  if(th.participants.indexOf(empId)<0){ th.participants.push(empId); if(!th.lang_prefs)th.lang_prefs={}; th.lang_prefs[empId]={my_lang:'de',see_lang:'de'}; dmSaveThreads(threads); renderTeam(); }
+  sb.rpc('dm_add_member',{p_thread:t.thread_id, p_emp:empId}).then(function(r){
+    if(r.error) throw r.error; return dmReloadAll();
+  }).then(function(){ renderTeam(); })
+  .catch(function(e){ alert('Hinzufügen fehlgeschlagen: '+dmErrMsg(e)); });
 }
 function dmLeaveGroup(){
   var t=dmActiveThread(); if(!t)return;
   if(!confirm('Gruppe "'+(t.group_name||'')+'" wirklich verlassen?'))return;
-  var threads=dmLoadThreads(), th=threads.find(function(x){return x.thread_id===t.thread_id;}); if(!th){DM_ACTIVE=null;renderTeam();return;}
-  th.participants=th.participants.filter(function(p){return p!==ME.id;});
-  if(th.participants.length===0){
-    threads=threads.filter(function(x){return x.thread_id!==t.thread_id;});
-    var msgs=dmLoadMessages().filter(function(m){return m.thread_id!==t.thread_id;}); dmSaveMessages(msgs);
-  }
-  dmSaveThreads(threads);
-  DM_GROUPSETTINGS=false; DM_ACTIVE=null; renderTeam();
+  sb.rpc('dm_leave_group',{p_thread:t.thread_id}).then(function(r){
+    if(r.error) throw r.error; return dmReloadAll();
+  }).then(function(){ DM_GROUPSETTINGS=false; DM_ACTIVE=null; renderTeam(); })
+  .catch(function(e){ alert('Verlassen fehlgeschlagen: '+dmErrMsg(e)); });
 }
 function dmGroupSettingsHtml(){
   var t=dmActiveThread(); if(!t)return '';
@@ -2688,32 +2794,24 @@ function dmGroupSettingsHtml(){
 function dmSend(){
   var ta=document.getElementById('dmInput');
   if(!ta||!ta.value.trim()||!DM_ACTIVE)return;
+  var me=dmMe(); if(!me){ alert('Kein Mitarbeiterdatensatz verknüpft — Senden nicht möglich.'); return; }
   var t=dmActiveThread(); if(!t)return;
   var text=ta.value.trim();
-  var myLang=(t.lang_prefs&&t.lang_prefs[ME.id]&&t.lang_prefs[ME.id].my_lang)||'de';
+  var myLang=(t.lang_prefs&&t.lang_prefs[me]&&t.lang_prefs[me].my_lang)||'de';
   var aiOn=aiEnabled();
-  var msg={ id:'m_'+Date.now()+'_'+Math.floor(Math.random()*1000),
-    thread_id:t.thread_id, from_emp_id:ME.id,
-    text_original:text, lang_original:myLang, translations:{},
-    sent_at:new Date().toISOString() };
-  if(t.is_group){
-    if(t.participants.indexOf(ME.id)<0){
-      if(UNIVERSAL_CHAT_ROLES.indexOf(getMeRole())<0){ alert('Du bist kein Mitglied dieser Gruppe.'); return; }
-      var thr=dmLoadThreads(), thj=thr.find(function(x){return x.thread_id===t.thread_id;});
-      if(thj){ thj.participants.push(ME.id); if(!thj.lang_prefs)thj.lang_prefs={}; thj.lang_prefs[ME.id]={my_lang:'de',see_lang:'de'}; dmSaveThreads(thr); t=dmActiveThread(); }
-    }
-    msg.to_emp_id=null; msg.read_by=[ME.id];
-  } else {
-    msg.to_emp_id=dmOtherId(t); msg.read_at=null;
-  }
-  var msgs=dmLoadMessages();
-  msgs.push(msg);
-  dmSaveMessages(msgs);
-  var threads=dmLoadThreads(), th=threads.find(function(x){return x.thread_id===t.thread_id;});
-  if(th){th.updated_at=new Date().toISOString();dmSaveThreads(threads);}
-  ta.value='';
-  renderTeam();
-  if(aiOn) dmTranslateForMessage(msg.id, t.thread_id);
+  var payload={ thread_id:t.thread_id, from_emp_id:me, text_original:text, lang_original:myLang, translations:{} };
+  ta.disabled=true;
+  // Insert -> RLS erzwingt Mitgliedschaft. Fehler MUSS sichtbar sein (Eingabe bleibt erhalten).
+  sb.from('dm_messages').insert(payload).select().single().then(function(r){
+    ta.disabled=false;
+    if(r.error){ alert('Nachricht konnte nicht gesendet werden: '+dmErrMsg(r.error)); return; }
+    ta.value=''; dmAutoGrow(ta);
+    var newId=r.data&&r.data.id;
+    return dmReloadAll().then(function(){
+      renderTeam(); dmScrollBottom();
+      if(aiOn&&newId) dmTranslateForMessage(newId, t.thread_id);
+    });
+  }).catch(function(e){ ta.disabled=false; alert('Nachricht konnte nicht gesendet werden: '+dmErrMsg(e)); });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -3120,6 +3218,9 @@ function finishSpin(){
 // ═══════════════════════════════════════════════════════════════════════════
 // ─── PROFIL: Selbstauskunft + Foto (schreibt via Supabase, 25h) ───
 function saveMyEmpFields(fields){
+  // Schreibpfad-Guard: ohne aufgeloeste Identitaet (ME.id) KEIN Profil-Write — verhindert,
+  // dass ein nicht verknuepftes Konto fremde/erfundene Datensaetze bearbeitet.
+  if(!ME || !ME.id){ alert('Kein Mitarbeiter-Datensatz verknüpft — Speichern nicht möglich.'); return; }
   // 25h: Supabase-Save mit Whitelist + optimistic ME-Update. Dead-Cache jsr_portal_me entfaellt.
   for(var k in fields) ME[k] = fields[k]; // optimistic
   saveOwnProfileToDB(ME.id, fields).catch(function(err){
@@ -3219,6 +3320,26 @@ function renderProfile(){
   }
 
   html+='</div>'; // end data-grid
+
+  // Qualitätsbewertungen — read-only, nur eigene. Rating + Datum + Notiz (Kunden-Feedback).
+  // Ohne Aggregat-Score und ohne Überwachungs-Alarm (HR-Führungssicht, gehört nicht ins MA-Portal).
+  var QR_META={schlecht:{label:'Schlecht',icon:'👎',color:'#dc2626',bg:'#fef2f2'},gut:{label:'Gut',icon:'👍',color:'#059669',bg:'#ecfdf5'},'super':{label:'Super',icon:'⭐',color:'#0d9488',bg:'#f0fdfa'}};
+  var qrs=Array.isArray(ME.quality_ratings)?ME.quality_ratings:[];
+  html+='<div class="card" style="margin-top:14px;"><div class="card-header"><div class="card-title">⭐ Meine Qualitätsbewertungen</div></div><div class="card-body">';
+  if(qrs.length===0){
+    html+='<div style="color:var(--muted);font-size:13px;">Noch keine Bewertungen vorhanden.</div>';
+  }else{
+    qrs.slice().sort(function(a,b){return (b.date||'').localeCompare(a.date||'');}).forEach(function(r){
+      var m=QR_META[r.rating]||{label:(r.rating||'—'),icon:'•',color:'var(--muted)',bg:'var(--surface-2)'};
+      var dt=''; try{ if(r.date) dt=new Date(r.date).toLocaleDateString('de-DE'); }catch(e){ dt=esc(r.date||''); }
+      html+='<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);">';
+      html+='<span style="padding:2px 8px;border-radius:5px;font-size:11px;font-weight:600;background:'+m.bg+';color:'+m.color+';white-space:nowrap;">'+m.icon+' '+esc(m.label)+'</span>';
+      html+='<span style="flex:1;font-size:12px;color:var(--dim);">'+esc(r.note||'')+'</span>';
+      html+='<span style="font-size:11px;color:var(--muted);white-space:nowrap;">'+dt+'</span>';
+      html+='</div>';
+    });
+  }
+  html+='</div></div>';
 
   // Über mich (editierbar durch den Mitarbeiter)
   html+='<div class="card"><div class="card-header"><div class="card-title">✨ Über mich</div></div><div class="card-body">';
