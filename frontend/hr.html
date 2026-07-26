@@ -5560,16 +5560,15 @@ function TrainingPlans({plans, setPlans, projects, employees}){
     const names=(plan.confirmed_ids||[]).map(id=>{const e=employees.find(x=>x.id===id); return e?(e.first_name+' '+e.last_name):('MA '+String(id).slice(0,6));});
     const today=new Date().toISOString().slice(0,10);
     const started=(plan.start_date&&plan.start_date<=today)||(plan.status&&plan.status!=='planned');
-    const L=[];
-    L.push('Schulungsblock löschen?','');
-    L.push('„'+(plan.name||'(ohne Namen)')+'"');
-    L.push('Projekt: '+(proj?proj.name:'—'));
-    L.push('Zeitraum: '+(plan.start_date||'—')+' → '+(plan.end_date||'—'));
-    if(plan.active_date) L.push('Produktiv-Batch — aktiv ab '+plan.active_date);
-    if(started) L.push('','🚨 ACHTUNG: Dieser Block ist bereits GESTARTET bzw. nicht mehr „geplant" — das ist Historie. Löschen entfernt den Verlauf dieses Batches unwiederbringlich.');
-    if(names.length) L.push('','Betroffen: '+names.length+' bestätigte Teilnehmer ('+names.join(', ')+').','Die Mitarbeiter bleiben erhalten, ihr Status ändert sich nicht — nur die Batch-Zuordnung geht verloren.');
-    L.push('','Trotzdem löschen?');
-    if(!window.confirm(L.join('\n'))) return;
+    const items=[];
+    items.push('„'+(plan.name||'(ohne Namen)')+'"');
+    items.push('Projekt: '+(proj?proj.name:'—'));
+    items.push('Zeitraum: '+(plan.start_date||'—')+' → '+(plan.end_date||'—'));
+    if(plan.active_date) items.push('Produktiv-Batch — aktiv ab '+plan.active_date);
+    if(names.length) items.push('Betroffen: '+names.length+' bestätigte Teilnehmer ('+names.join(', ')+')');
+    const warnText=(started?'🚨 Dieser Block ist bereits GESTARTET bzw. nicht mehr „geplant" — das ist Historie. Löschen entfernt den Verlauf dieses Batches unwiederbringlich.':'')
+      +(names.length?((started?'\n\n':'')+'Die Mitarbeiter bleiben erhalten, ihr Status ändert sich nicht — nur die Batch-Zuordnung geht verloren.'):'');
+    if(!(await uiConfirm({title:'Schulungsblock löschen', text:warnText||undefined, items, danger:true, confirmLabel:'Löschen'}))) return;
     const res=await deleteTrainingPlanToDB(plan.id);
     if(!res.ok){ alert('Löschen fehlgeschlagen: '+((res.error&&res.error.message)||res.error||'unbekannt')+'\nDer Block bleibt in der Liste.'); return; }
     setPlans(ps=>ps.filter(p=>p.id!==plan.id));
@@ -22154,9 +22153,9 @@ function PositionCategoryEditor({configKey, defaults, employees, title, hint, wi
   const TIERS=[['lead','Projektleitung'],['teamlead','Team-Lead'],['support','Support']];
   const persist=(next)=>{ setList(next); localStorage.setItem(configKey,JSON.stringify(next)); saveConfigToDB(configKey,next); };
   const add=()=>{ const v=input.trim(); if(!v) return; if(list.some(p=>posOf(p).toLowerCase()===v.toLowerCase())){ setInput(''); return; } persist([...list, withTiers?{pos:v,tier:defaultOrgTier(v)}:v]); setInput(''); };
-  const remove=(p)=>{ const name=posOf(p);
+  const remove=async(p)=>{ const name=posOf(p);
     const n=(employees||[]).filter(e=>e&&e.status==='active'&&(((e.position||'').toLowerCase().trim())===name.toLowerCase().trim())).length;
-    if(n>0 && !window.confirm(n+' aktive MA haben die Position „'+name+'".\n\nEntfernen macht sie zu AGENT → sie erzeugen ab sofort vollen Umsatz im Forecast.\n\nTrotzdem entfernen?')) return;
+    if(n>0 && !(await uiConfirm({title:'Position entfernen', text:'Entfernen macht die betroffenen MA zu AGENT → sie erzeugen ab sofort vollen Umsatz im Forecast.', items:[n+' aktive MA mit Position „'+name+'"'], danger:true, confirmLabel:'Entfernen'}))) return;
     persist(list.filter(x=>posOf(x)!==name));
   };
   const setTier=(name,tier)=>persist(list.map(x=>posOf(x)===name?{pos:name,tier}:x));
@@ -22391,14 +22390,14 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
     alert('Konnte keinen freien PIN finden — bitte erneut versuchen.');
   }
   async function removePin(emp){
-    if(!window.confirm(emp.first_name+' '+emp.last_name+' — PIN löschen?')) return;
+    if(!(await uiConfirm({title:'PIN löschen', items:[emp.first_name+' '+emp.last_name], danger:true, confirmLabel:'Löschen'}))) return;
     await deletePinFromDB(emp.id);
     setPins(pp=>{const n={...pp};delete n[emp.id];return n;});
   }
   async function migratePinsToDB(){
     const entries=Object.entries(pins||{}).filter(([id,p])=>p&&p.code);
     if(!entries.length){ alert('Keine lokalen PINs gefunden.'); return; }
-    if(!window.confirm('In DB übernehmen: '+entries.length+' PINs.\nBestehende DB-Einträge werden überschrieben. Fortfahren?')) return;
+    if(!(await uiConfirm({title:'PINs in DB übernehmen', text:'Bestehende DB-Einträge werden überschrieben.', items:[entries.length+' PINs'], confirmLabel:'Übernehmen'}))) return;
     setPinMigBusy(true);
     let ok=0, dup=0, err=0;
     try{
@@ -22445,15 +22444,16 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
     URL.revokeObjectURL(url);
   }
 
-  function importBackup(e){
-    const file = e.target.files[0];
+  async function importBackup(e){
+    const el = e.target;
+    const file = el.files[0];
     if(!file) return;
     // Sicherheit: Import schreibt AUSSCHLIESSLICH lokale Einstellungen (localStorage) zurück.
     // KEIN einziger DB-Write. Das frühere Rückschreiben von employees/clients nach Supabase
     // (saveEmployeeToDB/saveClientAccountToDB) wurde entfernt — es überschrieb Live-Daten mit
     // Altständen. employees/clients/cvs/showcases liegen in der DB (SoT) und werden nie importiert.
-    if(!window.confirm('Lokale Einstellungen aus dieser Datei wiederherstellen?\n\nNur lokale Einstellungen (Pläne, Löhne, Rollen, Accounts, Skills, Feiertage …) werden überschrieben. Mitarbeiter, Kunden und CVs bleiben unberührt — die liegen in der Datenbank.')){
-      e.target.value=''; return;
+    if(!(await uiConfirm({title:'Lokale Einstellungen wiederherstellen', text:'Nur lokale Einstellungen (Pläne, Löhne, Rollen, Accounts, Skills, Feiertage …) werden überschrieben. Mitarbeiter, Kunden und CVs bleiben unberührt — die liegen in der Datenbank.', danger:true, confirmLabel:'Wiederherstellen'}))){
+      el.value=''; return;
     }
     const reader = new FileReader();
     reader.onload = async ev => {
@@ -22595,7 +22595,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
     ];
     const present=items.filter(([k])=>localStorage.getItem(k)!=null);
     if(!present.length){ alert('Keine lokalen App-Inhalte gefunden.'); return; }
-    if(!window.confirm('In DB übernehmen (app_config):\n'+present.map(([,l])=>'· '+l).join('\n')+'\n\nBestehende DB-Werte werden überschrieben. Fortfahren?')) return;
+    if(!(await uiConfirm({title:'In DB übernehmen (app_config)', text:'Bestehende DB-Werte werden überschrieben.', items:present.map(([,l])=>l), confirmLabel:'Übernehmen'}))) return;
     setCfgRestBusy(true);
     let ok=0, err=0;
     try{
@@ -22707,7 +22707,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
     }
     const monthlyJobs=Object.values(monthlyMap);
     if(!monthlyJobs.length && !overheadJobs.length){ alert('Keine lokalen Raumkosten-Daten gefunden.'); return; }
-    if(!window.confirm('In DB übernehmen:\n· '+monthlyJobs.length+' Monats-Einträge\n· '+overheadJobs.length+' Overhead-Listen\n\nBestehende DB-Zeilen werden überschrieben. Fortfahren?')) return;
+    if(!(await uiConfirm({title:'Raumkosten in DB übernehmen', text:'Bestehende DB-Zeilen werden überschrieben.', items:[monthlyJobs.length+' Monats-Einträge', overheadJobs.length+' Overhead-Listen'], confirmLabel:'Übernehmen'}))) return;
     setRkMigBusy(true);
     let ok=0, err=0;
     try{
@@ -23657,7 +23657,10 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
                           color:skill.active?'var(--muted)':'var(--green)',fontSize:12}}>
                         {skill.active?'○':'✓'}
                       </button>
-                      <button onClick={()=>setSkills(ss=>ss.filter(s=>s.id!==skill.id))}
+                      <button onClick={async()=>{ const nm=skill.name;
+                          const cnt=(employees||[]).filter(e=>e&&e.status!=='terminated'&&((Array.isArray(e.cv_skills)&&e.cv_skills.some(s=>String(s).toLowerCase()===String(nm).toLowerCase()))||(e.project_assignments||[]).some(a=>a&&!a.end_date&&String(a.skill||'').toLowerCase()===String(nm).toLowerCase()))).length;
+                          if(!(await uiConfirm({title:'Skill löschen', text:'„'+nm+'" aus dem Katalog entfernen.', items:[cnt>0?(cnt+' MA haben diesen Skill (CV oder aktive Zuweisung)'):'Kein MA nutzt diesen Skill aktuell'], danger:true, confirmLabel:'Löschen'})))return;
+                          setSkills(ss=>ss.filter(s=>s.id!==skill.id)); }}
                         style={{border:'none',background:'none',cursor:'pointer',padding:'0 2px',
                           color:'var(--red)',fontSize:12}}>×</button>
                     </div>
@@ -24020,12 +24023,14 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
               <div className="card" style={{marginBottom:12}}>
                 <div className="card-header">
                   <span className="card-title">Schichten pro Projekt und Skill</span>
-                  <button className="btn btn-primary btn-sm" onClick={()=>{
-                    const proj=window.prompt('Projekt-ID (z.B. proj_hc):');
-                    if(!proj)return;
-                    const skill=window.prompt('Skill-Key (z.B. sales) oder leer:');
-                    const key=proj+'_'+(skill||'all');
-                    if(shiftCfg[key]){alert('Existiert bereits.');return;}
+                  <button className="btn btn-primary btn-sm" onClick={async()=>{
+                    const r=await uiPrompt({title:'Schicht-Eintrag anlegen', fields:[
+                      {key:'proj', label:'Projekt', options:(projects||[]).map(p=>({value:p.id,label:p.name||p.id})), placeholder:'– Projekt wählen –'},
+                      {key:'skill', label:'Skill-Key', placeholder:'z.B. sales — leer = alle Skills', optional:true}
+                    ], confirmLabel:'Anlegen'});
+                    if(!r||!r.proj)return;
+                    const key=r.proj+'_'+((r.skill||'').trim()||'all');
+                    if(shiftCfg[key]){ await uiConfirm({title:'Existiert bereits', text:'Für diese Projekt/Skill-Kombination gibt es schon einen Eintrag.', confirmLabel:'OK', cancelLabel:null}); return; }
                     saveShiftCfg({...shiftCfg,[key]:[]});
                   }}>+ Projekt / Skill</button>
                 </div>
@@ -24044,7 +24049,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
                       <span className="card-title">{projName} <span style={{marginLeft:8,fontSize:11,padding:'2px 8px',borderRadius:4,background:'var(--blue-bg)',color:'var(--blue)',fontWeight:700}}>{skillLabel}</span></span>
                       <div style={{display:'flex',gap:6}}>
                         <button className="btn btn-sm btn-primary" onClick={()=>{const nid='sh_'+Date.now();saveShiftCfg({...shiftCfg,[key]:[...shifts,{id:nid,label:'Neue Schicht',value:'08:00-16:30',...calcH('08:00-16:30')}]});flashNewEntry('cfgrow_'+nid);}}>+ Schicht</button>
-                        <button className="btn btn-sm" style={{color:'var(--red)'}} onClick={()=>{if(!window.confirm('Loeschen?'))return;const u={...shiftCfg};delete u[key];saveShiftCfg(u);}}>x Eintrag</button>
+                        <button className="btn btn-sm" style={{color:'var(--red)'}} onClick={async()=>{if(!(await uiConfirm({title:'Schicht-Eintrag löschen', text:projName+' · '+skillLabel, items:[shifts.length+' Schicht'+(shifts.length===1?'':'en')+' in diesem Eintrag'], danger:true, confirmLabel:'Löschen'})))return;const u={...shiftCfg};delete u[key];saveShiftCfg(u);}}>x Eintrag</button>
                       </div>
                     </div>
                     <div>
@@ -28896,6 +28901,79 @@ function CvSyncView({setCvList, projects}){
     </div>
   );
 }
+// ── In-App-Dialoge (Confirm/Prompt) — ersetzt window.confirm/window.prompt ──────
+// Imperative API: uiConfirm(opts):Promise<bool>, uiPrompt(opts):Promise<values|null>.
+// <DialogHost/> ist in App UNBEDINGT gemountet, und jeder Aufrufer ist ein Klick-/
+// Async-Handler (feuert erst nach Mount+Paint) -> _dialogSetter ist immer gesetzt,
+// sobald die App interaktiv ist. KEIN natives Fallback (waere toter Code). Der
+// null-Guard ist reiner Fail-safe: bricht destruktive Aktionen sicher ab, statt
+// ungefragt zu loeschen — erreichbar nur im theoretischen Pre-Mount-Rennen.
+let _dialogSetter = null;
+function uiConfirm(opts){ return new Promise(resolve=>{ if(!_dialogSetter){ resolve(false); return; } _dialogSetter({kind:'confirm', resolve, ...opts}); }); }
+function uiPrompt(opts){ return new Promise(resolve=>{ if(!_dialogSetter){ resolve(null); return; } _dialogSetter({kind:'prompt', resolve, ...opts}); }); }
+function DialogHost(){
+  const [cfg,setCfg]=useState(null);
+  const [vals,setVals]=useState({});
+  useEffect(()=>{
+    _dialogSetter=(c)=>{ const init={}; if(c&&Array.isArray(c.fields)) c.fields.forEach(f=>init[f.key]=f.default||''); setVals(init); setCfg(c); };
+    return ()=>{ _dialogSetter=null; };
+  },[]);
+  useEffect(()=>{
+    if(!cfg) return;
+    const h=(e)=>{ if(e.key==='Escape') close(cfg.kind==='prompt'?null:false); };
+    document.addEventListener('keydown',h);
+    return ()=>document.removeEventListener('keydown',h);
+  },[cfg]);
+  if(!cfg) return null;
+  const isPrompt=cfg.kind==='prompt';
+  const showCancel=cfg.cancelLabel!==null;   // cancelLabel:null -> Info-Dialog (nur OK)
+  function close(result){ const r=cfg.resolve; setCfg(null); if(r) r(result); }
+  function onOk(){
+    if(isPrompt){
+      if((cfg.fields||[]).some(f=>!f.optional && !String(vals[f.key]||'').trim())) return; // Pflichtfelder
+      close({...vals});
+    } else close(true);
+  }
+  return (
+    <div className="modal-overlay" style={{zIndex:2000}} onClick={e=>{ if(e.target===e.currentTarget) close(isPrompt?null:false); }}>
+      <div className="modal" style={{maxWidth:460,width:'100%'}} onClick={e=>e.stopPropagation()}>
+        <div className="modal-header"><span style={{fontWeight:700,fontSize:16}}>{cfg.title||(isPrompt?'Eingabe':'Bestätigen')}</span></div>
+        <div className="modal-body">
+          {cfg.text&&<div style={{fontSize:13,color:'var(--muted)',lineHeight:1.5,whiteSpace:'pre-line'}}>{cfg.text}</div>}
+          {Array.isArray(cfg.items)&&cfg.items.length>0&&(
+            <div style={{marginTop:cfg.text?12:0}}>
+              <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:.3,marginBottom:6}}>Betroffen</div>
+              <div style={{display:'flex',flexDirection:'column',gap:4}}>
+                {cfg.items.map((it,i)=>(<div key={i} style={{fontSize:13,padding:'6px 10px',background:'var(--surface-2)',borderRadius:6,border:'1px solid var(--border)'}}>{it}</div>))}
+              </div>
+            </div>
+          )}
+          {isPrompt&&(cfg.fields||[]).map((f,i)=>(
+            <div key={f.key} style={{marginTop:12}}>
+              <label className="form-label" style={{display:'block',marginBottom:4}}>{f.label}{f.optional?' (optional)':''}</label>
+              {Array.isArray(f.options)?(
+                <select className="form-select" autoFocus={i===0} value={vals[f.key]||''} onChange={e=>setVals(v=>({...v,[f.key]:e.target.value}))}>
+                  <option value="">{f.placeholder||'– wählen –'}</option>
+                  {f.options.map(o=>(<option key={o.value} value={o.value}>{o.label}</option>))}
+                </select>
+              ):(
+                <input className="form-input" autoFocus={i===0} value={vals[f.key]||''} placeholder={f.placeholder||''}
+                  onChange={e=>setVals(v=>({...v,[f.key]:e.target.value}))} onKeyDown={e=>{ if(e.key==='Enter') onOk(); }}/>
+              )}
+            </div>
+          ))}
+        </div>
+        <div style={{display:'flex',justifyContent:'flex-end',gap:8,padding:'14px 18px',borderTop:'1px solid var(--border)'}}>
+          {showCancel&&<button className="btn btn-sm" onClick={()=>close(isPrompt?null:false)}>{cfg.cancelLabel||'Abbrechen'}</button>}
+          <button className={'btn btn-sm'+(cfg.danger?'':' btn-primary')} autoFocus={!isPrompt}
+            style={cfg.danger?{background:'var(--red)',color:'#fff',borderColor:'var(--red)'}:undefined} onClick={onOk}>
+            {cfg.confirmLabel||(isPrompt?'OK':'Bestätigen')}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 function App(){
   migrateProjectData();
   const [loggedIn, setLoggedIn] = useState(false);
@@ -29598,6 +29676,7 @@ function App(){
             onClick={async()=>{ if(!window.confirm('Wirklich abmelden?')) return; try{await sb.auth.signOut();}catch(e){} sessionStorage.removeItem('jsr_team'); localStorage.removeItem('jsr_session_v1'); window.location.href=PORTAL_URLS.hr; }}>↩ Abmelden</button>
         </div>
         <div className="content">
+          <DialogHost/>
           {absenceModal&&<AbsenceModal emp={absenceModal} onSave={saveAbsences} onClose={()=>setAbsenceModal(null)}/>}
           {terminateModal&&<TerminateModal emp={terminateModal} onConfirm={confirmTerminate} onClose={()=>setTerminateModal(null)}/>}
           {bonusModal&&<BonusModal emp={bonusModal} onSave={saveBonus} onClose={()=>setBonusModal(null)}/>}
