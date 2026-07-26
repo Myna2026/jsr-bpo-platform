@@ -5541,6 +5541,25 @@ function TrainingPlans({plans, setPlans, projects, employees}){
     saveTrainingPlanToDB(rec);
     setModal(null);
   }
+  async function deletePlan(plan){
+    const proj=projects.find(p=>p.id===plan.project_id);
+    const names=(plan.confirmed_ids||[]).map(id=>{const e=employees.find(x=>x.id===id); return e?(e.first_name+' '+e.last_name):('MA '+String(id).slice(0,6));});
+    const today=new Date().toISOString().slice(0,10);
+    const started=(plan.start_date&&plan.start_date<=today)||(plan.status&&plan.status!=='planned');
+    const L=[];
+    L.push('Schulungsblock löschen?','');
+    L.push('„'+(plan.name||'(ohne Namen)')+'"');
+    L.push('Projekt: '+(proj?proj.name:'—'));
+    L.push('Zeitraum: '+(plan.start_date||'—')+' → '+(plan.end_date||'—'));
+    if(plan.active_date) L.push('Produktiv-Batch — aktiv ab '+plan.active_date);
+    if(started) L.push('','🚨 ACHTUNG: Dieser Block ist bereits GESTARTET bzw. nicht mehr „geplant" — das ist Historie. Löschen entfernt den Verlauf dieses Batches unwiederbringlich.');
+    if(names.length) L.push('','Betroffen: '+names.length+' bestätigte Teilnehmer ('+names.join(', ')+').','Die Mitarbeiter bleiben erhalten, ihr Status ändert sich nicht — nur die Batch-Zuordnung geht verloren.');
+    L.push('','Trotzdem löschen?');
+    if(!window.confirm(L.join('\n'))) return;
+    const res=await deleteTrainingPlanToDB(plan.id);
+    if(!res.ok){ alert('Löschen fehlgeschlagen: '+((res.error&&res.error.message)||res.error||'unbekannt')+'\nDer Block bleibt in der Liste.'); return; }
+    setPlans(ps=>ps.filter(p=>p.id!==plan.id));
+  }
   return(
     <div>
       {modal&&<TrainingPlanModal plan={modal==='add'?null:modal} projects={projects} employees={employees} onSave={savePlan} onClose={()=>setModal(null)}/>}
@@ -5575,7 +5594,8 @@ function TrainingPlans({plans, setPlans, projects, employees}){
                   {progress>=100&&<span className="badge badge-green">✓ Abgeschlossen</span>}
                   {progress>0&&progress<100&&<span className="badge badge-blue">▶ Läuft · {progress}%</span>}
                   {progress===0&&<span className="badge badge-amber">○ Geplant</span>}
-                  <button className="btn btn-sm" onClick={()=>setModal(plan)}>✎</button>
+                  <button className="btn btn-sm" title="Schulungsblock bearbeiten" onClick={()=>setModal(plan)}>✎</button>
+                  <button className="btn btn-sm" style={{color:'var(--red)'}} title="Schulungsblock löschen" onClick={()=>deletePlan(plan)}>🗑</button>
                 </div>
               </div>
               <div className="card-body">
@@ -26199,6 +26219,16 @@ async function saveTrainingPlanToDB(plan){
   const {error}=await sb.from('training_plans').upsert(payload);
   if(error){ console.error('[plan] saveTrainingPlanToDB', error); return false; }
   return true;
+}
+// Loeschen eines Schulungsblocks. Nicht-UUID-ids waren nie in der DB -> ok:true (nur State).
+// RLS "training_plans HR write" (for all) erlaubt DELETE fuer management/hr/finance.
+async function deleteTrainingPlanToDB(id){
+  const uuidRx=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if(!id) return {ok:false, error:'keine id'};
+  if(!uuidRx.test(String(id))) return {ok:true};   // lokal, nie gespeichert
+  const {error}=await sb.from('training_plans').delete().eq('id',id);
+  if(error){ console.error('[plan] deleteTrainingPlanToDB', error); return {ok:false, error:error}; }
+  return {ok:true};
 }
 
 // Etappe L2: Standorte relational aus Supabase (locations + location_monthly + spaces).
