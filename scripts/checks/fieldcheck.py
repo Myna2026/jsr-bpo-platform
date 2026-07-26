@@ -18,8 +18,9 @@ root = subprocess.check_output(["git", "rev-parse", "--show-toplevel"]).decode()
 hr  = open(os.path.join(root, "frontend/hr.html"), encoding="utf-8").read()
 mig = open(os.path.join(root, "migrations/2026-07-20_employees_availability.sql"), encoding="utf-8").read()
 
-FIELDS = ["work_weekend", "work_holidays", "work_saturday", "work_sunday", "work_split", "work_notes", "training_id"]
-BOOLS  = ["work_weekend", "work_holidays", "work_saturday", "work_sunday", "work_split"]
+# work_weekend am 2026-07-24 aus dem Datenmodell entfernt (drop column) — nicht mehr geprueft.
+FIELDS = ["work_holidays", "work_saturday", "work_sunday", "work_split", "work_notes", "training_id"]
+BOOLS  = ["work_holidays", "work_saturday", "work_sunday", "work_split"]
 
 def setbody(name):
     m = re.search(r"const " + name + r" = new Set\(\[(.*?)\]\)", hr, re.S)

@@ -2,7 +2,10 @@
 # TIVE 360° Deploy-Script — pusht die Frontend-Files auf die Hetzner-VM.
 #
 # Zwei Sicherungsstufen (System ist produktiv):
-#   Stufe 3  Vorab-Pruefung: balcheck/jsxcheck/macheck/fieldcheck laufen ZUERST.
+#   Stufe 3  Vorab-Pruefung: balcheck/jsxcheck/syntaxcheck/macheck/fieldcheck/eslintcheck laufen ZUERST.
+#            syntaxcheck parst hr.html echt (JSX) — faengt Fehler, die reine Klammerzaehlung nicht sieht.
+#            eslintcheck lintet alle Inline-Scripts als eine virtuelle Datei: no-undef blockt (verwaiste
+#            Referenzen), no-unused-vars warnt nur (Warnungen sichtbar via 'node scripts/checks/eslintcheck.js').
 #            Ein Fehlschlag bricht sofort ab — es wird NICHTS uebertragen.
 #            Notausgang: ./deploy.sh --force  (Pruefung uebersprungen, mit Warnung)
 #   Stufe 1  Rollback: vor jedem Uebertragen wird der aktuelle Live-Stand nach
@@ -52,8 +55,10 @@ else
   }
   run_check "balcheck.py  (hr.html)"           python3 "$CHECKS/balcheck.py"
   run_check "jsxcheck.js  (hr.html)"           node    "$CHECKS/jsxcheck.js"
+  run_check "syntaxcheck.js (hr.html parse)"   node    "$CHECKS/syntaxcheck.js"
   run_check "macheck.js   (mitarbeiter.html)"  node    "$CHECKS/macheck.js"
   run_check "fieldcheck.py (Felder/Migration)" python3 "$CHECKS/fieldcheck.py"
+  run_check "eslintcheck.js (hr.html no-undef)" node    "$CHECKS/eslintcheck.js"
   echo "  → alle Checks bestanden."
   echo ""
 fi
