@@ -5828,7 +5828,7 @@ function Timeline({employees, projects, plans, forecast}){
 // Feiertage STANDORTBEZOGEN ueber emp.location (Tirana/Prishtina), Nacht ueber konfigurierbares Fenster (night_start/end).
 // Rueckgabe { saturday_hours, sunday_hours, holiday_hours, night_hours, total_worked_hours, hasShifts }.
 async function classifyShiftSurcharges(emp, month){
-  const out={saturday_hours:0,sunday_hours:0,holiday_hours:0,night_hours:0,total_worked_hours:0,hasShifts:false};
+  const out={saturday_hours:0,sunday_hours:0,holiday_hours:0,night_hours:0,total_worked_hours:0,absence_shifts:0,hasShifts:false};
   try{
     if(!emp||!emp.id||!month) return out;
     const [y,m]=month.split('-').map(Number);
@@ -5856,6 +5856,9 @@ async function classifyShiftSurcharges(emp, month){
       const cell=(r.shift&&typeof r.shift==='object')?r.shift:(r.shift_value?{value:r.shift_value,net:r.net_hours}:null);
       const value=cell&&cell.value; if(!value) return;
       const net=(cell.net!=null?Number(cell.net):shiftHours(value).net)||0; if(!(net>0)) return;
+      // Punkt 2: Schicht an einem Abwesenheitstag ist ein Planungsfehler — NICHT ins Ist zaehlen,
+      // aber zaehlen + sichtbar machen (Hinweis im Bonus-Modal), damit HR den Plan korrigiert.
+      if((emp.absences||[]).some(a=>absCoversDay(a, ds))){ out.absence_shifts++; return; }
       out.total_worked_hours+=net;
       const dow=new Date(ds+'T00:00:00').getDay();
       const isSat=dow===6, isSun=dow===0, isHol=holDates.has(ds);
@@ -5888,7 +5891,10 @@ function calcAlbanianPayroll(slip, cfg){
   const hourlyRate = parseFloat(slip.hourly_rate||0);
   const workDays   = parseInt(slip.work_days||22);
   const hoursPerDay= parseFloat(slip.hours_per_day||8);
-  const monthTarget= workDays * hoursPerDay;
+  // Monatssoll aus gesnapshottetem soll_days (Werktage − Abwesenheit). Alt-Slips ohne soll_days:
+  // Fallback work_days. effRate unten bleibt bewusst work_days-basiert (Contract-Stundenwert).
+  const sollDays   = (slip.soll_days!=null && slip.soll_days!=='') ? parseFloat(slip.soll_days) : workDays;
+  const monthTarget= sollDays * hoursPerDay;
   // Effektiver Stundensatz NUR für Zuschläge. Fix-MA ohne hourly_rate: aus gesnapshottetem fixed_salary/Monatssoll.
   const effRate = hourlyRate>0 ? hourlyRate : (workDays>0 && hoursPerDay>0 ? parseFloat(slip.fixed_salary||0)/(workDays*hoursPerDay) : 0);
 
@@ -8249,6 +8255,10 @@ function PayrollView({employees, projects, showToast}){
   function calcSalary(emp){
     const r=parseFloat(emp.hourly_rate||0),h=parseFloat(emp.work_hours||8);
     const rec=(salaryData[selMonth]||[]).find(x=>x.emp_id===emp.id)||{};
+    // Soll-Werktage (Mo-Fr minus genehmigte Abwesenheit) — Basis fuer Monatssoll/Ueberstunden
+    // und die Fehlstunden-Schwelle. effRate/Stundenwert bleibt bewusst auf workDays (Mo-Fr):
+    // ein Fixgehalt-Stundenwert steigt nicht, weil jemand Urlaub hatte.
+    const sollDays=sollWorkdays(emp, selMonth);
     // Use actual worked days from plan if available, fallback to contract
     const actualDays=parseFloat(rec.work_days_actual||0)||workDays;
     // ── Salary type: fixed vs hourly ────────────────────────────
@@ -8267,7 +8277,7 @@ function PayrollView({employees, projects, showToast}){
       base = fixedSalary;
       // Optional: deduct for missing hours below guaranteed threshold
       if(deductMissing&&actualDays>0){
-        const targetH = workDays * h;
+        const targetH = sollDays * h;   // Fehlstunden-Schwelle abwesenheits-bereinigt
         const guaranteedH = targetH * guaranteedPct;
         const actualH = parseFloat(rec.worked_hours||0)||actualDays*h;
         if(actualH < guaranteedH){
@@ -8297,7 +8307,7 @@ function PayrollView({employees, projects, showToast}){
     const suP=P('surcharge_sunday',50);    // So 50% > OT 30% → So gilt
     const hoP=P('surcharge_holiday',50);   // Feiertag 50%
     const niP=P('surcharge_night',25);
-    const monthTarget = workDays*h;
+    const monthTarget = sollDays*h;   // Ueberstunden ab abwesenheits-bereinigtem Soll
     const workedH     = parseFloat(rec.total_worked_hours||monthTarget);
     const overtimeH   = Math.max(0,workedH-monthTarget); // Stunden über Soll
     const saH=parseFloat(rec.saturday_hours||0);
@@ -8329,7 +8339,7 @@ function PayrollView({employees, projects, showToast}){
     const dt=absenceDeduct,ds=parseFloat(rec.deduction_social||0),do_=parseFloat(rec.deduction_other||0);
     const totalDeductions=dt+ds+do_;
     const net=(base+rb+tb+sb+wb)-totalDeductions;
-    return{base,hourlyRate:r,hoursPerDay:h,grossHours:workDays*h,workDays,referralBonus:rb,targetBonus:tb,specialBonus:sb,wheelBonus:wb,totalBonuses:rb+tb+sb+wb,surcharges,gross:base+rb+tb+sb+wb+surcharges,deductionTax:dt,deductionSocial:ds,deductionOther:do_,totalDeductions,net,rec,unpaidPauseH,paidPauseH};
+    return{base,hourlyRate:r,hoursPerDay:h,grossHours:workDays*h,workDays,sollDays,referralBonus:rb,targetBonus:tb,specialBonus:sb,wheelBonus:wb,totalBonuses:rb+tb+sb+wb,surcharges,gross:base+rb+tb+sb+wb+surcharges,deductionTax:dt,deductionSocial:ds,deductionOther:do_,totalDeductions,net,rec,unpaidPauseH,paidPauseH};
   }
 
   function getSlip(empId,month){return(payslips[month]||[]).find(s=>s.emp_id===empId)||null;}
@@ -8356,7 +8366,7 @@ function PayrollView({employees, projects, showToast}){
       email:emp.email||'',
       hourly_rate:emp.hourly_rate, fixed_salary:emp.fixed_salary, work_hours:emp.work_hours, work_model:emp.work_model||'Vor Ort',
       contract_start:emp.contract?.start||emp.contract_start||'',
-      work_days:workDays, hours_per_day:s.hoursPerDay, gross_hours:s.grossHours,
+      work_days:workDays, soll_days:s.sollDays, hours_per_day:s.hoursPerDay, gross_hours:s.grossHours,
       base:s.base, referral_bonus:s.referralBonus, target_bonus:s.targetBonus,
       special_bonus:s.specialBonus, total_bonuses:s.totalBonuses, gross:s.gross,
       bonus_notes:s.rec?.notes||'',
@@ -8435,7 +8445,7 @@ function PayrollView({employees, projects, showToast}){
         first_name: emp.first_name, last_name: emp.last_name, staff_number: emp.staff_number,
         position: emp.position, location: emp.location, project_id: emp.project_id, email: emp.email||'',
         hourly_rate: emp.hourly_rate, work_hours: emp.work_hours, work_model: emp.work_model||'Vor Ort',
-        contract_start: emp.contract?.start||emp.contract_start||'', work_days: workDays, hours_per_day: s.hoursPerDay,
+        contract_start: emp.contract?.start||emp.contract_start||'', work_days: workDays, soll_days: s.sollDays, hours_per_day: s.hoursPerDay,
         gross_hours: s.grossHours, base: s.base, referral_bonus: s.referralBonus, target_bonus: s.targetBonus,
         special_bonus: s.specialBonus, total_bonuses: s.totalBonuses, gross: s.gross,
         deduction_tax: s.deductionTax, deduction_social: s.deductionSocial, deduction_other: s.deductionOther,
@@ -8828,7 +8838,8 @@ function PayrollView({employees, projects, showToast}){
                   <button className="btn btn-sm" type="button" onClick={async()=>{
                     const res=await classifyShiftSurcharges(bonusModal, selMonth);
                     if(!res.hasShifts){ setBonusForm(f=>({...f,_surchargeHint:'Keine Schichtdaten für '+fmtMonth(selMonth)+' — Zuschläge manuell eintragen.'})); return; }
-                    setBonusForm(f=>({...f, total_worked_hours:res.total_worked_hours, saturday_hours:res.saturday_hours, sunday_hours:res.sunday_hours, holiday_hours:res.holiday_hours, night_hours:res.night_hours, surcharge_source:'auto', _surchargeHint:''}));
+                    const absHint=res.absence_shifts>0?(res.absence_shifts+' geplante Schicht'+(res.absence_shifts>1?'en':'')+' an Abwesenheitstagen — nicht gezählt. Bitte den Plan prüfen/korrigieren.'):'';
+                    setBonusForm(f=>({...f, total_worked_hours:res.total_worked_hours, saturday_hours:res.saturday_hours, sunday_hours:res.sunday_hours, holiday_hours:res.holiday_hours, night_hours:res.night_hours, surcharge_source:'auto', _surchargeHint:absHint}));
                   }} style={{background:'var(--purple-bg)',color:'var(--purple)',border:'1.5px solid var(--purple)',fontWeight:700}}>🔄 Auto aus Schichtplan</button>
                   {bonusForm.surcharge_source==='auto' && <span style={{fontSize:11,fontWeight:700,color:'var(--green)',background:'rgba(34,197,94,.12)',padding:'3px 9px',borderRadius:99}}>● Auto aus Schichtplan</span>}
                   {bonusForm.surcharge_source==='manuell' && <span style={{fontSize:11,fontWeight:700,color:'var(--amber)',background:'var(--amber-bg)',padding:'3px 9px',borderRadius:99}}>● Manuell überschrieben</span>}
@@ -8837,8 +8848,8 @@ function PayrollView({employees, projects, showToast}){
                 <div className="form-row">
                   <div className="form-group">
                     <label className="form-label">Gesamt gearbeitete Stunden</label>
-                    <input className="form-input" type="number" min="0" step="0.5" value={bonusForm.total_worked_hours||''} onChange={e=>setBonusForm(f=>({...f,total_worked_hours:e.target.value,surcharge_source:'manuell'}))} placeholder={String(workDays*(parseFloat(bonusModal.work_hours)||8))}/>
-                    <div style={{fontSize:10,color:'var(--muted)',marginTop:2}}>Monatssoll: {workDays*(parseFloat(bonusModal.work_hours)||8)}h — Mehrstunden werden automatisch berechnet</div>
+                    <input className="form-input" type="number" min="0" step="0.5" value={bonusForm.total_worked_hours||''} onChange={e=>setBonusForm(f=>({...f,total_worked_hours:e.target.value,surcharge_source:'manuell'}))} placeholder={String(sollWorkdays(bonusModal, selMonth)*(parseFloat(bonusModal.work_hours)||8))}/>
+                    <div style={{fontSize:10,color:'var(--muted)',marginTop:2}}>Monatssoll: {sollWorkdays(bonusModal, selMonth)*(parseFloat(bonusModal.work_hours)||8)}h (Werktage − Abwesenheit) — Mehrstunden werden automatisch berechnet</div>
                   </div>
                   <div className="form-group"><label className="form-label">Samstag-Stunden (h)</label>
                     <input className="form-input" type="number" min="0" step="0.5" value={bonusForm.saturday_hours||0} onChange={e=>setBonusForm(f=>({...f,saturday_hours:e.target.value,surcharge_source:'manuell'}))}/></div>
@@ -27098,14 +27109,14 @@ const PAYSLIP_COLS = new Set([
   'employee_id','month','status',
   'first_name','last_name','staff_number','position','location','project_id','email',
   'hourly_rate','fixed_salary','work_hours','work_model','contract_start',
-  'work_days','hours_per_day','gross_hours',
+  'work_days','soll_days','hours_per_day','gross_hours',
   'base','referral_bonus','target_bonus','special_bonus','total_bonuses','gross',
   'deduction_tax','deduction_social','deduction_other','total_deductions','net',
   'bonus_notes','deduction_notes',
   'confirmed_at','paid_at','payment_date','payment_method',
 ]);
 const PAYSLIP_NUMERIC_COLS = new Set([
-  'hourly_rate','work_hours','work_days','hours_per_day','gross_hours',
+  'hourly_rate','work_hours','work_days','soll_days','hours_per_day','gross_hours',
   'base','referral_bonus','target_bonus','special_bonus','total_bonuses','gross',
   'deduction_tax','deduction_social','deduction_other','total_deductions','net',
 ]);
