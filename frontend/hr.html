@@ -6742,11 +6742,11 @@ const ROLE_DEFINITIONS = {
 };
 const ROLE_PRIORITY = ['admin','management','hr','finance','teamlead','individual'];
 const ROLE_DEFAULTS = {
-  admin: ['ma_per_project','training_status','krankheit_month','urlaub_bottleneck','personalkosten','ma_kritisch','ma_top','fluktuation','time_to_hire','auslastung','onboarding','vertrag_auslauf','nps','overtime','recruiting_pipeline'],
-  management: ['fluktuation','personalkosten','auslastung','vertrag_auslauf','ma_kritisch'],
+  admin: ['ma_per_project','training_status','krankheit_month','urlaub_bottleneck','personalkosten','fluktuation','time_to_hire','auslastung','onboarding','vertrag_auslauf','nps','overtime','recruiting_pipeline'],
+  management: ['fluktuation','personalkosten','auslastung','vertrag_auslauf'],
   hr: ['onboarding','recruiting_pipeline','time_to_hire','krankheit_month','urlaub_bottleneck','training_status'],
   finance: ['personalkosten','auslastung','ma_per_project'],
-  teamlead: ['ma_top','ma_kritisch','krankheit_month','urlaub_bottleneck','training_status','overtime'],
+  teamlead: ['krankheit_month','urlaub_bottleneck','training_status','overtime'],
   individual: []
 };
 function loadRoleCockpits(){
@@ -6768,7 +6768,10 @@ function roleForTeam(team){
   return 'individual';
 }
 function resolveMyCockpit(team, employees){
-  const w = cockpitForRole(roleForTeam(team));
+  // Gegen entfernte Widget-IDs in gespeicherten Cockpits absichern (z.B. ma_top/ma_kritisch,
+  // entfernt 2026-07-26): nur Keys behalten, die der Katalog noch kennt. Beim naechsten
+  // Speichern einer Rolle wird die bereinigte Liste persistiert (self-healing).
+  const w = (cockpitForRole(roleForTeam(team))||[]).filter(id=>WIDGETS[id]);
   return (w && w.length) ? w : DEFAULT_WIDGETS;
 }
 // Verknuepft App-User (Supabase) mit jsr_emp_v3-Datensatz: Email- oder staff_number-Match
@@ -6874,32 +6877,10 @@ function Widget_Personalkosten({employees}){
     </div>
   ))}</div>;
 }
-function empScores(employees){
-  const perf=readLS('jsr_perf_v1',{});
-  return (employees||[]).filter(e=>e&&e.status==='active').map(e=>{
-    const ent=perf[e.id]||[]; if(!ent.length)return null;
-    const avg=ent.reduce((s,x)=>s+(parseFloat(x.value)||0),0)/ent.length;
-    return {emp:e, score:Math.round(avg)};
-  }).filter(Boolean);
-}
-function Widget_MaTop({employees}){
-  const scored=empScores(employees).sort((a,b)=>b.score-a.score).slice(0,5);
-  if(!scored.length) return <div className="w-empty">Keine Bewertungsdaten.</div>;
-  return <div>{scored.map((s,i)=>(
-    <div key={i} className="widget-row">
-      <span>{s.emp.first_name} {s.emp.last_name}</span><span className="num" style={{color:'#059669'}}>{s.score}</span>
-    </div>
-  ))}</div>;
-}
-function Widget_MaKritisch({employees}){
-  const scored=empScores(employees).sort((a,b)=>a.score-b.score).slice(0,5);
-  if(!scored.length) return <div className="w-empty">Keine Bewertungsdaten.</div>;
-  return <div>{scored.map((s,i)=>(
-    <div key={i} className="widget-row">
-      <span>{s.emp.first_name} {s.emp.last_name}</span><span className="num" style={{color:'#dc2626'}}>{s.score}</span>
-    </div>
-  ))}</div>;
-}
+// empScores/Widget_MaTop/Widget_MaKritisch entfernt (2026-07-26): mittelten % mit Zaehlwerten
+// zu einer bedeutungslosen Zahl, projektuebergreifende Rangliste vergleicht ungleiche KPI-Saetze.
+// Korrekte Schwellen-Rangliste liegt im Performance-Tab (rankView/getRanking, je Projekt+Skill)
+// und in der Profil-Card (PerformanceCard). Widget-IDs ma_top/ma_kritisch ebenfalls entfernt.
 
 function WidgetPlaceholder({text}){return <div className="w-empty">{text||'Datenquelle nicht konfiguriert.'}</div>;}
 function Widget_Fluktuation({employees}){
@@ -6975,8 +6956,6 @@ function WidgetCard({id, employees, projects, plans, forecast}){
     krankheit_month:()=><Widget_KrankheitMonth employees={employees}/>,
     urlaub_bottleneck:()=><Widget_UrlaubBottleneck/>,
     personalkosten:()=><Widget_Personalkosten employees={employees}/>,
-    ma_kritisch:()=><Widget_MaKritisch employees={employees}/>,
-    ma_top:()=><Widget_MaTop employees={employees}/>,
     fluktuation:()=><Widget_Fluktuation employees={employees}/>,
     time_to_hire:()=><Widget_TimeToHire employees={employees}/>,
     auslastung:()=><Widget_Auslastung employees={employees} projects={projects} forecast={forecast}/>,
@@ -28239,8 +28218,6 @@ const WIDGETS = {
   krankheit_month:     { id:'krankheit_month',     label:'Krankheitstage laufender Monat',    icon:'heart',                category:'zeit' },
   urlaub_bottleneck:   { id:'urlaub_bottleneck',   label:'Urlaubs-Bottleneck 6 Monate',       icon:'calendar',             category:'zeit' },
   personalkosten:      { id:'personalkosten',      label:'Personalkosten',                    icon:'currency-euro',        category:'finanzen' },
-  ma_kritisch:         { id:'ma_kritisch',         label:'Kritische MA (KPI-basiert)',        icon:'exclamation-triangle', category:'people' },
-  ma_top:              { id:'ma_top',              label:'Top MA (KPI-basiert)',              icon:'star',                 category:'people' },
   fluktuation:         { id:'fluktuation',         label:'Fluktuation 30/90/365 Tage',        icon:'arrow-trending-down',  category:'people' },
   time_to_hire:        { id:'time_to_hire',        label:'Time-to-Hire',                      icon:'clock',                category:'recruiting' },
   auslastung:          { id:'auslastung',          label:'Auslastung Ist/Soll',               icon:'chart-pie',            category:'personal' },
@@ -28256,7 +28233,7 @@ const WIDGET_CATEGORIES = {personal:'Personal', zeit:'Zeit', finanzen:'Finanzen'
 
 // ═══ CockpitEditor (Modal) ═══
 function CockpitEditor({roleDef, current, onSave, onClose}){
-  const [sel, setSel] = useState(()=> (current&&current.length?current.slice():DEFAULT_WIDGETS.slice()));
+  const [sel, setSel] = useState(()=> (current&&current.length?current:DEFAULT_WIDGETS).slice().filter(id=>WIDGETS[id]));
   const [dragIdx, setDragIdx] = useState(null);
   useEffect(()=>{
     const h = e=>{ if(e.key==='Escape') onClose(); };
