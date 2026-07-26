@@ -1347,16 +1347,14 @@ const MENU_BADGE_MAIN_ITEMS = [
 // hasAccess() gibt fuer diese Keys IMMER true zurueck, VOR der Sperr-Pruefung —
 // damit ist die Sperrung dieser Tabs nicht nur Konvention, sondern unmoeglich.
 const HR_ALWAYS_TABS = ['start','daily_tasks','shiftplan','activity_log','datacheck','locations','spaces','payroll','showcase','timetracking','superadmin','tabperms','aisettings','cockpits','hraccess','appusers','aiendpoint','cvsync','wissen_system'];
-// Opt-in-Tabs: standardmaessig VERBORGEN, nur mit ausdruecklicher Freigabe sichtbar
-// (jsr_hr_tab_allow_v1). Umkehrung zur normalen "sichtbar ausser gesperrt"-Logik.
-// Erweiterbar: weiteren Key ergaenzen (heute nur das WFP-Beta).
-const HR_OPTIN_TABS = ['workforce'];
-// Sperrbarer Katalog = alle Menue-Tabs ausser always- UND opt-in-Tabs, plus der
-// Sperr-Admin selbst (hrtablocks ist sperrbar, damit man ihn Nutzern entziehen kann).
-const HR_LOCKABLE_TABS = [...MENU_BADGE_MAIN_ITEMS.filter(t=>HR_ALWAYS_TABS.indexOf(t.key)<0 && HR_OPTIN_TABS.indexOf(t.key)<0), {key:'hrtablocks',label:'HR-Tab-Sperren'}];
-// Matrix-Anzeige (Punkt 1: Vollstaendigkeit): opt-in-Items (Haken=freigegeben) +
-// strukturell geschuetzte Items (ausgegraut, nicht sperrbar = HR_ALWAYS_TABS ∩ Menue).
-const HR_OPTIN_ITEMS     = MENU_BADGE_MAIN_ITEMS.filter(t=>HR_OPTIN_TABS.indexOf(t.key)>=0);
+// Tabs, die bei NEUEN Zugaengen ohne eigenen Sperr-Eintrag standardmaessig verborgen sind:
+// workforce (WFP-Beta). KEINE umgekehrte Semantik — ein Haken heisst ueberall "sperren";
+// neue Zugaenge bekommen den Sperr-Eintrag nur vorbelegt (Login-Default + Matrix-Backfill).
+const HR_DEFAULT_LOCKED_TABS = ['workforce'];
+// Sperrbarer Katalog = alle Menue-Tabs ausser always-Tabs, plus der Sperr-Admin selbst
+// (hrtablocks ist sperrbar, damit man ihn Nutzern entziehen kann). workforce ist normal sperrbar.
+const HR_LOCKABLE_TABS = [...MENU_BADGE_MAIN_ITEMS.filter(t=>HR_ALWAYS_TABS.indexOf(t.key)<0), {key:'hrtablocks',label:'HR-Tab-Sperren'}];
+// Matrix-Anzeige (Vollstaendigkeit): strukturell geschuetzte Items (ausgegraut, nicht sperrbar).
 const HR_PROTECTED_ITEMS = MENU_BADGE_MAIN_ITEMS.filter(t=>HR_ALWAYS_TABS.indexOf(t.key)>=0);
 function loadMenuBadges(){
   try{ const raw=JSON.parse(localStorage.getItem('jsr_menu_badges_v1')||'null');
@@ -27951,7 +27949,6 @@ function TabPermsView({employees}){
 function HrTabLocksView(){
   const [users,setUsers]=useState([]);
   const [locks,setLocks]=useState({});
-  const [allow,setAllow]=useState({});
   const [loading,setLoading]=useState(true);
   const [q,setQ]=useState('');
   useEffect(()=>{
@@ -27959,56 +27956,49 @@ function HrTabLocksView(){
     (async()=>{
       try{
         const m=await loadConfigFromDB('jsr_hr_tab_locks_v1');
-        const ma=await loadConfigFromDB('jsr_hr_tab_allow_v1');
         const uRes=await sb.from('app_users').select('user_id, full_name, role_keys, active');
         if(!alive) return;
-        setLocks((m&&typeof m==='object'&&!Array.isArray(m))?m:{});
-        setAllow((ma&&typeof ma==='object'&&!Array.isArray(ma))?ma:{});
-        setUsers((uRes.data||[]).filter(u=>u&&u.active&&u.user_id&&Array.isArray(u.role_keys)&&u.role_keys.length));
+        const lm=(m&&typeof m==='object'&&!Array.isArray(m))?{...m}:{};
+        const activeUsers=(uRes.data||[]).filter(u=>u&&u.active&&u.user_id&&Array.isArray(u.role_keys)&&u.role_keys.length);
+        // Vorbelegung: neue Zugaenge ohne eigenen Eintrag bekommen die Default-Sperren
+        // (workforce) materialisiert in jsr_hr_tab_locks_v1. Kein Eintrag = noch nie konfiguriert;
+        // toggleLock haelt danach auch leere Arrays (nie zurueck zu "kein Eintrag"), damit ein
+        // Freischalten der Default-Tabs nicht beim naechsten Oeffnen ueberschrieben wird.
+        let seeded=false;
+        activeUsers.forEach(u=>{ if(!Array.isArray(lm[u.user_id])){ lm[u.user_id]=[...HR_DEFAULT_LOCKED_TABS]; seeded=true; } });
+        setLocks(lm);
+        setUsers(activeUsers);
+        if(seeded) saveConfigToDB('jsr_hr_tab_locks_v1', lm);
       }catch(e){ console.error('[hrtablocks] load', e); }
       if(alive) setLoading(false);
     })();
     return ()=>{alive=false;};
   },[]);
   const LOCKABLE_KEYS=new Set(HR_LOCKABLE_TABS.map(t=>t.key));
-  const OPTIN_KEYS=new Set(HR_OPTIN_TABS);
   const isLocked=(uid,tab)=>{ const a=locks[uid]; return Array.isArray(a)&&a.includes(tab); };
-  const isAllowed=(uid,tab)=>{ const a=allow[uid]; return Array.isArray(a)&&a.includes(tab); };
   function toggleLock(uid,tab){
-    if(!LOCKABLE_KEYS.has(tab)||HR_ALWAYS_TABS.indexOf(tab)>=0||OPTIN_KEYS.has(tab)) return; // Sicherung
+    if(!LOCKABLE_KEYS.has(tab)||HR_ALWAYS_TABS.indexOf(tab)>=0) return; // Sicherung
     setLocks(prev=>{
       const next={...prev};
       const arr=Array.isArray(next[uid])?[...next[uid]]:[];
       const i=arr.indexOf(tab); if(i>=0) arr.splice(i,1); else arr.push(tab);
-      const clean=arr.filter(k=>LOCKABLE_KEYS.has(k)&&HR_ALWAYS_TABS.indexOf(k)<0&&!OPTIN_KEYS.has(k));
-      if(clean.length) next[uid]=clean; else delete next[uid];
+      const clean=arr.filter(k=>LOCKABLE_KEYS.has(k)&&HR_ALWAYS_TABS.indexOf(k)<0);
+      next[uid]=clean; // auch leer behalten: "konfiguriert, nichts gesperrt" (verhindert Re-Seed)
       saveConfigToDB('jsr_hr_tab_locks_v1', next);
-      return next;
-    });
-  }
-  function toggleAllow(uid,tab){
-    if(!OPTIN_KEYS.has(tab)) return; // nur opt-in-Tabs
-    setAllow(prev=>{
-      const next={...prev};
-      const arr=Array.isArray(next[uid])?[...next[uid]]:[];
-      const i=arr.indexOf(tab); if(i>=0) arr.splice(i,1); else arr.push(tab);
-      const clean=arr.filter(k=>OPTIN_KEYS.has(k));
-      if(clean.length) next[uid]=clean; else delete next[uid];
-      saveConfigToDB('jsr_hr_tab_allow_v1', next);
       return next;
     });
   }
   const rows=(users||[])
     .filter(u=>{const n=(u.full_name||'').toLowerCase();return !q.trim()||n.includes(q.trim().toLowerCase());})
     .sort((a,b)=>(a.full_name||'').localeCompare(b.full_name||'','de'));
-  const colCount=1+HR_LOCKABLE_TABS.length+HR_OPTIN_ITEMS.length+HR_PROTECTED_ITEMS.length;
+  const colCount=1+HR_LOCKABLE_TABS.length+HR_PROTECTED_ITEMS.length;
   const grpTh=(bg,color,text,n)=> n>0 ? <th colSpan={n} style={{padding:'6px 8px',borderBottom:'1px solid var(--border)',textAlign:'center',fontSize:11,fontWeight:800,background:bg,color:color,whiteSpace:'nowrap'}}>{text}</th> : null;
   const labTh=(t,extra)=> <th key={t.key} style={{padding:'8px 6px',borderBottom:'2px solid var(--border)',textAlign:'center',fontSize:11,whiteSpace:'nowrap',...(extra||{})}}>{t.label}</th>;
   return (
     <div>
       <div style={{marginBottom:14}}>
         <div style={{fontSize:18,fontWeight:700}}>HR-Tab-Sperren</div>
-        <div style={{fontSize:13,color:'var(--muted)',marginTop:2}}>Sichtbarkeit einzelner HR-Portal-Tabs pro Nutzer. Daten bleiben für alle identisch — nur die Sichtbarkeit. Greift beim nächsten Login/Reload. Drei Spaltengruppen: <b style={{color:'var(--red)'}}>Sperrbar</b> (Haken = gesperrt), <b style={{color:'#16a34a'}}>Freigabe</b> (standardmäßig verborgen, Haken = sichtbar), <b style={{color:'var(--muted)'}}>Strukturell geschützt</b> (nicht sperrbar).</div>
+        <div style={{fontSize:13,color:'var(--muted)',marginTop:2}}>Sichtbarkeit einzelner HR-Portal-Tabs pro Nutzer. Daten bleiben für alle identisch — nur die Sichtbarkeit. Greift beim nächsten Login/Reload. Ein Haken bedeutet überall <b>gesperrt</b>. Zwei Spaltengruppen: <b style={{color:'var(--red)'}}>Sperrbar</b> (Haken = gesperrt), <b style={{color:'var(--muted)'}}>Strukturell geschützt</b> (nicht sperrbar). Neue Zugänge bekommen <b>Workforce (Beta)</b> automatisch vorbelegt gesperrt — Haken entfernen, um freizuschalten.</div>
       </div>
       <div style={{display:'flex',gap:10,marginBottom:14,flexWrap:'wrap'}}>
         <input placeholder="Name suchen…" value={q} onChange={e=>setQ(e.target.value)} style={{padding:'8px 10px',borderRadius:8,border:'1px solid var(--border)',fontSize:13,minWidth:200}}/>
@@ -28020,12 +28010,10 @@ function HrTabLocksView(){
             <tr>
               <th rowSpan={2} style={{textAlign:'left',padding:'8px 10px',borderBottom:'2px solid var(--border)',position:'sticky',left:0,background:'var(--card)',verticalAlign:'bottom'}}>Nutzer</th>
               {grpTh('var(--red-bg,#fee2e2)','var(--red,#dc2626)','🔒 Sperrbar — Haken = gesperrt',HR_LOCKABLE_TABS.length)}
-              {grpTh('#dcfce7','#16a34a','👁 Freigabe — Haken = sichtbar',HR_OPTIN_ITEMS.length)}
               {grpTh('var(--surface-2)','var(--muted)','🛡 Strukturell geschützt — nicht sperrbar',HR_PROTECTED_ITEMS.length)}
             </tr>
             <tr>
               {HR_LOCKABLE_TABS.map(t=>labTh(t))}
-              {HR_OPTIN_ITEMS.map(t=>labTh(t,{background:'#dcfce7',color:'#166534'}))}
               {HR_PROTECTED_ITEMS.map(t=>labTh(t,{background:'var(--surface-2)',color:'var(--muted)'}))}
             </tr>
           </thead>
@@ -28039,11 +28027,6 @@ function HrTabLocksView(){
                 {HR_LOCKABLE_TABS.map(t=>(
                   <td key={t.key} style={{padding:'6px',borderBottom:'1px solid var(--border)',textAlign:'center'}}>
                     <input type="checkbox" checked={isLocked(u.user_id,t.key)} onChange={()=>toggleLock(u.user_id,t.key)} style={{cursor:'pointer',width:16,height:16}}/>
-                  </td>
-                ))}
-                {HR_OPTIN_ITEMS.map(t=>(
-                  <td key={t.key} style={{padding:'6px',borderBottom:'1px solid var(--border)',textAlign:'center',background:'rgba(22,163,74,.06)'}}>
-                    <input type="checkbox" checked={isAllowed(u.user_id,t.key)} onChange={()=>toggleAllow(u.user_id,t.key)} title="freigeben (sonst verborgen)" style={{cursor:'pointer',width:16,height:16,accentColor:'#16a34a'}}/>
                   </td>
                 ))}
                 {HR_PROTECTED_ITEMS.map(t=>(
@@ -28944,15 +28927,15 @@ function App(){
       // HR-Tab-Sperren pro Nutzer (identifiziert ueber app_users.user_id): access bleibt 'all'
       // (identische Daten, Architekturregel), nur team.locked blendet einzelne Tabs aus.
       let hrTabLocks={}; try{ const m=await loadConfigFromDB('jsr_hr_tab_locks_v1'); if(m&&typeof m==='object'&&!Array.isArray(m)) hrTabLocks=m; }catch(e){}
-      // Opt-in-Freigaben (jsr_hr_tab_allow_v1): verborgene Tabs (WFP) nur mit Eintrag sichtbar.
-      let hrTabAllow={}; try{ const m2=await loadConfigFromDB('jsr_hr_tab_allow_v1'); if(m2&&typeof m2==='object'&&!Array.isArray(m2)) hrTabAllow=m2; }catch(e){}
       const loginPayload = {
         name: au.full_name || session.user.email,
         icon: '⬡',
         role: (au.role_keys||[]).map(k=>ROLE_LABELS[k]||k).join(' · '),
         access: 'all',                 // Daten identisch fuer alle; Unterschiede nur ueber team.locked
-        locked: Array.isArray(hrTabLocks[session.user.id]) ? hrTabLocks[session.user.id] : [],
-        allowed: Array.isArray(hrTabAllow[session.user.id]) ? hrTabAllow[session.user.id] : [],
+        // Vorbelegung fuer neue Zugaenge: noch kein Eintrag -> Default-Sperren (workforce) greifen,
+        // bis ein Admin die Matrix oeffnet (Backfill materialisiert den Eintrag). Bestehender
+        // Eintrag (auch leer) gewinnt -> Freischalten haelt.
+        locked: Array.isArray(hrTabLocks[session.user.id]) ? hrTabLocks[session.user.id] : [...HR_DEFAULT_LOCKED_TABS],
         role_keys: au.role_keys,
         portals: portals,
         employee_id: await matchEmployeeToUserSb(session.user.email, au.staff_number),  // 25a: Auto-Match über Supabase
@@ -29193,7 +29176,7 @@ function App(){
     );
   }
 
-  const hasAccess = (key) => { try{ if(HR_ALWAYS_TABS.includes(key)) return true; if(HR_OPTIN_TABS.includes(key)) return !!(team&&Array.isArray(team.allowed)&&team.allowed.includes(key)); if(team&&Array.isArray(team.locked)&&team.locked.includes(key)) return false; return !team||(team.access==='all'||team.access.includes(key));}catch(e){return true;} };
+  const hasAccess = (key) => { try{ if(HR_ALWAYS_TABS.includes(key)) return true; if(team&&Array.isArray(team.locked)&&team.locked.includes(key)) return false; return !team||(team.access==='all'||team.access.includes(key));}catch(e){return true;} };
 
   async function saveEmployee(form){
     let saved = form;
