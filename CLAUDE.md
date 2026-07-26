@@ -783,16 +783,14 @@ Historie), nur für einen anderen Status. Saubere Lösung braucht echte
 allgemein eine Statushistorie mit Von-Bis), nicht einen einzelnen
 Live-Statuswert. Eigener Vorhaben-Schnitt, vor Produktivgang zu klären.
 
-### AbsenceOverview `getYearStats` zählt nur Einzeltage (offen)
-Die Jahres-Tabelle in `AbsenceOverview` (`getYearStats`) zählt Abwesenheiten
-ausschließlich über `a.date` (Einzeltag-Modell). Die aus dem Urlaubsantrag-
-Flow erzeugten **Zeitraum**-Absences (`from`/`to`, kein `date`) werden dort
-**nicht** gezählt — Krank/Urlaub/Sonderurlaub/Unbezahlt-Summen und „Urlaub
-offen" bleiben für genehmigte Anträge zu niedrig. Der Monatskalender + die
-Liste „Kommende Abwesenheiten" wurden bereits range-aware gemacht
-(`a.start||a.from||a.date` … `s<=ds&&en>=ds`); `getYearStats` fehlt noch.
-Fix: die Tage eines Zeitraums innerhalb des Jahres zählen (Werktage,
-konsistent zu `days`). Direkt nach Schnitt 1 des Urlaubs-Features angehen.
+### AbsenceOverview `getYearStats` zählt nur Einzeltage (ERLEDIGT 2026-07-26)
+`getYearStats` zählte Abwesenheiten ausschließlich über `a.date` (Einzeltag-
+Modell) und per Eintrags-`.length` — Zeitraum-Absences aus dem Urlaubsantrag-
+Flow wurden nicht gezählt. Mit der **Absence-Format-Vereinheitlichung**
+(2026-07-26) behoben: `getYearStats` summiert jetzt tagbasiert über
+`absDaysInYear` (deckt Einzeltag `from===to` UND Zeitraum ab). Teil des
+Umbaus auf **ein** Format `{from, to, days}` — Einzelheiten siehe Memory
+`open-migration-cuts`/`partial-absence-localstorage-loss`.
 
 ### Abwesenheits-Kalender rendert nur die ersten 10 MA (offen)
 Das Monats-Grid in `AbsenceOverview` mappt `activeEmps.slice(0,10)` → bei mehr

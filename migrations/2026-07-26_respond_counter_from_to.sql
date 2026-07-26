@@ -1,12 +1,9 @@
--- ============================================================================
--- Schnitt 2 / Teil A — respond_counter(request_id, accept)
--- MA beantwortet einen HR-Gegenvorschlag (status='counter').
--- SECURITY DEFINER: schreibt die Absence serverseitig, damit der MA KEINE breite
--- UPDATE-Policy auf vacation_requests/employees braucht. Alle Guards IM RPC.
+-- Absence-Format vereinheitlichen: respond_counter schreibt die Absence beim Counter-Accept
+-- nur noch im from/to-Format (start/end entfernt). Sonst entstünde beim MA-Counter-Accept
+-- sofort wieder eine Absence im Alt-Format, an der neue Auswertungen vorbeilaufen.
 --
--- Erwartete counter_proposal-Form (setzt HR in Teil B):
---   { "from": "YYYY-MM-DD", "to": "YYYY-MM-DD" }
--- ============================================================================
+-- Nur der Absence-INSERT-Block ändert sich (Zeilen 'start'/'end' raus). Guards/Signatur/
+-- Grants unverändert. Idempotent via create or replace.
 
 create or replace function public.respond_counter(p_request_id uuid, p_accept boolean)
 returns void
@@ -29,24 +26,18 @@ begin
     raise exception 'Antrag nicht gefunden';
   end if;
 
-  -- Guard 1: nur der Mitarbeiter, dem der Antrag gehört
   if v_me is null or v_row.employee_id <> v_me then
     raise exception 'Kein Zugriff auf diesen Antrag';
   end if;
 
-  -- Guard 2: nur aus status='counter' heraus (kein Doppel-Annehmen, kein
-  --          Umbiegen von pending/approved/rejected)
   if v_row.status <> 'counter' then
     raise exception 'Antrag ist nicht im Status counter (aktuell: %)', v_row.status;
   end if;
 
   if p_accept then
-    -- Gegenvorschlags-Daten; Fallback auf die ursprünglichen Antragsdaten
     v_from := coalesce((v_row.counter_proposal->>'from')::date, v_row.from_date);
     v_to   := coalesce((v_row.counter_proposal->>'to')::date,   v_row.to_date);
 
-    -- Offboarding-Schnitt 1: Grenze = frühestes von Austrittsdatum und Vertragsende
-    -- (least ignoriert NULL). Gesetzt und v_to danach → hart blocken (inklusiv).
     select least(e.termination_date, nullif(e.contract->>'end','')::date)
       into v_exit
       from public.employees e where e.id = v_row.employee_id;
@@ -54,14 +45,11 @@ begin
       raise exception 'Zeitraum liegt nach dem Austritts-/Vertragsende (%)', v_exit;
     end if;
 
-    -- Werktage (Mo–Fr) im Zeitraum — serverseitig, nicht dem Client vertrauen
     select count(*)::int into v_days
       from generate_series(v_from, v_to, interval '1 day') d
      where extract(dow from d) not in (0, 6);
 
-    -- Absence an den Mitarbeiter schreiben (SECURITY DEFINER umgeht RLS).
-    -- EIN Format: from/to (Einzeltag from===to), type/days/paid. start/end entfernt
-    -- (2026-07-26, Absence-Format-Vereinheitlichung). paid = (type <> 'unpaid').
+    -- EIN Format: from/to (Einzeltag from===to), days. start/end entfernt (2026-07-26).
     update public.employees
        set absences = coalesce(absences, '[]'::jsonb) || jsonb_build_object(
              'type',         v_row.type,
@@ -75,12 +63,10 @@ begin
            )
      where id = v_row.employee_id;
 
-    -- Antrag auf approved + den vereinbarten Zeitraum festschreiben
     update public.vacation_requests
        set status = 'approved', from_date = v_from, to_date = v_to, days = v_days
      where id = p_request_id;
   else
-    -- Ablehnen des Gegenvorschlags: nur Status, keine Absence
     update public.vacation_requests
        set status = 'rejected'
      where id = p_request_id;
@@ -90,14 +76,3 @@ $$;
 
 revoke all    on function public.respond_counter(uuid, boolean) from public;
 grant execute on function public.respond_counter(uuid, boolean) to authenticated;
-
-
--- ---- Verifikation (Ausgabe posten) -----------------------------------------
--- 1) RPC existiert + SECURITY DEFINER?
-select proname, prosecdef, pg_get_function_identity_arguments(oid) as args
-  from pg_proc where proname = 'respond_counter';
-
--- 2) Aktuelle Policies auf vacation_requests (MA hat KEIN update):
-select policyname, cmd from pg_policies
- where schemaname = 'public' and tablename = 'vacation_requests'
- order by cmd, policyname;
