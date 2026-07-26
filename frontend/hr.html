@@ -3647,7 +3647,7 @@ function EmployeeModal({emp, projects, onSave, onClose, initialTab, onTerminate}
                   <label className="form-label">Telefon</label>
                   <div style={{display:'flex',gap:6}}>
                     {(()=>{
-                      const KNOWN_CC=['383','355','49','43']; // 3-stellige zuerst (383/355 vor 43/49); Erkennung MIT oder OHNE '+'
+                      const KNOWN_CC=['383','355','49','43','41']; // 3-stellige zuerst (383/355 vor 43/49/41); Erkennung MIT oder OHNE '+'; 41=Schweiz
                       const detectCC=raw=>{ const d=String(raw||'').replace(/^\s*\+/,'').replace(/\D/g,''); for(const cc of KNOWN_CC){ if(d.startsWith(cc)) return '+'+cc; } return ''; };
                       // Entfernt eine fuehrende Vorwahl (Ziffern + evtl. '+'/Trenner davor/dazwischen), Rest der Nummer bleibt.
                       const stripCC=(raw,cc)=>{ const s=String(raw||'').trim().replace(/^\+/,''); let rm=0,out=''; for(let i=0;i<s.length;i++){ const ch=s[i]; if(rm<cc.length){ if(/\d/.test(ch)) rm++; continue; } out+=ch; } return out.replace(/^[\s\-\/().]*/,'').trim(); };
@@ -3658,11 +3658,13 @@ function EmployeeModal({emp, projects, onSave, onClose, initialTab, onTerminate}
                           title="Optionale Vorwahl — ersetzt nur die Vorwahl, die Nummer bleibt erhalten"
                           onChange={e=>{ const cc=e.target.value; if(!cc) return;
                             const rest=detected?stripCC(form.phone,detected.replace('+','')):String(form.phone||'').trim(); // vorhandene Vorwahl ersetzen, sonst nur voranstellen
-                            set('phone',(cc+' '+rest).trim()); }}>
+                            const nat=String(rest).replace(/\D/g,''); // E.164: +CC direkt gefolgt von der Nationalnummer, ohne Trennzeichen
+                            set('phone', cc+nat); }}>
                           <option value="+383">🇽🇰 Kosovo +383</option>
                           <option value="+355">🇦🇱 Albanien +355</option>
                           <option value="+49">🇩🇪 Deutschland +49</option>
                           <option value="+43">🇦🇹 Österreich +43</option>
+                          <option value="+41">🇨🇭 Schweiz +41</option>
                         </select>
                       );
                     })()}
@@ -7216,9 +7218,9 @@ function DailyTasksView({employees, projects, plans, onNavigate, team}){
 
 // ── Telefon-Vereinheitlichung (E.164) — EINE WAHRHEIT für Report (jetzt) und spätere Migration ──
 // Erkennung führender Vorwahl MIT oder OHNE '+'. Plausible Nationalnummer-Längen je Land (konservativ).
-const PHONE_CC=['383','355','49','43'];                                   // 3-stellige zuerst
-const PHONE_CC_NAT={'383':[8,8],'355':[8,9],'49':[9,11],'43':[9,13]};     // [min,max] Stellen der Nationalnummer
-const PHONE_CC_LAND={'383':'Kosovo','355':'Albanien','49':'Deutschland','43':'Österreich'};
+const PHONE_CC=['383','355','49','43','41'];                              // 3-stellige zuerst; 41=Schweiz
+const PHONE_CC_NAT={'383':[8,8],'355':[8,9],'49':[9,11],'43':[9,13],'41':[9,9]}; // [min,max] Stellen der Nationalnummer
+const PHONE_CC_LAND={'383':'Kosovo','355':'Albanien','49':'Deutschland','43':'Österreich','41':'Schweiz'};
 function phoneDigits(raw){ return String(raw||'').replace(/^\s*\+/,'').replace(/\D/g,''); }
 function phoneDetectCC(raw){ const d=phoneDigits(raw); for(const cc of PHONE_CC){ if(d.startsWith(cc)) return cc; } return ''; }
 // Standort-Hinweis (nur Hinweis, kein Raten): Prishtina→+383, Tirana→+355; sonst ''.
@@ -26915,6 +26917,10 @@ function logLabel(k){ return LOG_LABELS[k] || k; }
 
 async function saveEmployeeToDB(emp){
   if(!emp) throw new Error('emp required');
+  // E.164-Normalisierung beim Speichern: nur bei sicher erkannter Vorwahl + plausibler Laenge
+  // (phoneClassify, identisch zur Migration). Unklares bleibt unveraendert und taucht im Report auf.
+  // Vor diffLog, damit der Audit-Log den tatsaechlich persistierten Zielwert erfasst.
+  if(emp.phone){ const _pc=phoneClassify(emp.phone); if(_pc.cat==='ok') emp.phone=_pc.target; }
   const _wasNew = !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(emp.id||''));
   const _detail = _wasNew ? null : diffLog(EMP_BY_ID[emp.id], emp); // vor dem Upsert erfassen (alter State)
   mapLegacyEmployeeFields(emp); // 25g: Legacy-Namen → Master-Namen vor Payload-Build
@@ -27223,6 +27229,7 @@ const CV_EXTRA_OK = new Set([
   'hr_notes','hr_strengths','hr_weaknesses','assessed_writing','assessment_note',
   'ai_level','ai_writing','ai_confidence_level','ai_confidence_writing','ai_reasoning_audio','ai_reasoning_writing',
   'id_card_file','id_card_filename',
+  'phone_original',   // Backup der Original-Telefonnummer vor E.164-Migration (SQL, umkehrbar) — kein Warn-Toast
 ]);
 
 // 4a-3: GDoc-Bulk-Insert umgeht saveCvToDB → Normalisierung + Insert-Robustheit hier.
@@ -27270,6 +27277,9 @@ async function saveCvToDB(cv){
   if(!cv) throw new Error('cv required');
   const src = {...cv};                        // State-Objekt nicht mutieren
   mapCvFields(src);
+  // E.164-Normalisierung beim Speichern (wie employees/Migration): nur sicher erkannte Vorwahl +
+  // plausible Laenge; Unklares bleibt unveraendert und taucht im Report auf. Ein Format systemweit.
+  if(src.phone){ const _pc=phoneClassify(src.phone); if(_pc.cat==='ok') src.phone=_pc.target; }
   const uuidRx=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const payload = {};
   const extraOverflow = {};
