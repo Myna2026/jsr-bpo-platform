@@ -1145,21 +1145,21 @@ function analyzeAbsences(absences){
   const now=new Date();
   
   // Diesen Monat
-  const thisMonthSick=sick.filter(a=>{const d=new Date(a.date);return d.getMonth()===now.getMonth()&&d.getFullYear()===now.getFullYear();});
+  const thisMonthSick=sick.filter(a=>{const d=new Date(a.from);return d.getMonth()===now.getMonth()&&d.getFullYear()===now.getFullYear();});
   if(thisMonthSick.length>=4)warnings.push({level:'red',msg:`🚨 ${thisMonthSick.length}x krank diesen Monat`});
   else if(thisMonthSick.length>=2)warnings.push({level:'amber',msg:`⚠️ ${thisMonthSick.length}x krank diesen Monat`});
   
   // Freitag/Montag Muster
-  const fmSick=sick.filter(a=>{const d=new Date(a.date).getDay();return d===1||d===5;});
+  const fmSick=sick.filter(a=>{const d=new Date(a.from).getDay();return d===1||d===5;});
   if(fmSick.length>=3)warnings.push({level:'red',msg:`🚨 ${fmSick.length}x krank an Fr/Mo — Wochenend-Verlängerung!`});
   else if(fmSick.length>=2)warnings.push({level:'amber',msg:`⚠️ ${fmSick.length}x krank an Freitag oder Montag`});
   
   // Nur Montag
-  const monSick=sick.filter(a=>new Date(a.date).getDay()===1);
+  const monSick=sick.filter(a=>new Date(a.from).getDay()===1);
   if(monSick.length>=2&&monSick.length>fmSick.length)warnings.push({level:'amber',msg:`⚠️ ${monSick.length}x nur montags krank`});
   
   // Gesamt dieses Jahr
-  const yearSick=sick.filter(a=>new Date(a.date).getFullYear()===now.getFullYear());
+  const yearSick=sick.filter(a=>new Date(a.from).getFullYear()===now.getFullYear());
   if(yearSick.length>=10)warnings.push({level:'red',msg:`🚨 ${yearSick.length} Kranktage dieses Jahr`});
   else if(yearSick.length>=5)warnings.push({level:'amber',msg:`⚠️ ${yearSick.length} Kranktage dieses Jahr`});
   
@@ -2462,28 +2462,32 @@ function PerformanceView({employees, projects}){
 
   // Yearly stats
   const currentYear = new Date().getFullYear();
-  const yearAbsences = absences.filter(a=>new Date(a.date).getFullYear()===currentYear);
-  const vacationDays = yearAbsences.filter(a=>a.type==='vacation').length;
-  const sickDays = yearAbsences.filter(a=>a.type==='sick').length;
-  const unpaidDays = yearAbsences.filter(a=>a.type==='unpaid').length;                                   // Typ-basiert: unpaid = immer unbezahlt (paid-Flag unbrauchbar)
-  const paidAbsenceDays = yearAbsences.filter(a=>!['sick','vacation','unpaid'].includes(a.type)).length; // sonstige bezahlte (special/custom)
+  // Tage (nicht Eintraege) zaehlen — deckt Einzeltag (from===to) UND Zeitraum ab (absDaysInYear).
+  const yearDays=(pred)=>absences.filter(pred).reduce((s,a)=>s+absDaysInYear(a,currentYear),0);
+  const vacationDays = yearDays(a=>a.type==='vacation');
+  const sickDays = yearDays(a=>a.type==='sick');
+  const unpaidDays = yearDays(a=>a.type==='unpaid');                                   // Typ-basiert: unpaid = immer unbezahlt (paid-Flag unbrauchbar)
+  const paidAbsenceDays = yearDays(a=>!['sick','vacation','unpaid'].includes(a.type)); // sonstige bezahlte (special/custom)
   const vacationQuota = calcVacationEntitlement(emp).quota;   // eine Wahrheit: berechneter Anspruch
   const vacationLeft = vacationQuota - vacationDays;
 
   function getAbsence(d){
     if(!d)return null;
-    return absences.find(a=>a.date===d.toISOString().slice(0,10));
+    return absences.find(a=>absCoversDay(a, d.toISOString().slice(0,10)))||null;
   }
 
   function toggleDay(d){
     if(!d)return;
     const dateStr=d.toISOString().slice(0,10);
-    const existing=absences.find(a=>a.date===dateStr);
-    if(existing){
-      if(existing.type===selType){setAbsences(prev=>prev.filter(a=>a.date!==dateStr));}
-      else{setAbsences(prev=>prev.map(a=>a.date===dateStr?{...a,type:selType,note,paid:(selType!=='unpaid'),approved:true}:a));}
+    // Nur selbst angelegte Einzeltage (from===to) sind hier editierbar. Ein Tag, der Teil eines
+    // Zeitraums ist (z.B. genehmigter Urlaubsantrag), bleibt im Modal unveraendert (kein Splitten).
+    const single=absences.find(a=>a.from===dateStr && (a.to||a.from)===dateStr);
+    if(!single && absences.some(a=>absCoversDay(a,dateStr))) return;
+    if(single){
+      if(single.type===selType){setAbsences(prev=>prev.filter(a=>a!==single));}
+      else{setAbsences(prev=>prev.map(a=>a===single?{...a,type:selType,note,paid:(selType!=='unpaid'),approved:true}:a));}
     } else {
-      setAbsences(prev=>[...prev,{id:'a'+Date.now(),type:selType,date:dateStr,note,paid:(selType!=='unpaid'),approved:true}]);
+      setAbsences(prev=>[...prev,{id:'a'+Date.now(),type:selType,from:dateStr,to:dateStr,days:1,note,paid:(selType!=='unpaid'),approved:true}]);
     }
   }
 
@@ -2491,14 +2495,12 @@ function PerformanceView({employees, projects}){
   const DOW=['Mo','Di','Mi','Do','Fr','Sa','So'];
   const todayStr=new Date().toISOString().slice(0,10);
 
-  // Month summary
-  const monthAbs = absences.filter(a=>{
-    const d=new Date(a.date);
-    return d.getMonth()===month&&d.getFullYear()===year;
-  });
+  // Month summary — Eintraege, die den angezeigten Monat berueren (Zeitraum-aware)
+  const ymView = year+'-'+String(month+1).padStart(2,'0');
+  const monthTypeDays = (k)=>absences.filter(a=>a.type===k).reduce((s,a)=>s+absDaysInMonth(a, ymView),0);
 
   // All years in absences
-  const years = [...new Set(absences.map(a=>new Date(a.date).getFullYear()))].sort().reverse();
+  const years = [...new Set(absences.map(a=>parseInt(String(a.from||'').slice(0,4))).filter(Boolean))].sort().reverse();
   if(!years.includes(currentYear)) years.unshift(currentYear);
 
   return(
@@ -2577,7 +2579,7 @@ function PerformanceView({employees, projects}){
             {/* Month summary */}
             <div style={{display:'flex',gap:10,marginTop:12,flexWrap:'wrap'}}>
               {Object.entries(ABSENCE_TYPES).map(([k,v])=>{
-                const count=monthAbs.filter(a=>a.type===k).length;
+                const count=monthTypeDays(k);
                 return count>0?<span key={k} style={{fontSize:11,padding:'2px 8px',borderRadius:4,background:v.bg,color:v.color}}>{v.icon} {count}x {v.label}</span>:null;
               })}
             </div>
@@ -2652,11 +2654,12 @@ function PerformanceView({employees, projects}){
                 </tr></thead>
                 <tbody>
                   {Array.from({length:12},(_,mi)=>{
-                    const moAbs=absences.filter(a=>{const d=new Date(a.date);return d.getMonth()===mi&&d.getFullYear()===currentYear;});
-                    const sick=moAbs.filter(a=>a.type==='sick').length;
-                    const vac=moAbs.filter(a=>a.type==='vacation').length;
-                    const unpaidP=moAbs.filter(a=>!['sick','vacation','unpaid'].includes(a.type)).length;
-                    const unpaidU=moAbs.filter(a=>a.type==='unpaid').length;
+                    const ymMo=currentYear+'-'+String(mi+1).padStart(2,'0');
+                    const moDays=(pred)=>absences.filter(pred).reduce((s,a)=>s+absDaysInMonth(a,ymMo),0);
+                    const sick=moDays(a=>a.type==='sick');
+                    const vac=moDays(a=>a.type==='vacation');
+                    const unpaidP=moDays(a=>!['sick','vacation','unpaid'].includes(a.type));
+                    const unpaidU=moDays(a=>a.type==='unpaid');
                     const total=sick+vac+unpaidP+unpaidU;
                     const isCurrentMonth=mi===new Date().getMonth()&&currentYear===new Date().getFullYear();
                     return(
@@ -5322,9 +5325,8 @@ function EmployeeList({employees, setEmployees, projects, seedSearch, onEdit, on
                 .filter(e => e.status !== 'terminated')
                 .map(e => ({
                   e,
-                  days: (e.absences||[]).filter(a =>
-                    a.type==='sick' && a.date && new Date(a.date).getFullYear()===thisYear
-                  ).length
+                  days: (e.absences||[]).filter(a=>a.type==='sick')
+                    .reduce((s,a)=>s+absDaysInYear(a, thisYear), 0)
                 }))
                 .filter(x => x.days > 0)
                 .sort((a,b) => b.days - a.days)
@@ -6837,7 +6839,7 @@ function Widget_KrankheitMonth({employees}){
   const pm=new Date(now.getFullYear(),now.getMonth()-1,1), pym=pm.getFullYear()+'-'+String(pm.getMonth()+1).padStart(2,'0');
   let cur=0, prev=0;
   (employees||[]).forEach(e=>(e.absences||[]).forEach(a=>{
-    if(a.type!=='sick')return; const d=a.date||a.from||''; if(d.slice(0,7)===ym)cur++; else if(d.slice(0,7)===pym)prev++;
+    if(a.type!=='sick')return; const d=a.from||''; if(d.slice(0,7)===ym)cur++; else if(d.slice(0,7)===pym)prev++;
   }));
   const diff=cur-prev, arrow=diff>0?'↑':diff<0?'↓':'→', cls=diff>0?'widget-trend-up':diff<0?'widget-trend-down':'widget-trend-neutral';
   return <div>
@@ -9720,25 +9722,25 @@ function shiftHours(value){
   String(value||'').split('|').forEach(p=>{ brutto+=shiftSpanHours(p); });
   return { brutto:r2(brutto), paid:r2(Math.max(0,brutto-0.5)), net:r2(Math.max(0,brutto-1.0)) };
 }
-// Kanonische Abwesenheits-Pruefung — deckt ALLE drei Datumskonventionen ab:
-//   Format A (Einzeltag): {date}   ·   Antrag: {from,to}   ·   sowie {start,end}.
-// Fehlendes Ende => offener Zeitraum (ab Beginn). ds = 'YYYY-MM-DD'.
+// Kanonische Abwesenheits-Pruefung — Single Source of Truth. EIN Format: {from, to}
+// (Einzeltag: to===from). ds = 'YYYY-MM-DD'. Fallbacks auf start/end/date entfernt
+// (2026-07-26); alle Schreiber schreiben from/to, Format-Assert in saveEmployeeToDB.
 function absCoversDay(a, ds){
   if(!a||!ds) return false;
-  const from = a.from ?? a.start ?? a.date;
+  const from = a.from;
   if(from==null||from==='') return false;
   const f = String(from).slice(0,10);
-  const toRaw = a.to ?? a.end ?? a.date;          // Einzeltag: to/end fehlen -> date
-  const t = (toRaw==null||toRaw==='') ? null : String(toRaw).slice(0,10);
-  return t ? (ds>=f && ds<=t) : (ds>=f);          // fehlendes Ende => offen
+  const toRaw = a.to;
+  const t = (toRaw==null||toRaw==='') ? f : String(toRaw).slice(0,10);   // Einzeltag: to fehlt -> from
+  return ds>=f && ds<=t;
 }
 // Werktage (Mo-Fr) einer Abwesenheit im Kalenderjahr — fuer Verbrauchszaehlung (Urlaub/Krank).
 function absDaysInYear(a, year){
-  const from = a && (a.from ?? a.start ?? a.date);
+  const from = a && a.from;
   if(from==null||from==='') return 0;
   const y = String(year);
   const f0 = String(from).slice(0,10);
-  const toRaw = a.to ?? a.end ?? a.date;
+  const toRaw = a.to;
   const t0 = (toRaw==null||toRaw==='') ? f0 : String(toRaw).slice(0,10);
   if(f0===t0){ const d=new Date(f0+'T12:00:00'); const dw=d.getDay(); return (f0.slice(0,4)===y && dw>0 && dw<6) ? (Number(a.days)||1) : 0; }
   const start = f0 < y+'-01-01' ? y+'-01-01' : f0;
@@ -9750,10 +9752,10 @@ function absDaysInYear(a, year){
 }
 // Werktage einer Abwesenheit im Kalendermonat ('YYYY-MM') — fuer Lohnabrechnung.
 function absDaysInMonth(a, ym){
-  const from = a && (a.from ?? a.start ?? a.date);
+  const from = a && a.from;
   if(from==null||from===''||!ym) return 0;
   const f0=String(from).slice(0,10);
-  const toRaw=a.to ?? a.end ?? a.date;
+  const toRaw=a.to;
   const t0=(toRaw==null||toRaw==='')?f0:String(toRaw).slice(0,10);
   const [yy,mm]=ym.split('-').map(Number); const last=new Date(yy,mm,0).getDate();
   const mStart=ym+'-01', mEnd=ym+'-'+String(last).padStart(2,'0');
@@ -11647,7 +11649,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
       const dow=d.getDay();
       if(dow===6&&!canSat) return false;
       if(dow===0&&!canSun) return false;
-      const ab=(emp.absences||[]).find(a=>a.start<=iso(d)&&a.end>=iso(d));
+      const ab=(emp.absences||[]).find(a=>absCoversDay(a, iso(d)));
       if(ab) return false;
       const noHoliday=!(canWorkHoliday(emp));
       if(noHoliday&&holSet.has(iso(d))) return false;
@@ -19385,15 +19387,17 @@ function ProjectProfitability({projects, employees, forecast, setForecast}){
   const _iso = d => d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
   const winStartStr = _iso(new Date(_now.getFullYear(), _now.getMonth(), 1));
   const winEndStr   = _iso(new Date(_now.getFullYear(), _now.getMonth()+7, 0));  // letzter Tag von Monat+6
-  const hasAbsWin = e => (e.absences||[]).some(a=>{ const s=a.start||a.from||a.date, en=a.end||a.to||a.date; return s&&en&&s<=winEndStr&&en>=winStartStr; });
+  const hasAbsWin = e => (e.absences||[]).some(a=>{ const s=a.from, en=a.to||a.from; return s&&en&&s<=winEndStr&&en>=winStartStr; });
   const displayEmps = showAll ? activeEmps : activeEmps.filter(hasAbsWin);
 
   function getYearStats(emp, year){
-    const abs=(emp.absences||[]).filter(a=>new Date(a.date).getFullYear()===year);
-    const sick=abs.filter(a=>a.type==='sick').length;
-    const vacation=abs.filter(a=>a.type==='vacation').length;
-    const paidAbs=abs.filter(a=>!['sick','vacation','unpaid'].includes(a.type)).length;
-    const unpaid=abs.filter(a=>a.type==='unpaid').length;
+    // Tage (nicht Eintraege) — deckt Einzeltag UND Zeitraum ab (absDaysInYear). Fixt den
+    // frueheren Einzeltag-only-Bug: Zeitraum-Absences aus Antraegen wurden nicht gezaehlt.
+    const yd=(pred)=>(emp.absences||[]).filter(pred).reduce((s,a)=>s+absDaysInYear(a,year),0);
+    const sick=yd(a=>a.type==='sick');
+    const vacation=yd(a=>a.type==='vacation');
+    const paidAbs=yd(a=>!['sick','vacation','unpaid'].includes(a.type));
+    const unpaid=yd(a=>a.type==='unpaid');
     const quota=emp.vacation_days??emp.vacation_days_quota??20;
     const vacLeft=Math.max(0,quota-vacation);
     return {sick,vacation,paidAbs,unpaid,quota,vacLeft,total:sick+vacation+paidAbs+unpaid};
@@ -19524,7 +19528,7 @@ function ProjectProfitability({projects, employees, forecast, setForecast}){
                   {Array.from({length:days},(_,i)=>{
                     const dateStr=viewYear+'-'+String(viewMonth+1).padStart(2,'0')+'-'+String(i+1).padStart(2,'0');
                     // Range-aware: Einzeltag (a.date) ODER Zeitraum (from/to bzw. start/end)
-                    const abs=(e.absences||[]).find(a=>{ const s=a.start||a.from||a.date, en=a.end||a.to||a.date; return s&&en&&s<=dateStr&&en>=dateStr; });
+                    const abs=(e.absences||[]).find(a=>absCoversDay(a, dateStr));
                     const isWeekend=new Date(viewYear,viewMonth,i+1).getDay()===0||new Date(viewYear,viewMonth,i+1).getDay()===6;
                     const bg=abs?.type==='sick'?'#fca5a5':abs?.type==='vacation'?'#fcd34d':abs?.type==='special'?'#93c5fd':abs?.type==='unpaid'?'#d1d5db':isWeekend?'#f3f4f6':'transparent';
                     return <div key={i} style={{height:20,borderRadius:2,background:bg,border:abs?'1px solid rgba(0,0,0,.1)':'none'}} title={abs?`${abs.type}${abs.note?' - '+abs.note:''}`:''}/>;
@@ -19554,7 +19558,7 @@ function ProjectProfitability({projects, employees, forecast, setForecast}){
               const today=new Date().toISOString().slice(0,10);
               const AT={sick:['🤒 Krank','#fca5a5'],vacation:['🏖 Urlaub','#fcd34d'],special:['🟦 Sonderurlaub','#93c5fd'],unpaid:['❌ Unbezahlt','#d1d5db']};
               const rows=[];
-              activeEmps.forEach(e=>{ (e.absences||[]).forEach(a=>{ const s=a.start||a.from||a.date, en=a.end||a.to||a.date; if(s&&en&&en>=today) rows.push({e,a,s,en}); }); });
+              activeEmps.forEach(e=>{ (e.absences||[]).forEach(a=>{ const s=a.from, en=a.to||a.from; if(s&&en&&en>=today) rows.push({e,a,s,en}); }); });
               rows.sort((x,y)=>x.s.localeCompare(y.s));
               if(rows.length===0) return <tr><td colSpan={5} style={{textAlign:'center',color:'var(--muted)',padding:'20px'}}>Keine kommenden Abwesenheiten</td></tr>;
               return rows.map((r,i)=>{ const t=AT[r.a.type]||[r.a.type,'#e5e7eb']; return(
@@ -25411,7 +25415,7 @@ function ForecastView({employees, projects}){
     (emp.absences||[]).forEach(a=>{
       if(!a||!a.approved) return;
       if(!['vacation','sick','unpaid'].includes(a.type)) return;
-      const from=a.from||a.start||a.date, to=a.to||a.end||a.date;
+      const from=a.from, to=a.to||a.from;
       if(!from||!to) return;
       const s=from<mStart?mStart:from, e=to>mEnd?mEnd:to;
       if(s>e) return;
@@ -26908,6 +26912,10 @@ async function saveEmployeeToDB(emp){
   // (phoneClassify, identisch zur Migration). Unklares bleibt unveraendert und taucht im Report auf.
   // Vor diffLog, damit der Audit-Log den tatsaechlich persistierten Zielwert erfasst.
   if(emp.phone){ const _pc=phoneClassify(emp.phone); if(_pc.cat==='ok') emp.phone=_pc.target; }
+  // Format-Assert Abwesenheiten: EIN Format {from, to} (Einzeltag from===to). Faellt ein
+  // Eintrag ohne from oder mit Legacy-Feldern (date/start/end) auf -> laut warnen statt still
+  // durchlaufen. So faellt eine neue Schreibstelle im falschen Format sofort im Log auf.
+  (emp.absences||[]).forEach(a=>{ if(a && (a.from==null || a.date!==undefined || a.start!==undefined || a.end!==undefined)) console.warn('[absence-format] Eintrag nicht im from/to-Format (from Pflicht, kein date/start/end):', a); });
   const _wasNew = !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(emp.id||''));
   const _detail = _wasNew ? null : diffLog(EMP_BY_ID[emp.id], emp); // vor dem Upsert erfassen (alter State)
   mapLegacyEmployeeFields(emp); // 25g: Legacy-Namen → Master-Namen vor Payload-Build
@@ -27674,8 +27682,7 @@ function VacationRequestsView({employees, setEmployees, showToast}){
       if(!exists){
         const updated={...emp, absences:[...(emp.absences||[]), {
           type: req.type,                 // vacation | special | unpaid
-          from: req.from, to: req.to,
-          start: req.from, end: req.to,   // Kompat: Workforce (hr.html) liest start/end
+          from: req.from, to: req.to,     // EIN Format from/to (start/end entfernt 2026-07-26)
           days: req.days,
           paid: req.type!=='unpaid',      // vacation + special bezahlt, unpaid nicht
           approved: true, approved_by:'HR', from_request:req.id,
