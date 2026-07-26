@@ -1346,7 +1346,13 @@ const MENU_BADGE_MAIN_ITEMS = [
 // Tabs, die NIE gesperrt werden koennen (struktureller Selbst-Aussperr-Schutz).
 // hasAccess() gibt fuer diese Keys IMMER true zurueck, VOR der Sperr-Pruefung —
 // damit ist die Sperrung dieser Tabs nicht nur Konvention, sondern unmoeglich.
-const HR_ALWAYS_TABS = ['start','daily_tasks','shiftplan','activity_log','datacheck','locations','spaces','payroll','showcase','timetracking','superadmin','tabperms','aisettings','cockpits','hraccess','appusers','aiendpoint','cvsync','wissen_system'];
+// Bewusst KLEIN gehalten (Reklassifizierung 2026-07-26): nur Zugriffssteuerung
+// (superadmin/appusers/hraccess/tabperms) + Startseite. Alles Operative/Config
+// (payroll, timetracking, shiftplan, locations, spaces, showcase, daily_tasks,
+// datacheck, cockpits, wissen_system, aisettings, aiendpoint, cvsync) ist sperrbar,
+// damit z.B. die Lohnabrechnung entziehbar ist. activity_log ist KEIN Menue-Item
+// (eigener Rollenfilter in der Nav) -> bleibt hier, hat aber keine Matrix-Spalte.
+const HR_ALWAYS_TABS = ['start','activity_log','superadmin','tabperms','hraccess','appusers'];
 // Tabs, die bei NEUEN Zugaengen ohne eigenen Sperr-Eintrag standardmaessig verborgen sind:
 // workforce (WFP-Beta). KEINE umgekehrte Semantik — ein Haken heisst ueberall "sperren";
 // neue Zugaenge bekommen den Sperr-Eintrag nur vorbelegt (Login-Default + Matrix-Backfill).
@@ -27951,13 +27957,16 @@ function HrTabLocksView(){
   const [locks,setLocks]=useState({});
   const [loading,setLoading]=useState(true);
   const [q,setQ]=useState('');
+  const [myUid,setMyUid]=useState(null); // Self-Guard: eigenen hrtablocks-Zugang nicht entziehbar
   useEffect(()=>{
     let alive=true;
     (async()=>{
       try{
+        const uData=await sb.auth.getUser();
         const m=await loadConfigFromDB('jsr_hr_tab_locks_v1');
         const uRes=await sb.from('app_users').select('user_id, full_name, role_keys, active');
         if(!alive) return;
+        setMyUid(uData&&uData.data&&uData.data.user?uData.data.user.id:null);
         const lm=(m&&typeof m==='object'&&!Array.isArray(m))?{...m}:{};
         const activeUsers=(uRes.data||[]).filter(u=>u&&u.active&&u.user_id&&Array.isArray(u.role_keys)&&u.role_keys.length);
         // Vorbelegung: neue Zugaenge ohne eigenen Eintrag bekommen die Default-Sperren
@@ -27978,6 +27987,7 @@ function HrTabLocksView(){
   const isLocked=(uid,tab)=>{ const a=locks[uid]; return Array.isArray(a)&&a.includes(tab); };
   function toggleLock(uid,tab){
     if(!LOCKABLE_KEYS.has(tab)||HR_ALWAYS_TABS.indexOf(tab)>=0) return; // Sicherung
+    if(tab==='hrtablocks'&&uid===myUid) return; // Self-Guard: eigenen Matrix-Zugang nicht sperren
     setLocks(prev=>{
       const next={...prev};
       const arr=Array.isArray(next[uid])?[...next[uid]]:[];
@@ -28024,11 +28034,14 @@ function HrTabLocksView(){
                   <span style={{fontWeight:600}}>{u.full_name||u.user_id.slice(0,8)}</span>
                   <span style={{color:'var(--muted)',fontSize:11}}> · {(u.role_keys||[]).map(k=>ROLE_LABELS[k]||k).join(', ')}</span>
                 </td>
-                {HR_LOCKABLE_TABS.map(t=>(
+                {HR_LOCKABLE_TABS.map(t=>{
+                  const selfLock=t.key==='hrtablocks'&&u.user_id===myUid;
+                  return (
                   <td key={t.key} style={{padding:'6px',borderBottom:'1px solid var(--border)',textAlign:'center'}}>
-                    <input type="checkbox" checked={isLocked(u.user_id,t.key)} onChange={()=>toggleLock(u.user_id,t.key)} style={{cursor:'pointer',width:16,height:16}}/>
+                    <input type="checkbox" checked={isLocked(u.user_id,t.key)} disabled={selfLock} onChange={selfLock?undefined:()=>toggleLock(u.user_id,t.key)} title={selfLock?'Den eigenen Zugang zur Sperr-Matrix kannst du dir nicht entziehen':undefined} style={{cursor:selfLock?'not-allowed':'pointer',opacity:selfLock?.35:1,width:16,height:16}}/>
                   </td>
-                ))}
+                  );
+                })}
                 {HR_PROTECTED_ITEMS.map(t=>(
                   <td key={t.key} title="strukturell nicht sperrbar" style={{padding:'6px',borderBottom:'1px solid var(--border)',textAlign:'center',background:'var(--surface-2)',color:'var(--muted)'}}>—</td>
                 ))}
@@ -29166,6 +29179,17 @@ function App(){
     const unsub = subscribeClientAccounts(setClients);
     return ()=>{ alive=false; if(unsub) unsub(); };
   }, []);
+
+  // Redirect-Guard: wird der aktive Tab (programmatisch oder durch eine frisch geladene
+  // Sperre) unerreichbar, zurueck auf 'start' (immer sichtbar) — nie eine leere Seite und
+  // kein Inhalt eines gesperrten Tabs. Logik = hasAccess inline (const erst weiter unten).
+  useEffect(()=>{
+    if(!team) return;                              // waehrend Laden nicht umleiten
+    if(view==='start'||HR_ALWAYS_TABS.includes(view)) return;
+    const locked = Array.isArray(team.locked) && team.locked.includes(view);
+    const allowed = team.access==='all' || (Array.isArray(team.access) && team.access.includes(view));
+    if(locked || !allowed) setView('start');
+  }, [view, team]);
 
   if(loggedIn && !team){
     return(
