@@ -3300,13 +3300,9 @@ function StundenkontoTab({emp}){
       if(ds<todayIso||ds===todayIso){workedH+=net;workedDays++;if(d.getDay()===6)satDays++;if(d.getDay()===0)sunDays++;}
       else plannedFuture+=net;
     });
-    const workDays=days.filter(d=>{
-      const ds=d.toISOString().slice(0,10);const dow=d.getDay();
-      if(dow===6&&!canSat)return false;if(dow===0&&!canSun)return false;
-      const ab=(emp.absences||[]).find(a=>absCoversDay(a,ds));if(ab)return false;
-      if(!(canWorkHoliday(emp))&&holSet.has(ds))return false;
-      return true;
-    }).length;
+    // Soll-Werktage: gemeinsame Zaehlung (Mo-Fr minus Feiertage/genehmigte Abwesenheit).
+    // Abwesenheitsabzug bleibt — bezahlte Abwesenheit senkt das Soll (nicht das Ist).
+    const workDays=sollWorkdays(emp, sel.year+'-'+String(sel.month).padStart(2,'0'));
     const target=Math.round(workDays*workH*10)/10;
     const passedDays=isCurrentMonth?days.filter(d=>{
       const ds=d.toISOString().slice(0,10);if(ds>=todayIso)return false;
@@ -3351,6 +3347,11 @@ function StundenkontoTab({emp}){
             {stats.isCurrentMonth&&stats.plannedFuture>0&&card('Geplant',stats.plannedFuture+'h','noch geplant','#7c3aed')}
             {stats.isCurrentMonth&&stats.remainingH>0&&card('Offen',stats.remainingH+'h','ungeplant','#f59e0b')}
           </div>
+          {stats.workedH===0&&stats.plannedFuture===0&&(
+            <div style={{fontSize:11,color:'#b45309',fontWeight:600,padding:'8px 12px',background:'#fef3c7',borderRadius:6,marginBottom:8}}>
+              ⚠ Keine Schichten geplant — Ist unvollständig. Soll {stats.target}h, aber Fehlstunden sind ohne Planung nicht aussagekräftig.
+            </div>
+          )}
           <div style={{fontSize:11,color:'var(--muted)',padding:'8px 12px',background:'var(--surface-2)',borderRadius:6}}>
             {stats.isCurrentMonth
               ?<span>Aktueller Stand · Soll anteilig: <b>{stats.targetSoFar}h</b> · {stats.otH>0?<b style={{color:'#16a34a'}}>+{stats.otH}h Überstunden</b>:stats.minusH>0?<b style={{color:'#dc2626'}}>−{stats.minusH}h Rückstand</b>:<b style={{color:'#16a34a'}}>Im Soll</b>}</span>
@@ -9811,6 +9812,29 @@ function shiftHolidayOn(emp, ds){
 function canWorkSat(emp){ return !(emp && (emp.work_saturday===false || emp.work_saturday==='no')); }
 function canWorkSun(emp){ return !(emp && (emp.work_sunday===false   || emp.work_sunday==='no')); }
 function canWorkHoliday(emp){ return !(emp && (emp.work_holidays===false || emp.work_holidays==='no')); }
+// Soll-Werktage eines Monats fuer einen MA: gearbeitete Wochentage (Mo-Fr, plus Sa/So falls
+// er dort arbeitet), minus Feiertage (falls er nicht an Feiertagen arbeitet), minus ALLE
+// genehmigten Abwesenheitstage (absCoversDay, deckt Einzeltag- UND Zeitraum-Format ab).
+// Bezahlt/unbezahlt ist hier egal — das steckt auf der Kostenseite (empCostEurForMonth).
+// EINE Zaehlung fuer calcEmpTarget, EmpHoursWidget und das Stundenkonto. Soll = Ergebnis × work_hours.
+function sollWorkdays(emp, ym){
+  if(!emp || !ym || ym.length<7) return 0;
+  const [y,m]=ym.split('-').map(Number);
+  const holSet=holidayDatesForLocation(emp.location||emp.city);
+  const canSat=canWorkSat(emp), canSun=canWorkSun(emp), canHol=canWorkHoliday(emp);
+  const abs=emp.absences||[];
+  let c=0; const d=new Date(y,m-1,1);
+  while(d.getMonth()===m-1){
+    const ds=y+'-'+String(m).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+    const dow=d.getDay();
+    let ok = !(dow===6 && !canSat) && !(dow===0 && !canSun);
+    if(ok && !canHol && holSet.has(ds)) ok=false;
+    if(ok && abs.some(a=>absCoversDay(a, ds))) ok=false;
+    if(ok) c++;
+    d.setDate(d.getDate()+1);
+  }
+  return c;
+}
 // Warum ist die Zelle dieses MA an diesem Tag gesperrt? Klartext-Grund oder null (=planbar).
 // EINE Wahrheit für Lock (shiftEmpDayOk) UND sichtbaren Hinweis (Klick/Tooltip).
 function shiftLockReason(emp, ds){
@@ -10990,30 +11014,16 @@ function WorkforcePlanningView({employees,projects,showToast}){
   // Returns {brutto, net, workDays} based on contract
   function calcEmpTarget(emp){
     const workH=parseFloat(emp.work_hours||8);
-    const holSet=holidayDatesForLocation(emp.location||emp.city);   // standortbewusst (war: flach über alle Standorte)
-    // Count available work days this month
-    const workDays=mdays().filter(d=>{
-      const dow=d.getDay();
-      const canSat=canWorkSat(emp);
-      const canSun=canWorkSun(emp);
-      if(dow===6&&!canSat) return false;
-      if(dow===0&&!canSun) return false;
-      if(absent(emp,iso(d))) return false;
-      // Exclude holidays if emp doesn't work holidays
-      if(!(canWorkHoliday(emp)) && holSet.has(iso(d))) return false;
-      return true;
-    }).length;
-    // Contract brutto: work_hours (Stunden/Tag) × 5 × 4.33 — EINZIGE Wahrheit.
-    // monthly_hours/weekly_hours (import-only, im HR-Portal nicht pflegbar) 2026-07-26 entfernt:
-    // sie ueberschrieben still die editierbaren Tagesstunden.
-    const brutto=Math.round(workH*5*4.33*10)/10;
-    // Net = brutto minus 0.5h pause per work day, capped by actual days available
-    const maxBrutto=workDays*workH;
-    const cappedBrutto=Math.min(brutto,maxBrutto);
+    // Soll-Werktage (Mo-Fr des Monats minus Feiertage/genehmigte Abwesenheit) — gemeinsame
+    // Zaehlung sollWorkdays (absCoversDay). Ersetzt die work_hours×5×4.33-Pauschale, die einen
+    // Durchschnittsmonat statt des tatsaechlichen rechnete (2026-07-26).
+    const workDays=sollWorkdays(emp, year+'-'+String(month).padStart(2,'0'));
+    const brutto=Math.round(workDays*workH*10)/10;
     // productive_pct: Anteil tatsächlich produktiver Zeit (z.B. 92% = Meetings, Einarbeitung etc.)
     const prodPct=parseFloat(emp.productive_pct)||100;
-    const net=Math.max(0,Math.round((cappedBrutto*(prodPct/100)-workDays*0.5)*10)/10);
-    return{brutto:Math.round(cappedBrutto*10)/10,net,workDays,prodPct};
+    // Net = brutto × prod% minus 0.5h Pause je Werktag
+    const net=Math.max(0,Math.round((brutto*(prodPct/100)-workDays*0.5)*10)/10);
+    return{brutto,net,workDays,prodPct};
   }
 
       function autoplan(){
@@ -27566,13 +27576,15 @@ function EmpHoursWidget({emp}){
     }catch(e){}
   });
   const wkHrs=parseFloat(emp.work_hours||8);
-  const wkly=wkHrs*5;   // work_hours als einzige Wahrheit (weekly_hours 2026-07-26 entfernt)
-  const target=Math.round(wkly*4.33*10)/10;
-  const otH=Math.max(0,Math.round((workedH-target*0.7)*10)/10);
+  // Soll = Werktage (Mo-Fr minus Feiertage/genehmigte Abwesenheit) × work_hours — gemeinsame Zaehlung
+  const target=Math.round(sollWorkdays(emp, yr+'-'+String(mo).padStart(2,'0'))*wkHrs*10)/10;
+  const otH=Math.max(0,Math.round((workedH-target)*10)/10);   // Ueberstunden ueber Soll
   const remainH=Math.max(0,Math.round((target-workedH-plannedFuture)*10)/10);
+  const noPlan=(workedH===0&&plannedFuture===0);
   return(
     <div style={{margin:'8px 16px',padding:'12px 16px',background:'var(--surface-2)',borderRadius:'var(--r)',border:'1px solid var(--border)'}}>
-      <div style={{fontWeight:700,fontSize:12,marginBottom:8}}>📊 {emp.first_name} — Aktueller Monat (Stand heute)</div>
+      <div style={{fontWeight:700,fontSize:12,marginBottom:8}}>📊 {emp.first_name} — Aktueller Monat (Stand heute) · Soll {target}h</div>
+      {noPlan&&<div style={{fontSize:10,color:'#b45309',fontWeight:600,marginBottom:8}}>⚠ Keine Schichten geplant — Ist unvollständig, Zahlen ohne Aussagekraft.</div>}
       <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:8,fontSize:11}}>
         <div style={{textAlign:'center',padding:'6px 8px',background:'var(--surface)',borderRadius:4}}>
           <div style={{fontSize:18,fontWeight:900,color:'#16a34a'}}>{Math.round(workedH*10)/10}h</div>
