@@ -7605,6 +7605,15 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
     loadCvsFromDB().then(rows=>{ if(alive) setCvsDb(rows||[]); });
     return ()=>{ alive=false; };
   },[]);
+  // Feedbackgespräche heute (für „Heute zu erledigen"). Realtime → erledigte verschwinden live.
+  const [feedbackTodayDb, setFeedbackTodayDb] = useState([]);
+  useEffect(()=>{
+    let alive=true;
+    const load=()=>{ sb.from('feedback_sessions').select('id,employee_id,status,scheduled_date').eq('scheduled_date',new Date().toISOString().slice(0,10)).then(r=>{ if(alive) setFeedbackTodayDb(r.data||[]); }); };
+    load();
+    const chan=sb.channel('cockpit-feedback').on('postgres_changes',{event:'*',schema:'public',table:'feedback_sessions'},load).subscribe();
+    return ()=>{ alive=false; try{ sb.removeChannel(chan); }catch(e){} };
+  },[]);
   const [selfEdit,setSelfEdit]=useState(false);   // eigenes Cockpit anpassen (jsr_user_cockpits_v1[user_id])
   const active=employees.filter(e=>e&&e.status==='active');
   const inTraining=employees.filter(e=>e&&e.status==='training');
@@ -7772,6 +7781,16 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
           if(cExp.length) tasks.push({icon:'📋',label:cExp.length+' Vertrag'+(cExp.length>1?'e':'')+(cExp.length>1?' laufen':' läuft')+' bald ab',color:'var(--red)',tab:'employees'});
         }catch(e){}
         if(noSal.length) tasks.push({icon:'⚠️',label:noSal.length+' aktive MA ohne Stundenlohn',color:'var(--red)',tab:'employees'});
+        try{
+          const fb=feedbackTodayDb||[];
+          if(fb.length===0){
+            tasks.push({icon:'💬',label:'Feedback-Kandidaten für heute ziehen',color:'#7c3aed',nav:{kind:'view',view:'feedback',feedbackDraw:true}});
+          } else {
+            fb.filter(s=>s.status!=='done').forEach(s=>{ const e=employees.find(x=>x&&x.id===s.employee_id); const nm=e?(e.first_name+' '+e.last_name):'Mitarbeiter';
+              const pr=e?((projects||[]).find(p=>p&&p.id===e.project_id)||{}).name:'';
+              tasks.push({icon:'💬',label:'Feedbackgespräch: '+nm+(pr?' · '+pr:''),color:'#c026d3',nav:{kind:'view',view:'feedback',feedbackSession:s.id}}); });
+          }
+        }catch(e){}
         if(!tasks.length) return null;
         return(
           <div style={{marginBottom:14,background:'var(--card)',borderRadius:'var(--r)',border:'1px solid var(--border)'}}>
@@ -7780,7 +7799,7 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
             </div>
             {tasks.map((t,i)=>(
               <div key={i} style={{display:'flex',alignItems:'center',gap:10,padding:'10px 16px',borderBottom:i<tasks.length-1?'1px solid var(--border)':'none',cursor:'pointer'}}
-                onClick={()=>window.dispatchEvent&&window.dispatchEvent(new CustomEvent('navigate',{detail:t.tab}))}>
+                onClick={()=>{ if(onNavigate) onNavigate(t.nav||{kind:'view',view:t.tab}); else if(window.dispatchEvent) window.dispatchEvent(new CustomEvent('navigate',{detail:t.tab})); }}>
                 <span style={{fontSize:18}}>{t.icon}</span>
                 <span style={{fontSize:13,fontWeight:600,color:t.color,flex:1}}>{t.label}</span>
                 <span style={{fontSize:11,color:'var(--muted)'}}>→</span>
@@ -29347,8 +29366,162 @@ function FeedbackCatalog({showToast}){
     </div>
   );
 }
-function FeedbackView({showToast}){   // employees/projects/team kommen in Schnitt 3 dazu
-  const [tab,setTab]=useState('katalog');   // Schnitt 3/4 füllen 'gespraeche'/'auswertung'
+// Notenfarbe (invertiert: 1 grün = beste … 5 rot = schlechteste) — verstärkt „niedriger = besser".
+function fbGradeColor(n){ return ['','#16a34a','#65a30d','#d97706','#ea580c','#dc2626'][n]||'#64748b'; }
+
+// Gespräch führen: Frage für Frage (Step-through, wie Tagesaufgaben). HR trägt ein; jede Antwort
+// snapshottet Wortlaut/Typ. Note-Fragen mit Skala-Legende + bedingter Folgefrage (ab Schwelle).
+function FeedbackInterview({session, emp, questions, conductorName, onDone, onClose, showToast}){
+  const [step,setStep]=useState(0);
+  const [ans,setAns]=useState({});     // {qid:{grade,text,followups:[]}}
+  const [busy,setBusy]=useState(false);
+  if(!questions.length) return null;
+  const q=questions[step], a=ans[q.id]||{};
+  const setA=(patch)=>setAns(m=>({...m,[q.id]:{...m[q.id],...patch}}));
+  const showF = q.type==='grade' && q.followup_prompt && a.grade!=null && a.grade>=q.followup_show_if_grade_gte;
+  const last = step===questions.length-1;
+  async function finish(){
+    setBusy(true);
+    let uid=null; try{ const u=await sb.auth.getUser(); uid=u&&u.data&&u.data.user?u.data.user.id:null; }catch(e){}
+    const rows=questions.map(qq=>{ const x=ans[qq.id]||{};
+      const hasF = qq.followup_prompt && x.grade!=null && x.grade>=qq.followup_show_if_grade_gte;
+      return { session_id:session.id, question_id:qq.id, order_index:qq.order_index, section:qq.section,
+        prompt_snapshot:qq.prompt, type_snapshot:qq.type,
+        answer_text: qq.type==='text'?((x.text||'').trim()||null):null,
+        grade: qq.type==='grade'?(x.grade||null):null,
+        followup_prompt_snapshot: hasF?qq.followup_prompt:null,
+        followup_texts: hasF?((x.followups||[]).map(s=>(s||'').trim()).filter(Boolean)):null }; });
+    let error;
+    ({error}=await sb.from('feedback_answers').insert(rows));
+    if(!error){ ({error}=await sb.from('feedback_sessions').update({status:'done',conducted_at:new Date().toISOString(),conducted_by:uid,conducted_by_name:conductorName||null,project_id:(emp&&emp.project_id)||null,location:(emp&&emp.location)||null}).eq('id',session.id)); }
+    setBusy(false);
+    if(error){ showToast&&showToast('⚠ Nicht gespeichert: '+(error.message||''),'error'); return; }
+    showToast&&showToast('✓ Gespräch abgeschlossen'); onDone&&onDone();
+  }
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" style={{width:600,maxWidth:'95vw'}} onClick={e=>e.stopPropagation()}>
+        <div className="modal-header"><span className="modal-title">💬 {emp?emp.first_name+' '+emp.last_name:''} — Feedbackgespräch</span><button className="btn btn-sm" onClick={onClose}>✕</button></div>
+        <div className="modal-body" style={{padding:20,minHeight:230}}>
+          <div style={{fontSize:11,color:'var(--muted)',marginBottom:10}}>Frage {step+1} / {questions.length} · {q.section}</div>
+          <div style={{fontSize:15,fontWeight:600,marginBottom:14}}>{q.prompt}</div>
+          {q.type==='grade' ? (
+            <div>
+              <div style={{display:'flex',gap:8,marginBottom:8}}>
+                {[1,2,3,4,5].map(n=>(
+                  <button key={n} onClick={()=>setA({grade:n})} style={{flex:1,padding:'12px 0',fontSize:18,fontWeight:800,cursor:'pointer',borderRadius:8,
+                    border:'2px solid '+(a.grade===n?fbGradeColor(n):'var(--border)'),background:a.grade===n?fbGradeColor(n):'var(--surface-2)',color:a.grade===n?'#fff':'var(--fg)'}}>{n}</button>
+                ))}
+              </div>
+              <FeedbackScaleLegend/>
+              {showF && (
+                <div style={{marginTop:14,padding:'12px 14px',background:'#fff7ed',border:'1px solid #fed7aa',borderRadius:8}}>
+                  <div style={{fontSize:12,fontWeight:700,color:'#9a3412',marginBottom:8}}>{q.followup_prompt}</div>
+                  {Array.from({length:q.followup_slots||2}).map((_,i)=>(
+                    <input key={i} className="form-input" style={{marginBottom:6}} placeholder={(i+1)+'.'} value={(a.followups&&a.followups[i])||''} onChange={e=>{ const f=[...(a.followups||[])]; f[i]=e.target.value; setA({followups:f}); }}/>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : (
+            <textarea className="form-input" rows={5} style={{resize:'vertical'}} value={a.text||''} onChange={e=>setA({text:e.target.value})} placeholder="Antwort eintragen…"/>
+          )}
+        </div>
+        <div className="modal-footer" style={{display:'flex',gap:8,justifyContent:'space-between'}}>
+          <button className="btn btn-sm" disabled={step===0} onClick={()=>setStep(s=>s-1)}>← Zurück</button>
+          {last
+            ? <button className="btn btn-sm btn-primary" disabled={busy} onClick={finish}>{busy?'…':'✓ Abschließen'}</button>
+            : <button className="btn btn-sm btn-primary" onClick={()=>setStep(s=>s+1)}>Weiter →</button>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Gespräche-Tab: heutige Sessions, Ziehung (HR-Button), manueller Start, Gesprächs-Modal.
+function FeedbackConversations({employees, projects, team, showToast, nav, onNavConsumed}){
+  const today=new Date().toISOString().slice(0,10);
+  const COOLDOWN_DAYS=21, DRAW_MAX=3;
+  const [sessions,setSessions]=useState(null);   // heutige Sessions
+  const [questions,setQuestions]=useState([]);
+  const [interview,setInterview]=useState(null); // {session, emp}
+  const [manual,setManual]=useState(false);
+  const [q,setQ]=useState('');
+  const empById={}; (employees||[]).forEach(e=>{ if(e) empById[e.id]=e; });
+  const projById={}; (projects||[]).forEach(p=>{ if(p) projById[p.id]=p; });
+  const projName=e=>{ const p=e&&projById[e.project_id]; return p?p.name:'—'; };
+  const conductorName=(team&&(team.full_name||team.name))||'HR';
+  async function loadToday(){ const {data}=await sb.from('feedback_sessions').select('*').eq('scheduled_date',today); setSessions(data||[]); }
+  async function loadQuestions(){ const {data}=await sb.from('feedback_questions').select('*').eq('active',true).order('order_index',{ascending:true}); setQuestions(data||[]); }
+  useEffect(()=>{ loadToday(); loadQuestions(); },[]);
+  // Cockpit-Direktnavigation: bestimmtes Gespräch öffnen (nav.session) — einmalig konsumieren.
+  useEffect(()=>{ if(!nav||sessions===null) return;
+    if(nav.session){ const s=sessions.find(x=>x.id===nav.session); if(s) setInterview({session:s,emp:empById[s.employee_id]}); }
+    onNavConsumed&&onNavConsumed();
+  },[nav,sessions]);
+
+  async function draw(){
+    const slots=Math.max(0, DRAW_MAX-(sessions||[]).length);
+    if(slots<=0){ showToast&&showToast('Heute sind bereits '+DRAW_MAX+' Kandidaten gezogen.','info'); return; }
+    // Schicht heute (nicht abgebrochen)
+    const {data:shifts}=await sb.from('shift_assignments').select('employee_id,shift').eq('work_date',today);
+    const shiftEmps=new Set((shifts||[]).filter(r=>r.shift&&!(r.shift.canceled)).map(r=>r.employee_id));
+    // Cooldown: wer in den letzten COOLDOWN_DAYS eine Session hatte → raus
+    const cutoff=new Date(Date.now()-COOLDOWN_DAYS*864e5).toISOString().slice(0,10);
+    const {data:recent}=await sb.from('feedback_sessions').select('employee_id,scheduled_date').gte('scheduled_date',cutoff);
+    const recentEmp=new Set((recent||[]).map(r=>r.employee_id));
+    const eligible=(employees||[]).filter(e=>e&&e.status==='active'&&shiftEmps.has(e.id)&&!recentEmp.has(e.id));
+    if(!eligible.length){ showToast&&showToast('Keine Kandidaten: niemand mit Schicht heute außerhalb des '+COOLDOWN_DAYS+'-Tage-Cooldowns (Schichtplan gepflegt?).','info'); return; }
+    const chosen=eligible.slice().sort(()=>Math.random()-0.5).slice(0,Math.min(slots,eligible.length));
+    const rows=chosen.map(e=>({employee_id:e.id,status:'scheduled',source:'random',scheduled_date:today}));
+    const {error}=await sb.from('feedback_sessions').insert(rows);
+    if(error){ showToast&&showToast('⚠ '+(error.message||''),'error'); return; }
+    await loadToday(); showToast&&showToast('✓ '+rows.length+' Kandidat'+(rows.length===1?'':'en')+' gezogen');
+  }
+  async function startManual(emp){
+    const {data,error}=await sb.from('feedback_sessions').insert({employee_id:emp.id,status:'scheduled',source:'manual',scheduled_date:today}).select().single();
+    if(error){ showToast&&showToast('⚠ '+(error.message||''),'error'); return; }
+    setManual(false); setQ(''); await loadToday(); setInterview({session:data,emp});
+  }
+  if(sessions===null) return <div className="sp-empty">Lade…</div>;
+  const openS=sessions.filter(s=>s.status!=='done');
+  const doneS=sessions.filter(s=>s.status==='done');
+  const manualMatches=q.trim()?(employees||[]).filter(e=>e&&e.status==='active'&&((e.first_name||'')+' '+(e.last_name||'')).toLowerCase().includes(q.toLowerCase())).slice(0,10):[];
+  return (
+    <div>
+      <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap',marginBottom:14}}>
+        <button className="btn btn-primary btn-sm" onClick={draw}>🎲 Heutige Kandidaten ziehen</button>
+        <button className="btn btn-sm" onClick={()=>setManual(m=>!m)}>+ Manuell starten</button>
+        <span style={{fontSize:11,color:'var(--muted)'}}>Zufällig aus MA mit Schicht heute, {COOLDOWN_DAYS}-Tage-Cooldown · bis {DRAW_MAX}/Tag</span>
+      </div>
+      {manual && (
+        <div style={{marginBottom:14,padding:'10px 12px',background:'var(--surface-2)',borderRadius:8}}>
+          <input className="form-input" autoFocus placeholder="Mitarbeiter suchen…" value={q} onChange={e=>setQ(e.target.value)}/>
+          {manualMatches.map(e=>(
+            <div key={e.id} onClick={()=>startManual(e)} style={{padding:'7px 9px',cursor:'pointer',borderBottom:'1px solid var(--border)',fontSize:13}}>{e.first_name} {e.last_name} <span style={{color:'var(--muted)'}}>· {projName(e)}</span></div>
+          ))}
+        </div>
+      )}
+      {openS.length===0 && doneS.length===0 && <div className="sp-empty">Für heute noch keine Gespräche. Ziehe Kandidaten oder starte manuell.</div>}
+      {openS.map(s=>{ const e=empById[s.employee_id]; return (
+        <div key={s.id} style={{display:'flex',alignItems:'center',gap:10,padding:'11px 14px',border:'1px solid var(--border)',borderRadius:8,marginBottom:8,background:'var(--card)'}}>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontSize:14,fontWeight:600}}>{e?e.first_name+' '+e.last_name:'—'} {s.source==='manual'&&<span style={{fontSize:10,color:'var(--muted)'}}>(manuell)</span>}</div>
+            <div style={{fontSize:12,color:'var(--muted)'}}>{projName(e)}</div>
+          </div>
+          <button className="btn btn-sm btn-primary" onClick={()=>setInterview({session:s,emp:e})}>Gespräch führen →</button>
+        </div>
+      ); })}
+      {doneS.length>0 && <div style={{marginTop:14,fontSize:12,color:'var(--muted)'}}>✓ Heute erledigt: {doneS.map(s=>{const e=empById[s.employee_id];return e?e.first_name+' '+e.last_name:'—';}).join(', ')}</div>}
+      {interview && <FeedbackInterview session={interview.session} emp={interview.emp} questions={questions} conductorName={conductorName}
+        onClose={()=>setInterview(null)} onDone={()=>{ setInterview(null); loadToday(); }} showToast={showToast}/>}
+    </div>
+  );
+}
+
+function FeedbackView({employees, projects, team, showToast, nav, onNavConsumed}){
+  const [tab,setTab]=useState('gespraeche');
+  useEffect(()=>{ if(nav&&(nav.session||nav.draw)) setTab('gespraeche'); },[nav]);
   const TABS=[['gespraeche','Gespräche'],['katalog','Fragenkatalog'],['auswertung','Auswertung']];
   return (
     <div>
@@ -29359,8 +29532,8 @@ function FeedbackView({showToast}){   // employees/projects/team kommen in Schni
           <button key={k} onClick={()=>setTab(k)} style={{padding:'8px 14px',fontSize:13,fontWeight:600,cursor:'pointer',border:'none',background:'none',borderBottom:'2px solid '+(tab===k?'var(--blue)':'transparent'),color:tab===k?'var(--blue)':'var(--muted)'}}>{l}</button>
         ))}
       </div>
+      {tab==='gespraeche' && <FeedbackConversations employees={employees} projects={projects} team={team} showToast={showToast} nav={nav} onNavConsumed={onNavConsumed}/>}
       {tab==='katalog' && <FeedbackCatalog showToast={showToast}/>}
-      {tab==='gespraeche' && <div className="sp-empty">Gesprächsführung (Kandidaten-Ziehung + Frage für Frage) kommt im nächsten Schnitt.</div>}
       {tab==='auswertung' && <div className="sp-empty">Auswertungs-Dashboard kommt danach.</div>}
     </div>
   );
@@ -29780,6 +29953,7 @@ function App(){
   }, []);
   const [view, setView] = useState('start');
   const [empSeed, setEmpSeed] = useState(''); // Datenqualität-Klick → Mitarbeiter-Suche vorbelegen
+  const [feedbackNav, setFeedbackNav] = useState(null); // Cockpit → Feedback: {session:id} | {draw:true}
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const isMobile = () => window.innerWidth < 768;
   const [showToast, toastEl] = useToast();
@@ -30321,7 +30495,8 @@ function App(){
   const dqNavigate = (nav)=>{
     if(!nav) return;
     if(nav.kind==='emp'){ const e=employees.find(x=>x.id===nav.id); if(e){ setModalTab(nav.tab||'hr'); setModal(e); } }
-    else if(nav.kind==='view'){ setView(nav.view); if(nav.view==='employees'&&nav.query) setEmpSeed(nav.query); }
+    else if(nav.kind==='view'){ setView(nav.view); if(nav.view==='employees'&&nav.query) setEmpSeed(nav.query);
+      if(nav.view==='feedback') setFeedbackNav(nav.feedbackSession?{session:nav.feedbackSession}:(nav.feedbackDraw?{draw:true}:null)); }
   };
   const allNavSections = isEmpUser
     ? [{sec:'Mein Bereich', items:[{key:'mein-plan',label:'Mein Schichtplan',icon:'📋'}]}, ...navSections]
@@ -30483,7 +30658,7 @@ function App(){
           {view==='hraccess'&&(<div><HrAccessView/></div>)}
           {view==='appusers'&&(<div><AppUsersView employees={employees} clients={clients} showToast={showToast}/></div>)}
           {view==='cvsync'&&(<div><CvSyncView setCvList={setCvList} projects={projects}/></div>)}
-          {view==='feedback'&&<FeedbackView showToast={showToast}/>}
+          {view==='feedback'&&<FeedbackView employees={employees} projects={projects} team={team} showToast={showToast} nav={feedbackNav} onNavConsumed={()=>setFeedbackNav(null)}/>}
           {view==='spaces'&&(
             <div>
               <SpacesView employees={employees} projects={projects} locations={getLocations()}/>
