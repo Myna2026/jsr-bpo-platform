@@ -6093,7 +6093,9 @@ function calcFullPayslip(emp, month, salaryRec, employees, absences){
   const h50 = suH*(suRate===0.50?1:0) + hoH*(hoRate===0.50?1:0) + niH*(niRate===0.50?1:0);
 
   // ── ABSENCE / DEDUCTIONS ──────────────────────────────────────────────────
-  const absenceDays = parseFloat(rec.deduction_absence_days||0);
+  // Snapshot bei Erstellung/Neuberechnung: manueller Wert gewinnt, sonst Auto aus unbezahlten
+  // Abwesenheiten (allowAuto=true, da hier bewusst ein Slip erzeugt/neu berechnet wird).
+  const absenceDays = payrollAbsenceDays(rec, emp, month, true);
   const dailyRate   = r * hpd;
   const absenceDeduct = Math.round(absenceDays * dailyRate * 100)/100;
   const advanceDeduct = parseFloat(rec.deduction_social||0); // Vorschuss
@@ -8322,7 +8324,10 @@ function PayrollView({employees, projects, showToast}){
       niH*effRate*niRate
     )*100)/100:0;
     // Absence deduction: days × daily rate (or manual tax field if set directly)
-    const absenceDays=parseFloat(rec.deduction_absence_days||0);
+    // Abzugs-Tage: manueller Wert gewinnt, sonst Auto aus unbezahlten Abwesenheiten — aber nur
+    // solange der Slip noch Draft ist (finalisiert/bezahlt bleibt unberuehrt, wird aus Snapshot gerendert).
+    const _slipDraft=(()=>{const sl=getSlip(emp.id,selMonth);return !sl||sl.status==='draft';})();
+    const absenceDays=payrollAbsenceDays(rec, emp, selMonth, _slipDraft);
     const dailyRate=r*h;
     const absenceDeduct=absenceDays>0?Math.round(absenceDays*dailyRate*100)/100:parseFloat(rec.deduction_tax||0);
     const dt=absenceDeduct,ds=parseFloat(rec.deduction_social||0),do_=parseFloat(rec.deduction_other||0);
@@ -8885,34 +8890,37 @@ function PayrollView({employees, projects, showToast}){
               {/* Deductions */}
               <div style={{borderTop:'1px solid var(--border)',paddingTop:12,marginTop:4}}>
                 <div style={{fontSize:11,fontWeight:700,color:'var(--red)',textTransform:'uppercase',letterSpacing:'.06em',marginBottom:8}}>Abzüge</div>
-                {/* Unpaid absence auto-calc */}
+                {/* Unpaid absence auto-calc — Auto aus empUnpaidWorkdays (genehmigte unbezahlte
+                    Abwesenheitstage, inkl. Teiltage 0.x); manueller Wert im Feld ueberschreibt. */}
                 {(()=>{
-                  const absences=(employees||[]).find(e=>e.id===bonusModal.id)?.absences||[];
-                  const unpaidDays=absences.filter(a=>{
-                    if(a.type!=='vacation'&&a.type!=='sick') return false;
-                    const d=a.date||'';
-                    return d.startsWith(selMonth)&&a.unpaid;
-                  }).length;
-                  if(!unpaidDays) return null;
+                  const autoDays=empUnpaidWorkdays(bonusModal, selMonth);
+                  const isAuto=payrollAbsenceIsAuto(bonusForm);
+                  if(isAuto && !autoDays) return null;
                   const dailyRate=parseFloat(bonusModal.hourly_rate||0)*parseFloat(bonusModal.work_hours||8);
-                  const autoDeduct=Math.round(unpaidDays*dailyRate*100)/100;
-                  return(
+                  return isAuto ? (
                     <div style={{padding:'8px 12px',background:'var(--amber-bg)',borderRadius:'var(--r-sm)',marginBottom:10,fontSize:12,color:'var(--amber)'}}>
-                      ⚠ {unpaidDays} unbezahlte Fehltage erkannt → automatischer Abzug: <strong>{eur(autoDeduct)}</strong>
+                      ⚙ Automatisch: <strong>{autoDays} unbezahlte Tage</strong> → Abzug <strong>{eur(Math.round(autoDays*dailyRate*100)/100)}</strong> (Feld leer = automatisch)
+                    </div>
+                  ) : (
+                    <div style={{padding:'8px 12px',background:'var(--amber-bg)',borderRadius:'var(--r-sm)',marginBottom:10,fontSize:12,color:'var(--amber)'}}>
+                      ● Manuell überschrieben — automatisch wären {autoDays} Tage. Feld leeren für Automatik.
                     </div>
                   );
                 })()}
                 <div className="form-row">
                   <div className="form-group">
-                    <label className="form-label">Unbezahlter Urlaub / Fehltage (Tage)</label>
-                    <input className="form-input" type="number" min="0" step="1" value={bonusForm.deduction_absence_days||0}
+                    <label className="form-label">Unbezahlter Urlaub / Fehltage (Tage) — leer = automatisch</label>
+                    <input className="form-input" type="number" min="0" step="0.25" value={bonusForm.deduction_absence_days??''}
+                      placeholder={String(empUnpaidWorkdays(bonusModal, selMonth))+' (auto)'}
                       onChange={e=>{
-                        const days=parseFloat(e.target.value||0);
+                        const v=e.target.value;
                         const dailyRate=parseFloat(bonusModal.hourly_rate||0)*parseFloat(bonusModal.work_hours||8);
-                        setBonusForm(f=>({...f,deduction_absence_days:e.target.value,deduction_tax:Math.round(days*dailyRate*100)/100}));
+                        if(v===''){ setBonusForm(f=>{const n={...f}; delete n.deduction_absence_days; delete n.deduction_tax; return n;}); return; }
+                        const days=parseFloat(v||0);
+                        setBonusForm(f=>({...f,deduction_absence_days:v,deduction_tax:Math.round(days*dailyRate*100)/100}));
                       }}/>
                     <div style={{fontSize:10,color:'var(--muted)',marginTop:3}}>
-                      Tagessatz: {eur(parseFloat(bonusModal.hourly_rate||0)*parseFloat(bonusModal.work_hours||8))} · Abzug wird automatisch berechnet
+                      Tagessatz: {eur(parseFloat(bonusModal.hourly_rate||0)*parseFloat(bonusModal.work_hours||8))} · leer lassen → automatischer Abzug aus unbezahlten Abwesenheiten
                     </div>
                   </div>
                   <div className="form-group">
@@ -9981,6 +9989,15 @@ function empUnpaidWorkdays(emp, ym){
   return ((emp&&emp.absences)||[]).filter(a=>a && a.type==='unpaid' && a.approved)
     .reduce((s,a)=>s+absDaysInMonth(a, ym), 0);
 }
+// Ist ein manueller Abzugs-Wert gesetzt? Leer/undefined = nein -> Automatik greift.
+function payrollAbsenceIsAuto(rec){ const raw=rec&&rec.deduction_absence_days; return raw==null||raw===''; }
+// Aufgeloeste Abzugs-Tage fuer die Lohnabrechnung: manueller Wert (auch 0) gewinnt; sonst Auto
+// aus empUnpaidWorkdays — aber NUR wenn allowAuto (Draft/kein Slip), damit finalisierte Payslips
+// nicht rueckwirkend geaendert werden. Bruchteile (Teiltage, days=0.x) werden durchgereicht.
+function payrollAbsenceDays(rec, emp, ym, allowAuto){
+  if(!payrollAbsenceIsAuto(rec)) return parseFloat(rec.deduction_absence_days)||0;
+  return allowAuto ? empUnpaidWorkdays(emp, ym) : 0;
+}
 // Monatskosten in EUR MINUS anteiligem Unpaid-Abzug. Setzt auf empCostEur auf (Umrechnung linear,
 // darum Abzug direkt auf dem EUR-Betrag). Einheitliche Anteilsformel: full/Werktage × Unpaid-Werktage,
 // gedeckelt auf 0 und Unpaid-Tage auf die Monats-Werktage begrenzt. Fehlender Kurs → null (fx-Banner greift).
@@ -10836,7 +10853,7 @@ function WorkforcePlanningView({employees,projects,showToast}){
   function getEntry(eid,ds){return plan['s_'+eid+'_'+ds]||null;}
 
   function setPartialAbsence(eid,ds,endTime,absType){
-    // endTime: 'HH:MM' when employee left, absType: 'sick'|'vacation'|'absent'
+    // endTime: 'HH:MM' when employee left, absType: 'sick'|'vacation'|'unpaid'
     const u={...plan};
     const entry=u['s_'+eid+'_'+ds];
     if(!entry) return;
@@ -10861,23 +10878,23 @@ function WorkforcePlanningView({employees,projects,showToast}){
       SLOTS.forEach((_,i)=>{if(i>=endSlotIdx) delete u['i_'+eid+'_'+ds+'_'+i];});
     }
     save(u);
-    // Write absence record to employee
-    const allEmps=JSON.parse(localStorage.getItem('jsr_employees_v1')||'[]');
-    const empIdx=allEmps.findIndex(e=>e.id===eid);
-    if(empIdx>=0){
-      const emp=allEmps[empIdx];
-      const absences=emp.absences||[];
-      // Remove any existing full-day absence for this date
-      const filtered=absences.filter(a=>!(a.start===ds&&a.end===ds&&a.partial));
-      filtered.push({
-        start:ds,end:ds,
-        type:absType,
-        partial:true,
-        partial_from:endTime,
-        note:'Partiell ab '+endTime+' ('+workedH+'h gearbeitet)',
-      });
-      allEmps[empIdx]={...emp,absences:filtered};
-      localStorage.setItem('jsr_employees_v1',JSON.stringify(allEmps));
+    // Abwesenheits-Eintrag am Mitarbeiter in die DB (statt frueher jsr_employees_v1/localStorage,
+    // wo er still verloren ging). EIN Format {from,to,days} (Einzeltag from===to); days = abwesender
+    // Anteil des Vertragstags (Bruchteil). paid=false bei unpaid; approved:true, damit der Lohnabzug
+    // (empUnpaidWorkdays -> deduction_absence_days) greift.
+    const pEmp=(employees||[]).find(e=>e.id===eid);
+    if(pEmp){
+      const contractH=parseFloat(pEmp.work_hours)||8;
+      const frac=Math.min(1, Math.max(0, Math.round((contractH-workedH)/contractH*100)/100));
+      if(frac>0){
+        const rest=(pEmp.absences||[]).filter(a=>!(a.from===ds && (a.to||a.from)===ds));   // bestehenden Einzeltag ersetzen
+        const updated={...pEmp, absences:[...rest, {
+          id:'a'+Date.now(), type:absType, from:ds, to:ds, days:frac,
+          paid:(absType!=='unpaid'), approved:true,
+          note:'Teiltag ab '+endTime+' ('+workedH+'h gearbeitet)',
+        }]};
+        saveEmployeeToDB(updated).catch(err=>console.error('[partial] saveEmployeeToDB', err));
+      }
     }
     recalculateAfterChange();
     setPartialModal(null);
@@ -14379,7 +14396,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                   <div style={{borderTop:'1px solid var(--border)',marginTop:8,paddingTop:8}}>
                     <div style={{fontSize:10,fontWeight:700,color:'var(--muted)',marginBottom:5}}>⚡ Heute partiell:</div>
                     {[['sick','🤒 Krank ab…','#dc2626','#fee2e2'],
-                      ['absent','❌ Abwesend ab…','#d97706','#fef3c7'],
+                      ['unpaid','❌ Unbezahlt ab…','#d97706','#fef3c7'],
                       ['vacation','🏖 Urlaub ab…','#0F5661','#E4EEF0']].map(([type,label,col,bg])=>(
                       <div key={type}
                         onClick={()=>{(()=>{const _n=new Date();const _t=String(_n.getHours()).padStart(2,'0')+':'+String(Math.floor(_n.getMinutes()/30)*30).padStart(2,'0');setPartialEndTime(_t);setPartialModal({empId:bEmp.id,ds:blockMenu.ds,entry:bEntry,absType:type});setBlockMenu(null);})();}}
@@ -14404,8 +14421,8 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
         const shM=(pEntry.shift||'').match(/(\d{1,2}):(\d{2})/);
         const startStr=shM?shM[0]:'08:00';
         const startMin=shM?parseInt(shM[1])*60+parseInt(shM[2]):480;
-        const absLabels={sick:'🤒 Krank',absent:'❌ Abwesend',vacation:'🏖 Urlaub'};
-        const absColors={sick:'#dc2626',absent:'#d97706',vacation:'#0F5661'};
+        const absLabels={sick:'🤒 Krank',unpaid:'❌ Unbezahlt',vacation:'🏖 Urlaub'};
+        const absColors={sick:'#dc2626',unpaid:'#d97706',vacation:'#0F5661'};
         const col=absColors[partialModal.absType]||'#6b7280';
         const endTime=partialEndTime||startStr;
         const em=endTime.match(/(\d{1,2}):(\d{2})/);
@@ -14420,7 +14437,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
               onClick={e=>e.stopPropagation()}>
               {/* Type toggle */}
               <div style={{display:'flex',gap:6,marginBottom:14}}>
-                {[['sick','🤒 Krank','#dc2626'],['absent','❌ Abwesend','#d97706'],['vacation','🏖 Urlaub','#0F5661']].map(([t,l,c])=>(
+                {[['sick','🤒 Krank','#dc2626'],['unpaid','❌ Unbezahlt','#d97706'],['vacation','🏖 Urlaub','#0F5661']].map(([t,l,c])=>(
                   <button key={t} onClick={()=>setPartialModal(pm=>({...pm,absType:t}))}
                     style={{flex:1,padding:'6px 3px',borderRadius:7,
                       border:'2px solid '+(partialModal.absType===t?c:'var(--border)'),
