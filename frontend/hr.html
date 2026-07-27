@@ -6851,6 +6851,18 @@ function Widget_TrainingStatus({plans}){
     </div>;
   })}</div>;
 }
+// Forecast-KPIs (ausdrücklich GEPLANT, nicht Ist — Ist steht erst am Monatsende fest).
+function Widget_ForecastUmsatz({employees, projects}){
+  const ym=new Date().toISOString().slice(0,7);
+  const map=planRevenueByProject(employees, projects, ym);
+  const rev=(projects||[]).reduce((s,p)=>s+((map[p.id]&&map[p.id].revenue)||0),0);
+  return <div><div className="widget-metric-hero" style={{color:'#059669'}}>{eur(rev)}</div><div className="widget-sub">📈 Forecast-Umsatz {ym} · geplant</div></div>;
+}
+function Widget_ForecastKosten({employees}){
+  const ym=new Date().toISOString().slice(0,7);
+  const cost=(employees||[]).filter(e=>e&&['active','training'].includes(e.status)).reduce((s,e)=>s+(empCostEurForMonth(e,ym)||0),0);
+  return <div><div className="widget-metric-hero" style={{color:'#dc2626'}}>{eur(cost)}</div><div className="widget-sub">📈 Forecast-Personalkosten {ym} · geplant</div></div>;
+}
 function Widget_KrankheitMonth({employees}){
   const now=new Date(), ym=now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0');
   const pm=new Date(now.getFullYear(),now.getMonth()-1,1), pym=pm.getFullYear()+'-'+String(pm.getMonth()+1).padStart(2,'0');
@@ -6937,6 +6949,77 @@ function Widget_Auslastung({employees, projects, forecast, onNavigate}){
     </div>}
   </div>;
 }
+// Schichtplan-Ansicht (read-only): Projekt-Tabs, Diese/Nächste Woche, nur eingeteilte MA,
+// Besetzt/Tag-Fusszeile, Wochenende nur wenn belegt. Quelle shift_assignments (shiftLoadCells).
+function Widget_Schichtplan({employees, projects, onNavigate}){
+  const isoD=d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+  const mondayOf=d=>{const x=new Date(d);const dow=(x.getDay()+6)%7;x.setDate(x.getDate()-dow);x.setHours(0,0,0,0);return x;};
+  const isoWeek=d=>{const x=new Date(Date.UTC(d.getFullYear(),d.getMonth(),d.getDate()));const dw=x.getUTCDay()||7;x.setUTCDate(x.getUTCDate()+4-dw);const y1=new Date(Date.UTC(x.getUTCFullYear(),0,1));return Math.ceil((((x-y1)/86400000)+1)/7);};
+  const projList=(projects||[]).filter(p=>p&&p.id&&p.status!=='inactive');
+  const [projId,setProjId]=useState(()=>(projList[0]&&projList[0].id)||'');
+  const [wk,setWk]=useState(0);
+  const [cells,setCells]=useState(null);
+  const proj=projList.find(p=>p.id===projId)||null;
+  const weekStart=(()=>{const m=mondayOf(new Date());m.setDate(m.getDate()+wk*7);return m;})();
+  const days=Array.from({length:7},(_,i)=>{const d=new Date(weekStart);d.setDate(d.getDate()+i);return d;});
+  const dayDs=days.map(isoD);
+  useEffect(()=>{ let alive=true; setCells(null);
+    (async()=>{
+      if(!projId){ if(alive) setCells({}); return; }
+      const skills=(proj&&Array.isArray(proj.skills)&&proj.skills.length)?proj.skills.map(s=>s.key):['all'];
+      const merged={};
+      for(const sk of skills){ const m=await shiftLoadCells(projId, sk, dayDs[0], dayDs[6]); Object.assign(merged, m); }
+      if(alive) setCells(merged);
+    })();
+    return ()=>{alive=false;};
+  },[projId, wk]);
+  const DOW=['Mo','Di','Mi','Do','Fr','Sa','So'];
+  const shortShift=(c)=>{ const v=(c&&(c.value||c.shift))||''; const m=String(v).match(/(\d{1,2}):\d{2}\D+(\d{1,2}):\d{2}/); return m?(parseInt(m[1])+'–'+parseInt(m[2])):((c&&c.label)||'✓'); };
+  const cellOf=(eid,i)=> cells && cells[eid+'|'+dayDs[i]];
+  const members=shiftMembersFor(employees, projId, '');
+  const assigned=members.filter(e=>days.some((_,i)=>cellOf(e.id,i))).sort((a,b)=>((a.first_name||'')+(a.last_name||'')).localeCompare((b.first_name||'')+(b.last_name||''),'de'));
+  const showDay=days.map((_,i)=> i<5 || assigned.some(e=>cellOf(e.id,i)) );
+  const visIdx=days.map((_,i)=>i).filter(i=>showDay[i]);
+  const perDay=i=>assigned.filter(e=>cellOf(e.id,i)).length;
+  const header=(
+    <div style={{marginBottom:8}}>
+      <div style={{display:'flex',flexWrap:'wrap',gap:4,marginBottom:6}}>
+        {projList.map(p=>(<button key={p.id} onClick={()=>setProjId(p.id)} style={{padding:'3px 9px',borderRadius:99,fontSize:11,fontWeight:700,cursor:'pointer',border:'1px solid '+(p.id===projId?'#0F5661':'var(--border)'),background:p.id===projId?'#0F5661':'transparent',color:p.id===projId?'#fff':'var(--muted)'}}>{p.name}</button>))}
+      </div>
+      <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+        <div style={{display:'flex',gap:2,background:'var(--surface-2)',borderRadius:8,padding:2}}>
+          {[['Diese Woche',0],['Nächste Woche',1]].map(([l,v])=>(<button key={v} onClick={()=>setWk(v)} style={{padding:'4px 10px',borderRadius:6,fontSize:11,fontWeight:700,cursor:'pointer',border:'none',background:wk===v?'#fff':'transparent',color:wk===v?'#0F5661':'var(--muted)'}}>{l}</button>))}
+        </div>
+        <span style={{fontSize:11,color:'var(--muted)'}}>KW {isoWeek(weekStart)} · {isoD(days[0]).slice(5)}–{isoD(days[6]).slice(5)}</span>
+      </div>
+    </div>
+  );
+  if(cells===null) return <div>{header}<div className="w-empty">Lädt…</div></div>;
+  if(!projId) return <div>{header}<div className="w-empty">Kein Projekt.</div></div>;
+  if(!assigned.length) return <div>{header}
+    <div onClick={()=>onNavigate&&onNavigate({kind:'view',view:'shiftplan'})} title="Zur Schichtplanung" style={{padding:'10px 12px',fontSize:12,fontWeight:600,color:'#d97706',background:'var(--amber-bg)',borderRadius:8,cursor:'pointer'}}>Keine Einteilung in dieser Woche — hier einteilen →</div>
+  </div>;
+  return <div>{header}
+    <div style={{overflowX:'auto'}}>
+      <table style={{width:'100%',borderCollapse:'collapse',fontSize:11}}>
+        <thead><tr>
+          <th style={{textAlign:'left',padding:'4px 6px',color:'var(--muted)',fontWeight:700}}>Mitarbeiter</th>
+          {visIdx.map(i=>(<th key={i} style={{padding:'4px 4px',color:'var(--muted)',fontWeight:700,whiteSpace:'nowrap'}}>{DOW[i]}<div style={{fontSize:9,fontWeight:400}}>{isoD(days[i]).slice(8)}.</div></th>))}
+        </tr></thead>
+        <tbody>
+          {assigned.map(e=>(<tr key={e.id} style={{borderTop:'1px solid var(--border)'}}>
+            <td style={{padding:'4px 6px',whiteSpace:'nowrap',fontWeight:600}}>{e.first_name} {(e.last_name||'')[0]||''}.</td>
+            {visIdx.map(i=>{ const c=cellOf(e.id,i); return <td key={i} style={{padding:'3px 4px',textAlign:'center',color:c?'#0F5661':'var(--dim)',fontWeight:c?700:400,fontFamily:'var(--mono)'}}>{c?shortShift(c):'·'}</td>; })}
+          </tr>))}
+          <tr style={{borderTop:'2px solid var(--border)',background:'var(--surface-2)'}}>
+            <td style={{padding:'4px 6px',fontWeight:700,color:'var(--muted)'}}>Besetzt/Tag</td>
+            {visIdx.map(i=>(<td key={i} style={{padding:'3px 4px',textAlign:'center',fontWeight:700,fontFamily:'var(--mono)',color:perDay(i)===0?'var(--dim)':'#0F5661'}}>{perDay(i)}</td>))}
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>;
+}
 function Widget_Onboarding({employees}){
   const now=Date.now();
   const list=(employees||[]).filter(e=>{if(!e)return false; if(e.status==='training')return true; const h=e.contract?.start||e.hire_date; return h&&e.status==='active'&&(now-new Date(h).getTime())<=90*86400000;});
@@ -6973,6 +7056,8 @@ function Widget_RecruitingPipeline(){
 function WidgetCard({id, employees, projects, plans, forecast, onNavigate}){
   const def=WIDGETS[id]; if(!def||def.section) return null;   // Sektionen rendert das Cockpit inline, nicht das Grid
   const impl={
+    forecast_umsatz:()=><Widget_ForecastUmsatz employees={employees} projects={projects}/>,
+    forecast_kosten:()=><Widget_ForecastKosten employees={employees}/>,
     ma_per_project:()=><Widget_MaPerProject employees={employees} projects={projects}/>,
     training_status:()=><Widget_TrainingStatus plans={plans}/>,
     krankheit_month:()=><Widget_KrankheitMonth employees={employees}/>,
@@ -7470,8 +7555,7 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
   // Umsatz = geplanter Monatsumsatz aus der geteilten Billing-Logik (productiveHours × Satz) — identisch zum Forecast.
   // Ersetzt die alte Pauschale n × rate_active × 160 × 0,85 (letzte doppelte Wahrheit in der Kalkulation).
   const _cockpitYm = year+'-'+String(todayM+1).padStart(2,'0');
-  const _planRevMap = planRevenueByProject(employees, projects, _cockpitYm);
-  const monthRevenue=projects.reduce((s,p)=>s+((_planRevMap[p.id]&&_planRevMap[p.id].revenue)||0),0);
+  const _planRevMap = planRevenueByProject(employees, projects, _cockpitYm);   // für Projekte-Karte (Marge)
   // Kosten in EUR über empCostEur (Währungs-Umrechnung + Fixgehalt korrekt); kein 1400/900-Schätz-Fallback mehr.
   const _fxMissingCk = fxMissingFor(employees, _cockpitYm);
 
@@ -7519,7 +7603,6 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
     {val:active.length,label:'Aktiv',sub:'Mitarbeiter',color:'#0F5661'},
     {val:inTraining.length,label:'Schulung',sub:'Mitarbeiter',color:'#7c3aed'},
     {val:pipeline.length,label:'Pipeline',sub:'Kandidaten',color:'#0d9488'},
-    {val:Math.round(monthRevenue/1000)+'k',label:'Umsatz/Mo',sub:'geplant',color:'#059669'},
   ];
 
   const myWidgets = resolveMyCockpit(team, employees);   // gewählte Widgets/Sektionen dieses Nutzers
@@ -7677,33 +7760,35 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
         }catch(e){return null;}
       })()}
 
-      {/* Bottom-Grid: Projekte + Heute abwesend (wählbar). Demografie/Sprachqualität/Monats-
-          Finanzen entfernt (2026-07-27, RAUS lt. Cockpit-Überarbeitung). Projekte-Redesign folgt. */}
+      {/* Schichtplan-Ansicht (nur lesen) — wählbare Sektion */}
+      {hasW('schichtplan_ansicht') && <div className="card" style={{marginBottom:14,padding:14}}>
+        <div style={{fontSize:12,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em',marginBottom:10}}>🗓 Schichtplan · nur Ansicht</div>
+        <Widget_Schichtplan employees={employees} projects={projects} onNavigate={onNavigate}/>
+      </div>}
+
+      {/* Bottom-Grid: Projekte + Heute abwesend (wählbar). Demografie/Sprachqualität/Monats-Finanzen entfernt (2026-07-27). */}
       {(hasW('projekte_karte')||hasW('heute_abwesend')) && <div className="cockpit-bottom-grid">
         {hasW('projekte_karte') && <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--r-lg)',overflow:'hidden'}}>
           <div style={{padding:'10px 14px',borderBottom:'1px solid var(--border)',fontSize:12,fontWeight:600}}>Projekte</div>
           {_fxMissingCk&&<div style={{padding:'8px 14px',borderBottom:'1px solid var(--border)',fontSize:11,color:'var(--red)',fontWeight:600,background:'var(--red-bg)'}}>⚠ Kein Wechselkurs für {_cockpitYm} — LEK-Gehälter fehlen in den Kosten (kein 1:1). Unter System → 💱 Wechselkurse pflegen.</div>}
-          <div>
+          {/* Redesign: große Kacheln, auf einen Blick — Besetzung groß, Marge als Ampel; keine Roh-€ */}
+          <div style={{padding:12,display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(150px,1fr))',gap:10}}>
             {projects.map(p=>{
               const n=active.filter(e=>e.project_id===p.id).length;
               const t=inTraining.filter(e=>e.project_id===p.id).length;
-              const rev=Math.round((_planRevMap[p.id]&&_planRevMap[p.id].revenue)||0);   // geteilte Billing-Logik (wie Forecast)
+              const rev=Math.round((_planRevMap[p.id]&&_planRevMap[p.id].revenue)||0);
               const cost=active.filter(e=>e.project_id===p.id).reduce((s,e)=>s+(empCostEurForMonth(e,_cockpitYm)||0),0)+
                 inTraining.filter(e=>e.project_id===p.id).reduce((s,e)=>s+(empCostEurForMonth(e,_cockpitYm)||0),0);
-              const mg=rev>0?Math.round((rev-cost)/rev*100):0;
+              const mg=rev>0?Math.round((rev-cost)/rev*100):null;
+              const mgColor=mg==null?'var(--muted)':mg>=20?'#059669':mg>=10?'#d97706':'#dc2626';
               return(
-                <div key={p.id} style={{padding:'9px 14px',borderBottom:'1px solid var(--border)'}}>
-                  <div style={{display:'flex',justifyContent:'space-between',marginBottom:4}}>
-                    <span style={{fontSize:12,fontWeight:600}}>{p.name}</span>
-                    <span style={{fontSize:12,fontFamily:'var(--mono)',color:'#059669',fontWeight:700}}>{rev.toLocaleString('de-DE')} €</span>
+                <div key={p.id} style={{padding:'12px 14px',background:'var(--card)',border:'1px solid var(--border)',borderRadius:'var(--r)',display:'flex',flexDirection:'column',gap:8}}>
+                  <div style={{fontSize:13,fontWeight:700,lineHeight:1.2}}>{p.name}</div>
+                  <div style={{display:'flex',alignItems:'baseline',gap:6}}>
+                    <span style={{fontSize:30,fontWeight:800,color:'#0F5661',lineHeight:1,fontFamily:'var(--mono)'}}>{n}</span>
+                    <span style={{fontSize:11,color:'var(--muted)'}}>aktiv{t>0?' · +'+t+' Schulung':''}</span>
                   </div>
-                  <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-                    <div style={{display:'flex',gap:5}}>
-                      <span style={{fontSize:10,padding:'1px 6px',borderRadius:3,background:'#E4EEF0',color:'#0F5661',fontWeight:500}}>{n} aktiv</span>
-                      {t>0&&<span style={{fontSize:10,padding:'1px 6px',borderRadius:3,background:'#f5f3ff',color:'#7c3aed',fontWeight:500}}>{t} Schulung</span>}
-                    </div>
-                    <span style={{fontSize:11,fontFamily:'var(--mono)',fontWeight:700,color:mg>=20?'#059669':mg>=10?'#d97706':'#dc2626'}}>{cost.toLocaleString('de-DE')} € · {mg}%</span>
-                  </div>
+                  <span style={{alignSelf:'flex-start',fontSize:12,fontWeight:800,padding:'2px 10px',borderRadius:99,background:mgColor+'1f',color:mgColor}}>{mg==null?'Marge —':'Marge '+mg+'%'}</span>
                 </div>
               );
             })}
@@ -28175,6 +28260,9 @@ function SystemManualView({hasAccess}){
 
 // ═══ COCKPIT-WIDGETS: Registry + Default + Kategorien ═══
 const WIDGETS = {
+  forecast_umsatz:     { id:'forecast_umsatz',     label:'Forecast-Umsatz (geplant)',         icon:'currency-euro',        category:'forecast' },
+  forecast_kosten:     { id:'forecast_kosten',     label:'Forecast-Kosten (geplant)',         icon:'currency-euro',        category:'forecast' },
+  schichtplan_ansicht: { id:'schichtplan_ansicht', label:'Schichtplan-Ansicht (nur lesen)',   icon:'calendar',             category:'cockpit', section:true },
   ma_per_project:      { id:'ma_per_project',      label:'MA pro Projekt & Skill',            icon:'users',                category:'personal' },
   training_status:     { id:'training_status',     label:'Schulungen: Status & Teilnehmer',   icon:'academic-cap',         category:'schulung' },
   krankheit_month:     { id:'krankheit_month',     label:'Krankheitstage laufender Monat',    icon:'heart',                category:'zeit' },
@@ -28194,8 +28282,8 @@ const WIDGETS = {
   projekte_karte:      { id:'projekte_karte',      label:'Projekte-Übersicht',                icon:'users',                category:'cockpit', section:true },
   heute_abwesend:      { id:'heute_abwesend',      label:'Heute abwesend',                    icon:'calendar',             category:'cockpit', section:true }
 };
-const DEFAULT_WIDGETS = ['overview_kpis','heute_todo','daten_checks','vertraege_auslaufend','ma_per_project','training_status','projekte_karte','heute_abwesend'];
-const WIDGET_CATEGORIES = {cockpit:'Cockpit-Sektionen', personal:'Personal', zeit:'Zeit', schulung:'Schulung', recruiting:'Recruiting', people:'People'};
+const DEFAULT_WIDGETS = ['overview_kpis','forecast_umsatz','forecast_kosten','heute_todo','daten_checks','vertraege_auslaufend','ma_per_project','training_status','projekte_karte','heute_abwesend'];
+const WIDGET_CATEGORIES = {cockpit:'Cockpit-Sektionen', forecast:'Forecast (geplant)', personal:'Personal', zeit:'Zeit', schulung:'Schulung', recruiting:'Recruiting', people:'People'};
 
 
 // ═══ CockpitEditor (Modal) ═══
