@@ -29213,8 +29213,12 @@ function AiEndpointView(){
   );
 }
 // ══ CV-Sync aus öffentlichem Google Sheet (Feature 20) ══
+// Browser-Auto-Sync-Guard: max 1× pro Sitzung (Modul-Flag, reset bei Reload) UND Mindestabstand
+// zum letzten Sync (auto ODER manuell) — verhindert einen Lauf bei jedem Tab-Wechsel/20×-am-Tag.
+let _cvAutoSyncSession=false;
+const CV_AUTOSYNC_MIN_MS=2*60*60*1000;   // 2 h
 function loadCvSyncConfig(){
-  const DEF={enabled:false, sheet_url:'', csv_url:'', cutoff_date:'',
+  const DEF={enabled:false, sheet_url:'', csv_url:'', cutoff_date:'', auto_sync_on_open:false,
     mapping:{name:'Vor- und Nachname', phone:'Telefonnummer', date:'Zeitstempel',
       german:'Sprichst du Deutsch?', cc_experience:'Hast du Erfahrung im Call Center?',
       experience:'In welchen', availability:'Wann kannst du anfangen?',
@@ -29358,6 +29362,13 @@ function CvSyncView({setCvList, projects}){
         <label style={{display:'flex',alignItems:'center',gap:10,cursor:'pointer',marginBottom:14}}>
           <input type="checkbox" checked={!!cfg.enabled} onChange={e=>up({enabled:e.target.checked})} style={{width:16,height:16}}/>
           <span style={{fontSize:14,fontWeight:600}}>CV-Sync aktiviert</span>
+        </label>
+        <label style={{display:'flex',alignItems:'flex-start',gap:10,cursor:cfg.enabled?'pointer':'not-allowed',marginBottom:14,opacity:cfg.enabled?1:0.5}}>
+          <input type="checkbox" disabled={!cfg.enabled} checked={!!cfg.auto_sync_on_open} onChange={e=>up({auto_sync_on_open:e.target.checked})} style={{width:16,height:16,marginTop:2}}/>
+          <span>
+            <span style={{fontSize:14,fontWeight:600}}>Beim Öffnen des Recruiting-Bereichs automatisch synchronisieren</span>
+            <div style={{fontSize:11,color:'var(--muted)',marginTop:2}}>Läuft im Browser, wenn jemand Recruiting/Bewerber/CV-Sync öffnet — höchstens <b>einmal pro Sitzung</b> und nur, wenn der letzte Sync über 2 h her ist (kein Lauf bei jedem Tab-Wechsel).</div>
+          </span>
         </label>
 
         <div className="form-group">
@@ -29625,6 +29636,25 @@ function App(){
   });
   useEffect(()=>{localStorage.setItem('jsr_projects_v1',JSON.stringify(projects));},[projects]);
   useEffect(()=>{ const m={}; (projects||[]).forEach(p=>{ if(p&&p.id) m[p.id]=p; }); PROJ_BY_ID=m; },[projects]); // Snapshot fürs Protokoll-Diff
+
+  // Opt-in Browser-Auto-Sync: beim Öffnen des Recruiting-Bereichs (kanban/cvs/cvsync) einmal
+  // synchronisieren — greift nur, wenn jemand ohnehin hinschaut. Bewusst KEIN Serverlauf (der
+  // bräuchte eine zweite Kopie der Sync-Logik). Guard: max 1×/Sitzung + Mindestabstand (2 h).
+  useEffect(()=>{
+    if(!(view==='kanban'||view==='cvs'||view==='cvsync')) return;
+    if(_cvAutoSyncSession) return;
+    const cfg=loadCvSyncConfig();
+    if(!cfg.enabled || !cfg.auto_sync_on_open) return;
+    if(!(cfg.csv_url||extractCsvUrl(cfg.sheet_url))) return;
+    const last=cfg.last_sync_at?Date.parse(cfg.last_sync_at):0;
+    if(last && (Date.now()-last)<CV_AUTOSYNC_MIN_MS) return;
+    _cvAutoSyncSession=true;
+    (async()=>{
+      try{ const r=await syncCvsFromSheet();
+        if(r&&r.imported){ loadCvsFromDB().then(setCvList); showToast('CV-Sync: '+r.imported+' neu importiert · '+(r.skipped||0)+' übersprungen','success'); }
+      }catch(e){ console.warn('[cv-autosync]', e); }
+    })();
+  }, [view]);
 
   useEffect(()=>{
     if(!localStorage.getItem('jsr_projects_v1')||JSON.parse(localStorage.getItem('jsr_projects_v1')||'[]').length===0){
