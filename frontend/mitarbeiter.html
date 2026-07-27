@@ -625,6 +625,10 @@ td.muted{color:var(--muted);}
       <button class="ni" data-view="Perf" onclick="showView('Perf',this)">
         <span class="ni-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path fill-rule="evenodd" d="M5.166 2.621v.858c-1.035.148-2.059.33-3.071.543a.75.75 0 0 0-.584.859 6.753 6.753 0 0 0 6.138 5.6 6.73 6.73 0 0 0 2.743 1.346A6.707 6.707 0 0 1 9.279 15H8.54c-1.036 0-1.875.84-1.875 1.875V19.5h-.75a2.25 2.25 0 0 0-2.25 2.25c0 .414.336.75.75.75h15a.75.75 0 0 0 .75-.75 2.25 2.25 0 0 0-2.25-2.25h-.75v-2.625c0-1.036-.84-1.875-1.875-1.875h-.739a6.706 6.706 0 0 1-1.112-3.173 6.73 6.73 0 0 0 2.743-1.347 6.753 6.753 0 0 0 6.139-5.6.75.75 0 0 0-.585-.858 47.077 47.077 0 0 0-3.07-.543V2.62a.75.75 0 0 0-.658-.744 49.22 49.22 0 0 0-6.093-.377c-2.063 0-4.096.128-6.093.377a.75.75 0 0 0-.657.744Zm0 2.629c0 1.196.312 2.32.857 3.294A5.266 5.266 0 0 1 3.16 5.337a45.6 45.6 0 0 1 2.006-.343v.256Zm13.5 0v-.256c.674.1 1.343.214 2.006.343a5.265 5.265 0 0 1-2.863 3.207 6.72 6.72 0 0 0 .857-3.294Z" clip-rule="evenodd"/></svg></span><span>Performance</span>
       </button>
+      <button class="ni" data-view="Feedback" onclick="showView('Feedback',this)">
+        <span class="ni-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path fill-rule="evenodd" d="M4.848 2.771A49.144 49.144 0 0 1 12 2.25c2.43 0 4.817.178 7.152.52 1.978.292 3.348 2.024 3.348 3.97v6.02c0 1.946-1.37 3.678-3.348 3.97a48.9 48.9 0 0 1-3.476.383.39.39 0 0 0-.297.17l-2.755 4.133a.75.75 0 0 1-1.248 0l-2.755-4.133a.39.39 0 0 0-.297-.17 48.9 48.9 0 0 1-3.476-.384c-1.978-.29-3.348-2.024-3.348-3.97V6.741c0-1.946 1.37-3.68 3.348-3.97Z" clip-rule="evenodd"/></svg></span><span>Feedback</span>
+        <span id="fbNavBadge" class="ni-badge" style="display:none;background:#7c3aed;">●</span>
+      </button>
 
       <div class="nav-section">Extras</div>
       <button class="ni" data-view="Team" onclick="showView('Team',this)">
@@ -693,6 +697,9 @@ td.muted{color:var(--muted);}
 
       <!-- PERF -->
       <div id="vPerf" class="view"></div>
+
+      <!-- FEEDBACK -->
+      <div id="vFeedback" class="view"></div>
 
       <!-- TEAM/CHAT -->
       <div id="vTeam" class="view"></div>
@@ -956,6 +963,8 @@ function renderCurrentViewOnRealtime(){
   catch(e){ console.error('[25i] renderTeam after realtime', e); }
   try{ if(typeof renderPayroll === 'function') renderPayroll(); }
   catch(e){ console.error('[27d] renderPayroll after realtime', e); }
+  try{ if(typeof renderFeedback === 'function') renderFeedback(); }
+  catch(e){ console.error('[feedback] renderFeedback after realtime', e); }
 }
 
 // ─── 25i: Employee Team-View direct Supabase read ────────────────────
@@ -1116,6 +1125,69 @@ function subscribeMyPayslips(employeeId, onChange){
       })
     .subscribe();
   return function(){ try{ sb.removeChannel(chan); }catch(e){} };
+}
+
+// ── Feedbackgespräche (read-only): eigene Sessions + Antworten via RLS (get_my_employee_id).
+//    MA füllt nichts aus — sieht nur, dass eins ansteht, und die eigene Historie.
+var FB_SESSIONS_ME = [];
+var FB_ANSWERS_ME  = [];
+function loadMyFeedbackFromDB(){
+  return Promise.all([
+    sb.from('feedback_sessions').select('*'),
+    sb.from('feedback_answers').select('*')
+  ]).then(function(r){
+    FB_SESSIONS_ME = (r[0] && r[0].data) || [];
+    FB_ANSWERS_ME  = (r[1] && r[1].data) || [];
+  }).catch(function(){ FB_SESSIONS_ME=[]; FB_ANSWERS_ME=[]; });
+}
+function subscribeMyFeedback(onChange){
+  var chan = sb.channel('feedback-my').on('postgres_changes',
+    {event:'*', schema:'public', table:'feedback_sessions'}, onChange).subscribe();
+  return function(){ try{ sb.removeChannel(chan); }catch(e){} };
+}
+function fbFace(g){ return ['','😄','🙂','😐','🙁','😞'][g] || '•'; }
+function updateFbBadge(){
+  var n = FB_SESSIONS_ME.filter(function(s){ return s.status==='scheduled'; }).length;
+  var b = document.getElementById('fbNavBadge');
+  if(b) b.style.display = n>0 ? 'inline-block' : 'none';
+}
+function renderFeedback(){
+  var el=document.getElementById('vFeedback'); if(!el) return;
+  updateFbBadge();
+  var scheduled = FB_SESSIONS_ME.filter(function(s){ return s.status==='scheduled'; });
+  var done = FB_SESSIONS_ME.filter(function(s){ return s.status==='done'; })
+    .sort(function(a,b){ return (b.conducted_at||b.scheduled_date||'').localeCompare(a.conducted_at||a.scheduled_date||''); });
+  var html='';
+  html+='<div style="font-size:12px;color:var(--muted);margin-bottom:12px;padding:8px 12px;background:var(--surface-2);border-radius:8px;">HR führt die Feedbackgespräche und trägt die Antworten ein — du füllst nichts selbst aus. Hier siehst du, wann eins ansteht, und deine Historie.</div>';
+  if(scheduled.length){
+    html+='<div class="card" style="border-color:#7c3aed;"><div class="card-header"><div class="card-title">📋 Ein Feedbackgespräch steht an</div></div><div class="card-body"><div style="font-size:14px;">Für dich ist ein Feedbackgespräch vorgesehen. HR kommt auf dich zu — du musst nichts vorbereiten.</div></div></div>';
+  }
+  if(done.length===0){
+    html+='<div class="empty"><div class="empty-icon">💬</div><div>Noch keine Feedbackgespräche geführt.</div></div>';
+  } else {
+    html+='<div class="card"><div class="card-header"><div class="card-title">Meine Historie</div></div><div class="card-body">';
+    done.forEach(function(s){
+      var d = s.conducted_at ? new Date(s.conducted_at).toLocaleDateString('de-AT') : (s.scheduled_date||'');
+      var ans = FB_ANSWERS_ME.filter(function(a){ return a.session_id===s.id; })
+        .sort(function(a,b){ return (a.order_index||0)-(b.order_index||0); });
+      html+='<details style="margin-bottom:8px;border:1px solid var(--border);border-radius:8px;padding:8px 12px;"><summary style="cursor:pointer;font-weight:600;font-size:14px;">'+esc(d)+' · '+ans.length+' Fragen</summary><div style="margin-top:8px;">';
+      ans.forEach(function(a){
+        html+='<div style="padding:8px 0;border-bottom:1px solid var(--border);">';
+        html+='<div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;">'+esc(a.section||'')+'</div>';
+        html+='<div style="font-size:13px;font-weight:600;margin:2px 0;">'+esc(a.prompt_snapshot||'')+'</div>';
+        if(a.type_snapshot==='grade' && a.grade!=null){
+          html+='<div style="font-size:14px;">'+fbFace(a.grade)+' <b>Note '+a.grade+'</b> <span style="color:var(--muted);font-size:11px;">(1 = sehr zufrieden … 5 = sehr unzufrieden)</span></div>';
+          if(a.followup_texts && a.followup_texts.length) html+='<div style="font-size:12px;color:#9a3412;margin-top:2px;">'+esc(a.followup_texts.join(' · '))+'</div>';
+        } else if(a.answer_text){
+          html+='<div style="font-size:13px;white-space:pre-wrap;">'+esc(a.answer_text)+'</div>';
+        }
+        html+='</div>';
+      });
+      html+='</div></details>';
+    });
+    html+='</div></div>';
+  }
+  el.innerHTML=html;
 }
 
 // Perf: eigene KPI-Werte + Config aus Supabase (analog loadMyPayslipsFromDB).
@@ -1304,6 +1376,9 @@ function gateSession(session, event){
             subscribeMyShifts(ME.id, function(){
               loadMyShiftsFromDB(ME.id).then(function(){ renderCurrentViewOnRealtime(); }).catch(function(){});
             });
+            // Feedbackgespräche (read-only, RLS self-scoped) + Realtime
+            loadMyFeedbackFromDB().then(function(){ updateFbBadge(); renderCurrentViewOnRealtime(); }).catch(function(){});
+            subscribeMyFeedback(function(){ loadMyFeedbackFromDB().then(function(){ updateFbBadge(); renderCurrentViewOnRealtime(); }).catch(function(){}); });
             // Perf: eigene KPI-Werte + Config laden (einmalig beim Login)
             loadMyPerfFromDB(ME.id)
               .then(function(res){ PERF_ME=res.entries; KPI_CFG_ME=res.cfg; applyPerfVisibility(); renderCurrentViewOnRealtime(); })
@@ -1531,7 +1606,7 @@ window.addEventListener('DOMContentLoaded',function(){
 // NAVIGATION
 // ═══════════════════════════════════════════════════════════════════════════
 function showView(name,btn){
-  ['Home','Shift','Payroll','Urlaub','Perf','Team','Knowledge','Anleitung','Moti','Profile'].forEach(function(v){
+  ['Home','Shift','Payroll','Urlaub','Perf','Feedback','Team','Knowledge','Anleitung','Moti','Profile'].forEach(function(v){
     var el=document.getElementById('v'+v);if(el)el.classList.remove('on');
   });
   document.querySelectorAll('.ni').forEach(function(n){n.classList.remove('active');});
@@ -1544,7 +1619,7 @@ function showView(name,btn){
   // Title update
   var titles={Home:['Start','Mein Mitarbeiter-Portal'],Shift:['Schichtplan','Wochen- und Monatsübersicht'],
     Payroll:['Lohnzettel','Meine Gehaltsabrechnungen'],Urlaub:['Urlaub','Anträge und Saldo'],
-    Perf:['Performance','Meine KPIs'],Team:['Team-Chat','Kollegen kontaktieren'],
+    Perf:['Performance','Meine KPIs'],Feedback:['Feedback','Meine Feedbackgespräche'],Team:['Team-Chat','Kollegen kontaktieren'],
     Knowledge:['Wissensbasis','Team-Fachartikel & FAQ'],Anleitung:['Anleitung','So funktioniert das Portal'],Moti:['Motivation','Glücksrad und Boni'],
     Profile:['Mein Profil','Stammdaten']};
   var t=titles[name]||['','']; 
@@ -1557,6 +1632,7 @@ function showView(name,btn){
   else if(name==='Payroll')renderPayroll();
   else if(name==='Urlaub')renderUrlaub();
   else if(name==='Perf')renderPerf();
+  else if(name==='Feedback')renderFeedback();
   else if(name==='Team')renderTeam();
   else if(name==='Knowledge')renderKnowledge();
   else if(name==='Anleitung')renderAnleitung();
