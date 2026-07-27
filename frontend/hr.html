@@ -6734,8 +6734,10 @@ const WIDGET_ICONS = {
   'user':'<path fill-rule="evenodd" d="M7.5 6a4.5 4.5 0 1 1 9 0 4.5 4.5 0 0 1-9 0ZM3.751 20.105a8.25 8.25 0 0 1 16.498 0 .75.75 0 0 1-.437.695A18.683 18.683 0 0 1 12 22.5c-2.786 0-5.433-.608-7.812-1.7a.75.75 0 0 1-.437-.695Z" clip-rule="evenodd"/>'
 };
 function widgetIconSvg(name){return '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor">'+(WIDGET_ICONS[name]||'')+'</svg>';}
-function readLS(key,fb){try{const v=JSON.parse(localStorage.getItem(key)||'null');return v==null?fb:v;}catch(e){return fb;}}
 function eur(n){return (Math.round(n)||0).toLocaleString('de-AT')+' €';}
+// Rollen-Metadaten (Labels/Icons) — nach der Cockpit-Umstellung auf per-User (2026-07-27) nur
+// noch beim geplanten Retirement des Rollen-Fallbacks relevant. Bis dahin bewusst gehalten.
+// eslint-disable-next-line no-unused-vars
 const ROLE_DEFINITIONS = {
   admin:      { key:'admin',      label:'Admin',      icon:'shield-check',  description:'Vollzugriff, alle Widgets' },
   management: { key:'management', label:'Management', icon:'briefcase',     description:'Strategische Sicht' },
@@ -6746,11 +6748,11 @@ const ROLE_DEFINITIONS = {
 };
 const ROLE_PRIORITY = ['admin','management','hr','finance','teamlead','individual'];
 const ROLE_DEFAULTS = {
-  admin: ['ma_per_project','training_status','krankheit_month','urlaub_bottleneck','personalkosten','fluktuation','time_to_hire','auslastung','onboarding','vertrag_auslauf','nps','overtime','recruiting_pipeline'],
-  management: ['fluktuation','personalkosten','auslastung','vertrag_auslauf'],
-  hr: ['onboarding','recruiting_pipeline','time_to_hire','krankheit_month','urlaub_bottleneck','training_status'],
-  finance: ['personalkosten','auslastung','ma_per_project'],
-  teamlead: ['krankheit_month','urlaub_bottleneck','training_status','overtime'],
+  admin: ['ma_per_project','training_status','krankheit_month','urlaub_bottleneck','fluktuation','auslastung','onboarding','vertrag_auslauf','recruiting_pipeline'],
+  management: ['fluktuation','auslastung','vertrag_auslauf'],
+  hr: ['onboarding','recruiting_pipeline','krankheit_month','urlaub_bottleneck','training_status'],
+  finance: ['auslastung','ma_per_project'],
+  teamlead: ['krankheit_month','urlaub_bottleneck','training_status'],
   individual: []
 };
 function loadRoleCockpits(){
@@ -6763,8 +6765,16 @@ function loadRoleCockpits(){
   localStorage.setItem('jsr_role_cockpits_v1', JSON.stringify(init));
   return init;
 }
+// Nach der per-User-Umstellung ungenutzt (Rollen-Cockpits werden nicht mehr geschrieben);
+// bleibt bis zum Retirement des Rollen-Fallbacks.
+// eslint-disable-next-line no-unused-vars
 function saveRoleCockpits(obj){ localStorage.setItem('jsr_role_cockpits_v1', JSON.stringify(obj)); saveConfigToDB('jsr_role_cockpits_v1', obj); }
 function cockpitForRole(roleKey){ const all=loadRoleCockpits(); const e=all[roleKey]; return e?e.widgets:(ROLE_DEFAULTS[roleKey]||null); }
+// Per-USER-Cockpits (jsr_user_cockpits_v1 = { [user_id]: [widgetKey,…] }), app_config + localStorage.
+// EINE Ebene, Last-Write-Wins: Admin-Matrix und Selbst-Editor schreiben denselben Eintrag —
+// die Admin-Einrichtung ist nur der Startpunkt, eine spaetere Selbst-Aenderung gewinnt.
+function loadUserCockpits(){ try{ const v=JSON.parse(localStorage.getItem('jsr_user_cockpits_v1')||'null'); return (v&&typeof v==='object'&&!Array.isArray(v))?v:{}; }catch(e){ return {}; } }
+function saveUserCockpits(obj){ const o=obj||{}; localStorage.setItem('jsr_user_cockpits_v1', JSON.stringify(o)); saveConfigToDB('jsr_user_cockpits_v1', o); }
 function roleForTeam(team){
   if(team && team.access==='all') return 'admin';
   const keys=(team&&team.role_keys)||[];
@@ -6772,9 +6782,13 @@ function roleForTeam(team){
   return 'individual';
 }
 function resolveMyCockpit(team, employees){
-  // Gegen entfernte Widget-IDs in gespeicherten Cockpits absichern (z.B. ma_top/ma_kritisch,
-  // entfernt 2026-07-26): nur Keys behalten, die der Katalog noch kennt. Beim naechsten
-  // Speichern einer Rolle wird die bereinigte Liste persistiert (self-healing).
+  // Pro NUTZER (team.user_id) statt pro Rolle. Nur bekannte Katalog-Keys (self-healing gegen
+  // entfernte Widgets). Fallback: noch kein eigener Eintrag -> Rollen-Default (Uebergang) -> DEFAULT_WIDGETS.
+  const uid = team && team.user_id;
+  const uc = loadUserCockpits();
+  // Expliziter Eintrag (auch LEER) gewinnt -> ein leeres Cockpit bleibt leer (Empty-State),
+  // nicht auf Default zurueckfallen. Nur wenn gar kein Eintrag existiert: Rollen-Default -> DEFAULT_WIDGETS.
+  if(uid && Array.isArray(uc[uid])) return uc[uid].filter(id=>WIDGETS[id]);
   const w = (cockpitForRole(roleForTeam(team))||[]).filter(id=>WIDGETS[id]);
   return (w && w.length) ? w : DEFAULT_WIDGETS;
 }
@@ -6830,8 +6844,9 @@ function Widget_TrainingStatus({plans}){
   if(!up.length) return <div className="w-empty">Keine geplanten Schulungen.</div>;
   return <div>{up.map((p,i)=>{
     const days=Math.round((new Date(p.start_date)-new Date(today))/86400000);
+    const conf=(p.confirmed_ids&&p.confirmed_ids.length)||0, plan=p.planned_count||0;
     return <div key={i} className="widget-row">
-      <span>{p.name||p.project_name||'Schulung'} · {p.planned_count||0} MA</span>
+      <span>{p.name||p.project_name||'Schulung'} · {conf}/{plan} bestätigt</span>
       <span className="num" style={{color:'#94A3B8'}}>in {days} T</span>
     </div>;
   })}</div>;
@@ -6851,13 +6866,15 @@ function Widget_KrankheitMonth({employees}){
   </div>;
 }
 function Widget_UrlaubBottleneck(){
-  const reqsAll=readLS('jsr_vacation_requests_v1',{});
-  let list=[];
-  if(Array.isArray(reqsAll))list=reqsAll; else Object.keys(reqsAll).forEach(k=>list=list.concat(reqsAll[k]||[]));
-  const approved=list.filter(r=>r&&r.status==='approved'&&r.from&&r.to);
+  // Aus der DB (vacation_requests), nicht mehr localStorage. null = lädt.
+  const [reqs,setReqs]=useState(null);
+  useEffect(()=>{ let alive=true; (async()=>{ try{ const {data}=await sb.from('vacation_requests').select('from_date,to_date,status'); if(alive) setReqs(data||[]); }catch(e){ if(alive) setReqs([]); } })(); return ()=>{alive=false;}; },[]);
+  if(reqs===null) return <div className="w-empty">Lädt…</div>;
+  const approved=(reqs||[]).filter(r=>r&&r.status==='approved'&&r.from_date&&r.to_date);
+  if(!approved.length) return <div className="w-empty">Keine genehmigten Urlaubsanträge in der DB.</div>;
   const now=new Date(); const months=[];
   for(let i=0;i<6;i++){const d=new Date(now.getFullYear(),now.getMonth()+i,1);months.push({ym:d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'),label:d.toLocaleString('de-AT',{month:'short',year:'2-digit'}),count:0});}
-  approved.forEach(r=>{months.forEach(m=>{if(r.from.slice(0,7)<=m.ym&&r.to.slice(0,7)>=m.ym)m.count++;});});
+  approved.forEach(r=>{months.forEach(m=>{if(r.from_date.slice(0,7)<=m.ym&&r.to_date.slice(0,7)>=m.ym)m.count++;});});
   const max=Math.max(1,...months.map(m=>m.count));
   return <div>{months.map((m,i)=>(
     <div key={i} style={{display:'flex',alignItems:'center',gap:8,fontSize:12,padding:'3px 0'}}>
@@ -6867,20 +6884,7 @@ function Widget_UrlaubBottleneck(){
     </div>
   ))}</div>;
 }
-function Widget_Personalkosten({employees}){
-  const active=(employees||[]).filter(e=>e&&e.status==='active');
-  const byLoc={};
-  active.forEach(e=>{const l=e.location||'—';byLoc[l]=(byLoc[l]||0)+(empCostEur(e, new Date().toISOString().slice(0,7))||0);});
-  const rows=Object.keys(byLoc).map(l=>({l,v:byLoc[l]})).sort((a,b)=>b.v-a.v);
-  if(!rows.length) return <div className="w-empty">Keine Kostendaten.</div>;
-  const max=Math.max(...rows.map(r=>r.v));
-  return <div>{rows.map((r,i)=>(
-    <div key={i} style={{marginBottom:8}}>
-      <div className="widget-row" style={{borderBottom:'none',padding:'2px 0'}}><span>{r.l}</span><span className="num">{eur(r.v)}</span></div>
-      <div className="widget-bar"><span style={{width:(r.v/max*100)+'%'}}/></div>
-    </div>
-  ))}</div>;
-}
+// Widget_Personalkosten entfernt (2026-07-27, Personalkosten komplett raus lt. Cockpit-Überarbeitung).
 // empScores/Widget_MaTop/Widget_MaKritisch entfernt (2026-07-26): mittelten % mit Zaehlwerten
 // zu einer bedeutungslosen Zahl, projektuebergreifende Rangliste vergleicht ungleiche KPI-Saetze.
 // Korrekte Schwellen-Rangliste liegt im Performance-Tab (rankView/getRanking, je Projekt+Skill)
@@ -6897,27 +6901,41 @@ function Widget_Fluktuation({employees}){
     ))}
   </div>;
 }
-function Widget_TimeToHire({employees}){
-  const pairs=(employees||[]).map(e=>{const cv=e.cv_received_at||e.cv_date, h=e.contract?.start||e.hire_date; if(!cv||!h)return null; const d=(new Date(h)-new Date(cv))/86400000; return d>=0?d:null;}).filter(v=>v!=null);
-  if(!pairs.length) return <WidgetPlaceholder/>;
-  const avg=Math.round(pairs.reduce((s,d)=>s+d,0)/pairs.length);
-  return <div><div className="widget-metric-hero">{avg}<span style={{fontSize:16,fontWeight:600,color:'#94A3B8'}}> Tage</span></div><div className="widget-sub">Ø Bewerbung → Einstellung ({pairs.length} MA)</div></div>;
-}
-function Widget_Auslastung({employees, projects, forecast}){
+// Widget_TimeToHire entfernt (2026-07-27, RAUS lt. Cockpit-Überarbeitung).
+function Widget_Auslastung({employees, projects, forecast, onNavigate}){
   const active=(employees||[]).filter(e=>e&&e.status==='active');
+  const staffing=loadStaffingAll();   // Sollbesetzung (jsr_staffing_target_v1, app_config)
+  // Tages-Peak als Soll: max Kopfzahl in irgendeinem Zeitfenster, je Skill summiert.
+  const projSoll=(p)=>{
+    const skills=(Array.isArray(p.skills)&&p.skills.length)?p.skills.map(s=>s.key):['all'];
+    return skills.reduce((sum,sk)=>{ const cfg=staffing[staffingKeyFor(p.id, sk)]||{}; let peak=0;
+      STAFFING_DAYS.forEach(([dk])=>{ (cfg[dk]||[]).forEach(w=>{ peak=Math.max(peak, parseInt(w.count)||0); }); }); return sum+peak; }, 0);
+  };
   const rows=(projects||[]).map(p=>{
     const ist=active.filter(e=>e.project_id===p.id).length;
-    const soll=null;   // FK1: toter forecast[p.id].planned_agents-Read entfernt (Key existierte nie)
+    const soll=projSoll(p);
     return {name:p.name, ist, soll};
-  }).filter(r=>r.ist>0||r.soll);
+  }).filter(r=>r.ist>0||r.soll>0);
   if(!rows.length) return <WidgetPlaceholder text="Keine Projektdaten."/>;
+  const anySoll=rows.some(r=>r.soll>0);
   const max=Math.max(1,...rows.map(r=>Math.max(r.ist,r.soll||0)));
-  return <div>{rows.map((r,i)=>(
-    <div key={i} style={{marginBottom:8}}>
-      <div className="widget-row" style={{borderBottom:'none',padding:'2px 0'}}><span>{r.name}</span><span className="num">{r.ist}{r.soll!=null?' / '+r.soll:''}</span></div>
-      <div className="widget-bar"><span style={{width:(r.ist/max*100)+'%'}}/></div>
-    </div>
-  ))}</div>;
+  return <div>
+    {rows.map((r,i)=>{
+      const barColor = r.soll>0 ? (staffingUnder(r.ist,r.soll)?'#dc2626':(staffingOver(r.ist,r.soll)?'#d97706':'#059669')) : '#0F5661';
+      return (
+        <div key={i} style={{marginBottom:8}}>
+          <div className="widget-row" style={{borderBottom:'none',padding:'2px 0'}}><span>{r.name}</span><span className="num">{r.ist}{r.soll>0?' / '+r.soll:''}</span></div>
+          <div className="widget-bar"><span style={{width:(r.ist/max*100)+'%',background:barColor}}/></div>
+        </div>
+      );
+    })}
+    {/* Kein Soll gepflegt -> klickbarer Hinweis in die Schichtplanung (dort wird die Sollbesetzung eingetragen) */}
+    {!anySoll && <div onClick={()=>onNavigate&&onNavigate({kind:'view',view:'shiftplan'})}
+      title="Zur Schichtplanung — Sollbesetzung eintragen"
+      style={{marginTop:4,padding:'6px 9px',fontSize:11,fontWeight:600,color:'#d97706',background:'var(--amber-bg)',borderRadius:6,cursor:'pointer'}}>
+      ⚠ Sollbesetzung nicht gepflegt — hier eintragen →
+    </div>}
+  </div>;
 }
 function Widget_Onboarding({employees}){
   const now=Date.now();
@@ -6952,21 +6970,17 @@ function Widget_RecruitingPipeline(){
   ))}</div>;
 }
 
-function WidgetCard({id, employees, projects, plans, forecast}){
-  const def=WIDGETS[id]; if(!def) return null;
+function WidgetCard({id, employees, projects, plans, forecast, onNavigate}){
+  const def=WIDGETS[id]; if(!def||def.section) return null;   // Sektionen rendert das Cockpit inline, nicht das Grid
   const impl={
     ma_per_project:()=><Widget_MaPerProject employees={employees} projects={projects}/>,
     training_status:()=><Widget_TrainingStatus plans={plans}/>,
     krankheit_month:()=><Widget_KrankheitMonth employees={employees}/>,
     urlaub_bottleneck:()=><Widget_UrlaubBottleneck/>,
-    personalkosten:()=><Widget_Personalkosten employees={employees}/>,
     fluktuation:()=><Widget_Fluktuation employees={employees}/>,
-    time_to_hire:()=><Widget_TimeToHire employees={employees}/>,
-    auslastung:()=><Widget_Auslastung employees={employees} projects={projects} forecast={forecast}/>,
+    auslastung:()=><Widget_Auslastung employees={employees} projects={projects} forecast={forecast} onNavigate={onNavigate}/>,
     onboarding:()=><Widget_Onboarding employees={employees}/>,
     vertrag_auslauf:()=><Widget_VertragAuslauf employees={employees}/>,
-    nps:()=><WidgetPlaceholder/>,
-    overtime:()=><WidgetPlaceholder/>,
     recruiting_pipeline:()=><Widget_RecruitingPipeline/>
   };
   const body=impl[id]?impl[id]():<div className="w-empty">In Kürze verfügbar.</div>;
@@ -6977,12 +6991,12 @@ function WidgetCard({id, employees, projects, plans, forecast}){
     </div>
   );
 }
-function CockpitGrid({employees, projects, plans, forecast, team}){
+function CockpitGrid({employees, projects, plans, forecast, team, onNavigate}){
   const ids=resolveMyCockpit(team, employees);
   if(!ids||!ids.length) return null;
   return (
     <div className="cockpit-grid">
-      {ids.map(id=><WidgetCard key={id} id={id} employees={employees} projects={projects} plans={plans} forecast={forecast}/>)}
+      {ids.map(id=><WidgetCard key={id} id={id} employees={employees} projects={projects} plans={plans} forecast={forecast} onNavigate={onNavigate}/>)}
     </div>
   );
 }
@@ -7443,6 +7457,7 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
     loadCvsFromDB().then(rows=>{ if(alive) setCvsDb(rows||[]); });
     return ()=>{ alive=false; };
   },[]);
+  const [selfEdit,setSelfEdit]=useState(false);   // eigenes Cockpit anpassen (jsr_user_cockpits_v1[user_id])
   const active=employees.filter(e=>e&&e.status==='active');
   const inTraining=employees.filter(e=>e&&e.status==='training');
   // 4a-4: Pipeline-Kandidaten aus cvs-DB (CV-Funnel-Phasen), nicht mehr aus employees mit Legacy-Status.
@@ -7459,9 +7474,6 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
   const monthRevenue=projects.reduce((s,p)=>s+((_planRevMap[p.id]&&_planRevMap[p.id].revenue)||0),0);
   // Kosten in EUR über empCostEur (Währungs-Umrechnung + Fixgehalt korrekt); kein 1400/900-Schätz-Fallback mehr.
   const _fxMissingCk = fxMissingFor(employees, _cockpitYm);
-  const monthCost=active.reduce((s,e)=>s+(empCostEurForMonth(e,_cockpitYm)||0),0)+
-    inTraining.reduce((s,e)=>s+(empCostEurForMonth(e,_cockpitYm)||0),0);
-  const margin=monthRevenue>0?Math.round((monthRevenue-monthCost)/monthRevenue*100):0;
 
   const todayAbsent=employees.filter(e=>(e.absences||[]).some(a=>a.type==='sick'&&absCoversDay(a,todayStr)));
   const todayVac=employees.filter(e=>(e.absences||[]).some(a=>a.type==='vacation'&&absCoversDay(a,todayStr)));
@@ -7507,21 +7519,33 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
     {val:active.length,label:'Aktiv',sub:'Mitarbeiter',color:'#0F5661'},
     {val:inTraining.length,label:'Schulung',sub:'Mitarbeiter',color:'#7c3aed'},
     {val:pipeline.length,label:'Pipeline',sub:'Kandidaten',color:'#0d9488'},
-    {val:Math.round(monthRevenue/1000)+'k',label:'Umsatz/Mo',sub:'Vormonat est.',color:'#059669'},
-    {val:Math.round(monthCost/1000)+'k',label:'Kosten/Mo',sub:'Personal',color:'#dc2626'},
+    {val:Math.round(monthRevenue/1000)+'k',label:'Umsatz/Mo',sub:'geplant',color:'#059669'},
   ];
 
-  const financeRows=[
-    {label:'Umsatz',val:monthRevenue,color:'#059669'},
-    {label:'Personalkosten',val:monthCost,color:'#dc2626'},
-    {label:'Deckungsbeitrag',val:monthRevenue-monthCost,color:monthRevenue>=monthCost?'#0F5661':'#dc2626'},
-  ];
-
+  const myWidgets = resolveMyCockpit(team, employees);   // gewählte Widgets/Sektionen dieses Nutzers
+  const hasW = k => myWidgets.includes(k);
   return(
     <React.Fragment>
 
+      {/* Selbst-Konfiguration: eigenes Cockpit zusammenstellen (Last-Write-Wins mit Admin-Matrix) */}
+      <div style={{display:'flex',justifyContent:'flex-end',marginBottom:10}}>
+        <button className="btn btn-sm" onClick={()=>setSelfEdit(true)} title="Widgets deines Cockpits auswählen und ordnen">⚙ Cockpit anpassen</button>
+      </div>
+      {selfEdit && <CockpitEditor roleDef={{label:'dein Cockpit'}} current={resolveMyCockpit(team, employees)}
+        onSave={(widgets)=>{ const uid=team&&team.user_id; if(uid){ saveUserCockpits({...loadUserCockpits(), [uid]:widgets}); } setSelfEdit(false); }}
+        onClose={()=>setSelfEdit(false)}/>}
+
+      {/* Empty-State: leeres Cockpit -> keine weisse Seite, sondern Hinweis mit Verweis auf den Editor */}
+      {myWidgets.length===0 && (
+        <div style={{textAlign:'center',padding:'48px 20px',color:'var(--muted)'}}>
+          <div style={{fontSize:32,marginBottom:8}}>🗂</div>
+          <div style={{fontSize:15,fontWeight:600,marginBottom:4,color:'var(--text)'}}>Dein Cockpit ist leer</div>
+          <div style={{fontSize:13}}>Füge oben über „⚙ Cockpit anpassen" Widgets und Sektionen hinzu.</div>
+        </div>
+      )}
+
       {/* 1) Top-KPI-Reihe */}
-      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:10,marginBottom:12}}>
+      {hasW('overview_kpis') && <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:10,marginBottom:12}}>
         {kpis.map((k,i)=>(
           <div key={i} style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--r-lg)',padding:'12px 14px',boxShadow:'var(--shadow-xs)'}}>
             <div style={{fontSize:10,fontWeight:600,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',marginBottom:6}}>{k.label}</div>
@@ -7529,13 +7553,13 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
             <div style={{fontSize:10,color:'var(--muted)',marginTop:4}}>{k.sub}</div>
           </div>
         ))}
-      </div>
+      </div>}
 
       {/* 2) Widget-Grid */}
-      <CockpitGrid employees={employees} projects={projects} plans={plans} forecast={forecast} team={team}/>
+      <CockpitGrid employees={employees} projects={projects} plans={plans} forecast={forecast} team={team} onNavigate={onNavigate}/>
 
       {/* 2b Daten-Checks — kompakte Hinweiszeile (Panel lebt im eigenen Tab), nur für privilegierte Rollen */}
-      {(()=>{
+      {hasW('daten_checks') && (()=>{
         const sess=JSON.parse(sessionStorage.getItem('jsr_team')||localStorage.getItem('jsr_session_v1')||'{}');
         const isPriv=!sess.access||(sess.access==='all'||sess.access?.includes?.('superadmin'));
         if(!isPriv) return null;
@@ -7543,7 +7567,7 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
       })()}
 
       {/* 3) Auslaufende Vertraege — kompakt */}
-      {(()=>{
+      {hasW('vertraege_auslaufend') && (()=>{
         const sess=JSON.parse(sessionStorage.getItem('jsr_team')||localStorage.getItem('jsr_session_v1')||'{}');
         const isPrivileged=!sess.access||(sess.access==='all'||sess.access?.includes?.('superadmin'));
         if(!isPrivileged) return null;
@@ -7570,7 +7594,7 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
       })()}
 
       {/* 4) HEUTE ZU ERLEDIGEN */}
-      {(()=>{
+      {hasW('heute_todo') && (()=>{
         const today=new Date().toISOString().slice(0,10);
         const tasks=[];
         try{
@@ -7621,7 +7645,7 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
       })()}
 
       {/* 5) Neue CVs heute */}
-      {(()=>{
+      {hasW('neue_cvs') && (()=>{
         const today=new Date().toISOString().slice(0,10);
         try{
           const cvs=cvsDb;
@@ -7653,77 +7677,10 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
         }catch(e){return null;}
       })()}
 
-      {/* 6-10) Bottom-Grid: Demografie, Sprachqualitaet, Projekte, Monats-Finanzen, Heute Abwesend */}
-      <div className="cockpit-bottom-grid">
-        {(()=>{
-          try{
-            const allCvs=cvsDb;
-            const month=new Date().toISOString().slice(0,7);
-            const base=allCvs.filter(c=>(c.cv_date||'').startsWith(month));
-            if(!base.length) return null;
-            const male=base.filter(c=>(c.gender||'').toLowerCase().startsWith('m')).length;
-            const female=base.filter(c=>(c.gender||'').toLowerCase().startsWith('f')||c.gender==='w').length;
-            const other=base.length-male-female;
-            const gPct=(n)=>base.length?Math.round(n/base.length*100):0;
-            const ages=base.map(c=>{ if(!c.birthday) return null; const b=new Date(c.birthday.includes('.')?c.birthday.split('.').reverse().join('-'):c.birthday); if(isNaN(b)) return null; return Math.floor((new Date()-b)/(365.25*24*3600*1000)); }).filter(a=>a&&a>15&&a<80);
-            const avgAge=ages.length?Math.round(ages.reduce((a,b)=>a+b,0)/ages.length):0;
-            const exps=base.map(c=>parseFloat(c.experience_years||0)).filter(e=>e>=0&&e<50);
-            const avgExp=exps.length?(exps.reduce((a,b)=>a+b,0)/exps.length).toFixed(1):0;
-            const salaries=base.map(c=>parseFloat(c.salary_expectation||0)).filter(s=>s>100&&s<10000);
-            const avgSalary=salaries.length?Math.round(salaries.reduce((a,b)=>a+b,0)/salaries.length):0;
-            const LEVELS=['A2','B1','B2','C1','C2']; const LEVEL_VAL={'A2':1,'B1':2,'B2':3,'C1':4,'C2':5};
-            const selfLevels=base.map(c=>c.language_level).filter(l=>LEVELS.includes(l));
-            const avgSelf=selfLevels.length?LEVELS[Math.round(selfLevels.reduce((a,l)=>a+(LEVEL_VAL[l]||0),0)/selfLevels.length)-1]||'—':'—';
-            const selfDist=LEVELS.reduce((acc,l)=>({...acc,[l]:selfLevels.filter(x=>x===l).length}),{});
-            const ourLevels=base.map(c=>c.assessed_level||c.test_level).filter(l=>LEVELS.includes(l));
-            const avgOur=ourLevels.length?LEVELS[Math.round(ourLevels.reduce((a,l)=>a+(LEVEL_VAL[l]||0),0)/ourLevels.length)-1]||'—':'—';
-            const writingLevels=base.map(c=>c.assessed_writing||c.writing_level).filter(Boolean);
-            const avgWriting=writingLevels.length?writingLevels[Math.round(writingLevels.length/2)]||'—':'—';
-            const CARD=({title,children})=>(
-              <div style={{background:'var(--card)',borderRadius:'var(--r-lg)',border:'1px solid var(--border)',overflow:'hidden'}}>
-                <div style={{padding:'10px 14px',borderBottom:'1px solid var(--border)',fontWeight:700,fontSize:11,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em'}}>{title}</div>
-                <div style={{padding:'10px 14px'}}>{children}</div>
-              </div>
-            );
-            const ROW=({label,val,sub,bar,barColor})=>(
-              <div style={{display:'flex',alignItems:'center',gap:8,padding:'4px 0',borderBottom:'1px solid var(--border)'}}>
-                <span style={{fontSize:12,color:'var(--muted)',flex:1,whiteSpace:'nowrap'}}>{label}</span>
-                {bar!=null&&<div style={{flex:2,height:6,background:'var(--surface-2)',borderRadius:3,overflow:'hidden'}}><div style={{height:'100%',width:bar+'%',background:barColor||'var(--blue)',borderRadius:3}}/></div>}
-                <span style={{fontSize:13,fontWeight:700,color:'var(--text)',textAlign:'right',minWidth:50}}>{val}</span>
-                {sub&&<span style={{fontSize:10,color:'var(--muted)',minWidth:30}}>{sub}</span>}
-              </div>
-            );
-            return(<React.Fragment>
-              <CARD title="Demografie & Profil">
-                <ROW label="Männlich" val={male} sub={gPct(male)+'%'} bar={gPct(male)} barColor="#3b82f6"/>
-                <ROW label="Weiblich" val={female} sub={gPct(female)+'%'} bar={gPct(female)} barColor="#ec4899"/>
-                {other>0&&<ROW label="Divers/k.A." val={other} sub={gPct(other)+'%'} bar={gPct(other)} barColor="#94a3b8"/>}
-                <ROW label="⌀ Alter" val={avgAge?avgAge+' J.':'—'} barColor="var(--blue)"/>
-                <ROW label="⌀ Berufserfahrung" val={avgExp?avgExp+' J.':'—'}/>
-                {avgSalary>0&&<ROW label="⌀ Gehaltsvorstellung" val={avgSalary+' €'}/>}
-              </CARD>
-              <CARD title="Sprachqualität">
-                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:8}}>
-                  <div style={{padding:'8px 10px',background:'var(--surface-2)',borderRadius:'var(--r)',textAlign:'center'}}>
-                    <div style={{fontSize:10,color:'var(--muted)',marginBottom:2}}>Selbstangabe ⌀</div>
-                    <div style={{fontSize:20,fontWeight:800,color:'var(--blue)'}}>{avgSelf}</div>
-                  </div>
-                  <div style={{padding:'8px 10px',background:'var(--surface-2)',borderRadius:'var(--r)',textAlign:'center'}}>
-                    <div style={{fontSize:10,color:'var(--muted)',marginBottom:2}}>Intern validiert ⌀</div>
-                    <div style={{fontSize:20,fontWeight:800,color:ourLevels.length?'var(--green)':'var(--dim)'}}>{avgOur||'—'}</div>
-                  </div>
-                </div>
-                {LEVELS.filter(l=>selfDist[l]>0).map(l=>(
-                  <ROW key={l} label={l} val={selfDist[l]} sub={gPct(selfDist[l])+'%'} bar={gPct(selfDist[l])}
-                    barColor={l==='C2'?'#059669':l==='C1'?'#2563eb':l==='B2'?'#7c3aed':l==='B1'?'#d97706':'#ef4444'}/>
-                ))}
-                {writingLevels.length>0&&<ROW label="⌀ Schrift (intern)" val={avgWriting||'—'}/>}
-              </CARD>
-            </React.Fragment>);
-          }catch(e){return null;}
-        })()}
-
-        <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--r-lg)',overflow:'hidden'}}>
+      {/* Bottom-Grid: Projekte + Heute abwesend (wählbar). Demografie/Sprachqualität/Monats-
+          Finanzen entfernt (2026-07-27, RAUS lt. Cockpit-Überarbeitung). Projekte-Redesign folgt. */}
+      {(hasW('projekte_karte')||hasW('heute_abwesend')) && <div className="cockpit-bottom-grid">
+        {hasW('projekte_karte') && <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--r-lg)',overflow:'hidden'}}>
           <div style={{padding:'10px 14px',borderBottom:'1px solid var(--border)',fontSize:12,fontWeight:600}}>Projekte</div>
           {_fxMissingCk&&<div style={{padding:'8px 14px',borderBottom:'1px solid var(--border)',fontSize:11,color:'var(--red)',fontWeight:600,background:'var(--red-bg)'}}>⚠ Kein Wechselkurs für {_cockpitYm} — LEK-Gehälter fehlen in den Kosten (kein 1:1). Unter System → 💱 Wechselkurse pflegen.</div>}
           <div>
@@ -7751,28 +7708,9 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
               );
             })}
           </div>
-        </div>
+        </div>}
 
-        <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--r-lg)',overflow:'hidden'}}>
-          <div style={{padding:'10px 14px',borderBottom:'1px solid var(--border)',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-            <span style={{fontSize:12,fontWeight:600}}>Monats-Finanzen</span>
-            <span style={{fontSize:11,color:'var(--muted)',fontFamily:'var(--mono)'}}>{new Date(year,now.getMonth()-1,1).toLocaleDateString('de-DE',{month:'long',year:'numeric'})}</span>
-          </div>
-          <div style={{padding:'12px 14px'}}>
-            {financeRows.map((r,i)=>(
-              <div key={i} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'9px 0',borderBottom:i<2?'1px solid var(--border)':'none'}}>
-                <div style={{fontSize:11,color:'var(--muted)'}}>{r.label}</div>
-                <div style={{fontSize:16,fontWeight:700,color:r.color,fontFamily:'var(--mono)'}}>{r.val.toLocaleString('de-DE')} €</div>
-              </div>
-            ))}
-            <div style={{marginTop:10,display:'flex',justifyContent:'space-between',padding:'6px 10px',background:'var(--surface-2)',borderRadius:'var(--r-md)'}}>
-              <span style={{fontSize:11,color:'var(--muted)'}}>Marge</span>
-              <span style={{fontSize:13,fontWeight:700,fontFamily:'var(--mono)',color:margin>=20?'#059669':margin>=10?'#d97706':'#dc2626'}}>{margin}%</span>
-            </div>
-          </div>
-        </div>
-
-        <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--r-lg)',overflow:'hidden'}}>
+        {hasW('heute_abwesend') && <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--r-lg)',overflow:'hidden'}}>
           <div style={{padding:'10px 14px',borderBottom:'1px solid var(--border)',fontSize:12,fontWeight:600}}>Heute Abwesend</div>
           <div style={{padding:'8px 14px'}}>
             {todayAbsent.length===0&&todayVac.length===0
@@ -7793,8 +7731,8 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
               </div>
             }
           </div>
-        </div>
-      </div>
+        </div>}
+      </div>}
 
       {/* TODO: Google-Doc-Sync kommt als eigener System-Tab (Feature spaeter) — Code hier entfernt */}
 
@@ -28238,21 +28176,26 @@ function SystemManualView({hasAccess}){
 // ═══ COCKPIT-WIDGETS: Registry + Default + Kategorien ═══
 const WIDGETS = {
   ma_per_project:      { id:'ma_per_project',      label:'MA pro Projekt & Skill',            icon:'users',                category:'personal' },
-  training_status:     { id:'training_status',     label:'Schulungen: Status & Anmeldungen',  icon:'academic-cap',         category:'schulung' },
+  training_status:     { id:'training_status',     label:'Schulungen: Status & Teilnehmer',   icon:'academic-cap',         category:'schulung' },
   krankheit_month:     { id:'krankheit_month',     label:'Krankheitstage laufender Monat',    icon:'heart',                category:'zeit' },
   urlaub_bottleneck:   { id:'urlaub_bottleneck',   label:'Urlaubs-Bottleneck 6 Monate',       icon:'calendar',             category:'zeit' },
-  personalkosten:      { id:'personalkosten',      label:'Personalkosten',                    icon:'currency-euro',        category:'finanzen' },
   fluktuation:         { id:'fluktuation',         label:'Fluktuation 30/90/365 Tage',        icon:'arrow-trending-down',  category:'people' },
-  time_to_hire:        { id:'time_to_hire',        label:'Time-to-Hire',                      icon:'clock',                category:'recruiting' },
   auslastung:          { id:'auslastung',          label:'Auslastung Ist/Soll',               icon:'chart-pie',            category:'personal' },
   onboarding:          { id:'onboarding',          label:'Onboarding-Pipeline',               icon:'user-plus',            category:'people' },
   vertrag_auslauf:     { id:'vertrag_auslauf',     label:'Vertrags-Auslauf 6 Monate',         icon:'document-text',        category:'people' },
-  nps:                 { id:'nps',                 label:'NPS / eNPS',                        icon:'face-smile',           category:'people' },
-  overtime:            { id:'overtime',            label:'Overtime-Watch',                    icon:'exclamation-circle',   category:'zeit' },
-  recruiting_pipeline: { id:'recruiting_pipeline', label:'Recruiting-Pipeline',               icon:'user-group',           category:'recruiting' }
+  recruiting_pipeline: { id:'recruiting_pipeline', label:'Recruiting-Pipeline',               icon:'user-group',           category:'recruiting' },
+  // Cockpit-Sektionen (section:true): grosse Blöcke, die im Cockpit inline gerendert werden
+  // (nicht über das Widget-Grid). Wählbar wie Widgets; das Grid überspringt sie (WidgetCard).
+  overview_kpis:       { id:'overview_kpis',       label:'Übersicht (KPI-Reihe)',             icon:'chart-pie',            category:'cockpit', section:true },
+  heute_todo:          { id:'heute_todo',          label:'Heute zu erledigen',                icon:'clock',                category:'cockpit', section:true },
+  neue_cvs:            { id:'neue_cvs',            label:'Neue CVs heute',                    icon:'user-plus',            category:'cockpit', section:true },
+  daten_checks:        { id:'daten_checks',        label:'Daten-Checks',                      icon:'exclamation-circle',   category:'cockpit', section:true },
+  vertraege_auslaufend:{ id:'vertraege_auslaufend',label:'Auslaufende Verträge (Detail)',     icon:'document-text',        category:'cockpit', section:true },
+  projekte_karte:      { id:'projekte_karte',      label:'Projekte-Übersicht',                icon:'users',                category:'cockpit', section:true },
+  heute_abwesend:      { id:'heute_abwesend',      label:'Heute abwesend',                    icon:'calendar',             category:'cockpit', section:true }
 };
-const DEFAULT_WIDGETS = ['ma_per_project','urlaub_bottleneck','krankheit_month','training_status','personalkosten'];
-const WIDGET_CATEGORIES = {personal:'Personal', zeit:'Zeit', finanzen:'Finanzen', schulung:'Schulung', recruiting:'Recruiting', people:'People'};
+const DEFAULT_WIDGETS = ['overview_kpis','heute_todo','daten_checks','vertraege_auslaufend','ma_per_project','training_status','projekte_karte','heute_abwesend'];
+const WIDGET_CATEGORIES = {cockpit:'Cockpit-Sektionen', personal:'Personal', zeit:'Zeit', schulung:'Schulung', recruiting:'Recruiting', people:'People'};
 
 
 // ═══ CockpitEditor (Modal) ═══
@@ -28274,7 +28217,7 @@ function CockpitEditor({roleDef, current, onSave, onClose}){
   return (
     <div style={{position:'fixed',inset:0,background:'rgba(11,69,78,.45)',zIndex:1000,display:'flex',alignItems:'center',justifyContent:'center',padding:20}} onClick={onClose}>
       <div className="card" style={{width:'100%',maxWidth:760,maxHeight:'88vh',display:'flex',flexDirection:'column'}} onClick={e=>e.stopPropagation()}>
-        <div className="card-header"><div className="card-title">Cockpit für Rolle {roleDef.label} konfigurieren</div></div>
+        <div className="card-header"><div className="card-title">Cockpit für {roleDef.label} konfigurieren</div></div>
         <div className="card-body" style={{overflow:'auto',display:'grid',gridTemplateColumns:'1fr 1fr',gap:16}}>
           <div>
             <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:8}}>Verfügbare Widgets</div>
@@ -28323,42 +28266,67 @@ function CockpitEditor({roleDef, current, onSave, onClose}){
 }
 
 // ═══ CockpitsView (Tabelle) ═══
+// Cockpit-Konfiguration pro NUTZER (Admin-Matrix). Listet aktive App-User, je Nutzer sein
+// Cockpit einrichten -> jsr_user_cockpits_v1[user_id]. Last-Write-Wins mit dem Selbst-Editor:
+// Admin ist Startpunkt, spaetere Selbst-Aenderung des Nutzers gewinnt (gleicher Store-Eintrag).
 function CockpitsView(){
-  const [cockpits, setCockpits] = useState(loadRoleCockpits);
-  const [editorFor, setEditorFor] = useState(null);
+  const [users,setUsers]=useState([]);
+  const [cockpits,setCockpits]=useState({});
+  const [loading,setLoading]=useState(true);
+  const [editorFor,setEditorFor]=useState(null);   // {user_id, label}
+  const [q,setQ]=useState('');
+  useEffect(()=>{
+    let alive=true;
+    (async()=>{
+      try{
+        const m=await loadConfigFromDB('jsr_user_cockpits_v1');
+        const uRes=await sb.from('app_users').select('user_id, full_name, role_keys, active');
+        if(!alive) return;
+        setCockpits((m&&typeof m==='object'&&!Array.isArray(m))?m:{});
+        setUsers((uRes.data||[]).filter(u=>u&&u.active&&u.user_id&&Array.isArray(u.role_keys)&&u.role_keys.length));
+      }catch(e){ console.error('[cockpits] load', e); }
+      if(alive) setLoading(false);
+    })();
+    return ()=>{alive=false;};
+  },[]);
   function handleSave(widgets){
-    const key=editorFor.key;
-    setCockpits(prev=>{
-      const next={...prev, [key]:{widgets, updated_at:new Date().toISOString()}};
-      saveRoleCockpits(next);
-      return next;
-    });
+    const uid=editorFor.user_id;
+    setCockpits(prev=>{ const next={...prev, [uid]:widgets}; saveUserCockpits(next); return next; });
     setEditorFor(null);
   }
+  const rows=(users||[])
+    .filter(u=>{const n=(u.full_name||'').toLowerCase(); return !q.trim()||n.includes(q.trim().toLowerCase());})
+    .sort((a,b)=>(a.full_name||'').localeCompare(b.full_name||'','de'));
   return (
     <div>
       <div style={{marginBottom:14}}>
-        <div style={{fontSize:18,fontWeight:700}}>Cockpit-Konfiguration pro Rolle</div>
-        <div style={{fontSize:13,color:'var(--muted)',marginTop:2}}>Legt fest, welche Widgets Mitarbeiter je nach Rolle auf ihrem Start-Cockpit sehen. Die Rolle wird automatisch aus dem Login abgeleitet.</div>
+        <div style={{fontSize:18,fontWeight:700}}>Cockpit-Konfiguration pro Nutzer</div>
+        <div style={{fontSize:13,color:'var(--muted)',marginTop:2}}>Legt fest, welche Widgets ein Nutzer auf seinem Start-Cockpit sieht. Deine Einrichtung ist der Startpunkt — ändert der Nutzer sein Cockpit später selbst, gilt sein Stand. Kein eigener Eintrag → Rollen-Standard.</div>
       </div>
+      <div style={{marginBottom:14}}>
+        <input placeholder="Name suchen…" value={q} onChange={e=>setQ(e.target.value)} style={{padding:'8px 10px',borderRadius:8,border:'1px solid var(--border)',fontSize:13,minWidth:200}}/>
+      </div>
+      {loading?<div style={{color:'var(--muted)',fontSize:13,padding:'20px 0'}}>Lädt…</div>:(
       <div className="role-cards">
-        {Object.values(ROLE_DEFINITIONS).map(rd=>{
-          const cfg=cockpits[rd.key];
-          const count=cfg?cfg.widgets.length:(ROLE_DEFAULTS[rd.key]||[]).length;
+        {rows.map(u=>{
+          const cfg=cockpits[u.user_id];
+          const count=Array.isArray(cfg)?cfg.filter(id=>WIDGETS[id]).length:null;
           return (
-            <div key={rd.key} className="role-card">
-              <div className="role-card-head"><span dangerouslySetInnerHTML={{__html:widgetIconSvg(rd.icon)}}/>{rd.label}</div>
+            <div key={u.user_id} className="role-card">
+              <div className="role-card-head">{u.full_name||u.user_id.slice(0,8)}</div>
               <div className="role-card-body">
-                <div style={{fontSize:11,color:'var(--muted)',marginBottom:8,minHeight:28}}>{rd.description}</div>
-                <div style={{fontSize:22,fontWeight:800,color:'#0F5661'}}>{count}</div>
-                <div style={{fontSize:11,color:'var(--muted)',marginBottom:10}}>aktive Widgets</div>
-                <button className="btn btn-sm" style={{width:'100%'}} onClick={()=>setEditorFor(rd)}>Bearbeiten</button>
+                <div style={{fontSize:11,color:'var(--muted)',marginBottom:8,minHeight:28}}>{(u.role_keys||[]).map(k=>ROLE_LABELS[k]||k).join(', ')}</div>
+                <div style={{fontSize:22,fontWeight:800,color:count==null?'var(--muted)':'#0F5661'}}>{count==null?'—':count}</div>
+                <div style={{fontSize:11,color:'var(--muted)',marginBottom:10}}>{count==null?'Standard (Rolle)':'aktive Widgets'}</div>
+                <button className="btn btn-sm" style={{width:'100%'}} onClick={()=>setEditorFor({user_id:u.user_id, label:u.full_name||u.user_id.slice(0,8)})}>Bearbeiten</button>
               </div>
             </div>
           );
         })}
+        {rows.length===0&&<div style={{fontSize:13,color:'var(--muted)',padding:'20px 0'}}>Keine aktiven Nutzer gefunden.</div>}
       </div>
-      {editorFor && <CockpitEditor roleDef={editorFor} current={(cockpits[editorFor.key]||{}).widgets} onSave={handleSave} onClose={()=>setEditorFor(null)}/>}
+      )}
+      {editorFor && <CockpitEditor roleDef={{label:editorFor.label}} current={Array.isArray(cockpits[editorFor.user_id])?cockpits[editorFor.user_id]:undefined} onSave={handleSave} onClose={()=>setEditorFor(null)}/>}
     </div>
   );
 }
@@ -29043,6 +29011,7 @@ function App(){
         locked: Array.isArray(hrTabLocks[session.user.id]) ? hrTabLocks[session.user.id] : [...HR_DEFAULT_LOCKED_TABS],
         role_keys: au.role_keys,
         portals: portals,
+        user_id: session.user.id,   // fuer per-User-Cockpits (jsr_user_cockpits_v1) + Tab-Sperren
         employee_id: await matchEmployeeToUserSb(session.user.email, au.staff_number),  // 25a: Auto-Match über Supabase
         email: session.user.email
       };
