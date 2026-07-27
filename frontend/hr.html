@@ -9805,6 +9805,43 @@ function shiftHours(value){
   String(value||'').split('|').forEach(p=>{ brutto+=shiftSpanHours(p); });
   return { brutto:r2(brutto), paid:r2(Math.max(0,brutto-0.5)), net:r2(Math.max(0,brutto-1.0)) };
 }
+// Pause an einer Schicht-Zelle setzen (Override der Default-1,0-h-Pause aus shiftHours).
+// Regel (Wahrheit = shiftHours): der Arbeitgeber traegt FIX 0,5 h, der Rest der Pause ist
+// unbezahlt (Mitarbeiter). Also: net = brutto − pause, paid = brutto − min(0,5; pause).
+// pauseHours<=0 (oder gleich Default) → Override entfernen, zurueck auf shiftHours-Default.
+// Liefert eine NEUE Zelle; net/hours werden neu gesetzt, damit Payroll (classifyShiftSurcharges,
+// liest cell.net) und die Ansichten die reduzierte Arbeitszeit uebernehmen.
+function shiftApplyPause(cell, pauseHours){
+  if(!cell||!cell.shift) return cell;
+  const r2=x=>Math.round(x*100)/100;
+  const d=shiftHours(cell.shift);
+  const brutto=d.brutto;
+  const p=r2(Math.min(brutto, Math.max(0, Number(pauseHours)||0)));
+  if(!(p>0) || p===1.0){
+    // Default (1,0 h) oder keine Pause → kein Override speichern
+    const c={...cell, hours:brutto, net:d.net, paid:d.paid}; delete c.pause_duration; return c;
+  }
+  return {...cell, hours:brutto, pause_duration:p,
+    net:r2(Math.max(0,brutto-p)), paid:r2(Math.max(0,brutto-Math.min(0.5,p)))};
+}
+// Schichtabbruch → Bruchteil-Abwesenheitseintrag am Mitarbeiter (Modell aus setPartialAbsence,
+// verallgemeinert). workedH = bis zum Abbruch gearbeitete Stunden (0 = gar nicht erschienen /
+// Voll-Abbruch). absType: 'sick' (bezahlt/neutral) | 'unpaid' (abzugsrelevant). Liefert den
+// Absence-Record {id,type,from,to,days,paid,approved,note} oder null, wenn kein abwesender Anteil.
+// opts: {id, endTime, note, reason} — reason nur fuer die Notiz (z. B. 'terminated').
+function shiftPartialAbsenceRecord(emp, ds, workedH, absType, opts){
+  const contractH=parseFloat(emp&&emp.work_hours)||8;
+  const w=Math.max(0, Number(workedH)||0);
+  const frac=Math.min(1, Math.max(0, Math.round((contractH-w)/contractH*100)/100));
+  if(!(frac>0)) return null;
+  const o=opts||{};
+  const REASON={sick:'krank',unpaid:'unbezahlt',terminated:'gekündigt'};
+  const why=REASON[o.reason||absType]||absType;
+  const note=o.note!=null?o.note:('Schichtabbruch ('+why+')'+(w>0?(' ab '+(o.endTime||'?')+' — '+w+'h gearbeitet'):' — nicht erschienen'));
+  return { id:o.id||('a'+Date.now()), type:absType, from:ds, to:ds, days:frac,
+    paid:(absType!=='unpaid'), approved:true, note:note };
+}
+const ABORT_REASON_LBL={sick:'krank',unpaid:'unbezahlt',terminated:'gekündigt'};
 // Kanonische Abwesenheits-Pruefung — Single Source of Truth. EIN Format: {from, to}
 // (Einzeltag: to===from). ds = 'YYYY-MM-DD'. Fallbacks auf start/end/date entfernt
 // (2026-07-26); alle Schreiber schreiben from/to, Format-Assert in saveEmployeeToDB.
@@ -10155,7 +10192,7 @@ function shiftBridgeLocal(projId, skill, empId, ds, cellOrNull){
 }
 
 // Popover einer Zelle: Standard-Schichten + „Eigene Zeit" + „Split" (nur work_split).
-function ShiftCellPopover({options, defVal, filled, allowSplit, onPick, onClear, weekDays, clickedDs, dayLocked}){
+function ShiftCellPopover({options, defVal, filled, allowSplit, onPick, onClear, weekDays, clickedDs, dayLocked, cell, onAbort, onReclassify, onUncancel}){
   const [mode,setMode]=useState('list'); // list | custom | split
   const [f1,setF1]=useState('09:00'),[t1,setT1]=useState('14:00');
   const [f2,setF2]=useState('16:00'),[t2,setT2]=useState('20:00');
@@ -10205,6 +10242,19 @@ function ShiftCellPopover({options, defVal, filled, allowSplit, onPick, onClear,
       </div>
     );
   }
+  if(filled&&cell&&cell.canceled){
+    return (
+      <div className="sp-pop" onClick={e=>e.stopPropagation()}>
+        <div style={{padding:'7px 9px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:6,marginBottom:8}}>
+          <div style={{fontSize:11,fontWeight:700,color:'#dc2626'}}>⛔ Abgebrochen · {ABORT_REASON_LBL[cell.cancel_reason]||cell.cancel_reason}</div>
+          <div style={{fontSize:10,color:'var(--muted)',marginTop:2}}>{cell.cancel_end?('bis '+cell.cancel_end+' · '+(cell.net||0)+' h gezählt'):'nicht erschienen'}</div>
+        </div>
+        {cell.cancel_reason==='unpaid'&&onReclassify&&<button onClick={onReclassify} style={{width:'100%',marginBottom:6,padding:'6px',fontSize:12,fontWeight:600,cursor:'pointer',border:'1px solid #dc2626',borderRadius:6,background:'#fff',color:'#dc2626'}}>🤒 Nachträglich als krank umwidmen</button>}
+        {onUncancel&&<button onClick={onUncancel} style={{width:'100%',marginBottom:6,padding:'6px',fontSize:12,fontWeight:600,cursor:'pointer',border:'1px solid var(--border)',borderRadius:6,background:'transparent',color:'var(--muted)'}}>↩ Abbruch aufheben</button>}
+        {onClear&&<button className="sp-pop-del" onClick={onClear}>✕ Zelle entfernen</button>}
+      </div>
+    );
+  }
   const scopeBtn=(val,label)=>(
     <button onClick={()=>setScope(val)} style={{flex:1,padding:'4px 6px',fontSize:11,fontWeight:600,cursor:'pointer',
       border:'1px solid '+(scope===val?'var(--blue)':'var(--border)'),borderRadius:5,
@@ -10232,6 +10282,9 @@ function ShiftCellPopover({options, defVal, filled, allowSplit, onPick, onClear,
           })}
         </div>}
       </div>}
+      {filled&&cell&&!cell.canceled&&onAbort&&(
+        <button onClick={onAbort} style={{width:'100%',marginBottom:8,padding:'6px',fontSize:12,fontWeight:600,cursor:'pointer',border:'1px solid #fca5a5',borderRadius:6,background:'#fef2f2',color:'#dc2626'}}>⛔ Schicht abbrechen</button>
+      )}
       {options.length===0&&<div className="sp-pop-empty">Keine Standard-Schicht erlaubt</div>}
       {options.map(s=>(
         <button key={s.value} className={"sp-pop-opt"+(s.value===defVal?' def':'')} onClick={()=>doPick(s)}>
@@ -10334,6 +10387,115 @@ function StaffingTargetModal({projId, skill, projName, onClose, onSaved}){
 // ═══ EINFACHE SCHICHTPLANUNG — Wochenraster, Klick-Zuweisung ══════════════════
 // Prinzip: so einfach wie möglich. Vorauswahl statt fragen, nur gültige Optionen
 // anbieten (Constraints verhindern statt melden), wenige Klicks, Auto-Save.
+// Schichtabbruch-Dialog (SimpleShiftView): Grund (krank/unbezahlt/gekündigt) + optionale
+// End-Uhrzeit ODER Voll-Abbruch (nicht erschienen). Gibt (reason, endTime|'' , note) zurück.
+function ShiftAbortModal({emp, ds, cell, onConfirm, onClose}){
+  const start=((String(cell&&cell.shift).match(/(\d{1,2}):(\d{2})/))||[])[0]||'';
+  const nowHM=(()=>{ const n=new Date(); return String(n.getHours()).padStart(2,'0')+':'+String(Math.floor(n.getMinutes()/10)*10).padStart(2,'0'); })();
+  const [reason,setReason]=React.useState('sick');
+  const [full,setFull]=React.useState(false);
+  const [endTime,setEndTime]=React.useState(nowHM);
+  const [note,setNote]=React.useState('');
+  const R=[{v:'sick',l:'🤒 Krank',d:'bezahlt · neutral',c:'#dc2626'},
+           {v:'unpaid',l:'❌ Unbezahlt',d:'wird abgezogen',c:'#d97706'},
+           {v:'terminated',l:'📄 Gekündigt',d:'nur Vermerk · Fehlstunden',c:'#6b7280'}];
+  const worked=(()=>{ if(full) return 0; const sm=start.match(/(\d{1,2}):(\d{2})/), em=(endTime||'').match(/(\d{1,2}):(\d{2})/); if(!sm||!em) return 0; const s=+sm[1]*60+ +sm[2], e=+em[1]*60+ +em[2]; return Math.max(0,Math.round((e-s)/60*10)/10); })();
+  const plannedNet=shiftHours(cell&&cell.shift).net;
+  const restH=Math.max(0,Math.round((plannedNet-worked)*100)/100);
+  const restLbl={sick:'Krank',unpaid:'Unbezahlt',terminated:'Gekündigt'}[reason];
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" style={{width:420}} onClick={e=>e.stopPropagation()}>
+        <div className="modal-header"><span className="modal-title">⛔ Schicht abbrechen</span><button className="btn btn-sm" onClick={onClose}>✕</button></div>
+        <div className="modal-body" style={{padding:20}}>
+          <div style={{fontSize:13,color:'var(--muted)',marginBottom:14}}>
+            {emp?emp.first_name+' '+emp.last_name:''} · {new Date(ds+'T12:00').toLocaleDateString('de-AT')} · {cell&&(cell.label||cell.shift)}
+          </div>
+          <label style={{fontSize:12,fontWeight:700,display:'block',marginBottom:8}}>Grund</label>
+          <div style={{display:'flex',gap:8,marginBottom:16}}>
+            {R.map(o=>(
+              <div key={o.v} onClick={()=>setReason(o.v)} style={{flex:1,padding:'9px 8px',borderRadius:8,cursor:'pointer',textAlign:'center',
+                border:'2px solid '+(reason===o.v?o.c:'var(--border)'),background:reason===o.v?o.c+'14':'var(--surface-2)'}}>
+                <div style={{fontWeight:700,fontSize:12,color:reason===o.v?o.c:'var(--fg)'}}>{o.l}</div>
+                <div style={{fontSize:10,color:'var(--muted)',marginTop:3}}>{o.d}</div>
+              </div>
+            ))}
+          </div>
+          <label style={{fontSize:12,fontWeight:700,display:'block',marginBottom:8}}>Zeitpunkt</label>
+          <div style={{display:'flex',gap:8,marginBottom:12}}>
+            <button onClick={()=>setFull(false)} style={{flex:1,padding:'8px',fontSize:12,fontWeight:600,cursor:'pointer',borderRadius:6,border:'1px solid '+(!full?'var(--blue)':'var(--border)'),background:!full?'var(--blue)':'transparent',color:!full?'#fff':'var(--muted)'}}>Ab Uhrzeit gegangen</button>
+            <button onClick={()=>setFull(true)} style={{flex:1,padding:'8px',fontSize:12,fontWeight:600,cursor:'pointer',borderRadius:6,border:'1px solid '+(full?'var(--blue)':'var(--border)'),background:full?'var(--blue)':'transparent',color:full?'#fff':'var(--muted)'}}>Gar nicht erschienen</button>
+          </div>
+          {!full&&<div style={{display:'flex',alignItems:'center',gap:8,marginBottom:12}}>
+            <span style={{fontSize:12,color:'var(--muted)'}}>Ende:</span>
+            <input type="time" step="600" value={endTime} onChange={e=>setEndTime(e.target.value)} style={{padding:'6px 8px',borderRadius:6,border:'1px solid var(--border)',fontSize:13}}/>
+            <span style={{fontSize:11,color:'var(--muted)'}}>Beginn {start||'—'}</span>
+          </div>}
+          <input value={note} onChange={e=>setNote(e.target.value)} placeholder="Notiz (optional)" style={{width:'100%',padding:'7px 9px',borderRadius:6,border:'1px solid var(--border)',fontSize:12,marginBottom:14}}/>
+          <div style={{padding:'10px 14px',background:'var(--surface-2)',borderRadius:8,fontSize:12}}>
+            <div style={{display:'flex',justifyContent:'space-between',marginBottom:4}}><span>Gearbeitet (zählt):</span><strong>{worked} h</strong></div>
+            {reason==='terminated'
+              ? <div style={{display:'flex',justifyContent:'space-between'}}><span>Rest des Tages →</span><strong style={{color:'#d97706'}}>{restH} h Fehlstunden</strong></div>
+              : <div style={{display:'flex',justifyContent:'space-between'}}><span>Rest der Schicht →</span><strong style={{color:reason==='sick'?'#16a34a':'#d97706'}}>{restLbl}{reason==='sick'?' (neutral)':' (Abzug)'}</strong></div>}
+          </div>
+          {reason==='terminated'&&<div style={{marginTop:10,padding:'8px 11px',background:'#fff7ed',border:'1px solid #fed7aa',borderRadius:8,fontSize:11,color:'#9a3412',lineHeight:1.5}}>
+            ⚠ Kein Lohnabzug hier: das <b>Soll bleibt unverändert</b>, der Rest des Tages bleibt als <b>Fehlstunden</b> stehen. Austrittsdatum, Resturlaub und Restlohn klärt HR in der Endabrechnung.
+          </div>}
+        </div>
+        <div className="modal-footer" style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
+          <button className="btn btn-sm" onClick={onClose}>Abbrechen</button>
+          <button className="btn btn-sm btn-primary" style={{background:'#dc2626',borderColor:'#dc2626'}} onClick={()=>onConfirm(reason, full?'':endTime, note)}>⛔ Abbruch bestätigen</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+// Pause-Dialog (SimpleShiftView, Gantt-Balken): Dauer 1 h / 30 min / ±10 min. Split-Regel wie
+// shiftApplyPause — Arbeitgeber trägt fix 0,5 h, Rest unbezahlt. Netto-Herleitung sichtbar.
+function ShiftPauseModal({emp, ds, cell, onSave, onClose}){
+  const brutto=shiftHours(cell&&cell.shift).brutto;
+  const maxMin=Math.round(brutto*60);
+  const [pmMin,setPmMin]=React.useState(Math.min(maxMin, Math.round((cell&&cell.pause_duration!=null?cell.pause_duration:1.0)*60)));
+  const clamp=m=>Math.max(0,Math.min(maxMin,m));
+  const p=Math.round(pmMin/60*100)/100;
+  const agH=Math.min(0.5,p), maH=Math.round(Math.max(0,p-0.5)*100)/100;
+  const net=Math.round((brutto-p)*100)/100;
+  const fmtMin=m=>{ const h=Math.floor(m/60), mm=m%60; return (h?h+' h':'')+(h&&mm?' ':'')+(mm?mm+' min':(h?'':'0 min')); };
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" style={{width:400}} onClick={e=>e.stopPropagation()}>
+        <div className="modal-header"><span className="modal-title">☕ Pause eintragen</span><button className="btn btn-sm" onClick={onClose}>✕</button></div>
+        <div className="modal-body" style={{padding:20}}>
+          <div style={{fontSize:13,color:'var(--muted)',marginBottom:16}}>{emp?emp.first_name+' '+emp.last_name+' · ':''}{cell&&(cell.label||cell.shift)} · {brutto} h Brutto</div>
+          <label style={{fontSize:12,fontWeight:700,display:'block',marginBottom:8}}>Pausendauer</label>
+          <div style={{display:'flex',gap:8,marginBottom:12}}>
+            {[['30 min',30],['1 h',60]].map(([l,m])=>(
+              <button key={m} onClick={()=>setPmMin(clamp(m))} style={{flex:1,padding:'7px',fontSize:12,fontWeight:700,cursor:'pointer',borderRadius:6,border:'1px solid '+(pmMin===m?'var(--blue)':'var(--border)'),background:pmMin===m?'var(--blue)':'transparent',color:pmMin===m?'#fff':'var(--muted)'}}>{l}</button>
+            ))}
+          </div>
+          <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:16,justifyContent:'center'}}>
+            <button className="btn btn-sm" style={{background:'#dc2626',color:'#fff',fontWeight:700,minWidth:40}} onClick={()=>setPmMin(m=>clamp(m-10))}>−10</button>
+            <span style={{fontSize:18,fontWeight:800,minWidth:90,textAlign:'center'}}>{fmtMin(pmMin)}</span>
+            <button className="btn btn-sm" style={{background:'#16a34a',color:'#fff',fontWeight:700,minWidth:40}} onClick={()=>setPmMin(m=>clamp(m+10))}>+10</button>
+          </div>
+          <div style={{padding:'10px 14px',background:'var(--surface-2)',borderRadius:8,fontSize:12}}>
+            <div style={{display:'flex',justifyContent:'space-between',marginBottom:4}}><span>Brutto (Anwesenheit):</span><strong>{brutto} h</strong></div>
+            <div style={{display:'flex',justifyContent:'space-between',marginBottom:4}}><span>Pause gesamt:</span><span style={{color:'#dc2626'}}>−{p} h</span></div>
+            <div style={{display:'flex',justifyContent:'space-between',marginBottom:4,fontSize:11,color:'var(--muted)'}}><span>davon Arbeitgeber / Mitarbeiter:</span><span>{agH} h / {maH} h</span></div>
+            <div style={{display:'flex',justifyContent:'space-between',fontWeight:700,borderTop:'1px solid var(--border)',paddingTop:4,marginTop:4}}><span>Netto (Arbeitszeit):</span><strong style={{color:'var(--blue)'}}>{net} h</strong></div>
+          </div>
+        </div>
+        <div className="modal-footer" style={{display:'flex',gap:8,justifyContent:'space-between'}}>
+          <button className="btn btn-sm" onClick={()=>onSave(1.0)}>↺ Standard (1 h)</button>
+          <div style={{display:'flex',gap:8}}>
+            <button className="btn btn-sm" onClick={onClose}>Abbrechen</button>
+            <button className="btn btn-sm btn-primary" onClick={()=>onSave(p)}>💾 Speichern</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 function SimpleShiftView({employees, projects, showToast}){
   const isoD=d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
   const addDays=(d,n)=>{const x=new Date(d);x.setDate(x.getDate()+n);return x;};
@@ -10356,6 +10518,8 @@ function SimpleShiftView({employees, projects, showToast}){
   const [daySel,setDaySel]=useState('');            // ds für die Tagesansicht
   const [staffModal,setStaffModal]=useState(false); // Sollbesetzung-Editor
   const [staffVer,setStaffVer]=useState(0);         // Re-Render nach Speichern
+  const [abortModal,setAbortModal]=useState(null);  // {empId, ds, cell} — Schichtabbruch
+  const [pauseModal,setPauseModal]=useState(null);  // {empId, ds, cell} — Pause am Balken
   const uidRef=React.useRef(null);
   const shiftLogTimer=React.useRef(null);
   // Grobes Protokoll: EIN Sammel-Eintrag pro Projekt/KW, debounced (nicht pro Zelle).
@@ -10409,6 +10573,75 @@ function SimpleShiftView({employees, projects, showToast}){
     await shiftDeleteCell(projId,effSkill,emp.id,ds);
     shiftBridgeLocal(projId,effSkill,emp.id,ds,null);
     noteShiftChange();
+  }
+  // Schichtabbruch: reason 'sick'(bezahlt/neutral) | 'unpaid'(Abzug) — beide schreiben einen
+  // Bruchteil-Absence am MA. 'terminated'(gekündigt) = NUR Vermerk: kein Absence, Soll bleibt,
+  // Rest wird als Fehlstunden sichtbar (Endabrechnung durch HR). endTime='' → Voll-Abbruch (0h).
+  // Zelle wird als canceled markiert (net=gearbeitet); Absence ersetzt einen bestehenden Einzeltag.
+  async function abortShift(empId, ds, cell, reason, endTime, note){
+    const absType = reason==='sick' ? 'sick' : 'unpaid';
+    let workedH=0;
+    if(endTime){
+      const sm=String(cell.shift).match(/(\d{1,2}):(\d{2})/), em=endTime.match(/(\d{1,2}):(\d{2})/);
+      if(sm&&em){ const s=+sm[1]*60+ +sm[2], e=+em[1]*60+ +em[2]; workedH=Math.max(0,Math.round((e-s)/60*10)/10); }
+    }
+    const newCell={...cell, canceled:true, cancel_reason:reason, cancel_end:endTime||null, net:workedH, hours:workedH};
+    delete newCell.pause_duration;
+    setCells(p=>({...p,[empId+'|'+ds]:newCell}));
+    await shiftUpsertCell(projId,effSkill,empId,ds,newCell,uidRef.current);
+    shiftBridgeLocal(projId,effSkill,empId,ds,newCell);
+    // "Gekündigt" = reiner Vermerk mit faktischen Stunden: KEIN Absence-Eintrag (kein Basis-Abzug;
+    // Status/Lohn regelt der Kündigen-Flow). Nur Krank/Unbezahlt schreiben einen Absence-Record.
+    const emp=(employees||[]).find(e=>e.id===empId);
+    if(emp && reason!=='terminated'){
+      const rec=shiftPartialAbsenceRecord(emp,ds,workedH,absType,{endTime,reason,note});
+      const rest=(emp.absences||[]).filter(a=>!(a.from===ds&&(a.to||a.from)===ds));
+      try{ await saveEmployeeToDB({...emp, absences:rec?[...rest,rec]:rest}); }
+      catch(e){ showToast&&showToast('⚠ Abbruch nicht gespeichert: '+((e&&e.message)||e),'error'); }
+    }
+    noteShiftChange(); setAbortModal(null);
+    showToast&&showToast('Schicht abgebrochen'+(workedH>0?(' — '+workedH+'h gezählt'):' — nicht erschienen'),'success');
+  }
+  // Nachträgliche Umwidmung zu krank (Attest kommt oft 2–3 Tage später): Absence-Record IN-PLACE
+  // drehen (kein neuer Eintrag → kein Doppel-Abzug), Provenienz in reclassified_from/at.
+  async function reclassifyToSick(empId, ds, cell){
+    const emp=(employees||[]).find(e=>e.id===empId);
+    if(emp){
+      const abs=(emp.absences||[]).map(a=>(a.from===ds&&(a.to||a.from)===ds&&a.type!=='sick')
+        ? {...a, type:'sick', paid:true, reclassified_from:a.type, reclassified_at:new Date().toISOString(), note:(a.note||'')+' · umgewidmet zu krank'}
+        : a);
+      try{ await saveEmployeeToDB({...emp, absences:abs}); }
+      catch(e){ showToast&&showToast('⚠ Umwidmung nicht gespeichert','error'); return; }
+    }
+    const newCell={...cell, cancel_reason:'sick'};
+    setCells(p=>({...p,[empId+'|'+ds]:newCell}));
+    await shiftUpsertCell(projId,effSkill,empId,ds,newCell,uidRef.current);
+    shiftBridgeLocal(projId,effSkill,empId,ds,newCell);
+    setPop(null);
+    showToast&&showToast('Als krank umgewidmet — neutral. Falls der Lohnlauf für '+ds.slice(0,7)+' schon abgeschlossen ist, bitte manuell prüfen.','info');
+  }
+  // Abbruch aufheben: Zelle auf Default-Stunden zurück, Bruchteil-Absence des Tages entfernen.
+  async function uncancelShift(empId, ds, cell){
+    const d=shiftHours(cell.shift);
+    const newCell={...cell, net:d.net, hours:d.brutto}; delete newCell.canceled; delete newCell.cancel_reason; delete newCell.cancel_end;
+    setCells(p=>({...p,[empId+'|'+ds]:newCell}));
+    await shiftUpsertCell(projId,effSkill,empId,ds,newCell,uidRef.current);
+    shiftBridgeLocal(projId,effSkill,empId,ds,newCell);
+    const emp=(employees||[]).find(e=>e.id===empId);
+    if(emp){
+      const rest=(emp.absences||[]).filter(a=>!(a.from===ds&&(a.to||a.from)===ds));
+      if(rest.length!==(emp.absences||[]).length){ try{ await saveEmployeeToDB({...emp,absences:rest}); }catch(e){} }
+    }
+    noteShiftChange(); setPop(null);
+    showToast&&showToast('Abbruch aufgehoben','success');
+  }
+  // Pause am Balken (Gantt): pauseHours in Stunden, Split-Regel in shiftApplyPause (AG fix 0,5 h).
+  async function applyPause(empId, ds, cell, pauseHours){
+    const newCell=shiftApplyPause(cell, pauseHours);
+    setCells(p=>({...p,[empId+'|'+ds]:newCell}));
+    await shiftUpsertCell(projId,effSkill,empId,ds,newCell,uidRef.current);
+    shiftBridgeLocal(projId,effSkill,empId,ds,newCell);
+    noteShiftChange(); setPauseModal(null);
   }
   // Schicht auf mehrere Tage anwenden (Mehrtage-Auswahl im Popover). Einzeltag = unveraendert
   // (kein Toast). Mehrtage: dieselben Prueflogiken wie copyPrevWeek (shiftEmpDayOk je Tag,
@@ -10466,15 +10699,20 @@ function SimpleShiftView({employees, projects, showToast}){
         return (
           <td key={i} className={cls}>
             <div className="sp-cell-in" onClick={()=>{ if(!dayOk&&!cell){ showToast&&showToast(shiftLockReason(emp,ds)||'Nicht verfügbar','info'); return; } setPop(open?null:{empId:emp.id,ds}); }}>
-              {cell? <span className="sp-chip">{cell.label||cell.shift}</span>
+              {cell? <span className="sp-chip" style={cell.canceled?{background:'#fee2e2',color:'#dc2626',textDecoration:'line-through'}:undefined}
+                       title={cell.canceled?('Abgebrochen: '+(ABORT_REASON_LBL[cell.cancel_reason]||cell.cancel_reason)+(cell.net?(' · '+cell.net+'h gezählt'):'')):(cell.pause_duration?('Pause '+cell.pause_duration+'h · Netto '+(cell.net!=null?cell.net:'')+'h'):'')}>
+                       {cell.canceled?'⛔ ':''}{cell.label||cell.shift}{(cell.pause_duration&&!cell.canceled)?' ☕':''}</span>
                 : (!dayOk? <span className="sp-x" title={shiftLockReason(emp,ds)||'Nicht verfügbar'}>✕</span>
                          : <span className="sp-add">＋</span>)}
             </div>
-            {open&&<ShiftCellPopover options={optionsFor(emp,ds)} defVal={defShift[emp.id]} filled={!!cell}
+            {open&&<ShiftCellPopover options={optionsFor(emp,ds)} defVal={defShift[emp.id]} filled={!!cell} cell={cell}
                      allowSplit={emp.work_split===true||emp.work_split==='yes'}
                      weekDays={days.map((d,di)=>({i:di,short:DOW[di],dom:d.getDate()+'.',ds:isoD(d)}))}
                      clickedDs={ds} dayLocked={dsx=>!shiftEmpDayOk(emp,dsx)}
-                     onPick={(t,dsList)=>applyToDays(emp,t,dsList)} onClear={()=>clearCell(emp,ds)}/>}
+                     onPick={(t,dsList)=>applyToDays(emp,t,dsList)} onClear={()=>clearCell(emp,ds)}
+                     onAbort={()=>{setPop(null);setAbortModal({empId:emp.id,ds,cell});}}
+                     onReclassify={()=>reclassifyToSick(emp.id,ds,cell)}
+                     onUncancel={()=>uncancelShift(emp.id,ds,cell)}/>}
           </td>
         );
       })}
@@ -10506,8 +10744,8 @@ function SimpleShiftView({employees, projects, showToast}){
       <React.Fragment key={emp.id}>
         <div className="wc-name">{emp.first_name} {emp.last_name}{trainingTag(emp)}{shiftIsOverhead(emp)&&<span className="wc-pos">{emp.position||''}</span>}</div>
         {days.map((d,i)=>{ const ds=isoD(d); const cell=cells[emp.id+'|'+ds]; const ok=shiftEmpDayOk(emp,ds);
-          if(cell&&cell.shift){ const col=shiftColorFor(shifts,cell.shift);
-            return <div className={"wc-cell"+colCls(i)} key={i}><div className="wc-bar" style={{background:col}} title={emp.first_name+' '+emp.last_name+' · '+(cell.label?cell.label+' · ':'')+cell.shift+' · '+fmtNum(cell.net||0)+' h'}>{cell.label||cell.shift}</div></div>;
+          if(cell&&cell.shift){ const col=shiftColorFor(shifts,cell.shift); const canc=!!cell.canceled;
+            return <div className={"wc-cell"+colCls(i)} key={i}><div className="wc-bar" style={{background:canc?'#fee2e2':col,color:canc?'#dc2626':undefined,textDecoration:canc?'line-through':'none'}} title={emp.first_name+' '+emp.last_name+' · '+(cell.label?cell.label+' · ':'')+cell.shift+' · '+fmtNum(cell.net||0)+' h'+(canc?' · ⛔ abgebrochen':(cell.pause_duration?(' · ☕ Pause '+cell.pause_duration+'h'):''))}>{canc?'⛔ ':''}{cell.label||cell.shift}{(cell.pause_duration&&!canc)?' ☕':''}</div></div>;
           }
           return <div className={"wc-cell"+colCls(i)} key={i}>{ok?<span className="wc-dot">·</span>:<span className="wc-x">✕</span>}</div>;
         })}
@@ -10556,7 +10794,12 @@ function SimpleShiftView({employees, projects, showToast}){
         <div className="gt-name">{r.emp.first_name} {r.emp.last_name}{trainingTag(r.emp)}{shiftIsOverhead(r.emp)&&<span className="wc-pos">{r.emp.position||''}</span>}</div>
         <div className="gt-track" style={{backgroundImage:gridBg}}>
           {r.blocks.map((b,i)=>{ const col=shiftColorFor(shifts, r.cell&&r.cell.shift); const left=(b.s-lo)/range*100, w=(b.e-b.s)/range*100;
-            return <div key={i} className="gt-bar" style={{left:left+'%',width:w+'%',background:col}} title={r.emp.first_name+' '+r.emp.last_name+' · '+(r.cell&&r.cell.label?r.cell.label+' · ':'')+min2hm(b.s)+'–'+min2hm(b.e)}>{w>9?min2hm(b.s)+'–'+min2hm(b.e):''}</div>;
+            const cx=r.cell||{}; const canc=!!cx.canceled;
+            return <div key={i} className="gt-bar"
+              onClick={e=>{e.stopPropagation(); if(r.cell&&!canc) setPauseModal({empId:r.emp.id,ds:dsel,cell:r.cell});}}
+              style={{left:left+'%',width:w+'%',background:col,cursor:(r.cell&&!canc)?'pointer':'default',opacity:canc?0.45:1,textDecoration:canc?'line-through':'none'}}
+              title={r.emp.first_name+' '+r.emp.last_name+' · '+(cx.label?cx.label+' · ':'')+min2hm(b.s)+'–'+min2hm(b.e)+(canc?(' · ⛔ abgebrochen ('+(ABORT_REASON_LBL[cx.cancel_reason]||'')+')'):(cx.pause_duration?(' · ☕ Pause '+cx.pause_duration+'h · Netto '+cx.net+'h'):' · Klick: Pause eintragen'))}>
+              {w>9?(min2hm(b.s)+'–'+min2hm(b.e)+(canc?' ⛔':(cx.pause_duration?' ☕':''))):''}</div>;
           })}
         </div>
       </div>
@@ -10707,6 +10950,12 @@ function SimpleShiftView({employees, projects, showToast}){
        )}
       {pop&&<div className="sp-backdrop" onClick={()=>setPop(null)}/>}
       {staffModal&&<StaffingTargetModal projId={projId} skill={effSkill} projName={(proj&&proj.name)||''} onClose={()=>setStaffModal(false)} onSaved={()=>setStaffVer(v=>v+1)}/>}
+      {abortModal&&<ShiftAbortModal emp={(employees||[]).find(x=>x.id===abortModal.empId)} ds={abortModal.ds} cell={abortModal.cell}
+        onConfirm={(reason,endTime,note)=>abortShift(abortModal.empId,abortModal.ds,abortModal.cell,reason,endTime,note)}
+        onClose={()=>setAbortModal(null)}/>}
+      {pauseModal&&<ShiftPauseModal emp={(employees||[]).find(x=>x.id===pauseModal.empId)} ds={pauseModal.ds} cell={pauseModal.cell}
+        onSave={p=>applyPause(pauseModal.empId,pauseModal.ds,pauseModal.cell,p)}
+        onClose={()=>setPauseModal(null)}/>}
     </div>
   );
 }
