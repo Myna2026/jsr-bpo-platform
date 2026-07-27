@@ -7363,6 +7363,17 @@ function phoneClassify(raw){
   if(!s) return {cat:'missing'};
   const digits=phoneDigits(s);
   if(digits.length<6 || /[a-zA-Z]/.test(s.replace(/^\s*\+/,''))) return {cat:'unclear', reason:'unassignable'};
+  // Nationale Nummernplan-Erkennung fuer lokal getippte Nummern (KEIN fuehrendes '+'):
+  // fuehrende 0 abschneiden, dann Laenge UND Praefix pruefen (beide muessen passen).
+  //   Kosovo:   8 Stellen national, Praefix 43/44/45/46/48/49 -> +383
+  //   Albanien: 9 Stellen national, Praefix 66/67/68/69       -> +355
+  // Kollision mit 2-stelligen Vorwahlen (z.B. '43'=AT) ist unkritisch: internationale Nummern
+  // sind laenger als 8/9 Stellen und fallen nie in diese exakte Laengenpruefung.
+  if(!/^\s*\+/.test(s)){
+    const d0=digits.replace(/^0/,'');
+    if(d0.length===8 && /^4[345689]/.test(d0)) return {cat:'ok', cc:'383', natLen:8, target:'+383'+d0};
+    if(d0.length===9 && /^6[6789]/.test(d0))  return {cat:'ok', cc:'355', natLen:9, target:'+355'+d0};
+  }
   const cc=phoneDetectCC(s);
   if(!cc) return {cat:'unclear', reason:'no_cc'};
   const nat=digits.slice(cc.length);
@@ -29168,8 +29179,11 @@ function AiEndpointView(){
 }
 // ══ CV-Sync aus öffentlichem Google Sheet (Feature 20) ══
 function loadCvSyncConfig(){
-  const DEF={enabled:false, sheet_url:'', csv_url:'',
-    mapping:{name:'Name',email:'Email',phone:'Telefon',skill:'Skill',project:'Projekt',date:'Datum'},
+  const DEF={enabled:false, sheet_url:'', csv_url:'', cutoff_date:'',
+    mapping:{name:'Vor- und Nachname', phone:'Telefonnummer', date:'Zeitstempel',
+      german:'Sprichst du Deutsch?', cc_experience:'Hast du Erfahrung im Call Center?',
+      experience:'In welchen', availability:'Wann kannst du anfangen?',
+      worktime:'Arbeitszeit verfügbar?', termin:'Termin'},
     last_sync_at:null, last_sync_count:0, last_sync_skipped:0, last_error:null};
   try{ const p=JSON.parse(localStorage.getItem('jsr_cv_sync_config_v1')||'null'); if(!p) return DEF;
     return {...DEF, ...p, mapping:{...DEF.mapping, ...(p.mapping||{})}}; }catch(e){ return DEF; }
@@ -29208,15 +29222,16 @@ function parseCsv(text){
   });
 }
 
-function parseCvDate(v){
-  const today=new Date().toISOString().slice(0,10);
-  if(!v) return today;
+// Strikt: liefert 'YYYY-MM-DD' oder null. Akzeptiert 'YYYY-MM-DD…' und 'DD.MM.YYYY[ HH:MM:SS]'
+// (Google-Sheet-Zeitstempel) — KEIN '$'-Anker, damit der Zeit-Suffix nicht scheitern laesst.
+function cvDateIso(v){
+  if(!v) return null;
   const s=String(v).trim();
-  if(/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-  const m=s.match(/^(\d{1,2})[.\/](\d{1,2})[.\/](\d{4})$/);
-  if(m) return m[3]+'-'+m[2].padStart(2,'0')+'-'+m[1].padStart(2,'0');
-  return today;
+  if(/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0,10);
+  const m=s.match(/^(\d{1,2})[.\/](\d{1,2})[.\/](\d{4})/);
+  return m ? m[3]+'-'+m[2].padStart(2,'0')+'-'+m[1].padStart(2,'0') : null;
 }
+function parseCvDate(v){ return cvDateIso(v) || new Date().toISOString().slice(0,10); }
 
 async function syncCvsFromSheet(){
   const cfg=loadCvSyncConfig();
@@ -29235,35 +29250,49 @@ async function syncCvsFromSheet(){
     return {imported:0,skipped:0,total:0,preview:[],error:msg};
   }
   const M=cfg.mapping;
-  let projects=[]; try{ projects=JSON.parse(localStorage.getItem('jsr_projects_v1')||'null')||PROJECTS_INIT; }catch(e){ projects=PROJECTS_INIT; }
-  const projByName=(nm)=>{ if(!nm) return ''; const n=nm.trim().toLowerCase(); if(!n) return '';
-    let p=projects.find(x=>(x.name||'').toLowerCase()===n); if(p) return p.id;
-    p=projects.find(x=>{const xn=(x.name||'').toLowerCase(); return xn&&(xn.includes(n)||n.includes(xn));}); return p?p.id:''; };
-  // 4a-3: Dedup gegen DB (cvs.email)
-  const {data:existingRows} = await sb.from('cvs').select('email');
-  const seen=new Set((existingRows||[]).map(x=>(x.email||'').trim().toLowerCase()).filter(Boolean));
-  let imported=0, skipped=0; const payloads=[];
-  rows.forEach((r,i)=>{
-    const email=(r[M.email]||'').trim();
-    if(!email){ skipped++; return; }
-    if(seen.has(email.toLowerCase())){ skipped++; return; }
-    const full=(r[M.name]||'').trim(); const sp=full.split(/\s+/).filter(Boolean);
-    const first=sp.shift()||''; const last=sp.join(' ');
-    const skill=(r[M.skill]||'').trim();
-    // 4a-3: DB-Payload — keine id (uuid), target_project→project_id, cv_skills→extra, '' → null
-    payloads.push({ first_name:nz(first), last_name:nz(last), email:nz(email),
-      phone:nz((r[M.phone]||'').trim()), city:null, project_id:projByName(r[M.project]||'')||null,
-      target_role:'Agent', status:'cv_inbound', cv_date:parseCvDate(r[M.date]||''), source:'Google Sheet',
-      notes:null, audios:[], videos:[], test_scores:{}, test_answers:{}, extra:(skill?{cv_skills:[skill]}:{}) });
-    seen.add(email.toLowerCase());
+  const cutoff=(cfg.cutoff_date||'').slice(0,10);   // '' → Backlog-Schutz: es wird nichts importiert
+  // Normalisierter Header-Lookup: trim + innere Mehrfach-Leerzeichen + lowercase (Whitespace/Case egal)
+  const norm=x=>String(x||'').trim().replace(/\s+/g,' ').toLowerCase();
+  const pick=(row, headerName)=>{ const key=norm(headerName); const hit=Object.keys(row).find(h=>norm(h)===key); return hit!=null?String(row[hit]||'').trim():''; };
+  // Dedup gegen bestehende cvs.phone (normalisiert per phoneClassify → E.164)
+  const {data:existingRows} = await sb.from('cvs').select('phone');
+  const seen=new Set(); (existingRows||[]).forEach(x=>{ const pc=phoneClassify(x&&x.phone); if(pc.cat==='ok'||pc.cat==='e164') seen.add(pc.target); });
+  const ALLOWED_CC=new Set(['355','383']);       // nur Albanien/Kosovo; Fremdland → Skip mit Grund
+  const UNCLEAR={unassignable:'Fremdinhalt (Buchstaben/E-Mail/Name)', no_cc:'keine erkennbare Rufnummer', implausible:'unplausible Länge'};
+  const payloads=[]; const skipped=[]; let preCutoff=0;
+  rows.forEach(r=>{
+    // Stichtag: nur Zeilen mit Zeitstempel AB cutoff. Alles davor (oder ohne gültigen Stichtag/Datum)
+    // wird STILL übersprungen — kein Fehler, sondern Absicht (Start bei null).
+    const rowIso=cvDateIso(pick(r,M.date));
+    if(!cutoff || !rowIso || rowIso<cutoff){ preCutoff++; return; }
+    const name=pick(r,M.name);
+    const phoneRaw=pick(r,M.phone);
+    if(!name){ skipped.push({name:'—', phone:phoneRaw, reason:'kein Name'}); return; }
+    const pc=phoneClassify(phoneRaw);
+    if(pc.cat==='missing'){ skipped.push({name, phone:phoneRaw, reason:'keine Telefonnummer'}); return; }
+    if(pc.cat==='unclear'){ skipped.push({name, phone:phoneRaw, reason:UNCLEAR[pc.reason]||'unklare Nummer'}); return; }
+    if(!ALLOWED_CC.has(pc.cc)){ skipped.push({name, phone:phoneRaw, reason:'Fremdland (Numer i huaj)'}); return; }
+    if(seen.has(pc.target)){ skipped.push({name, phone:pc.target, reason:'Dublette (mehrfach / bereits vorhanden)'}); return; }
+    seen.add(pc.target);
+    const sp=name.split(/\s+/).filter(Boolean); const first=sp.shift()||''; const last=sp.join(' ');
+    const german=pick(r,M.german); const lvl=(german.match(/\b([abc][12])\b/i)||[])[1];
+    const ccExp=pick(r,M.cc_experience), avail=pick(r,M.availability), wtime=pick(r,M.worktime);
+    const extra={}; if(ccExp) extra.cc_experience=ccExp; if(avail) extra.availability=avail; if(wtime) extra.work_time=wtime;
+    payloads.push({ first_name:nz(first), last_name:nz(last), email:null,
+      phone:pc.target, city:null, project_id:null,
+      target_role:'Agent', status:'cv_inbound', cv_date:parseCvDate(pick(r,M.date)), source:'Google Sheet',
+      language_level:(lvl?lvl.toUpperCase():nz(german)), work_history:nz(pick(r,M.experience)), notes:nz(pick(r,M.termin)),
+      audios:[], videos:[], test_scores:{}, test_answers:{}, extra });
   });
-  // 4a-3: Bulk-Insert in cvs (Per-Row-Fallback). Echter DB-Fehler → im {error}-Contract zurück.
+  // Bulk-Insert in cvs (Per-Row-Fallback). Unique-Index auf phone → 23505 = Dublette (Backstop).
   let inserted=0, dupSkipped=0;
   try{ const res=await bulkInsertCvs(payloads); inserted=res.inserted; dupSkipped=res.dupSkipped; }
-  catch(e){ const msg=e.message||'DB'; finish({last_error:'DB-Import: '+msg}); return {imported:0, skipped, total:rows.length, preview:rows.slice(0,5), error:msg}; }
-  imported = inserted; skipped += dupSkipped;
-  finish({last_error:null, last_sync_count:imported, last_sync_skipped:skipped});
-  return {imported, skipped, total:rows.length, preview:rows.slice(0,5), error:null};
+  catch(e){ const msg=e.message||'DB'; finish({last_error:'DB-Import: '+msg}); return {imported:0, skipped:skipped.length, preCutoff, total:rows.length, skippedRows:skipped, preview:rows.slice(0,5), error:msg}; }
+  const skipByReason={}; skipped.forEach(sk=>{ skipByReason[sk.reason]=(skipByReason[sk.reason]||0)+1; });
+  if(dupSkipped>0){ const k='Dublette (mehrfach / bereits vorhanden)'; skipByReason[k]=(skipByReason[k]||0)+dupSkipped; }
+  const skippedTotal=skipped.length+dupSkipped;
+  finish({last_error:null, last_sync_count:inserted, last_sync_skipped:skippedTotal});
+  return {imported:inserted, skipped:skippedTotal, preCutoff, total:rows.length, cutoff, skippedRows:skipped, skipByReason, preview:rows.slice(0,5), error:null};
 }
 
 function CvSyncView({setCvList, projects}){
@@ -29275,7 +29304,8 @@ function CvSyncView({setCvList, projects}){
   const upMap=(k,v)=>setCfg(prev=>{ const next={...prev, mapping:{...prev.mapping,[k]:v}}; saveCvSyncConfig(next); return next; });
   async function runSync(){ setBusy(true); const r=await syncCvsFromSheet(); setBusy(false); setResult(r); setCfg(loadCvSyncConfig());
     if(r&&r.imported){ loadCvsFromDB().then(setCvList); } }   // 4a-2 Bridge: aus DB neu laden (GDoc→DB kommt 4a-3)
-  const MAPS=[['name','Name'],['email','Email'],['phone','Telefon'],['skill','Skill'],['project','Projekt'],['date','Datum']];
+  const MAPS=[['name','Vor- und Nachname'],['phone','Telefonnummer'],['date','Zeitstempel'],['german','Sprichst du Deutsch?'],['cc_experience','Erfahrung Call Center?'],['experience','In welchen (Erfahrung)'],['availability','Wann anfangen?'],['worktime','Arbeitszeit'],['termin','Termin']];
+  const todayIso=new Date().toISOString().slice(0,10);
   const preview=result&&result.preview&&result.preview.length?result.preview:[];
   const cols=preview.length?Object.keys(preview[0]):[];
   const fmtTs=(iso)=>{ try{ return new Date(iso).toLocaleString('de-DE'); }catch(e){ return iso; } };
@@ -29286,7 +29316,7 @@ function CvSyncView({setCvList, projects}){
           <span style={{display:'inline-flex',color:'#0F5661'}} dangerouslySetInnerHTML={{__html:'<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="currentColor">' + `<path fill-rule="evenodd" d="M10.5 3.75a6 6 0 0 0-5.98 6.496A5.25 5.25 0 0 0 6.75 20.25H18a4.5 4.5 0 0 0 2.206-8.423 3.75 3.75 0 0 0-4.133-4.303A6.001 6.001 0 0 0 10.5 3.75Zm2.25 6a.75.75 0 0 0-1.5 0v4.94l-1.72-1.72a.75.75 0 0 0-1.06 1.06l3 3a.75.75 0 0 0 1.06 0l3-3a.75.75 0 1 0-1.06-1.06l-1.72 1.72V9.75Z" clip-rule="evenodd"/>` + '</svg>'}} />
           CV-Sync aus Google Sheet
         </div>
-        <div style={{fontSize:13,color:'var(--muted)',marginTop:2}}>Importiert Bewerber aus einem öffentlichen Google Sheet (CSV-Export). Dedup per E-Mail — bestehende Bewerber werden nie überschrieben.</div>
+        <div style={{fontSize:13,color:'var(--muted)',marginTop:2}}>Importiert Bewerber aus einem öffentlichen Google Sheet (CSV-Export). Nur Zeilen <b>ab Stichtag</b>, Dedup per <b>Telefon</b> (E.164, Nummernplan AL/XK). Bestehende Bewerber werden nie überschrieben.</div>
       </div>
 
       <div className="card" style={{maxWidth:640,marginBottom:16}}><div className="card-body">
@@ -29305,6 +29335,16 @@ function CvSyncView({setCvList, projects}){
         </div>
 
         <div className="form-group" style={{marginTop:10}}>
+          <label className="form-label">Stichtag — nur Bewerbungen ab diesem Datum</label>
+          <input className="form-input" type="date" style={{maxWidth:200}} value={cfg.cutoff_date||''} onChange={e=>up({cutoff_date:e.target.value})}/>
+          <div style={{fontSize:11,color:cfg.cutoff_date?'var(--muted)':'var(--red)',marginTop:4}}>
+            {cfg.cutoff_date
+              ? ('Zeilen mit Zeitstempel vor dem '+cfg.cutoff_date+' werden ohne Meldung übersprungen (Absicht).')
+              : ('⚠ Kein Stichtag gesetzt → es wird nichts importiert. Zum Start bei null z. B. '+todayIso+' eintragen.')}
+          </div>
+        </div>
+
+        <div className="form-group" style={{marginTop:10}}>
           <label className="form-label">Spalten-Mapping (Header-Namen im Sheet)</label>
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginTop:4}}>
             {MAPS.map(([k,label])=>(
@@ -29314,17 +29354,45 @@ function CvSyncView({setCvList, projects}){
               </div>
             ))}
           </div>
-          <div style={{fontSize:11,color:'var(--muted)',marginTop:6}}>„Skill" → CV-Skills · „Projekt" → Projekt-Zuordnung (Klartext → intern gematcht) · „Datum" → Eingangsdatum.</div>
+          <div style={{fontSize:11,color:'var(--muted)',marginTop:6}}>Header-Namen aus dem Sheet (Leerzeichen/Groß-/Kleinschreibung egal). „Sprichst du Deutsch?" → Deutschniveau (B1/B2/C1) · „In welchen" → Erfahrung · „Termin" → Notiz.</div>
         </div>
 
         {/* 4a-3: Auto-Sync-bei-Login-Checkbox entfernt — funktionslos ohne Auto-Sync */}
 
         <div style={{display:'flex',alignItems:'center',gap:12,marginTop:16}}>
           <button className="btn btn-primary" disabled={busy||!csvUrl} onClick={runSync}>{busy?'⏳ Synchronisiere…':'☁ Jetzt syncen'}</button>
-          {result&&!result.error&&<span style={{fontSize:13,fontWeight:600,color:'#0F5661'}}>✓ {result.imported} importiert, {result.skipped} übersprungen</span>}
+          {result&&!result.error&&<span style={{fontSize:13,fontWeight:600,color:'#0F5661'}}>✓ {result.imported} importiert · {result.skipped} übersprungen{result.preCutoff?(' · '+result.preCutoff+' vor Stichtag'):''}</span>}
           {result&&result.error&&<span style={{fontSize:13,fontWeight:600,color:'var(--red)'}}>✗ {result.error}</span>}
         </div>
       </div></div>
+
+      {result&&!result.error&&(
+        <div className="card" style={{maxWidth:640,marginBottom:16}}><div className="card-body">
+          <div style={{display:'flex',gap:20,flexWrap:'wrap',marginBottom:12}}>
+            <div><div style={{fontSize:22,fontWeight:800,color:'#0F5661'}}>{result.imported}</div><div style={{fontSize:11,color:'var(--muted)'}}>importiert</div></div>
+            <div><div style={{fontSize:22,fontWeight:800,color:'var(--amber)'}}>{result.skipped}</div><div style={{fontSize:11,color:'var(--muted)'}}>übersprungen</div></div>
+            {result.preCutoff>0&&<div><div style={{fontSize:22,fontWeight:800,color:'var(--muted)'}}>{result.preCutoff}</div><div style={{fontSize:11,color:'var(--muted)'}}>vor Stichtag (ignoriert)</div></div>}
+          </div>
+          {result.skipByReason&&Object.keys(result.skipByReason).length>0&&(
+            <div style={{marginBottom:8}}>
+              {Object.entries(result.skipByReason).sort((a,b)=>b[1]-a[1]).map(([reason,cnt])=>(
+                <div key={reason} style={{display:'flex',justifyContent:'space-between',fontSize:12,padding:'3px 0',borderBottom:'1px solid var(--border)'}}><span>{reason}</span><strong>{cnt}</strong></div>
+              ))}
+            </div>
+          )}
+          {result.skippedRows&&result.skippedRows.length>0&&(
+            <details>
+              <summary style={{fontSize:12,cursor:'pointer',color:'var(--muted)'}}>Übersprungene Zeilen anzeigen ({result.skippedRows.length})</summary>
+              <div style={{maxHeight:220,overflowY:'auto',marginTop:8}}>
+                <table style={{borderCollapse:'collapse',fontSize:12,width:'100%'}}>
+                  <thead><tr>{['Name','Telefon (roh)','Grund'].map(h=><th key={h} style={{textAlign:'left',padding:'3px 8px',borderBottom:'2px solid var(--border)',whiteSpace:'nowrap'}}>{h}</th>)}</tr></thead>
+                  <tbody>{result.skippedRows.map((sk,i)=><tr key={i}><td style={{padding:'3px 8px',borderBottom:'1px solid var(--border)'}}>{sk.name}</td><td style={{padding:'3px 8px',borderBottom:'1px solid var(--border)',fontFamily:'var(--mono)'}}>{sk.phone||'—'}</td><td style={{padding:'3px 8px',borderBottom:'1px solid var(--border)'}}>{sk.reason}</td></tr>)}</tbody>
+                </table>
+              </div>
+            </details>
+          )}
+        </div></div>
+      )}
 
       {preview.length>0&&(
         <div className="card" style={{maxWidth:'100%',marginBottom:16}}><div className="card-body">
