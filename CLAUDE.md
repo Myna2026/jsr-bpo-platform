@@ -783,21 +783,6 @@ Historie), nur für einen anderen Status. Saubere Lösung braucht echte
 allgemein eine Statushistorie mit Von-Bis), nicht einen einzelnen
 Live-Statuswert. Eigener Vorhaben-Schnitt, vor Produktivgang zu klären.
 
-### AbsenceOverview `getYearStats` zählt nur Einzeltage (ERLEDIGT 2026-07-26)
-`getYearStats` zählte Abwesenheiten ausschließlich über `a.date` (Einzeltag-
-Modell) und per Eintrags-`.length` — Zeitraum-Absences aus dem Urlaubsantrag-
-Flow wurden nicht gezählt. Mit der **Absence-Format-Vereinheitlichung**
-(2026-07-26) behoben: `getYearStats` summiert jetzt tagbasiert über
-`absDaysInYear` (deckt Einzeltag `from===to` UND Zeitraum ab). Teil des
-Umbaus auf **ein** Format `{from, to, days}` — Einzelheiten siehe Memory
-`open-migration-cuts`/`partial-absence-localstorage-loss`.
-
-### Abwesenheits-Kalender rendert nur die ersten 10 MA (offen)
-Das Monats-Grid in `AbsenceOverview` mappt `activeEmps.slice(0,10)` → bei mehr
-als 10 sichtbaren Mitarbeitern fehlen die restlichen Zeilen komplett (nur die
-ersten 10 werden gezeichnet). Aktuell unkritisch (wenige MA), aber vor
-Produktivgang: Slice entfernen oder Paginierung/Scroll ergänzen.
-
 ### Urlaubs-Genehmigung prüft den Mitarbeiter-Status nicht (offen)
 `VacationRequestsView.updateRequest` genehmigt ohne Status-Check — auch für
 `terminated`/`inactive` Mitarbeiter lässt sich Urlaub genehmigen und eine
