@@ -357,13 +357,35 @@ textarea.form-input{resize:vertical;min-height:70px}
 .ma-card-actions{display:flex;gap:6px;flex-wrap:wrap;border-top:1px solid var(--border);padding-top:8px;margin-top:2px}
 .ma-card-actions .btn{flex:1;min-width:60px;justify-content:center}
 .sp-mobile-note{display:none;margin:0 2px 10px;padding:8px 12px;background:#fef3c7;color:#b45309;border-radius:8px;font-size:12px;font-weight:600}
+/* Schichtplan-Mobile-Zwilling (Tagesauswahl + Karten). Default aus; @media schaltet um. */
+.sp-mobile-day{display:none}
+.spm-picker{display:flex;gap:4px;margin-bottom:6px}
+.spm-chip{flex:1;display:flex;flex-direction:column;align-items:center;gap:1px;padding:7px 2px;
+  border:1px solid var(--border);border-radius:9px;background:var(--card);cursor:pointer;line-height:1.1}
+.spm-chip .spm-dow{font-size:11px;font-weight:700;color:var(--muted)}
+.spm-chip .spm-dom{font-size:11px;color:var(--muted)}
+.spm-chip.today{border-color:var(--blue)}
+.spm-chip.sel{background:var(--blue);border-color:var(--blue)}
+.spm-chip.sel .spm-dow,.spm-chip.sel .spm-dom{color:#fff}
+.spm-count{font-size:12px;font-weight:700;color:var(--muted);margin:2px 2px 10px}
+.spm-group{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:12px 2px 6px}
+.spm-card{display:flex;justify-content:space-between;align-items:center;gap:10px;
+  background:var(--card);border:1px solid var(--border);border-radius:11px;padding:10px 13px;margin-bottom:7px}
+.spm-card-name{font-weight:700;font-size:14px;line-height:1.2}
+.spm-card-pos{font-size:11px;color:var(--muted);margin-top:1px}
+.spm-shift{font-size:13px;font-weight:700;white-space:nowrap;text-align:right}
+.spm-shift.filled{color:var(--green)}
+.spm-shift.gap{color:#b45309;font-weight:600}
+.spm-shift.off{color:var(--muted);font-weight:500}
+.spm-shift.canceled{color:#dc2626;text-decoration:line-through}
 @media(max-width:768px){
   .hide-on-mobile{display:none!important}
   .ma-cards{display:flex}
-  /* Schichtplan mobil: nur Ansicht (Scroll + sticky Namensspalte sind bereits da) */
+  /* Schichtplan mobil: Wochenraster/Charts aus, Tages-Karten an; Segment-Umschalter aus. */
   .sp-mobile-note{display:block}
-  .sp-cell-in{pointer-events:none!important;cursor:default!important}
-  .sp-add,.sp-x{display:none!important}
+  .sp-scroll{display:none!important}
+  .sp-seg{display:none!important}
+  .sp-mobile-day{display:block}
   /* Cockpit: eine Spalte */
   .cockpit-grid{grid-template-columns:1fr!important}
 }
@@ -10633,6 +10655,9 @@ function SimpleShiftView({employees, projects, showToast}){
   const [pop,setPop]=useState(null); // {empId, ds}
   const [chartMode,setChartMode]=useState('table'); // table | week | day
   const [daySel,setDaySel]=useState('');            // ds für die Tagesansicht
+  // Mobile-Tagesansicht: gewählter Wochentag-Index 0..6 (Mo..So). Default heute (in Mo-Start-Woche),
+  // sonst KW-Start. Nur für den Mobile-Karten-Zwilling; Desktop nutzt ihn nicht.
+  const [mDayIdx,setMDayIdx]=useState(()=>(new Date().getDay()+6)%7);
   const [staffModal,setStaffModal]=useState(false); // Sollbesetzung-Editor
   const [staffVer,setStaffVer]=useState(0);         // Re-Render nach Speichern
   const [abortModal,setAbortModal]=useState(null);  // {empId, ds, cell} — Schichtabbruch
@@ -11063,7 +11088,7 @@ function SimpleShiftView({employees, projects, showToast}){
           <button className="sp-nav" onClick={()=>setWeekStart(addDays(weekStart,-7))} title="Vorige Woche">◀</button>
           <div className="sp-kw"><b>KW {kw}</b><span>{yr}</span></div>
           <button className="sp-nav" onClick={()=>setWeekStart(addDays(weekStart,7))} title="Nächste Woche">▶</button>
-          <button className="sp-today" onClick={()=>setWeekStart(mondayOf(new Date()))}>Heute</button>
+          <button className="sp-today" onClick={()=>{setWeekStart(mondayOf(new Date()));setMDayIdx((new Date().getDay()+6)%7);}}>Heute</button>
         </div>
         <div className="sp-seg">
           {[['table','Tabelle'],['week','Woche'],['day','Tag'],['pauses','Pausen']].map(([m,l])=>(
@@ -11116,6 +11141,50 @@ function SimpleShiftView({employees, projects, showToast}){
           </table>
         </div>
        )}
+
+      {/* Mobile-Zwilling: Tagesauswahl + Karten statt Wochenraster. Nur via CSS @media sichtbar
+          (Desktop-Tabelle bleibt unangetastet). Read-only wie mobil beschlossen. */}
+      {projId && members.length>0 && (()=>{
+        const mDs=isoD(days[mDayIdx]);
+        const mEmps=[...overheadEmps,...agentEmps];
+        const mCount=mEmps.filter(e=>{const c=cells[e.id+'|'+mDs];return c&&!c.canceled;}).length;
+        const card=emp=>{
+          const cell=cells[emp.id+'|'+mDs], dayOk=shiftEmpDayOk(emp,mDs);
+          const cls='spm-shift '+(cell?(cell.canceled?'canceled':'filled'):(dayOk?'gap':'off'));
+          return (
+            <div key={emp.id} className="spm-card">
+              <div className="spm-card-main">
+                <div className="spm-card-name">{emp.first_name} {emp.last_name}{trainingTag(emp)}</div>
+                {shiftIsOverhead(emp)&&<div className="spm-card-pos">{emp.position||'Overhead'}</div>}
+              </div>
+              <div className={cls}>
+                {cell? (cell.canceled?'⛔ ':'')+(cell.label||cell.shift)+((cell.pause_duration&&!cell.canceled)?' ☕':'')
+                     : (dayOk?'nicht eingeteilt':'frei')}
+              </div>
+            </div>
+          );
+        };
+        return (
+          <div className="sp-mobile-day">
+            <div className="spm-picker">
+              {days.map((d,i)=>{
+                const isToday=isoD(d)===isoD(new Date());
+                return (
+                  <button key={i} className={"spm-chip"+(i===mDayIdx?' sel':'')+(isToday?' today':'')} onClick={()=>setMDayIdx(i)}>
+                    <span className="spm-dow">{DOW[i]}</span>
+                    <span className="spm-dom">{d.getDate()}.</span>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="spm-count">{mCount} eingeteilt</div>
+            {overheadEmps.length>0&&<div className="spm-group">Overhead / Leitung</div>}
+            {overheadEmps.map(card)}
+            {agentEmps.length>0&&<div className="spm-group">Agenten</div>}
+            {agentEmps.map(card)}
+          </div>
+        );
+      })()}
       {pop&&<div className="sp-backdrop" onClick={()=>setPop(null)}/>}
       {staffModal&&<StaffingTargetModal projId={projId} skill={effSkill} projName={(proj&&proj.name)||''} onClose={()=>setStaffModal(false)} onSaved={()=>setStaffVer(v=>v+1)}/>}
       {abortModal&&<ShiftAbortModal emp={(employees||[]).find(x=>x.id===abortModal.empId)} ds={abortModal.ds} cell={abortModal.cell}
