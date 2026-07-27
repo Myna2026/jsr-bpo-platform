@@ -1353,7 +1353,7 @@ const MENU_BADGE_MAIN_ITEMS = [
   {key:'performance',label:'Performance'},{key:'shiftplan',label:'Schichtplanung'},{key:'workforce',label:'Workforce (Beta)'},{key:'employees',label:'Mitarbeiter'},
   {key:'timetracking',label:'Zeiterfassung'},{key:'locations',label:'Standorte'},{key:'spaces',label:'Spaces & Seats'},
   {key:'payroll',label:'Löhne'},{key:'orgchart',label:'Organigramm'},{key:'absences',label:'Abwesenheiten'},
-  {key:'urlaubantraege',label:'Urlaubsanträge'},{key:'kanban',label:'Recruiting'},{key:'onboarding',label:'Onboarding'},
+  {key:'urlaubantraege',label:'Urlaubsanträge'},{key:'feedback',label:'Feedbackgespräche'},{key:'kanban',label:'Recruiting'},{key:'onboarding',label:'Onboarding'},
   {key:'cvs',label:'CVs & Bewerber'},{key:'showcase',label:'Showcases'},{key:'training_plans',label:'Schulungsplanung'},
   {key:'timeline',label:'Timeline'},{key:'projects',label:'Projekte'},{key:'forecast',label:'Forecast'},
   {key:'profitability',label:'Wirtschaftlichkeit'},{key:'superadmin',label:'System / Konfiguration'},{key:'tabperms',label:'Portal-Tabs'},
@@ -29212,6 +29212,159 @@ function AiEndpointView(){
     </div>
   );
 }
+// ══ HR-Feedbackgespräche (Schnitt 2: Fragenkatalog-Editor) ══
+// Skala kosovarisch 1–5: 1 = sehr zufrieden (beste), 5 = sehr unzufrieden. Niedriger = besser.
+// Muss an JEDER Skala sichtbar sein — nicht nur einmal oben.
+function FeedbackScaleLegend(){
+  return <span style={{fontSize:11,color:'var(--muted)'}}>Skala 1–5: <b>1 = sehr zufrieden</b> (beste) … <b>5 = sehr unzufrieden</b> (schlechteste) — niedriger ist besser.</span>;
+}
+// Fragenkatalog-Editor (DB-CRUD auf feedback_questions). Ändern ist unkritisch: alte Antworten
+// tragen einen eigenen Snapshot (prompt/type) → bleiben lesbar. Löschen = Archivieren (active=false).
+function FeedbackCatalog({showToast}){
+  const [rows,setRows]=useState(null);              // null = laden
+  const [edit,setEdit]=useState(null);              // 'new' | Frage | null
+  const [showArchived,setShowArchived]=useState(false);
+  const blank={section:'',prompt:'',type:'grade',followup_prompt:'',followup_show_if_grade_gte:4,followup_slots:2};
+  const [form,setForm]=useState(blank);
+  const set=(k,v)=>setForm(f=>({...f,[k]:v}));
+  async function load(){
+    const {data,error}=await sb.from('feedback_questions').select('*').order('order_index',{ascending:true});
+    if(error){ showToast&&showToast('⚠ Katalog laden fehlgeschlagen: '+(error.message||''),'error'); setRows([]); return; }
+    setRows(data||[]);
+  }
+  useEffect(()=>{ load(); },[]);
+  if(rows===null) return <div className="sp-empty">Lade Katalog…</div>;
+  const visible=rows.filter(q=>showArchived?true:q.active);
+  const sections=[...new Set(rows.map(q=>q.section).filter(Boolean))];
+  function openNew(){ setForm(blank); setEdit('new'); }
+  function openEdit(q){ setForm({section:q.section||'',prompt:q.prompt||'',type:q.type||'grade',followup_prompt:q.followup_prompt||'',followup_show_if_grade_gte:q.followup_show_if_grade_gte||4,followup_slots:q.followup_slots||2}); setEdit(q); }
+  async function save(){
+    if(!form.prompt.trim()||!form.section.trim()){ showToast&&showToast('Sektion und Frage sind Pflicht','info'); return; }
+    const hasF=form.type==='grade'&&form.followup_prompt.trim();
+    const payload={ section:form.section.trim(), prompt:form.prompt.trim(), type:form.type,
+      followup_prompt: hasF?form.followup_prompt.trim():null,
+      followup_show_if_grade_gte: hasF?(Number(form.followup_show_if_grade_gte)||4):null,
+      followup_slots: hasF?(Number(form.followup_slots)||2):null,
+      updated_at:new Date().toISOString() };
+    let error;
+    if(edit==='new'){ const maxOrd=Math.max(0,...rows.map(q=>q.order_index||0));
+      ({error}=await sb.from('feedback_questions').insert({...payload,order_index:maxOrd+10,active:true})); }
+    else { ({error}=await sb.from('feedback_questions').update(payload).eq('id',edit.id)); }
+    if(error){ showToast&&showToast('⚠ Nicht gespeichert: '+(error.message||''),'error'); return; }
+    setEdit(null); await load(); showToast&&showToast('✓ Gespeichert');
+  }
+  async function archive(q){
+    const ok=await uiConfirm({title:'Frage archivieren', text:'Verschwindet aus künftigen Gesprächen. Bereits gegebene Antworten bleiben erhalten und lesbar.', items:[q.prompt], confirmLabel:'Archivieren'});
+    if(!ok) return;
+    const {error}=await sb.from('feedback_questions').update({active:false,updated_at:new Date().toISOString()}).eq('id',q.id);
+    if(error){ showToast&&showToast('⚠ '+(error.message||''),'error'); return; } await load();
+  }
+  async function restore(q){ const {error}=await sb.from('feedback_questions').update({active:true,updated_at:new Date().toISOString()}).eq('id',q.id); if(!error) await load(); }
+  async function move(q,dir){
+    const i=visible.findIndex(x=>x.id===q.id); const j=i+dir; if(j<0||j>=visible.length) return;
+    const a=visible[i], b=visible[j];
+    await sb.from('feedback_questions').update({order_index:b.order_index}).eq('id',a.id);
+    await sb.from('feedback_questions').update({order_index:a.order_index}).eq('id',b.id);
+    await load();
+  }
+  return (
+    <div>
+      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:10,flexWrap:'wrap',gap:8}}>
+        <FeedbackScaleLegend/>
+        <div style={{display:'flex',gap:10,alignItems:'center'}}>
+          <label style={{fontSize:12,display:'flex',alignItems:'center',gap:6,color:'var(--muted)',cursor:'pointer'}}><input type="checkbox" checked={showArchived} onChange={e=>setShowArchived(e.target.checked)}/>Archivierte zeigen</label>
+          <button className="btn btn-primary btn-sm" onClick={openNew}>+ Neue Frage</button>
+        </div>
+      </div>
+      {visible.length===0 && <div className="sp-empty">Keine Fragen. Lege die erste an.</div>}
+      {visible.map((q,idx)=>{
+        const prevSec=idx>0?visible[idx-1].section:null;
+        const secHeader=q.section!==prevSec?q.section:null;
+        return <React.Fragment key={q.id}>
+          {secHeader!=null && <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em',margin:'12px 0 6px'}}>{secHeader}</div>}
+          <div style={{display:'flex',alignItems:'center',gap:10,padding:'9px 12px',border:'1px solid var(--border)',borderRadius:8,marginBottom:6,background:q.active?'var(--card)':'var(--surface-2)',opacity:q.active?1:0.6}}>
+            <span style={{fontSize:11,fontWeight:700,padding:'2px 7px',borderRadius:5,whiteSpace:'nowrap',background:q.type==='grade'?'#eef2ff':'#ecfdf5',color:q.type==='grade'?'#4338ca':'#047857'}}>{q.type==='grade'?'Note 1–5':'Freitext'}</span>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontSize:13,fontWeight:600}}>{q.prompt}{!q.active&&<span style={{marginLeft:6,fontSize:10,color:'var(--muted)'}}>(archiviert)</span>}</div>
+              {q.followup_prompt && <div style={{fontSize:11,color:'#d97706',marginTop:2}}>↳ Folgefrage ab Note {q.followup_show_if_grade_gte}: „{q.followup_prompt}" ({q.followup_slots}×)</div>}
+            </div>
+            {q.active ? <React.Fragment>
+              <button className="btn btn-sm" title="nach oben" disabled={idx===0} onClick={()=>move(q,-1)}>▲</button>
+              <button className="btn btn-sm" title="nach unten" disabled={idx===visible.length-1} onClick={()=>move(q,1)}>▼</button>
+              <button className="btn btn-sm" title="bearbeiten" onClick={()=>openEdit(q)}>✎</button>
+              <button className="btn btn-sm" title="archivieren" style={{color:'var(--red)'}} onClick={()=>archive(q)}>🗄</button>
+            </React.Fragment> : <button className="btn btn-sm" onClick={()=>restore(q)}>↩ Wiederherstellen</button>}
+          </div>
+        </React.Fragment>;
+      })}
+      {edit && (
+        <div className="modal-overlay" onClick={()=>setEdit(null)}>
+          <div className="modal" style={{width:560,maxWidth:'95vw'}} onClick={e=>e.stopPropagation()}>
+            <div className="modal-header"><span className="modal-title">{edit==='new'?'Neue Frage':'Frage bearbeiten'}</span><button className="btn btn-sm" onClick={()=>setEdit(null)}>✕</button></div>
+            <div className="modal-body" style={{padding:20}}>
+              <div className="form-row">
+                <div className="form-group"><label className="form-label">Sektion</label>
+                  <input className="form-input" list="fb-sections" value={form.section} onChange={e=>set('section',e.target.value)} placeholder="z. B. Einstieg"/>
+                  <datalist id="fb-sections">{sections.map(s=><option key={s} value={s}/>)}</datalist>
+                </div>
+                <div className="form-group"><label className="form-label">Typ</label>
+                  <select className="form-select" value={form.type} onChange={e=>set('type',e.target.value)}>
+                    <option value="grade">Schulnote 1–5</option>
+                    <option value="text">Freitext</option>
+                  </select>
+                </div>
+              </div>
+              <div className="form-group" style={{marginTop:10}}><label className="form-label">Frage</label>
+                <textarea className="form-input" rows={2} style={{resize:'vertical'}} value={form.prompt} onChange={e=>set('prompt',e.target.value)} placeholder="Fragetext…"/>
+              </div>
+              {form.type==='grade' && (
+                <div style={{marginTop:10,padding:'12px 14px',background:'var(--surface-2)',borderRadius:8}}>
+                  <div style={{marginBottom:8}}><FeedbackScaleLegend/></div>
+                  <label className="form-label">Bedingte Folgefrage (optional — bei Unzufriedenheit)</label>
+                  <input className="form-input" value={form.followup_prompt} onChange={e=>set('followup_prompt',e.target.value)} placeholder="z. B. Bitte 2 Gründe nennen — leer = keine Folgefrage"/>
+                  {form.followup_prompt.trim() && (
+                    <div className="form-row" style={{marginTop:8}}>
+                      <div className="form-group"><label className="form-label">Zeigt sich ab Note <span style={{fontWeight:400,color:'var(--muted)'}}>(höher = unzufriedener)</span></label>
+                        <select className="form-select" value={form.followup_show_if_grade_gte} onChange={e=>set('followup_show_if_grade_gte',e.target.value)}>
+                          {[2,3,4,5].map(n=><option key={n} value={n}>ab Note {n}{n>=4?' (unzufrieden)':''}</option>)}
+                        </select>
+                      </div>
+                      <div className="form-group"><label className="form-label">Anzahl Felder</label>
+                        <input className="form-input" type="number" min="1" max="5" value={form.followup_slots} onChange={e=>set('followup_slots',e.target.value)}/>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+            <div className="modal-footer" style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
+              <button className="btn btn-sm" onClick={()=>setEdit(null)}>Abbrechen</button>
+              <button className="btn btn-sm btn-primary" onClick={save}>💾 Speichern</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+function FeedbackView({showToast}){   // employees/projects/team kommen in Schnitt 3 dazu
+  const [tab,setTab]=useState('katalog');   // Schnitt 3/4 füllen 'gespraeche'/'auswertung'
+  const TABS=[['gespraeche','Gespräche'],['katalog','Fragenkatalog'],['auswertung','Auswertung']];
+  return (
+    <div>
+      <div style={{fontSize:20,fontWeight:700,marginBottom:4}}>💬 Feedbackgespräche</div>
+      <div style={{fontSize:13,color:'var(--muted)',marginBottom:14}}>HR führt die Gespräche und trägt die Antworten ein. Bewertungen als kosovarische Schulnote (1 = beste).</div>
+      <div style={{display:'flex',gap:6,marginBottom:16,borderBottom:'1px solid var(--border)'}}>
+        {TABS.map(([k,l])=>(
+          <button key={k} onClick={()=>setTab(k)} style={{padding:'8px 14px',fontSize:13,fontWeight:600,cursor:'pointer',border:'none',background:'none',borderBottom:'2px solid '+(tab===k?'var(--blue)':'transparent'),color:tab===k?'var(--blue)':'var(--muted)'}}>{l}</button>
+        ))}
+      </div>
+      {tab==='katalog' && <FeedbackCatalog showToast={showToast}/>}
+      {tab==='gespraeche' && <div className="sp-empty">Gesprächsführung (Kandidaten-Ziehung + Frage für Frage) kommt im nächsten Schnitt.</div>}
+      {tab==='auswertung' && <div className="sp-empty">Auswertungs-Dashboard kommt danach.</div>}
+    </div>
+  );
+}
 // ══ CV-Sync aus öffentlichem Google Sheet (Feature 20) ══
 // Browser-Auto-Sync-Guard: max 1× pro Sitzung (Modul-Flag, reset bei Reload) UND Mindestabstand
 // zum letzten Sync (auto ODER manuell) — verhindert einen Lauf bei jedem Tab-Wechsel/20×-am-Tag.
@@ -30071,6 +30224,7 @@ function App(){
       {key:'orgchart',label:'Organigramm',icon:'⬡'},
       {key:'absences',label:'Abwesenheiten',icon:'📅'},
       {key:'urlaubantraege',label:'Urlaubsanträge',icon:'🏖'},
+      {key:'feedback',label:'Feedbackgespräche',icon:'💬'},
     ]},
     {sec:'Recruiting', items:[
       {key:'kanban',label:'Recruiting',icon:'🔄'},
@@ -30173,7 +30327,7 @@ function App(){
     ? [{sec:'Mein Bereich', items:[{key:'mein-plan',label:'Mein Schichtplan',icon:'📋'}]}, ...navSections]
     : navSections;
 
-  const viewLabels = {cockpit:'Cockpit',productivity:'Produktivität',employees:'Mitarbeiter',timetracking:'Zeiterfassung',orgchart:'Organigramm',skillmatrix:'Skill Matrix',kanban:'Recruiting',onboarding:'Onboarding',cvs:'CVs & Bewerber',test_preview:'Test Vorschau',test_editor:'Test Editor',training_plans:'Schulungsplanung',timeline:'Timeline',knowledge:'Wissensbasis',elearning:'E-Learning',projects:'Projekte',forecast:'Forecast',absences:'Abwesenheiten & Urlaub',profitability:'Wirtschaftlichkeit',payroll:'Lohnbuchhaltung',performance:'Performance & KPIs'};
+  const viewLabels = {cockpit:'Cockpit',productivity:'Produktivität',employees:'Mitarbeiter',timetracking:'Zeiterfassung',orgchart:'Organigramm',skillmatrix:'Skill Matrix',kanban:'Recruiting',onboarding:'Onboarding',cvs:'CVs & Bewerber',test_preview:'Test Vorschau',test_editor:'Test Editor',training_plans:'Schulungsplanung',timeline:'Timeline',knowledge:'Wissensbasis',elearning:'E-Learning',projects:'Projekte',forecast:'Forecast',absences:'Abwesenheiten & Urlaub',profitability:'Wirtschaftlichkeit',payroll:'Lohnbuchhaltung',performance:'Performance & KPIs',feedback:'Feedbackgespräche'};
 
   const active = employees.filter(e=>e&&e.status==='active');
   const inTraining = employees.filter(e=>e&&e.status==='training');
@@ -30329,6 +30483,7 @@ function App(){
           {view==='hraccess'&&(<div><HrAccessView/></div>)}
           {view==='appusers'&&(<div><AppUsersView employees={employees} clients={clients} showToast={showToast}/></div>)}
           {view==='cvsync'&&(<div><CvSyncView setCvList={setCvList} projects={projects}/></div>)}
+          {view==='feedback'&&<FeedbackView showToast={showToast}/>}
           {view==='spaces'&&(
             <div>
               <SpacesView employees={employees} projects={projects} locations={getLocations()}/>
