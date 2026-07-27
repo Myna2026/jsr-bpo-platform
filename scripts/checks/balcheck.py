@@ -3,7 +3,7 @@
 #
 # ┌───────────────────────────────────────────────────────────────────────────┐
 # │ BASELINE — ACHTUNG, DARF NICHT STILL VERALTEN:                             │
-# │   ()=-23   {}=0   []=0   script 27/27                                       │
+# │   ()=-22   {}=0   []=0   script 27/27                                       │
 # │ Diese Werte sind ABSICHTLICH hart verdrahtet (BASE unten). Wenn eine       │
 # │ BEWUSSTE Aenderung sie verschiebt (neuer <script>-Block, ein zusaetzliches │
 # │ unbalanciertes Zeichen in String/Kommentar/Regex), dann ist der neue Stand │
@@ -29,7 +29,7 @@ brace = delta("{", "}")
 brack = delta("[", "]")
 so, sc = s.count("<script"), s.count("</script>")
 
-BASE = {"paren": -23, "brace": 0, "brack": 0, "script": (27, 27)}
+BASE = {"paren": -22, "brace": 0, "brack": 0, "script": (27, 27)}   # -23 -> -22 (2026-07-27): unbalanciertes ')' im entfernten "6-10)"-Cockpit-Kommentar
 ok = (paren == BASE["paren"] and brace == BASE["brace"] and brack == BASE["brack"]
       and (so, sc) == BASE["script"])
 
