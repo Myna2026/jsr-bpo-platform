@@ -3575,6 +3575,7 @@ function EmployeeModal({emp, projects, employees, onSave, onClose, initialTab, o
     {id:'stunden',    label:'Stunden',   icon:'⏱'},
     {id:'projekt',    label:'Projekt',   icon:'🎯'},
   ];
+  if(emp) TABS.push({id:'feedback', label:'Zufriedenheit', icon:'💬'});   // nur bei bestehendem MA (Feedbackgespräche = Sicht des MA)
 
 
   return(
@@ -3621,6 +3622,7 @@ function EmployeeModal({emp, projects, employees, onSave, onClose, initialTab, o
               </div>
             )}
 
+          {tab==='feedback'&&<FeedbackEmployeeTab emp={form}/>}
           {/* ── TAB: HR & VERWALTUNG ── */}
           {tab==='profil'&&(
             <div style={{paddingTop:16}}>
@@ -7252,11 +7254,13 @@ function DailyTasksView({employees, projects, plans, onNavigate, team}){
     {key:'schulung',      view:'training_plans',title:'Schulungsgruppen aktualisieren', desc:'Teilnehmer, Termine und Produktivstart der Schulungen aktuell halten — wer startet wann, wer ist fertig.'},
     {key:'kpi',           view:'performance',   title:'KPIs eintragen',             desc:'Die Leistungswerte der Mitarbeiter für den Zeitraum erfassen, damit Auswertungen und Boni auf echten Zahlen beruhen.'},
     {key:'abwesenheiten', view:'absences',      title:'Abwesenheiten pflegen',      desc:'Urlaub, Krankmeldungen und sonstige Abwesenheiten eintragen. Krankmeldungen (Anruf bis 8:30 Uhr) sollten hier landen.'},
+    {key:'feedback',      view:'feedback',      title:'Feedbackgespräche führen',   desc:'Die heutigen Kandidaten ziehen und die Gespräche führen — kurz nachfragen, wie es läuft, Noten und Rückmeldungen erfassen.'},
     {key:'vertraege',     view:'employees',     title:'Vertragsdaten prüfen',       desc:'Vertragsänderungen einpflegen und auf auslaufende Verträge achten, damit Verlängerungen rechtzeitig passieren.'},
   ];
   const [done,setDone] = useState({});     // {task_key:{done_by_name,done_at}}
   const [uid,setUid]   = useState(null);
   const [cvCount,setCvCount] = useState(null);
+  const [fbOpenCount,setFbOpenCount] = useState(null);   // heute offene Feedbackgespräche
   const [busy,setBusy] = useState('');
 
   const loadDone = async()=>{
@@ -7268,6 +7272,7 @@ function DailyTasksView({employees, projects, plans, onNavigate, team}){
     (async()=>{ try{ const {data}=await sb.auth.getUser(); if(alive&&data&&data.user) setUid(data.user.id); }catch(e){} await loadDone(); })();
     const chan=sb.channel('daily-tasks').on('postgres_changes',{event:'*',schema:'public',table:'daily_tasks_done'},()=>{ loadDone(); }).subscribe();
     (async()=>{ try{ const funnel=['cv_inbound','cv_accepted','cv_confirmed','invited','interview','selection1','selection2']; const {count}=await sb.from('cvs').select('id',{count:'exact',head:true}).in('status',funnel); if(alive) setCvCount(count||0); }catch(e){} })();
+    (async()=>{ try{ const {count}=await sb.from('feedback_sessions').select('id',{count:'exact',head:true}).eq('scheduled_date',today).eq('status','scheduled'); if(alive) setFbOpenCount(count||0); }catch(e){} })();
     return ()=>{ alive=false; try{ sb.removeChannel(chan); }catch(e){} };
   },[]);
 
@@ -7304,6 +7309,7 @@ function DailyTasksView({employees, projects, plans, onNavigate, team}){
     if(k==='team')       return counts.agentNoProj>0?{n:counts.agentNoProj,l:'ohne Zuweisung'}:null;
     if(k==='schulung')   return counts.planInc>0?{n:counts.planInc,l:'Pläne unvollständig'}:null;
     if(k==='vertraege')  return counts.expiring>0?{n:counts.expiring,l:'laufen in 30 T. aus'}:null;
+    if(k==='feedback')   return fbOpenCount>0?{n:fbOpenCount,l:'heute offen'}:null;
     return null;
   };
   const fmtTime=iso=>{ try{ const d=new Date(iso); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); }catch(e){ return ''; } };
@@ -29389,6 +29395,9 @@ function FeedbackInterview({session, emp, questions, conductorName, onDone, onCl
   const showF = q.type==='grade' && q.followup_prompt && a.grade!=null && a.grade>=q.followup_show_if_grade_gte;
   const last = step===questions.length-1;
   async function finish(){
+    // Guard: kein leeres „Abschließen" — mindestens eine Antwort nötig (verhindert Versehens-done).
+    const anyAnswered=questions.some(function(qq){ const x=ans[qq.id]||{}; return (x.grade!=null)||((x.text||'').trim()!==''); });
+    if(!anyAnswered){ showToast&&showToast('Bitte mindestens eine Antwort erfassen, bevor du abschließt.','info'); return; }
     setBusy(true);
     let uid=null; try{ const u=await sb.auth.getUser(); uid=u&&u.data&&u.data.user?u.data.user.id:null; }catch(e){}
     const rows=questions.map(qq=>{ const x=ans[qq.id]||{};
@@ -29483,9 +29492,10 @@ function FeedbackConversations({employees, projects, team, showToast, nav, onNav
     // Schicht heute (nicht abgebrochen)
     const {data:shifts}=await sb.from('shift_assignments').select('employee_id,shift').eq('work_date',today);
     const shiftEmps=new Set((shifts||[]).filter(r=>r.shift&&!(r.shift.canceled)).map(r=>r.employee_id));
-    // Cooldown: wer in den letzten COOLDOWN_DAYS eine Session hatte → raus
+    // Cooldown: wer in den letzten COOLDOWN_DAYS eine Session hatte → raus. Verworfene ('skipped')
+    // zählen NICHT (hat nicht stattgefunden) → der MA kann bald wieder gezogen werden.
     const cutoff=new Date(Date.now()-COOLDOWN_DAYS*864e5).toISOString().slice(0,10);
-    const {data:recent}=await sb.from('feedback_sessions').select('employee_id,scheduled_date').gte('scheduled_date',cutoff);
+    const {data:recent}=await sb.from('feedback_sessions').select('employee_id,scheduled_date,status').gte('scheduled_date',cutoff).neq('status','skipped');
     const recentEmp=new Set((recent||[]).map(r=>r.employee_id));
     const eligible=(employees||[]).filter(e=>e&&e.status==='active'&&shiftEmps.has(e.id)&&!recentEmp.has(e.id));
     if(!eligible.length){ showToast&&showToast('Keine Kandidaten: niemand mit Schicht heute außerhalb des '+COOLDOWN_DAYS+'-Tage-Cooldowns (Schichtplan gepflegt?).','info'); return; }
@@ -29500,36 +29510,73 @@ function FeedbackConversations({employees, projects, team, showToast, nav, onNav
     if(error){ showToast&&showToast('⚠ '+(error.message||''),'error'); return; }
     setManual(false); setQ(''); await loadToday(); setInterview({session:data,emp});
   }
+  async function skipSession(s){
+    const e=empById[s.employee_id], nm=e?e.first_name+' '+e.last_name:'Mitarbeiter';
+    const ok=await uiConfirm({title:'Gespräch verwerfen', text:'Findet nicht statt (krank/verschoben o. Ä.). Zählt nicht als geführt; der Mitarbeiter kann bald wieder gezogen werden.', items:[nm], confirmLabel:'Verwerfen'});
+    if(!ok) return;
+    const {error}=await sb.from('feedback_sessions').update({status:'skipped'}).eq('id',s.id);
+    if(error){ showToast&&showToast('⚠ '+(error.message||''),'error'); return; }
+    await loadToday(); showToast&&showToast('Gespräch verworfen');
+  }
+  async function deleteSession(s){
+    const e=empById[s.employee_id], nm=e?e.first_name+' '+e.last_name:'Mitarbeiter';
+    const dt=s.conducted_at?new Date(s.conducted_at).toLocaleDateString('de-AT'):(s.scheduled_date||'');
+    var n=0; try{ const r=await sb.from('feedback_answers').select('id',{count:'exact',head:true}).eq('session_id',s.id); n=r.count||0; }catch(e2){}
+    const ok=await uiConfirm({title:'Gespräch endgültig löschen', text:'Löscht dieses Gespräch samt allen Antworten — auch aus der Historie des Mitarbeiters im Portal. Nicht umkehrbar.', items:[nm+' · '+dt+' · '+n+' Antwort'+(n===1?'':'en')], danger:true, confirmLabel:'Endgültig löschen'});
+    if(!ok) return;
+    const {error}=await sb.from('feedback_sessions').delete().eq('id',s.id);
+    if(error){ showToast&&showToast('⚠ '+(error.message||''),'error'); return; }
+    await loadToday(); showToast&&showToast('Gespräch gelöscht');
+  }
   if(sessions===null) return <div className="sp-empty">Lade…</div>;
-  const openS=sessions.filter(s=>s.status!=='done');
+  const scheduledS=sessions.filter(s=>s.status==='scheduled');
   const doneS=sessions.filter(s=>s.status==='done');
+  const skippedS=sessions.filter(s=>s.status==='skipped');
   const manualMatches=q.trim()?(employees||[]).filter(e=>e&&e.status==='active'&&((e.first_name||'')+' '+(e.last_name||'')).toLowerCase().includes(q.toLowerCase())).slice(0,10):[];
+  const initials=e=>(((e&&e.first_name&&e.first_name[0])||'')+((e&&e.last_name&&e.last_name[0])||'')).toUpperCase()||'?';
+  const kpi=(n,label,color)=><div style={{background:'var(--card)',border:'1px solid var(--border)',borderRadius:10,padding:'12px 18px',minWidth:104}}><div style={{fontSize:26,fontWeight:800,color:color}}>{n}</div><div style={{fontSize:11,color:'var(--muted)'}}>{label}</div></div>;
+  const card=(s,kind)=>{ const e=empById[s.employee_id]; return (
+    <div key={s.id} style={{display:'flex',alignItems:'center',gap:12,padding:'12px 14px',border:'1px solid var(--border)',borderRadius:10,marginBottom:8,background:'var(--card)'}}>
+      <div style={{width:38,height:38,borderRadius:'50%',background:kind==='done'?'#0F5661':'#7c3aed',color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:700,fontSize:13,flexShrink:0}}>{initials(e)}</div>
+      <div style={{flex:1,minWidth:0}}>
+        <div style={{fontSize:15,fontWeight:600}}>{e?e.first_name+' '+e.last_name:'—'} {s.source==='manual'&&<span style={{fontSize:10,color:'var(--muted)',fontWeight:400}}>· manuell</span>}</div>
+        <div style={{fontSize:12,color:'var(--muted)'}}>{projName(e)}{kind==='done'&&s.conducted_at?(' · '+new Date(s.conducted_at).toLocaleDateString('de-AT')):''}</div>
+      </div>
+      {kind==='open' ? <React.Fragment>
+        <button className="btn btn-sm btn-primary" onClick={()=>setInterview({session:s,emp:e})}>Gespräch führen →</button>
+        <button className="btn btn-sm" onClick={()=>skipSession(s)}>Verwerfen</button>
+      </React.Fragment> : <React.Fragment>
+        <span style={{fontSize:12,color:'#0F5661',fontWeight:600}}>✓ erledigt</span>
+        <button className="btn btn-sm" style={{color:'var(--red)'}} onClick={()=>deleteSession(s)}>Löschen</button>
+      </React.Fragment>}
+    </div>
+  ); };
   return (
     <div>
-      <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap',marginBottom:14}}>
-        <button className="btn btn-primary btn-sm" onClick={draw}>🎲 Heutige Kandidaten ziehen</button>
-        <button className="btn btn-sm" onClick={()=>setManual(m=>!m)}>+ Manuell starten</button>
-        <span style={{fontSize:11,color:'var(--muted)'}}>Zufällig aus MA mit Schicht heute, {COOLDOWN_DAYS}-Tage-Cooldown · bis {DRAW_MAX}/Tag</span>
+      <div style={{display:'flex',gap:12,flexWrap:'wrap',marginBottom:16}}>
+        {kpi(scheduledS.length,'heute offen','#7c3aed')}
+        {kpi(doneS.length,'heute erledigt','#0F5661')}
+        {skippedS.length>0 && kpi(skippedS.length,'verworfen','var(--muted)')}
+      </div>
+      <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap',marginBottom:16}}>
+        <button className="btn btn-primary" onClick={draw}>🎲 Heutige Kandidaten ziehen</button>
+        <button className="btn" onClick={()=>setManual(m=>!m)}>+ Manuell starten</button>
+        <span style={{fontSize:11,color:'var(--muted)'}}>Zufällig aus MA mit Schicht heute · {COOLDOWN_DAYS}-Tage-Cooldown · bis {DRAW_MAX}/Tag</span>
       </div>
       {manual && (
-        <div style={{marginBottom:14,padding:'10px 12px',background:'var(--surface-2)',borderRadius:8}}>
+        <div style={{marginBottom:16,padding:'12px 14px',background:'var(--surface-2)',borderRadius:10}}>
           <input className="form-input" autoFocus placeholder="Mitarbeiter suchen…" value={q} onChange={e=>setQ(e.target.value)}/>
           {manualMatches.map(e=>(
-            <div key={e.id} onClick={()=>startManual(e)} style={{padding:'7px 9px',cursor:'pointer',borderBottom:'1px solid var(--border)',fontSize:13}}>{e.first_name} {e.last_name} <span style={{color:'var(--muted)'}}>· {projName(e)}</span></div>
+            <div key={e.id} onClick={()=>startManual(e)} style={{padding:'8px 10px',cursor:'pointer',borderBottom:'1px solid var(--border)',fontSize:13}}>{e.first_name} {e.last_name} <span style={{color:'var(--muted)'}}>· {projName(e)}</span></div>
           ))}
         </div>
       )}
-      {openS.length===0 && doneS.length===0 && <div className="sp-empty">Für heute noch keine Gespräche. Ziehe Kandidaten oder starte manuell.</div>}
-      {openS.map(s=>{ const e=empById[s.employee_id]; return (
-        <div key={s.id} style={{display:'flex',alignItems:'center',gap:10,padding:'11px 14px',border:'1px solid var(--border)',borderRadius:8,marginBottom:8,background:'var(--card)'}}>
-          <div style={{flex:1,minWidth:0}}>
-            <div style={{fontSize:14,fontWeight:600}}>{e?e.first_name+' '+e.last_name:'—'} {s.source==='manual'&&<span style={{fontSize:10,color:'var(--muted)'}}>(manuell)</span>}</div>
-            <div style={{fontSize:12,color:'var(--muted)'}}>{projName(e)}</div>
-          </div>
-          <button className="btn btn-sm btn-primary" onClick={()=>setInterview({session:s,emp:e})}>Gespräch führen →</button>
-        </div>
-      ); })}
-      {doneS.length>0 && <div style={{marginTop:14,fontSize:12,color:'var(--muted)'}}>✓ Heute erledigt: {doneS.map(s=>{const e=empById[s.employee_id];return e?e.first_name+' '+e.last_name:'—';}).join(', ')}</div>}
+      <div style={{fontSize:12,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',margin:'6px 0 8px'}}>Offene Gespräche</div>
+      {scheduledS.length===0 ? <div className="sp-empty">Keine offenen Gespräche. Ziehe Kandidaten oder starte manuell.</div> : scheduledS.map(s=>card(s,'open'))}
+      {doneS.length>0 && <React.Fragment>
+        <div style={{fontSize:12,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',margin:'18px 0 8px'}}>Heute erledigt</div>
+        {doneS.map(s=>card(s,'done'))}
+      </React.Fragment>}
       {interview && <FeedbackInterview session={interview.session} emp={interview.emp} questions={questions} conductorName={conductorName}
         onClose={()=>setInterview(null)} onDone={()=>{ setInterview(null); loadToday(); }} showToast={showToast}/>}
     </div>
@@ -29538,16 +29585,165 @@ function FeedbackConversations({employees, projects, team, showToast, nav, onNav
 
 // Auswertung: alles clientseitig aus feedback_sessions (done) + feedback_answers aggregiert.
 // Gruppierung der Noten über die STABILE question_id. Überall gilt: NIEDRIGER = BESSER (1 beste).
+// Eine Antwort read-only (Snapshot-Wortlaut, Note mit Gesicht/Farbe, Freitext, Folgefragen).
+function FbAnswer({a, hideSection}){
+  var m=FB_GRADE_META[a.grade];
+  return (
+    <div style={{padding:'9px 0',borderBottom:'1px solid var(--border)'}}>
+      {!hideSection && <div style={{fontSize:10,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em'}}>{a.section||''}</div>}
+      <div style={{fontSize:13,fontWeight:600,margin:'2px 0'}}>{a.prompt_snapshot||''}</div>
+      {a.type_snapshot==='grade' && a.grade!=null
+        ? <div style={{display:'flex',alignItems:'center',gap:8}}>
+            <span style={{fontSize:20}}>{m?m.face:''}</span>
+            <span style={{background:fbGradeColor(a.grade),color:'#fff',padding:'2px 9px',borderRadius:6,fontWeight:700,fontSize:12}}>Note {a.grade}</span>
+            <span style={{fontSize:11,color:'var(--muted)'}}>{m?m.label:''} · 1 = beste</span>
+          </div>
+        : (a.answer_text ? <div style={{fontSize:13,whiteSpace:'pre-wrap'}}>{a.answer_text}</div> : <div style={{fontSize:12,color:'var(--muted)',fontStyle:'italic'}}>—</div>)}
+      {a.followup_texts && a.followup_texts.length>0 && <div style={{fontSize:12,color:'#9a3412',marginTop:3}}>{a.followup_prompt_snapshot?(a.followup_prompt_snapshot+': '):''}{a.followup_texts.join(' · ')}</div>}
+    </div>
+  );
+}
+// Ein Gespräch komplett (alle Antworten untereinander) — read-only.
+function FeedbackSessionDetail({session, empName, answers, onClose, onDelete}){
+  const ans=answers.filter(a=>a.session_id===session.id).sort((a,b)=>(a.order_index||0)-(b.order_index||0));
+  const d=session.conducted_at?new Date(session.conducted_at).toLocaleDateString('de-AT'):(session.scheduled_date||'');
+  // Nach Sektion gruppieren (Reihenfolge erhalten) — so stehen Freitext + Note derselben Sektion zusammen.
+  const groups=[]; const gi={};
+  ans.forEach(a=>{ const sec=a.section||'—'; if(gi[sec]==null){ gi[sec]=groups.length; groups.push({sec,items:[]}); } groups[gi[sec]].items.push(a); });
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" style={{width:680,maxWidth:'96vw',maxHeight:'90vh',display:'flex',flexDirection:'column'}} onClick={e=>e.stopPropagation()}>
+        <div className="modal-header"><span className="modal-title">💬 {empName} · {d}</span><button className="btn btn-sm" onClick={onClose}>✕</button></div>
+        <div className="modal-body" style={{padding:'16px 22px',overflowY:'auto'}}>
+          <div style={{fontSize:11,color:'var(--muted)',marginBottom:8}}>Fragetexte wie zum Zeitpunkt des Gesprächs (Snapshot). Nach Abschnitt gruppiert.</div>
+          {ans.length===0?<div className="sp-empty">Keine Antworten.</div>:groups.map((g,ix)=>(
+            <div key={ix} style={{marginBottom:16}}>
+              <div style={{fontSize:12,fontWeight:700,color:'var(--blue)',textTransform:'uppercase',letterSpacing:'.06em',marginBottom:4}}>{g.sec}</div>
+              {g.items.map(a=><FbAnswer key={a.id} a={a} hideSection/>)}
+            </div>
+          ))}
+        </div>
+        <div className="modal-footer" style={{display:'flex',justifyContent:'space-between',padding:'12px 20px'}}>
+          {onDelete?<button className="btn btn-sm" style={{color:'var(--red)'}} onClick={()=>onDelete(session)}>Gespräch löschen</button>:<span/>}
+          <button className="btn btn-sm" onClick={onClose}>Schließen</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+// Komplette Historie eines MA: Noten je Frage ÜBER DIE ZEIT (Matrix), Freitexte chronologisch.
+// Jede Zelle trägt im title den damaligen Fragetext (Snapshot), die Zeile das jüngste Label.
+// Verlaufs-Inhalt (Matrix + Freitexte) — EINE Wahrheit, genutzt vom Dashboard-Modal UND vom MA-Tab.
+function FeedbackHistoryContent({empId, sessions, answers, onOpenSession}){
+  const mine=sessions.filter(s=>s.employee_id===empId).sort((a,b)=>((a.conducted_at||a.scheduled_date||'')<(b.conducted_at||b.scheduled_date||'')?-1:1));
+  const ids=mine.map(s=>s.id);
+  const myAns=answers.filter(a=>ids.indexOf(a.session_id)>=0);
+  const dateOf=s=>s.conducted_at?new Date(s.conducted_at).toLocaleDateString('de-AT'):(s.scheduled_date||'');
+  const gq={};
+  myAns.filter(a=>a.type_snapshot==='grade'&&a.grade!=null).forEach(a=>{ const k=a.question_id||a.prompt_snapshot; const r=(gq[k]=gq[k]||{label:a.prompt_snapshot,section:a.section,cells:{}}); r.cells[a.session_id]={grade:a.grade,prompt:a.prompt_snapshot}; r.label=a.prompt_snapshot; r.section=a.section; });
+  const gRows=Object.keys(gq).map(k=>gq[k]);
+  const texts=myAns.filter(a=>a.type_snapshot==='text'&&(a.answer_text||'').trim()).map(a=>{ const s=mine.find(x=>x.id===a.session_id); return {a,d:s?(s.conducted_at||s.scheduled_date||''):''}; }).sort((x,y)=>(y.d>x.d?1:-1));
+  if(!mine.length) return <div className="sp-empty">Noch keine Feedbackgespräche geführt.</div>;
+  return (
+    <div>
+      <div style={{fontSize:11,color:'var(--muted)',marginBottom:10}}>Noten je Frage über die Zeit — <b>niedriger = besser</b> (grün→rot). Spaltenkopf öffnet das Gespräch; Zelle zeigt den damaligen Fragetext.</div>
+      {gRows.length===0?<div style={{fontSize:12,color:'var(--muted)'}}>Noch keine bewerteten Gespräche.</div>:(
+        <div style={{overflowX:'auto'}}>
+          <table style={{borderCollapse:'collapse',fontSize:13,width:'100%'}}>
+            <thead><tr>
+              <th style={{textAlign:'left',padding:'6px 8px',borderBottom:'2px solid var(--border)',position:'sticky',left:0,background:'var(--card)'}}>Frage</th>
+              {mine.map(s=><th key={s.id} style={{padding:'6px 8px',borderBottom:'2px solid var(--border)',cursor:'pointer',whiteSpace:'nowrap',color:'var(--blue)'}} onClick={()=>onOpenSession&&onOpenSession(s)}>{dateOf(s)}</th>)}
+            </tr></thead>
+            <tbody>
+              {gRows.map((r,ri)=><tr key={ri}>
+                <td style={{padding:'6px 8px',borderBottom:'1px solid var(--border)',position:'sticky',left:0,background:'var(--card)'}}>{r.section?<span style={{color:'var(--muted)'}}>{r.section} · </span>:null}{r.label}</td>
+                {mine.map(s=>{ const c=r.cells[s.id]; return <td key={s.id} style={{padding:'6px 8px',borderBottom:'1px solid var(--border)',textAlign:'center'}} title={c?(c.prompt+' → Note '+c.grade):''}>{c?<span style={{display:'inline-block',minWidth:26,background:fbGradeColor(c.grade),color:'#fff',borderRadius:5,fontWeight:700,padding:'2px 6px'}}>{c.grade}</span>:<span style={{color:'var(--muted)'}}>—</span>}</td>; })}
+              </tr>)}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {texts.length>0 && <React.Fragment>
+        <div style={{fontSize:12,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',margin:'16px 0 6px'}}>Freitexte (chronologisch)</div>
+        {texts.map((x,i)=><div key={i} style={{padding:'8px 0',borderBottom:'1px solid var(--border)'}}>
+          <div style={{fontSize:11,color:'var(--muted)'}}>{(x.d||'').slice(0,10)} · {x.a.section?x.a.section+' · ':''}„{x.a.prompt_snapshot}"</div>
+          <div style={{fontSize:13,whiteSpace:'pre-wrap'}}>{x.a.answer_text}</div>
+        </div>)}
+      </React.Fragment>}
+    </div>
+  );
+}
+// Modal-Wrapper fürs Dashboard.
+function FeedbackEmployeeHistory({empId, empName, sessions, answers, onOpenSession, onClose}){
+  const count=sessions.filter(s=>s.employee_id===empId).length;
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" style={{width:820,maxWidth:'97vw',maxHeight:'92vh',display:'flex',flexDirection:'column'}} onClick={e=>e.stopPropagation()}>
+        <div className="modal-header"><span className="modal-title">📈 {empName} — Verlauf ({count} Gespräch{count===1?'':'e'})</span><button className="btn btn-sm" onClick={onClose}>✕</button></div>
+        <div className="modal-body" style={{padding:'16px 20px',overflow:'auto'}}>
+          <FeedbackHistoryContent empId={empId} sessions={sessions} answers={answers} onOpenSession={onOpenSession}/>
+        </div>
+        <div className="modal-footer" style={{display:'flex',justifyContent:'flex-end',padding:'12px 20px'}}><button className="btn btn-sm" onClick={onClose}>Schließen</button></div>
+      </div>
+    </div>
+  );
+}
+// Tab im EmployeeModal — lädt die Historie DIESES MA und erlaubt manuellen Gesprächsstart.
+function FeedbackEmployeeTab({emp, showToast}){
+  const [data,setData]=useState(null);          // {sessions, answers}
+  const [detail,setDetail]=useState(null);
+  const [interview,setInterview]=useState(null);
+  const [questions,setQuestions]=useState([]);
+  async function load(){
+    if(!emp||!emp.id){ setData({sessions:[],answers:[]}); return; }
+    const rs=await sb.from('feedback_sessions').select('*').eq('employee_id',emp.id).eq('status','done');
+    const ids=(rs.data||[]).map(s=>s.id);
+    let ans=[]; if(ids.length){ const ra=await sb.from('feedback_answers').select('*').in('session_id',ids); ans=ra.data||[]; }
+    setData({sessions:rs.data||[], answers:ans});
+  }
+  useEffect(()=>{ load(); sb.from('feedback_questions').select('*').eq('active',true).order('order_index',{ascending:true}).then(r=>setQuestions(r.data||[])); },[emp&&emp.id]);
+  async function startManual(){
+    if(!emp||!emp.id) return;
+    const {data:s,error}=await sb.from('feedback_sessions').insert({employee_id:emp.id,status:'scheduled',source:'manual',scheduled_date:new Date().toISOString().slice(0,10)}).select().single();
+    if(error){ showToast&&showToast('⚠ '+(error.message||''),'error'); return; }
+    setInterview(s);
+  }
+  const empName=emp?emp.first_name+' '+emp.last_name:'';
+  return (
+    <div style={{paddingTop:16}}>
+      <div style={{padding:'11px 13px',background:'var(--surface-2)',borderRadius:8,marginBottom:14,fontSize:12,color:'var(--muted)',lineHeight:1.5}}>
+        <b>Feedbackgespräche</b> = die Sicht des <b>Mitarbeiters</b> auf seine Situation (Zufriedenheit, Rückmeldungen). Hier bewertet <b>er</b> — nicht wir. Das ist <b>nicht</b> die QM-Qualitätsbewertung, die HR über ihn erfasst.
+      </div>
+      <div style={{marginBottom:16}}><button className="btn btn-sm btn-primary" onClick={startManual}>+ Gespräch starten</button></div>
+      {data===null ? <div className="sp-empty">Lade…</div> : <FeedbackHistoryContent empId={emp&&emp.id} sessions={data.sessions} answers={data.answers} onOpenSession={s=>setDetail(s)}/>}
+      {detail && <FeedbackSessionDetail session={detail} empName={empName} answers={data?data.answers:[]} onClose={()=>setDetail(null)}/>}
+      {interview && <FeedbackInterview session={interview} emp={emp} questions={questions} conductorName={'HR'} onClose={()=>setInterview(null)} onDone={()=>{ setInterview(null); load(); }} showToast={showToast}/>}
+    </div>
+  );
+}
 function FeedbackDashboard({employees, projects, showToast}){
   const [data,setData]=useState(null);   // {sessions, answers} | null | 'error'
-  useEffect(()=>{ (async()=>{
+  const [detail,setDetail]=useState(null);   // Gespräch-Detail: session-Objekt
+  const [history,setHistory]=useState(null); // MA-Verlauf: employee_id
+  async function load(){
     const [rs,ra]=await Promise.all([
       sb.from('feedback_sessions').select('*').eq('status','done'),
       sb.from('feedback_answers').select('*')
     ]);
     if(rs.error||ra.error){ showToast&&showToast('⚠ Auswertung laden fehlgeschlagen','error'); setData('error'); return; }
     setData({sessions:rs.data||[], answers:ra.data||[]});
-  })(); },[]);
+  }
+  useEffect(()=>{ load(); },[]);
+  async function deleteSession(s){
+    const nm=(function(){ const e=(employees||[]).find(x=>x&&x.id===s.employee_id); return e?e.first_name+' '+e.last_name:'Mitarbeiter'; })();
+    const dt=s.conducted_at?new Date(s.conducted_at).toLocaleDateString('de-AT'):(s.scheduled_date||'');
+    var n=0; try{ const r=await sb.from('feedback_answers').select('id',{count:'exact',head:true}).eq('session_id',s.id); n=r.count||0; }catch(e2){}
+    const ok=await uiConfirm({title:'Gespräch endgültig löschen', text:'Löscht dieses Gespräch samt allen Antworten — auch aus der Historie des Mitarbeiters im Portal. Nicht umkehrbar.', items:[nm+' · '+dt+' · '+n+' Antwort'+(n===1?'':'en')], danger:true, confirmLabel:'Endgültig löschen'});
+    if(!ok) return;
+    const {error}=await sb.from('feedback_sessions').delete().eq('id',s.id);
+    if(error){ showToast&&showToast('⚠ '+(error.message||''),'error'); return; }
+    setDetail(null); await load(); showToast&&showToast('Gespräch gelöscht');
+  }
   if(data===null) return <div className="sp-empty">Lade Auswertung…</div>;
   if(data==='error') return <div className="sp-empty">Auswertung konnte nicht geladen werden.</div>;
   const {sessions,answers}=data;
@@ -29629,27 +29825,40 @@ function FeedbackDashboard({employees, projects, showToast}){
         </Card>
       </div>
 
-      <Card title="Ausreißer — Mitarbeiter mit schlechtestem Schnitt">
-        {empRows.slice(0,8).map(r=>row(<span>{empName(r.id)} <span style={{color:'var(--muted)',fontSize:11}}>(n={r.n})</span></span>, badge(r.avg)))}
+      <Card title="Ausreißer — Mitarbeiter mit schlechtestem Schnitt (klick → Verlauf)">
+        {empRows.slice(0,8).map(r=>(
+          <div key={r.id} onClick={()=>setHistory(r.id)} style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:10,padding:'7px 0',borderBottom:'1px solid var(--border)',fontSize:13,cursor:'pointer'}}>
+            <span>{empName(r.id)} <span style={{color:'var(--muted)',fontSize:11}}>(n={r.n})</span> <span style={{color:'var(--blue)',fontSize:11}}>›</span></span>
+            {badge(r.avg)}
+          </div>
+        ))}
       </Card>
 
       <Card title="Abdeckung — lange nicht befragt (aktiv)">
-        {stale.length===0?<div style={{fontSize:12,color:'#0F5661'}}>✓ Alle aktiven MA innerhalb 30 Tagen befragt.</div>:stale.slice(0,15).map(x=>row(<span>{x.e.first_name} {x.e.last_name}</span>, <span style={{fontSize:12,color:'var(--muted)'}}>{x.last?('vor '+daysSince(x.last)+' Tagen'):'nie'}</span>))}
+        {stale.length===0?<div style={{fontSize:12,color:'#0F5661'}}>✓ Alle aktiven MA innerhalb 30 Tagen befragt.</div>:stale.slice(0,15).map(x=>(
+          <div key={x.e.id} onClick={()=>setHistory(x.e.id)} style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:10,padding:'7px 0',borderBottom:'1px solid var(--border)',fontSize:13,cursor:'pointer'}}>
+            <span>{x.e.first_name} {x.e.last_name} <span style={{color:'var(--blue)',fontSize:11}}>›</span></span>
+            <span style={{fontSize:12,color:'var(--muted)'}}>{x.last?('vor '+daysSince(x.last)+' Tagen'):'nie'}</span>
+          </div>
+        ))}
       </Card>
 
-      <Card title="Rückmeldungen — Gründe / Lösungsvorschläge">
-        {followups.length===0?<div style={{fontSize:12,color:'var(--muted)'}}>—</div>:followups.map((x,i)=><div key={i} style={{padding:'7px 0',borderBottom:'1px solid var(--border)',fontSize:13}}>
-          <div style={{fontSize:11,color:'var(--muted)'}}>{empName(x.a && sessById[x.a.session_id] && sessById[x.a.session_id].employee_id)} · {(x.d||'').slice(0,10)} · „{x.a.prompt_snapshot}"</div>
+      <Card title="Rückmeldungen — Gründe / Lösungsvorschläge (klick → Gespräch)">
+        {followups.length===0?<div style={{fontSize:12,color:'var(--muted)'}}>—</div>:followups.map((x,i)=>{ const s=sessById[x.a.session_id]; return <div key={i} onClick={()=>s&&setDetail(s)} style={{padding:'7px 0',borderBottom:'1px solid var(--border)',fontSize:13,cursor:s?'pointer':'default'}}>
+          <div style={{fontSize:11,color:'var(--muted)'}}>{empName(s&&s.employee_id)} · {(x.d||'').slice(0,10)} · „{x.a.prompt_snapshot}"</div>
           <div>{(x.a.followup_texts||[]).join(' · ')}</div>
-        </div>)}
+        </div>; })}
       </Card>
 
-      <Card title="Freitext-Rückmeldungen">
-        {freetexts.length===0?<div style={{fontSize:12,color:'var(--muted)'}}>—</div>:freetexts.map((x,i)=><div key={i} style={{padding:'7px 0',borderBottom:'1px solid var(--border)',fontSize:13}}>
-          <div style={{fontSize:11,color:'var(--muted)'}}>{empName(sessById[x.a.session_id]&&sessById[x.a.session_id].employee_id)} · {(x.d||'').slice(0,10)} · „{x.a.prompt_snapshot}"</div>
+      <Card title="Freitext-Rückmeldungen (klick → Gespräch)">
+        {freetexts.length===0?<div style={{fontSize:12,color:'var(--muted)'}}>—</div>:freetexts.map((x,i)=>{ const s=sessById[x.a.session_id]; return <div key={i} onClick={()=>s&&setDetail(s)} style={{padding:'7px 0',borderBottom:'1px solid var(--border)',fontSize:13,cursor:s?'pointer':'default'}}>
+          <div style={{fontSize:11,color:'var(--muted)'}}>{empName(s&&s.employee_id)} · {(x.d||'').slice(0,10)} · „{x.a.prompt_snapshot}"</div>
           <div>{x.a.answer_text}</div>
-        </div>)}
+        </div>; })}
       </Card>
+
+      {detail && <FeedbackSessionDetail session={detail} empName={empName(detail.employee_id)} answers={answers} onClose={()=>setDetail(null)} onDelete={deleteSession}/>}
+      {history && <FeedbackEmployeeHistory empId={history} empName={empName(history)} sessions={sessions} answers={answers} onOpenSession={(s)=>{ setHistory(null); setDetail(s); }} onClose={()=>setHistory(null)}/>}
     </div>
   );
 }
