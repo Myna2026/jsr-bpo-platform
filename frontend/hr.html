@@ -10558,7 +10558,7 @@ function ShiftPauseModal({emp, ds, cell, onSave, onClose}){
           <button className="btn btn-sm" onClick={autoStd} title="1 h Pause in die Mitte des ersten Blocks">↻ Auto: 1 h Mitte</button>
           <div style={{display:'flex',gap:8}}>
             <button className="btn btn-sm" onClick={onClose}>Abbrechen</button>
-            <button className="btn btn-sm btn-primary" onClick={()=>onSave(pauses)}>💾 Speichern</button>
+            <button className="btn btn-sm btn-primary" onClick={()=>{ let out=pauses; if(selStart!=null&&canAdd(selStart,dur)) out=sortP([...pauses,{start:min2hm(selStart),min:dur}]); onSave(out); }}>💾 Speichern{(selStart!=null&&canAdd(selStart,dur))?' (+ gewählte)':''}</button>
           </div>
         </div>
       </div>
@@ -10843,12 +10843,35 @@ function SimpleShiftView({employees, projects, showToast}){
 
   // TAGESANSICHT (Gantt): Uhrzeit × Mitarbeiter, Balken = Schicht (Split = 2 Balken),
   // darunter Besetzungskurve + Soll-Stufe.
-  function dayChart(){
+  function dayChart(interactive){
     const inWeek=daySel&&days.some(d=>isoD(d)===daySel);
     const dsel=inWeek?daySel:(()=>{ const t=isoD(new Date()); return days.some(d=>isoD(d)===t)?t:isoD(days[0]); })();
     const dow=new Date(dsel).getDay();
     const wins=staffingWindowsFor(projId,effSkill,STAFFING_DOW[dow]);
     const rowsData=members.map(emp=>{ const c=cells[emp.id+'|'+dsel]; return {emp, blocks:(c&&c.shift)?shiftBlocks(c.shift):[], cell:c}; });
+    // Pausen-Tab (interactive): Klick auf freie Stelle → PAUSE_QUICK_MIN-Pause an der Klickposition
+    // (auf 30-Min gerundet). Kein Platz/Überlappung → Feinarbeit-Modal statt still verwerfen.
+    const PAUSE_QUICK_MIN=30;
+    function quickPlacePause(emp, cell, startMin){
+      if(!cell||!cell.shift||cell.canceled) return;
+      const b=shiftBlocks(cell.shift).find(x=>startMin>=x.s&&startMin<x.e); if(!b) return;
+      const existing=shiftPausesOf(cell);
+      let lim=b.e; existing.forEach(p=>{ const ps=hm2min(p.start); if(ps>=startMin&&ps<lim) lim=ps; });
+      const dur=Math.min(PAUSE_QUICK_MIN, lim-startMin);
+      const s=startMin, e=startMin+dur;
+      if(dur<10 || existing.some(p=>{ const ps=hm2min(p.start),pe=ps+p.min; return s<pe&&e>ps; })){ setPauseModal({empId:emp.id,ds:dsel,cell}); return; }
+      applyPause(emp.id, dsel, cell, [...existing, {start:min2hm(startMin), min:dur}]);
+    }
+    const noPause = interactive ? rowsData.filter(r=>r.cell&&r.cell.shift&&!r.cell.canceled&&shiftPausesOf(r.cell).length===0) : [];
+    async function autoPauseAll(){
+      if(!noPause.length) return;
+      const ok=await uiConfirm({title:'Pausen setzen', text:PAUSE_QUICK_MIN+'-Minuten-Pause je Schichtmitte für alle ohne Pause:', items:noPause.map(r=>r.emp.first_name+' '+r.emp.last_name), confirmLabel:'Für '+noPause.length+' setzen'});
+      if(!ok) return;
+      for(const r of noPause){ const b=shiftBlocks(r.cell.shift)[0]; if(!b) continue;
+        let s=Math.round((b.s+(b.e-b.s)/2)/30)*30; if(s+PAUSE_QUICK_MIN>b.e)s=b.e-PAUSE_QUICK_MIN; if(s<b.s)s=b.s;
+        await applyPause(r.emp.id, dsel, r.cell, [...shiftPausesOf(r.cell), {start:min2hm(s),min:PAUSE_QUICK_MIN}]);
+      }
+    }
     // Zeitfenster: default 08:00–22:30, weitet sich automatisch bei Schichten/Soll außerhalb.
     let lo=8*60, hi=22*60+30;
     rowsData.forEach(r=>r.blocks.forEach(b=>{ lo=Math.min(lo,b.s); hi=Math.max(hi,b.e); }));
@@ -10875,15 +10898,17 @@ function SimpleShiftView({employees, projects, showToast}){
           {r.blocks.map((b,i)=>{ const col=shiftColorFor(shifts, r.cell&&r.cell.shift); const left=(b.s-lo)/range*100, w=(b.e-b.s)/range*100;
             const cx=r.cell||{}; const canc=!!cx.canceled; const bw=Math.max(1,b.e-b.s);
             const bpauses=canc?[]:shiftPausesOf(cx).map(p=>({s:hm2min(p.start),min:p.min||0})).filter(p=>p.s!=null&&p.s>=b.s&&p.s<b.e);
+            const clickable=interactive&&r.cell&&!canc;
             return <div key={i} className="gt-bar"
-              onClick={e=>{e.stopPropagation(); if(r.cell&&!canc) setPauseModal({empId:r.emp.id,ds:dsel,cell:r.cell});}}
-              style={{left:left+'%',width:w+'%',background:col,cursor:(r.cell&&!canc)?'pointer':'default',opacity:canc?0.45:1,textDecoration:canc?'line-through':'none'}}
-              title={r.emp.first_name+' '+r.emp.last_name+' · '+(cx.label?cx.label+' · ':'')+min2hm(b.s)+'–'+min2hm(b.e)+(canc?(' · ⛔ abgebrochen ('+(ABORT_REASON_LBL[cx.cancel_reason]||'')+')'):(cx.pause_duration?(' · ☕ Pause '+cx.pause_duration+'h · Netto '+cx.net+'h'):' · Klick: Pause eintragen'))}>
+              onClick={clickable?(e=>{ const rect=e.currentTarget.getBoundingClientRect(); const frac=(e.clientX-rect.left)/Math.max(1,rect.width); const mnt=b.s+frac*(b.e-b.s); const snap=Math.max(b.s,Math.min(b.e-10,Math.round(mnt/30)*30)); quickPlacePause(r.emp,r.cell,snap); }):undefined}
+              style={{left:left+'%',width:w+'%',background:col,cursor:clickable?'copy':'default',opacity:canc?0.45:1,textDecoration:canc?'line-through':'none'}}
+              title={r.emp.first_name+' '+r.emp.last_name+' · '+(cx.label?cx.label+' · ':'')+min2hm(b.s)+'–'+min2hm(b.e)+(canc?(' · ⛔ abgebrochen ('+(ABORT_REASON_LBL[cx.cancel_reason]||'')+')'):(cx.pause_duration?(' · ☕ Pause '+cx.pause_duration+'h · Netto '+cx.net+'h'):(clickable?' · Klick setzt 30-Min-Pause':'')))}>
               {w>9?(min2hm(b.s)+'–'+min2hm(b.e)+(canc?' ⛔':(cx.pause_duration?' ☕':''))):''}
-              {bpauses.map((p,pi)=><div key={'p'+pi} title={'Pause '+min2hm(p.s)+'–'+min2hm(p.s+p.min)+' ('+p.min+' min)'}
-                style={{position:'absolute',top:0,bottom:0,left:((p.s-b.s)/bw*100)+'%',width:(Math.min(p.min,b.e-p.s)/bw*100)+'%',
-                background:'repeating-linear-gradient(45deg,rgba(255,255,255,.6),rgba(255,255,255,.6) 3px,transparent 3px,transparent 6px)',
-                borderLeft:'1px solid rgba(0,0,0,.28)',borderRight:'1px solid rgba(0,0,0,.28)'}}/>)}
+              {bpauses.map((p,pi)=>{ const segW=Math.min(p.min,b.e-p.s)/bw*100; return <div key={'p'+pi} title={'Pause '+min2hm(p.s)+'–'+min2hm(p.s+p.min)+' ('+p.min+' min)'+(interactive?' · Klick: bearbeiten':'')}
+                onClick={interactive?(ev=>{ev.stopPropagation(); setPauseModal({empId:r.emp.id,ds:dsel,cell:r.cell});}):undefined}
+                style={{position:'absolute',top:0,bottom:0,left:((p.s-b.s)/bw*100)+'%',width:segW+'%',minWidth:5,
+                background:'rgba(0,0,0,.45)',borderLeft:'1px solid rgba(255,255,255,.9)',borderRight:'1px solid rgba(255,255,255,.9)',
+                display:'flex',alignItems:'center',justifyContent:'center',fontSize:9,cursor:interactive?'pointer':'default'}}>{segW>7?'☕':''}</div>; })}
             </div>;
           })}
         </div>
@@ -10892,6 +10917,15 @@ function SimpleShiftView({employees, projects, showToast}){
     return (
       <div className="gt-wrap">
         <div className="gt-daybar">{days.map((d,i)=>{ const ds=isoD(d); return <button key={i} className={"gt-daybtn"+(ds===dsel?' on':'')} onClick={()=>setDaySel(ds)}>{DOW[i]} {d.getDate()}.</button>; })}</div>
+        {interactive&&anyShift&&(
+          <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',margin:'2px 0 8px',fontSize:12}}>
+            <span style={{color:'var(--muted)'}}>☕ Klick auf einen Balken setzt eine 30-Min-Pause · Klick auf ein Segment öffnet die Feinarbeit.</span>
+            {noPause.length>0
+              ? <React.Fragment><span style={{color:'var(--amber)',fontWeight:600}}>{noPause.length} ohne Pause: {noPause.slice(0,6).map(r=>r.emp.first_name).join(', ')}{noPause.length>6?' …':''}</span>
+                  <button className="btn btn-sm" onClick={autoPauseAll}>☕ 30 min für alle ohne ({noPause.length})</button></React.Fragment>
+              : <span style={{color:'#0F5661',fontWeight:600}}>✓ Alle mit Schicht haben eine Pause</span>}
+          </div>
+        )}
         {!anyShift ? <div className="sp-empty">Keine Dienste an diesem Tag.</div> : (
           <div className="gt-chart">
             <div className="gt-plot">
@@ -10984,7 +11018,7 @@ function SimpleShiftView({employees, projects, showToast}){
           <button className="sp-today" onClick={()=>setWeekStart(mondayOf(new Date()))}>Heute</button>
         </div>
         <div className="sp-seg">
-          {[['table','Tabelle'],['week','Woche'],['day','Tag']].map(([m,l])=>(
+          {[['table','Tabelle'],['week','Woche'],['day','Tag'],['pauses','Pausen']].map(([m,l])=>(
             <button key={m} className={"sp-seg-btn"+(chartMode===m?' on':'')} onClick={()=>setChartMode(m)}>{l}</button>
           ))}
         </div>
@@ -11015,7 +11049,8 @@ function SimpleShiftView({employees, projects, showToast}){
       {!projId ? <div className="sp-empty">Bitte ein Projekt wählen.</div>
        : members.length===0 ? <div className="sp-empty">Keine aktiven Mitarbeiter auf diesem Projekt{effSkill?'/Skill':''}.</div>
        : chartMode==='week' ? <div className="sp-scroll">{weekChart()}</div>
-       : chartMode==='day' ? <div className="sp-scroll">{dayChart()}</div>
+       : chartMode==='day' ? <div className="sp-scroll">{dayChart(false)}</div>
+       : chartMode==='pauses' ? <div className="sp-scroll">{dayChart(true)}</div>
        : (
         <div className="sp-scroll">
           <table className="sp-table">
