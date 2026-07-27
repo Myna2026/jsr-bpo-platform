@@ -6668,6 +6668,7 @@ function PayslipArchiveView({payslips, employees, projects, fmtMonth, eur, onOpe
     const isAbsent=!!todayAbsence;
     const ph=productiveHours(e, _pmonth);   // absent-heute zieht den Monat NICHT auf 0 (Urlaub/Krank schon eingerechnet)
     const _ovh=isOverheadEmp(e);
+    const _company=isCompanyEmp(e);   // Firmenfunktion (CEO/Rezeption …): kein Projektumsatz by design
     const _ovhF=_ovh?(Number(e.overhead_productive_pct)||0)/100:1;
     const _full=empCostEur(e, _pmonth)||0;  // Arbeitgeber-Brutto in EUR (Währungs-Umrechnung)
     const asg=empAssignments(e); const list=asg.length?asg:[{project_id:null,skill:'',share_pct:100}];   // ohne Zuweisung: 1 Zeile (voll)
@@ -6679,14 +6680,16 @@ function PayslipArchiveView({payslips, employees, projects, fmtMonth, eur, onOpe
       const revenue=(br.revenue!=null && _ovh)?Math.round(br.revenue*_ovhF*100)/100:br.revenue;   // Overhead anteilig (Default 0)
       const cost=Math.round(_full*_sh);     // Gehalt anteilig je Zuweisung -> Σ = volles Gehalt
       const margin=revenue==null?null:revenue-cost;
-      return {e,_ai:ai,proj,skill:a.skill,todayAbsence,isAbsent,ph,sharePct:Math.round(_sh*100),revenue,cost,margin,rateLabel:br.rateLabel,missing:br.missing,isFlat:br.flat,isOverhead:_ovh,ovhPct:_ovh?(Number(e.overhead_productive_pct)||0):null};
+      return {e,_ai:ai,proj,skill:a.skill,todayAbsence,isAbsent,ph,sharePct:Math.round(_sh*100),revenue,cost,margin,rateLabel:br.rateLabel,missing:br.missing,isFlat:br.flat,isOverhead:_ovh,ovhPct:_ovh?(Number(e.overhead_productive_pct)||0):null,isCompany:_company,noRev:_company||(_ovh&&(Number(e.overhead_productive_pct)||0)===0)};
     });
   });
 
   const totalRev=rows.reduce((s,r)=>s+(r.revenue||0),0);   // null (kein Satz) nicht als 0 mitzählen
   const totalCost=rows.reduce((s,r)=>s+r.cost,0);
-  const missingCount=rows.filter(r=>r.missing).length;
+  const missingCount=rows.filter(r=>r.missing&&!r.isCompany).length;   // Firmenfunktionen sind KEIN fehlender Satz
   const overheadCount=new Set(rows.filter(r=>r.isOverhead).map(r=>r.e.id)).size;
+  const nonRevEmps=new Set(rows.filter(r=>r.isOverhead||r.isCompany).map(r=>r.e.id));   // Overhead + Firmenfunktionen
+  const nonRevCost=rows.filter(r=>r.isOverhead||r.isCompany).reduce((s,r)=>s+r.cost,0);
   const absentToday=new Set(rows.filter(r=>r.isAbsent).map(r=>r.e.id)).size;
   const lostRev=rows.filter(r=>r.isAbsent).reduce((s,r)=>{
     const wd=workdaysInMonth(_pmonth)||22;
@@ -6696,11 +6699,12 @@ function PayslipArchiveView({payslips, employees, projects, fmtMonth, eur, onOpe
 
   return(
     <div>
-      <div className="grid-4">
+      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:12,marginBottom:14}}>
         {[
           {label:(()=>{const ex=[];if(missingCount>0)ex.push('⚠'+missingCount+' ohne Satz');if(overheadCount>0)ex.push('👔'+overheadCount+' Overhead');return ex.length?('Monatsumsatz · '+ex.join(' · ')):'Monatsumsatz (produktiv)';})(),val:`${Math.round(totalRev).toLocaleString('de-DE')} €`,color:'var(--green)',icon:'💶'},
           {label:'Personalkosten',val:`${totalCost.toLocaleString('de-DE')} €`,color:'var(--red)',icon:'💸'},
           {label:'Deckungsbeitrag',val:`${(totalRev-totalCost).toLocaleString('de-DE')} €`,color:totalRev>=totalCost?'var(--teal)':'var(--red)',icon:'📊'},
+          {label:'Overhead & Firmenfunktionen',val:nonRevEmps.size>0?`${nonRevEmps.size} MA · ${Math.round(nonRevCost).toLocaleString('de-DE')} €`:'—',color:'var(--muted)',icon:'👔'},
           {label:'Ausfall heute',val:absentToday>0?`${absentToday} MA · -${lostRev.toLocaleString('de-DE')} €`:'Kein Ausfall',color:absentToday>0?'var(--amber)':'var(--muted)',icon:'⚠️'},
         ].map((k,i)=>(
           <div key={i} className="kpi">
@@ -6720,13 +6724,14 @@ function PayslipArchiveView({payslips, employees, projects, fmtMonth, eur, onOpe
             <th>Satz</th><th>Umsatz/Mo</th><th>Kosten/Mo</th><th>Marge</th><th>Abwesenheiten</th>
           </tr></thead>
           <tbody>
-            {rows.map(({e,_ai,proj,sharePct,todayAbsence,isAbsent,ph,revenue,cost,margin,rateLabel,missing,isFlat,isOverhead,ovhPct})=>{
+            {rows.map(({e,_ai,proj,sharePct,todayAbsence,isAbsent,ph,revenue,cost,margin,rateLabel,missing,isFlat,isOverhead,ovhPct,isCompany,noRev})=>{
               const warnings=analyzeAbsences(e.absences||[]);
               const hasWarn=warnings.length>0;
+              const missingReal=missing&&!isCompany;   // echter fehlender Satz — Firmenfunktion ist KEIN Fehler
               return(
-                <tr key={e.id+'_'+_ai} style={{background:isAbsent?'rgba(239,68,68,.04)':missing?'var(--amber-bg)':hasWarn?'rgba(245,158,11,.03)':'transparent'}}>
+                <tr key={e.id+'_'+_ai} style={{background:isAbsent?'rgba(239,68,68,.04)':missingReal?'var(--amber-bg)':noRev?'var(--surface-2)':hasWarn?'rgba(245,158,11,.03)':'transparent'}}>
                   <td>
-                    <div style={{fontWeight:500}}>{e.first_name} {e.last_name}{isOverhead&&<span title={'Overhead · '+ovhPct+'% produktiv'} style={{fontSize:10,color:'var(--muted)',marginLeft:5}}>👔{ovhPct}%</span>}{sharePct<100&&<span title="Anteil dieser Zuweisung" style={{fontSize:10,color:'var(--blue)',marginLeft:5}}>{sharePct}%</span>}</div>
+                    <div style={{fontWeight:500}}>{e.first_name} {e.last_name}{isOverhead&&<span title={'Overhead · '+ovhPct+'% produktiv'} style={{fontSize:10,color:ovhPct>0?'var(--amber)':'var(--muted)',fontWeight:700,marginLeft:5}}>👔{ovhPct}%</span>}{isCompany&&<span title="Firmenfunktion — kein Projektumsatz (by design)" style={{fontSize:10,color:'var(--muted)',fontWeight:700,marginLeft:5}}>🏢 Firmenfunktion</span>}{sharePct<100&&<span title="Anteil dieser Zuweisung" style={{fontSize:10,color:'var(--blue)',marginLeft:5}}>{sharePct}%</span>}</div>
                     {hasWarn&&<div style={{fontSize:10,color:'var(--amber)',marginTop:2}}>{warnings[0].msg}</div>}
                   </td>
                   <td>
@@ -6739,7 +6744,7 @@ function PayslipArchiveView({payslips, employees, projects, fmtMonth, eur, onOpe
                   <td style={{fontFamily:'var(--font-mono)',fontSize:12}}>{Math.round(ph.brutto*sharePct/100)}h</td>
                   <td style={{fontFamily:'var(--font-mono)',fontSize:12,fontWeight:600}} title={'Brutto '+Math.round(ph.brutto)+' − Urlaub '+ph.vacH.toFixed(1)+' − Pause '+ph.pauseH.toFixed(1)+' − Krank '+ph.sickH.toFixed(1)+(sharePct<100?(' · Anteil '+sharePct+'%'):'')}>{Math.round(ph.prod*sharePct/100)}h</td>
                   <td style={{fontFamily:'var(--font-mono)',fontSize:11}}>{rateLabel}</td>
-                  <td style={{fontFamily:'var(--font-mono)',fontSize:12,color:missing?'var(--amber)':'var(--green)',fontWeight:600}} title={rateLabel}>{missing?'— (kein Satz)':(Math.round(revenue).toLocaleString('de-DE')+(isFlat?' € · Pauschale/Mo':' €'))}</td>
+                  <td style={{fontFamily:'var(--font-mono)',fontSize:12,color:isCompany?'var(--muted)':missing?'var(--amber)':'var(--green)',fontWeight:600}} title={isCompany?'Firmenfunktion — kein Projektumsatz (by design)':rateLabel}>{isCompany?'— (kein Projektumsatz)':missing?'— (kein Satz)':(Math.round(revenue).toLocaleString('de-DE')+(isFlat?' € · Pauschale/Mo':' €'))}</td>
                   <td style={{fontFamily:'var(--font-mono)',fontSize:12,color:'var(--red)'}}>{cost.toLocaleString('de-DE')} €</td>
                   <td style={{fontFamily:'var(--font-mono)',fontSize:12,fontWeight:600,color:margin==null?'var(--muted)':margin>=0?'var(--teal)':'var(--red)'}}>{margin==null?'—':Math.round(margin).toLocaleString('de-DE')+' €'}</td>
                   <td>
