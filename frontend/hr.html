@@ -9805,24 +9805,31 @@ function shiftHours(value){
   String(value||'').split('|').forEach(p=>{ brutto+=shiftSpanHours(p); });
   return { brutto:r2(brutto), paid:r2(Math.max(0,brutto-0.5)), net:r2(Math.max(0,brutto-1.0)) };
 }
-// Pause an einer Schicht-Zelle setzen (Override der Default-1,0-h-Pause aus shiftHours).
-// Regel (Wahrheit = shiftHours): der Arbeitgeber traegt FIX 0,5 h, der Rest der Pause ist
-// unbezahlt (Mitarbeiter). Also: net = brutto − pause, paid = brutto − min(0,5; pause).
-// pauseHours<=0 (oder gleich Default) → Override entfernen, zurueck auf shiftHours-Default.
-// Liefert eine NEUE Zelle; net/hours werden neu gesetzt, damit Payroll (classifyShiftSurcharges,
-// liest cell.net) und die Ansichten die reduzierte Arbeitszeit uebernehmen.
-function shiftApplyPause(cell, pauseHours){
+// Positionierte Pausen an einer Schicht-Zelle: Liste [{start:'HH:MM', min:Int}].
+// Rechenregel (Wahrheit = shiftHours): der Arbeitgeber traegt FIX 0,5 h auf die SUMME aller
+// Pausen, der Rest ist unbezahlt → net = brutto − Summe, paid = brutto − min(0,5; Summe).
+// pause_duration bleibt als abgeleitete Summe (Stunden) erhalten (Netto-/Anzeige-Kompatibilitaet).
+// Leere Liste → shiftHours-Default (net = brutto − 1,0), kein Positions-Effekt auf die Kurve.
+// net/hours neu gesetzt, damit Payroll (classifyShiftSurcharges liest cell.net) mitzieht.
+function shiftApplyPauses(cell, pauses){
   if(!cell||!cell.shift) return cell;
   const r2=x=>Math.round(x*100)/100;
-  const d=shiftHours(cell.shift);
-  const brutto=d.brutto;
-  const p=r2(Math.min(brutto, Math.max(0, Number(pauseHours)||0)));
-  if(!(p>0) || p===1.0){
-    // Default (1,0 h) oder keine Pause → kein Override speichern
-    const c={...cell, hours:brutto, net:d.net, paid:d.paid}; delete c.pause_duration; return c;
-  }
-  return {...cell, hours:brutto, pause_duration:p,
+  const d=shiftHours(cell.shift), brutto=d.brutto;
+  const list=(pauses||[]).filter(p=>p&&(p.min>0)).slice().sort((a,b)=>hm2min(a.start)-hm2min(b.start));
+  if(!list.length){ const c={...cell, hours:brutto, net:d.net, paid:d.paid}; delete c.pauses; delete c.pause_duration; return c; }
+  const sumMin=list.reduce((a,p)=>a+(p.min||0),0);
+  const p=r2(sumMin/60);
+  return {...cell, hours:brutto, pauses:list, pause_duration:p,
     net:r2(Math.max(0,brutto-p)), paid:r2(Math.max(0,brutto-Math.min(0.5,p)))};
+}
+// Positionierte Pausen einer Zelle (leer bei Legacy-pause_duration ohne Position).
+function shiftPausesOf(cell){ return (cell&&Array.isArray(cell.pauses))?cell.pauses:[]; }
+// Deckt die Zelle die Minute m ab? Ein Block deckt m UND keine positionierte Pause deckt m.
+// Basis der Besetzungskurve (im 10-Min-Raster ausgewertet).
+function shiftCoversAt(cell, m){
+  if(!cell||!cell.shift) return false;
+  if(!shiftBlocks(cell.shift).some(b=>m>=b.s&&m<b.e)) return false;
+  return !shiftPausesOf(cell).some(p=>{ const s=hm2min(p.start); return s!=null && m>=s && m<s+(p.min||0); });
 }
 // Schichtabbruch → Bruchteil-Abwesenheitseintrag am Mitarbeiter (Modell aus setPartialAbsence,
 // verallgemeinert). workedH = bis zum Abbruch gearbeitete Stunden (0 = gar nicht erschienen /
@@ -10450,46 +10457,97 @@ function ShiftAbortModal({emp, ds, cell, onConfirm, onClose}){
     </div>
   );
 }
-// Pause-Dialog (SimpleShiftView, Gantt-Balken): Dauer 1 h / 30 min / ±10 min. Split-Regel wie
-// shiftApplyPause — Arbeitgeber trägt fix 0,5 h, Rest unbezahlt. Netto-Herleitung sichtbar.
+// Pause-Dialog (SimpleShiftView, Gantt-Balken): POSITIONIERTE Pausen. Start im 30-Min-Raster
+// (nur Slots innerhalb der Schichtblöcke), Dauer 10/30/60/individuell. Mehrere Pausen möglich.
+// Validierung: kein Überlauf über Blockende, kein Split-Gap, keine Überlappung. Split-Regel:
+// AG fix 0,5 h auf die SUMME. onSave(pausesArr) → shiftApplyPauses.
 function ShiftPauseModal({emp, ds, cell, onSave, onClose}){
+  const blocks=shiftBlocks(cell&&cell.shift);
   const brutto=shiftHours(cell&&cell.shift).brutto;
-  const maxMin=Math.round(brutto*60);
-  const [pmMin,setPmMin]=React.useState(Math.min(maxMin, Math.round((cell&&cell.pause_duration!=null?cell.pause_duration:1.0)*60)));
-  const clamp=m=>Math.max(0,Math.min(maxMin,m));
-  const p=Math.round(pmMin/60*100)/100;
-  const agH=Math.min(0.5,p), maH=Math.round(Math.max(0,p-0.5)*100)/100;
-  const net=Math.round((brutto-p)*100)/100;
-  const fmtMin=m=>{ const h=Math.floor(m/60), mm=m%60; return (h?h+' h':'')+(h&&mm?' ':'')+(mm?mm+' min':(h?'':'0 min')); };
+  const legacy=(!Array.isArray(cell&&cell.pauses)) && !!(cell&&cell.pause_duration>0);
+  const [pauses,setPauses]=React.useState(()=>(Array.isArray(cell&&cell.pauses)?cell.pauses:[]).map(p=>({start:p.start,min:p.min})));
+  const [selStart,setSelStart]=React.useState(null);   // Minute des gewählten Start-Slots
+  const [dur,setDur]=React.useState(30);               // Minuten
+  const blockOf=min=>blocks.find(b=>min>=b.s&&min<b.e);
+  const overlaps=(s,e)=>pauses.some(p=>{ const ps=hm2min(p.start), pe=ps+p.min; return s<pe&&e>ps; });
+  const maxDurAt=s=>{ const b=blockOf(s); if(!b) return 0; let lim=b.e; pauses.forEach(p=>{ const ps=hm2min(p.start); if(ps>=s&&ps<lim) lim=ps; }); return lim-s; };
+  const canAdd=(s,d)=>{ if(s==null||d<=0) return false; const b=blockOf(s); if(!b) return false; if(s+d>b.e) return false; return !overlaps(s,s+d); };
+  const pauseAt=m=>pauses.find(p=>{ const ps=hm2min(p.start), pe=ps+p.min; return m>=ps&&m<pe; });
+  const sortP=arr=>arr.slice().sort((a,b)=>hm2min(a.start)-hm2min(b.start));
+  const selectSlot=m=>{ setSelStart(m); const md=maxDurAt(m); setDur(d=>Math.min(Math.max(10,d),Math.max(10,md))); };
+  const addPause=()=>{ if(!canAdd(selStart,dur)) return; setPauses(ps=>sortP([...ps,{start:min2hm(selStart),min:dur}])); setSelStart(null); };
+  const removePause=idx=>setPauses(ps=>ps.filter((_,i)=>i!==idx));
+  const autoStd=()=>{ const b=blocks[0]; if(!b) return; let s=Math.round((b.s+(b.e-b.s)/2-30)/30)*30; if(s+60>b.e)s=b.e-60; if(s<b.s)s=b.s; if(canAdd(s,60)) setPauses(ps=>sortP([...ps,{start:min2hm(s),min:60}])); };
+  const sumMin=pauses.reduce((a,p)=>a+(p.min||0),0);
+  const pH=Math.round(sumMin/60*100)/100;
+  const agH=Math.min(0.5,pH), maH=Math.round(Math.max(0,pH-0.5)*100)/100;
+  const net=Math.round((brutto-(sumMin>0?pH:1.0))*100)/100;   // ohne platzierte Pause: Standard 1,0 h
+  const md=selStart!=null?maxDurAt(selStart):0;
+  const DURS=[['10 min',10],['30 min',30],['1 h',60]];
+  const slotBtn=(m)=>{ const pa=pauseAt(m); const sel=selStart===m; const inBlock=!!blockOf(m);
+    return <button key={m} disabled={!inBlock} onClick={()=>{ if(pa){ const idx=pauses.indexOf(pa); removePause(idx); if(sel)setSelStart(null); } else selectSlot(m); }}
+      title={pa?('Pause '+pa.start+' – '+min2hm(hm2min(pa.start)+pa.min)+' · Klick entfernt'):'Startzeit wählen'}
+      style={{minWidth:46,padding:'5px 2px',fontSize:10,fontWeight:700,cursor:inBlock?'pointer':'default',borderRadius:5,
+        border:'1px solid '+(sel?'var(--blue)':pa?'#d97706':'var(--border)'),
+        background:sel?'var(--blue)':pa?'#fde68a':'var(--surface-2)',
+        color:sel?'#fff':pa?'#92400e':'var(--fg)'}}>{min2hm(m)}{pa?' ☕':''}</button>;
+  };
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" style={{width:400}} onClick={e=>e.stopPropagation()}>
-        <div className="modal-header"><span className="modal-title">☕ Pause eintragen</span><button className="btn btn-sm" onClick={onClose}>✕</button></div>
+      <div className="modal" style={{width:480,maxWidth:'95vw'}} onClick={e=>e.stopPropagation()}>
+        <div className="modal-header"><span className="modal-title">☕ Pausen eintragen</span><button className="btn btn-sm" onClick={onClose}>✕</button></div>
         <div className="modal-body" style={{padding:20}}>
-          <div style={{fontSize:13,color:'var(--muted)',marginBottom:16}}>{emp?emp.first_name+' '+emp.last_name+' · ':''}{cell&&(cell.label||cell.shift)} · {brutto} h Brutto</div>
-          <label style={{fontSize:12,fontWeight:700,display:'block',marginBottom:8}}>Pausendauer</label>
-          <div style={{display:'flex',gap:8,marginBottom:12}}>
-            {[['30 min',30],['1 h',60]].map(([l,m])=>(
-              <button key={m} onClick={()=>setPmMin(clamp(m))} style={{flex:1,padding:'7px',fontSize:12,fontWeight:700,cursor:'pointer',borderRadius:6,border:'1px solid '+(pmMin===m?'var(--blue)':'var(--border)'),background:pmMin===m?'var(--blue)':'transparent',color:pmMin===m?'#fff':'var(--muted)'}}>{l}</button>
-            ))}
+          <div style={{fontSize:13,color:'var(--muted)',marginBottom:14}}>{emp?emp.first_name+' '+emp.last_name+' · ':''}{cell&&(cell.label||cell.shift)} · {brutto} h Brutto</div>
+          {legacy&&<div style={{marginBottom:12,padding:'7px 10px',background:'#fff7ed',border:'1px solid #fed7aa',borderRadius:6,fontSize:11,color:'#9a3412'}}>Bisher {cell.pause_duration} h Pause <b>ohne Position</b> — bitte platzieren, damit die Besetzungskurve sie berücksichtigt.</div>}
+          <label style={{fontSize:12,fontWeight:700,display:'block',marginBottom:6}}>1 · Startzeit wählen <span style={{fontWeight:400,color:'var(--muted)'}}>(30-Min-Raster, nur innerhalb der Schicht)</span></label>
+          {blocks.map((b,bi)=>(
+            <div key={bi} style={{marginBottom:8}}>
+              {blocks.length>1&&<div style={{fontSize:10,color:'var(--muted)',marginBottom:3}}>Block {min2hm(b.s)}–{min2hm(b.e)}</div>}
+              <div style={{display:'flex',flexWrap:'wrap',gap:4}}>{(()=>{const out=[];for(let m=b.s;m<b.e;m+=30)out.push(slotBtn(m));return out;})()}</div>
+            </div>
+          ))}
+          {selStart!=null&&<div style={{marginTop:10,padding:'10px 12px',background:'var(--surface-2)',borderRadius:8}}>
+            <label style={{fontSize:12,fontWeight:700,display:'block',marginBottom:6}}>2 · Dauer ab {min2hm(selStart)} <span style={{fontWeight:400,color:'var(--muted)'}}>(max. {md} min bis Blockende/nächste Pause)</span></label>
+            <div style={{display:'flex',gap:6,marginBottom:8}}>
+              {DURS.map(([l,m])=>(
+                <button key={m} disabled={m>md} onClick={()=>setDur(m)} style={{flex:1,padding:'6px',fontSize:11,fontWeight:700,cursor:m>md?'not-allowed':'pointer',borderRadius:6,opacity:m>md?0.4:1,
+                  border:'1px solid '+(dur===m?'var(--blue)':'var(--border)'),background:dur===m?'var(--blue)':'transparent',color:dur===m?'#fff':'var(--muted)'}}>{l}</button>
+              ))}
+              <div style={{display:'flex',alignItems:'center',gap:6}}>
+                <button className="btn btn-sm" style={{minWidth:32,fontWeight:700}} onClick={()=>setDur(d=>Math.max(10,d-10))}>−10</button>
+                <span style={{fontSize:13,fontWeight:800,minWidth:46,textAlign:'center'}}>{dur} min</span>
+                <button className="btn btn-sm" style={{minWidth:32,fontWeight:700}} onClick={()=>setDur(d=>Math.min(md,d+10))}>+10</button>
+              </div>
+            </div>
+            <button className="btn btn-sm btn-primary" disabled={!canAdd(selStart,dur)} style={{width:'100%',opacity:canAdd(selStart,dur)?1:0.5}}
+              onClick={addPause}>➕ Pause {min2hm(selStart)}–{min2hm(selStart+dur)} hinzufügen</button>
+          </div>}
+          <div style={{marginTop:12}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}>
+              <label style={{fontSize:12,fontWeight:700}}>Pausen ({pauses.length})</label>
+              {pauses.length>0&&<button onClick={()=>setPauses([])} style={{fontSize:11,color:'var(--red)',background:'none',border:'none',cursor:'pointer'}}>alle entfernen</button>}
+            </div>
+            {pauses.length===0
+              ? <div style={{fontSize:11,color:'var(--muted)',fontStyle:'italic'}}>Noch keine Pause platziert — ohne Platzierung gilt die Standard-Pause (1 h), aber die Besetzungskurve zeigt keinen Einbruch.</div>
+              : <div style={{display:'flex',flexDirection:'column',gap:4}}>
+                  {pauses.map((p,i)=>(<div key={i} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'5px 9px',background:'#fde68a',borderRadius:6,fontSize:12}}>
+                    <span style={{fontWeight:600,color:'#92400e'}}>☕ {p.start}–{min2hm(hm2min(p.start)+p.min)} · {p.min} min</span>
+                    <button onClick={()=>removePause(i)} style={{background:'none',border:'none',cursor:'pointer',color:'#92400e',fontWeight:700}}>✕</button>
+                  </div>))}
+                </div>}
           </div>
-          <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:16,justifyContent:'center'}}>
-            <button className="btn btn-sm" style={{background:'#dc2626',color:'#fff',fontWeight:700,minWidth:40}} onClick={()=>setPmMin(m=>clamp(m-10))}>−10</button>
-            <span style={{fontSize:18,fontWeight:800,minWidth:90,textAlign:'center'}}>{fmtMin(pmMin)}</span>
-            <button className="btn btn-sm" style={{background:'#16a34a',color:'#fff',fontWeight:700,minWidth:40}} onClick={()=>setPmMin(m=>clamp(m+10))}>+10</button>
-          </div>
-          <div style={{padding:'10px 14px',background:'var(--surface-2)',borderRadius:8,fontSize:12}}>
+          <div style={{marginTop:12,padding:'10px 14px',background:'var(--surface-2)',borderRadius:8,fontSize:12}}>
             <div style={{display:'flex',justifyContent:'space-between',marginBottom:4}}><span>Brutto (Anwesenheit):</span><strong>{brutto} h</strong></div>
-            <div style={{display:'flex',justifyContent:'space-between',marginBottom:4}}><span>Pause gesamt:</span><span style={{color:'#dc2626'}}>−{p} h</span></div>
-            <div style={{display:'flex',justifyContent:'space-between',marginBottom:4,fontSize:11,color:'var(--muted)'}}><span>davon Arbeitgeber / Mitarbeiter:</span><span>{agH} h / {maH} h</span></div>
+            <div style={{display:'flex',justifyContent:'space-between',marginBottom:4}}><span>Pause gesamt{sumMin>0?'':' (Standard)'}:</span><span style={{color:'#dc2626'}}>−{sumMin>0?pH:1.0} h</span></div>
+            {sumMin>0&&<div style={{display:'flex',justifyContent:'space-between',marginBottom:4,fontSize:11,color:'var(--muted)'}}><span>davon Arbeitgeber / Mitarbeiter:</span><span>{agH} h / {maH} h</span></div>}
             <div style={{display:'flex',justifyContent:'space-between',fontWeight:700,borderTop:'1px solid var(--border)',paddingTop:4,marginTop:4}}><span>Netto (Arbeitszeit):</span><strong style={{color:'var(--blue)'}}>{net} h</strong></div>
           </div>
         </div>
         <div className="modal-footer" style={{display:'flex',gap:8,justifyContent:'space-between'}}>
-          <button className="btn btn-sm" onClick={()=>onSave(1.0)}>↺ Standard (1 h)</button>
+          <button className="btn btn-sm" onClick={autoStd} title="1 h Pause in die Mitte des ersten Blocks">↻ Auto: 1 h Mitte</button>
           <div style={{display:'flex',gap:8}}>
             <button className="btn btn-sm" onClick={onClose}>Abbrechen</button>
-            <button className="btn btn-sm btn-primary" onClick={()=>onSave(p)}>💾 Speichern</button>
+            <button className="btn btn-sm btn-primary" onClick={()=>onSave(pauses)}>💾 Speichern</button>
           </div>
         </div>
       </div>
@@ -10586,7 +10644,7 @@ function SimpleShiftView({employees, projects, showToast}){
       if(sm&&em){ const s=+sm[1]*60+ +sm[2], e=+em[1]*60+ +em[2]; workedH=Math.max(0,Math.round((e-s)/60*10)/10); }
     }
     const newCell={...cell, canceled:true, cancel_reason:reason, cancel_end:endTime||null, net:workedH, hours:workedH};
-    delete newCell.pause_duration;
+    delete newCell.pause_duration; delete newCell.pauses;
     setCells(p=>({...p,[empId+'|'+ds]:newCell}));
     await shiftUpsertCell(projId,effSkill,empId,ds,newCell,uidRef.current);
     shiftBridgeLocal(projId,effSkill,empId,ds,newCell);
@@ -10635,9 +10693,9 @@ function SimpleShiftView({employees, projects, showToast}){
     noteShiftChange(); setPop(null);
     showToast&&showToast('Abbruch aufgehoben','success');
   }
-  // Pause am Balken (Gantt): pauseHours in Stunden, Split-Regel in shiftApplyPause (AG fix 0,5 h).
-  async function applyPause(empId, ds, cell, pauseHours){
-    const newCell=shiftApplyPause(cell, pauseHours);
+  // Pausen am Balken (Gantt): positionierte Liste [{start,min}], Split-Regel in shiftApplyPauses.
+  async function applyPause(empId, ds, cell, pauses){
+    const newCell=shiftApplyPauses(cell, pauses);
     setCells(p=>({...p,[empId+'|'+ds]:newCell}));
     await shiftUpsertCell(projId,effSkill,empId,ds,newCell,uidRef.current);
     shiftBridgeLocal(projId,effSkill,empId,ds,newCell);
@@ -10725,12 +10783,16 @@ function SimpleShiftView({employees, projects, showToast}){
   function staffingDayStatus(d,wins){
     const ds=isoD(d);
     let anySoll=false, anyUnder=false, anyOver=false;
-    for(let m=0;m<1440;m+=30){
-      const soll=staffingTargetAt(wins,m); if(soll<=0) continue;
+    // 10-Min-Raster (Pausen abziehen). Toleranz: Unterbesetzung faerbt den Tag erst rot, wenn sie
+    // >=30 min AM STUECK besteht — kurze Dips durch Pausen bleiben in der Tageskurve sichtbar,
+    // ueberfaerben aber nicht den ganzen Tag. Ueberbesetzung ohne Toleranz (Pausen erzeugen keine).
+    let underRun=0;
+    for(let m=0;m<1440;m+=10){
+      const soll=staffingTargetAt(wins,m); if(soll<=0){ underRun=0; continue; }   // kein Soll → Run bricht
       anySoll=true;
-      let ist=0; members.forEach(emp=>{ const c=cells[emp.id+'|'+ds]; if(c&&c.shift&&shiftBlocks(c.shift).some(b=>m>=b.s&&m<b.e)) ist++; });
-      if(staffingUnder(ist,soll)) anyUnder=true;
-      else if(staffingOver(ist,soll)) anyOver=true;
+      let ist=0; members.forEach(emp=>{ if(shiftCoversAt(cells[emp.id+'|'+ds], m)) ist++; });
+      if(staffingUnder(ist,soll)){ underRun+=10; if(underRun>=30) anyUnder=true; }
+      else { underRun=0; if(staffingOver(ist,soll)) anyOver=true; }
     }
     if(!anySoll) return null;      // kein Soll gepflegt → keine Warnung
     if(anyUnder) return 'under';   // Unterdeckung zuerst (rot)
@@ -10783,7 +10845,13 @@ function SimpleShiftView({employees, projects, showToast}){
     lo=Math.floor(lo/60)*60; hi=Math.ceil(hi/30)*30; const range=Math.max(30,hi-lo);
     const anyShift=rowsData.some(r=>r.blocks.length);
     const ticks=[]; for(let h=Math.ceil(lo/60);h*60<=hi;h++) ticks.push(h);
-    const slots=[]; for(let m=lo;m<hi;m+=30){ let ist=0; rowsData.forEach(r=>{ if(r.blocks.some(b=>m>=b.s&&m<b.e)) ist++; }); slots.push({m, ist, soll:staffingTargetAt(wins,m)}); }
+    // Besetzung im 10-Min-Raster rechnen (positionierte Pausen abziehen), pro 30-Min-Schritt als
+    // Durchschnitt anzeigen — so dippt eine 10-Min-Pause anteilig statt einen ganzen 30-Min-Block
+    // zu leeren (kein Raster-Artefakt). shiftCoversAt = Block deckt t UND keine Pause deckt t.
+    const slots=[]; for(let m=lo;m<hi;m+=30){ let sum=0,n=0;
+      for(let t=m;t<m+30;t+=10){ let ist=0; rowsData.forEach(r=>{ if(shiftCoversAt(r.cell,t)) ist++; }); sum+=ist; n++; }
+      slots.push({m, ist:n?Math.round(sum/n*10)/10:0, soll:staffingTargetAt(wins,m)}); }
+    const fmtIst=x=>Number.isInteger(x)?String(x):String(Math.round(x*10)/10).replace('.',',');
     const scale=Math.max(1,...slots.map(s=>Math.max(s.ist,s.soll)));
     // Feine senkrechte Linie nur bei voller Stunde (als Track-Hintergrund) — kein Gitternetz.
     const gridBg=(()=>{ if(!ticks.length) return 'none'; const st=[]; ticks.forEach(h=>{ const p=(h*60-lo)/range*100; st.push('transparent '+p+'%','var(--gt-line) '+p+'%','var(--gt-line) calc('+p+'% + 1px)','transparent calc('+p+'% + 1px)'); }); return 'linear-gradient(90deg,'+st.join(',')+')'; })();
@@ -10794,12 +10862,18 @@ function SimpleShiftView({employees, projects, showToast}){
         <div className="gt-name">{r.emp.first_name} {r.emp.last_name}{trainingTag(r.emp)}{shiftIsOverhead(r.emp)&&<span className="wc-pos">{r.emp.position||''}</span>}</div>
         <div className="gt-track" style={{backgroundImage:gridBg}}>
           {r.blocks.map((b,i)=>{ const col=shiftColorFor(shifts, r.cell&&r.cell.shift); const left=(b.s-lo)/range*100, w=(b.e-b.s)/range*100;
-            const cx=r.cell||{}; const canc=!!cx.canceled;
+            const cx=r.cell||{}; const canc=!!cx.canceled; const bw=Math.max(1,b.e-b.s);
+            const bpauses=canc?[]:shiftPausesOf(cx).map(p=>({s:hm2min(p.start),min:p.min||0})).filter(p=>p.s!=null&&p.s>=b.s&&p.s<b.e);
             return <div key={i} className="gt-bar"
               onClick={e=>{e.stopPropagation(); if(r.cell&&!canc) setPauseModal({empId:r.emp.id,ds:dsel,cell:r.cell});}}
               style={{left:left+'%',width:w+'%',background:col,cursor:(r.cell&&!canc)?'pointer':'default',opacity:canc?0.45:1,textDecoration:canc?'line-through':'none'}}
               title={r.emp.first_name+' '+r.emp.last_name+' · '+(cx.label?cx.label+' · ':'')+min2hm(b.s)+'–'+min2hm(b.e)+(canc?(' · ⛔ abgebrochen ('+(ABORT_REASON_LBL[cx.cancel_reason]||'')+')'):(cx.pause_duration?(' · ☕ Pause '+cx.pause_duration+'h · Netto '+cx.net+'h'):' · Klick: Pause eintragen'))}>
-              {w>9?(min2hm(b.s)+'–'+min2hm(b.e)+(canc?' ⛔':(cx.pause_duration?' ☕':''))):''}</div>;
+              {w>9?(min2hm(b.s)+'–'+min2hm(b.e)+(canc?' ⛔':(cx.pause_duration?' ☕':''))):''}
+              {bpauses.map((p,pi)=><div key={'p'+pi} title={'Pause '+min2hm(p.s)+'–'+min2hm(p.s+p.min)+' ('+p.min+' min)'}
+                style={{position:'absolute',top:0,bottom:0,left:((p.s-b.s)/bw*100)+'%',width:(Math.min(p.min,b.e-p.s)/bw*100)+'%',
+                background:'repeating-linear-gradient(45deg,rgba(255,255,255,.6),rgba(255,255,255,.6) 3px,transparent 3px,transparent 6px)',
+                borderLeft:'1px solid rgba(0,0,0,.28)',borderRight:'1px solid rgba(0,0,0,.28)'}}/>)}
+            </div>;
           })}
         </div>
       </div>
@@ -10820,8 +10894,8 @@ function SimpleShiftView({employees, projects, showToast}){
                 <div className="gt-name">Besetzung</div>
                 <div className="gt-track gt-covtrack" style={{backgroundImage:gridBg}}>
                   {slots.map((s,i)=>{ const w=100/slots.length; const under=staffingUnder(s.ist,s.soll); const over=staffingOver(s.ist,s.soll);
-                    return <div key={i} className="gt-covcol" style={{left:(i*w)+'%',width:w+'%'}} title={min2hm(s.m)+' · Ist '+s.ist+(s.soll>0?' / Soll '+s.soll+(under?' · Unterbesetzt':over?' · Überbesetzt':''):'')}>
-                      <div className={"gt-covbar"+(under?' under':over?' over':'')} style={{height:(s.ist/scale*100)+'%'}}>{s.ist>0?s.ist:''}</div>
+                    return <div key={i} className="gt-covcol" style={{left:(i*w)+'%',width:w+'%'}} title={min2hm(s.m)+'–'+min2hm(s.m+30)+' · Ø Ist '+fmtIst(s.ist)+(s.soll>0?' / Soll '+s.soll+(under?' · Unterbesetzt':over?' · Überbesetzt':''):'')}>
+                      <div className={"gt-covbar"+(under?' under':over?' over':'')} style={{height:(s.ist/scale*100)+'%'}}>{s.ist>0?fmtIst(s.ist):''}</div>
                       {s.soll>0&&<div className="gt-sollmark" style={{bottom:(s.soll/scale*100)+'%'}}/>}
                     </div>;
                   })}
