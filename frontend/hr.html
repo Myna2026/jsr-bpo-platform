@@ -645,7 +645,7 @@ textarea.form-input{resize:vertical;min-height:70px}
     if(!Array.isArray(projects)) projects = [];
     var projExists = projects.some(function(p){ return p.id === 'proj_hc_a1b2c3d4'; });
     if(!projExists){
-      projects.push({"id": "proj_hc_a1b2c3d4", "name": "HolidayCheck", "status": "active", "skills": [{"key": "Sales", "label": "Sales", "profiles": ["Agent", "Senior Agent", "ASP", "Teamleiter"]}], "project_profiles": ["Agent", "Senior Agent", "ASP"], "color": "#3b82f6", "created": "2026-05-20"});
+      projects.push({"id": "proj_hc_a1b2c3d4", "name": "HolidayCheck", "status": "active", "skills": [{"key": "Sales", "label": "Sales", "profiles": ["Agent", "Senior Agent", "ASP", "Teamleiter"]}], "color": "#3b82f6", "created": "2026-05-20"});
       localStorage.setItem('jsr_projects_v1', JSON.stringify(projects));
       console.log('JSR: Projekt HolidayCheck angelegt');
     }
@@ -4667,8 +4667,9 @@ function EmployeeModal({emp, projects, employees, onSave, onClose, initialTab, o
               <div style={{borderTop:'1px solid var(--border)',paddingTop:14,marginTop:14}}>
                 <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
                   <span style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em'}}>🏅 Zertifikate & Auszeichnungen</span>
-                  <button className="btn btn-sm" onClick={()=>{
-                    const title=window.prompt('Titel des Zertifikats:');
+                  <button className="btn btn-sm" onClick={async()=>{
+                    const _r=await uiPrompt({title:'Zertifikat hinzufügen', fields:[{key:'title',label:'Titel des Zertifikats'}], confirmLabel:'Hinzufügen'});
+                    const title=_r&&_r.title&&_r.title.trim();
                     if(title){const date=new Date().toISOString().slice(0,10);set('certificates',[...(form.certificates||[]),{title,date,issuer:'TIVE 360°'}]);}
                   }}>+ Hinzufügen</button>
                 </div>
@@ -5906,7 +5907,9 @@ async function classifyShiftSurcharges(emp, month){
       const net=(cell.net!=null?Number(cell.net):shiftHours(value).net)||0; if(!(net>0)) return;
       // Punkt 2: Schicht an einem Abwesenheitstag ist ein Planungsfehler — NICHT ins Ist zaehlen,
       // aber zaehlen + sichtbar machen (Hinweis im Bonus-Modal), damit HR den Plan korrigiert.
-      if((emp.absences||[]).some(a=>absCoversDay(a, ds))){ out.absence_shifts++; return; }
+      // Volltag-Abwesenheit → Schicht raus (Planungsfehler). Teiltag (Bruchteil-Abwesenheit) →
+      // net (= gearbeitete Stunden) zählt anteilig ins Ist (bruchteil-genaues Stundenkonto).
+      if((emp.absences||[]).some(a=>absCoversDay(a, ds)) && absPartialFraction(emp, ds)==null){ out.absence_shifts++; return; }
       out.total_worked_hours+=net;
       const dow=new Date(ds+'T00:00:00').getDay();
       const isSat=dow===6, isSun=dow===0, isHol=holDates.has(ds);
@@ -8002,8 +8005,8 @@ function OrgChart({projects, employees, orgCharts, setOrgCharts}){
     updateChart([...nodes,newNode].map(n=>n.id===parentId?{...n,children:[...n.children,newId]}:n));
     setShowAddNode(null);setNewNodeForm({title:'',skill:'',role:''});
   }
-  function removeNode(nodeId){
-    if(!window.confirm('Bereich löschen?')) return;
+  async function removeNode(nodeId){
+    if(!(await uiConfirm({title:'Bereich löschen', danger:true, confirmLabel:'Löschen'}))) return;
     updateChart(nodes.filter(n=>n.id!==nodeId).map(n=>({...n,children:n.children.filter(c=>c!==nodeId)})));
   }
   function dropEmpOnNode(empId,nodeId){
@@ -8498,7 +8501,7 @@ function PayrollView({employees, projects, showToast}){
 
   async function retractPayslip(slip){
     if(isLocked(slip)){alert('Abrechnung bereits überwiesen — kann nicht zurückgezogen werden.');return;}
-    if(!window.confirm('Abrechnung zurückziehen und löschen?')) return;
+    if(!(await uiConfirm({title:'Abrechnung zurückziehen', text:'Wird zurückgezogen und gelöscht.', danger:true, confirmLabel:'Zurückziehen'}))) return;
     // 27c: Q2(b) — await delete first, danach State-Remove. Kein Optimistic-Remove.
     try{
       await deletePayslipFromDB(slip.id);
@@ -8541,7 +8544,7 @@ function PayrollView({employees, projects, showToast}){
   async function createAllDrafts(){
     const missing=activeEmps.filter(e=>(parseFloat(e.hourly_rate||0)>0||(e.salary_type==='fixed'&&parseFloat(e.fixed_salary||0)>0))&&!getSlip(e.id,selMonth));
     if(!missing.length){alert('Alle Abrechnungen bereits vorhanden.');return;}
-    if(!window.confirm('Entwürfe für '+missing.length+' Mitarbeiter erstellen?')) return;
+    if(!(await uiConfirm({title:'Entwürfe erstellen', items:[missing.length+' Mitarbeiter'], confirmLabel:'Erstellen'}))) return;
     // 27c: Q3(a) — Promise.all mit einzelnem catch pro Save, Summary-Toast am Ende.
     const results = await Promise.all(missing.map(async emp => {
       const s = calcSalary(emp);
@@ -8590,7 +8593,7 @@ function PayrollView({employees, projects, showToast}){
   async function confirmAll(){
     const drafts=(payslips[selMonth]||[]).filter(s=>s.status==='draft');
     if(!drafts.length){alert('Keine Entwürfe zum Bestätigen.');return;}
-    if(!window.confirm('Alle '+drafts.length+' Entwürfe bestätigen?')) return;
+    if(!(await uiConfirm({title:'Entwürfe bestätigen', items:[drafts.length+' Entwürfe'], confirmLabel:'Bestätigen'}))) return;
     // 27c: Q3(a) — Promise.all Batch-Confirm.
     const now = new Date().toISOString();
     const results = await Promise.all(drafts.map(async d => {
@@ -8762,7 +8765,7 @@ function PayrollView({employees, projects, showToast}){
       (arr||[]).forEach(r=>{ if(r&&r.emp_id) recs.push({...r, month:r.month||month}); });
     });
     if(!recs.length){ alert('Keine lokalen Lohn-Inputs gefunden.'); return; }
-    if(!window.confirm('In DB übernehmen (Upsert nach emp_id + Monat):\n· '+recs.length+' Lohn-Input-Einträge\n\nBestehende DB-Zeilen werden überschrieben. Fortfahren?')) return;
+    if(!(await uiConfirm({title:'In DB übernehmen', text:'Upsert nach emp_id + Monat — bestehende DB-Zeilen werden überschrieben.', items:[recs.length+' Lohn-Input-Einträge'], confirmLabel:'Übernehmen'}))) return;
     setPayMigBusy(true);
     let ok=0, err=0;
     try{ for(const r of recs){ if(await savePayrollInputToDB(r,true)) ok++; else err++; } }
@@ -8887,7 +8890,7 @@ function PayrollView({employees, projects, showToast}){
             }
           }:null}
           onRetract={!isLocked(previewSlip)?async ()=>{
-            if(!window.confirm('Zurückziehen?'))return;
+            if(!(await uiConfirm({title:'Abrechnung zurückziehen', danger:true, confirmLabel:'Zurückziehen'})))return;
             // 27c: Q2(b) — await delete first, danach State-Remove.
             try{
               await deletePayslipFromDB(previewSlip.id);
@@ -9980,6 +9983,18 @@ function canWorkHoliday(emp){ return !(emp && (emp.work_holidays===false || emp.
 // genehmigten Abwesenheitstage (absCoversDay, deckt Einzeltag- UND Zeitraum-Format ab).
 // Bezahlt/unbezahlt ist hier egal — das steckt auf der Kostenseite (empCostEurForMonth).
 // EINE Zaehlung fuer calcEmpTarget, EmpHoursWidget und das Stundenkonto. Soll = Ergebnis × work_hours.
+// Bruchteil-Abwesenheit an einem Tag: Einzeltag-Absence mit 0<days<1 → abwesender Anteil (frac).
+// Sonst null (keine Absence oder Volltag/mehrtägig). Für bruchteil-genaues Stundenkonto: ein Teiltag
+// fällt nicht mehr ganz raus, sondern zählt anteilig — Soll UND Ist um denselben Anteil (=gearbeitete
+// Stunden), daher überstunden-/lohnneutral.
+function absPartialFraction(emp, ds){
+  const a=((emp&&emp.absences)||[]).find(x=>absCoversDay(x, ds));
+  if(!a) return null;
+  const from=String(a.from||'').slice(0,10), to=String(a.to||a.from||'').slice(0,10);
+  if(from!==ds || to!==ds) return null;     // mehrtägig → wie Volltag behandeln
+  const d=Number(a.days);
+  return (d>0 && d<1) ? d : null;           // nur echter Bruchteil
+}
 function sollWorkdays(emp, ym){
   if(!emp || !ym || ym.length<7) return 0;
   const [y,m]=ym.split('-').map(Number);
@@ -9992,7 +10007,11 @@ function sollWorkdays(emp, ym){
     const dow=d.getDay();
     let ok = !(dow===6 && !canSat) && !(dow===0 && !canSun);
     if(ok && !canHol && holSet.has(ds)) ok=false;
-    if(ok && abs.some(a=>absCoversDay(a, ds))) ok=false;
+    if(ok && abs.some(a=>absCoversDay(a, ds))){
+      const frac=absPartialFraction(emp, ds);
+      if(frac!=null){ c += (1-frac); }   // Teiltag: gearbeiteter Anteil zählt anteilig ins Soll
+      ok=false;                          // in beiden Fällen kein voller Werktag mehr
+    }
     if(ok) c++;
     d.setDate(d.getDate()+1);
   }
@@ -11829,7 +11848,8 @@ function WorkforcePlanningView({employees,projects,showToast}){
     async function runAiPlanning(){
     const apiKey=localStorage.getItem('jsr_anthropic_key');
     if(!apiKey){
-      const k=window.prompt('🤖 Anthropic API-Key eingeben (wird lokal gespeichert):');
+      const _r=await uiPrompt({title:'🤖 Anthropic API-Key', text:'Wird lokal gespeichert.', fields:[{key:'key',label:'API-Key'}], confirmLabel:'Speichern'});
+      const k=_r&&_r.key;
       if(!k||!k.trim()) return;
       localStorage.setItem('jsr_anthropic_key',k.trim());
     }
@@ -12566,8 +12586,8 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
               📥 FC importieren
             </button>
             {hasFc&&<button className="btn btn-sm btn-primary" onClick={()=>setProfileModal('select_vor')}>⚡ Vorplanen</button>}
-            <button className="btn btn-sm" onClick={()=>{
-              if(!window.confirm("Alle Schichten ab heute löschen und neu starten?")) return;
+            <button className="btn btn-sm" onClick={async()=>{
+              if(!(await uiConfirm({title:'Schichten zurücksetzen', text:'Alle Schichten ab heute werden gelöscht und neu gestartet.', danger:true, confirmLabel:'Zurücksetzen'}))) return;
               const u={...plan};const ts=iso(today);
               mdays().forEach(d=>{const ds=iso(d);if(ds<ts) return;
                 planEmpsDisplay.forEach(emp=>{delete u["s_"+emp.id+"_"+ds];
@@ -15446,7 +15466,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                     {!p.locked&&(
                       <div style={{display:'flex',gap:4}}>
                         <button className="btn btn-sm" onClick={e=>{e.stopPropagation();setEditingProfile({...p});setProfileModal('edit');}}>✏️</button>
-                        <button className="btn btn-sm" style={{color:'var(--red)'}} onClick={e=>{e.stopPropagation();if(window.confirm('Profil löschen?')){const np=profiles.filter(x=>x.id!==p.id);setProfiles(np);saveProfiles(np);if(activeProfileId===p.id)setActiveProfileId('default');}}}>🗑</button>
+                        <button className="btn btn-sm" style={{color:'var(--red)'}} onClick={async e=>{e.stopPropagation();if(await uiConfirm({title:'Profil löschen',danger:true,confirmLabel:'Löschen'})){const np=profiles.filter(x=>x.id!==p.id);setProfiles(np);saveProfiles(np);if(activeProfileId===p.id)setActiveProfileId('default');}}}>🗑</button>
                       </div>
                     )}
                   </div>
@@ -15564,7 +15584,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
     }
     setEditQ(null);
   }
-  function del(id){ if(window.confirm('Frage löschen?')) setTestQuestions(qs=>qs.filter(q=>q.id!==id)); }
+  async function del(id){ if(await uiConfirm({title:'Frage löschen',danger:true,confirmLabel:'Löschen'})) setTestQuestions(qs=>qs.filter(q=>q.id!==id)); }
   function moveUp(i){ if(i===0) return; const a=[...testQuestions]; [a[i-1],a[i]]=[a[i],a[i-1]]; setTestQuestions(a); }
   function moveDown(i){ if(i===testQuestions.length-1) return; const a=[...testQuestions]; [a[i],a[i+1]]=[a[i+1],a[i]]; setTestQuestions(a); }
 
@@ -16960,8 +16980,8 @@ Levels: A2, B1, B2, C1, C2. Für Kundenservice ist B2 das Minimum.`;
               {atLeast('selection2')
                 ?<ContractSection cv={form} onContractSaved={contract=>{
                     setForm(f=>({...f, contract, status:'contract'}));
-                  }} onPromote={isHR?()=>{
-                    if(window.confirm('Arbeitsvertrag unterschrieben — CV jetzt zu Mitarbeiter konvertieren?')){
+                  }} onPromote={isHR?async()=>{
+                    if(await uiConfirm({title:'Zu Mitarbeiter konvertieren', text:'Arbeitsvertrag unterschrieben — CV jetzt zu Mitarbeiter konvertieren?', confirmLabel:'Konvertieren'})){
                       onSave({...form, status:'active'});
                     }
                   }:undefined}/>
@@ -17114,7 +17134,7 @@ function CVsView({cvList, setCvList, projects, onPromoteToEmployee, team, showTo
     catch(e){ showToast('⚠ Test speichern fehlgeschlagen: '+(e.message||'DB'),'error'); }
   }
 
-  async function deleteCv(id){ if(!window.confirm('Bewerber löschen?')) return;
+  async function deleteCv(id){ const _c=(cvList||[]).find(x=>x&&x.id===id); if(!(await uiConfirm({title:'Bewerber löschen', text:'Wird endgültig entfernt.', items:[_c?((_c.first_name||'')+' '+(_c.last_name||'')).trim():'Bewerber'], danger:true, confirmLabel:'Löschen'}))) return;
     try{ await deleteCvFromDB(id); }catch(e){ showToast('⚠ Löschen fehlgeschlagen: '+(e.message||'DB'),'error'); } }
 
   const STATUS_NORM={'new':'cv_inbound','test_sent':'cv_inbound','test_done':'cv_accepted','reviewed':'cv_accepted','rejected':'rejected_by_us','accepted':'contract'};
@@ -17416,7 +17436,7 @@ function CandidateShowcase({cvList, projects}){
   }
 
   async function deleteShowcase(id){
-    if(!window.confirm('Showcase löschen?')) return;
+    if(!(await uiConfirm({title:'Showcase löschen', text:'Wird endgültig entfernt.', danger:true, confirmLabel:'Löschen'}))) return;
     const {error}=await sb.from('showcases').delete().eq('id',id);
     if(error){ alert('Fehler beim Löschen: '+(error.message||'unbekannt')); return; }
     setShowcases(s=>s.filter(x=>x.id!==id));
@@ -17725,7 +17745,7 @@ function CandidateShowcase({cvList, projects}){
     }
     setEditArticle(null);
   }
-  function delArticle(id){ if(window.confirm('Artikel löschen?')) setKbData(d=>({...d,articles:d.articles.filter(a=>a.id!==id)})); }
+  async function delArticle(id){ if(await uiConfirm({title:'Artikel löschen',danger:true,confirmLabel:'Löschen'})) setKbData(d=>({...d,articles:d.articles.filter(a=>a.id!==id)})); }
 
   // Simple markdown renderer
   function renderMd(text){
@@ -18199,7 +18219,7 @@ const LANGUAGE_TEST_QUESTIONS = [
       if(!cv) return;
       if(newStatus==='active'){
         // 4a-2: echte Promote (Employee anlegen + CV löschen), nicht nur status:'active'
-        if(window.confirm('CV von '+cv.first_name+' '+cv.last_name+' zu Mitarbeiter konvertieren?')){ onPromoteToEmployee&&onPromoteToEmployee(cv); }
+        if(await uiConfirm({title:'Zu Mitarbeiter konvertieren', text:'CV von '+cv.first_name+' '+cv.last_name+' zu Mitarbeiter konvertieren?', confirmLabel:'Konvertieren'})){ onPromoteToEmployee&&onPromoteToEmployee(cv); }
         return;
       }
       try{ await saveCvToDB({...cv,status:newStatus,status_changed:new Date().toISOString().slice(0,10)}); }
@@ -18287,7 +18307,7 @@ const LANGUAGE_TEST_QUESTIONS = [
               onSave={async updatedCv=>{
                 try{
                   if(updatedCv.status==='active'){
-                    if(window.confirm('CV zu Mitarbeiter konvertieren?')){ onPromoteToEmployee&&onPromoteToEmployee(updatedCv); }
+                    if(await uiConfirm({title:'Zu Mitarbeiter konvertieren', text:'CV jetzt zu Mitarbeiter konvertieren?', confirmLabel:'Konvertieren'})){ onPromoteToEmployee&&onPromoteToEmployee(updatedCv); }
                   } else {
                     await saveCvToDB(updatedCv);
                   }
@@ -19508,9 +19528,7 @@ function ProjectProfitability({projects, employees, forecast, setForecast}){
     });
     const skipLines=Object.entries(skipped).map(([pid,n])=>'· unbekanntes Projekt '+pid+' ('+n+' Einträge)');
     if(!jobs.length && !skipLines.length){ alert('Keine lokalen Ist-Zahlen gefunden.'); return; }
-    if(!window.confirm('In DB übernehmen (Upsert nach Projekt + Monat):\n· '+jobs.length+' Ist-Zahlen-Einträge'
-      +(skipLines.length?'\n\nÜbersprungen (kein passendes Projekt):\n'+skipLines.join('\n'):'')
-      +'\n\nBestehende DB-Zeilen werden überschrieben. Fortfahren?')) return;
+    if(!(await uiConfirm({title:'In DB übernehmen', text:'Upsert nach Projekt + Monat. Bestehende DB-Zeilen werden überschrieben.', items:[jobs.length+' Ist-Zahlen-Einträge', ...skipLines], confirmLabel:'Übernehmen'}))) return;
     setFcMigBusy(true);
     let ok=0, err=0;
     try{ for(const j of jobs){ if(await saveForecastActualToDB(j.pid, j.month, j.vals, true)) ok++; else err++; } }
@@ -20292,8 +20310,8 @@ function LocationsView({employees}){
     try{ const mc=JSON.parse(localStorage.getItem('jsr_location_monthly_v1')||'{}'); costs=!!(mc&&mc[loc.id]&&Object.keys(mc[loc.id]).length); }catch(e){}
     return {emps,spaces,costs};
   }
-  function deactivateLoc(loc){
-    if(!window.confirm('Standort "'+loc.name+'" als inaktiv setzen? Er verschwindet aus Dropdowns und Auswertungen, bleibt aber fuer historische Daten erhalten.')) return;
+  async function deactivateLoc(loc){
+    if(!(await uiConfirm({title:'Standort inaktiv setzen', text:'"'+loc.name+'" verschwindet aus Dropdowns und Auswertungen, bleibt aber für historische Daten erhalten.', confirmLabel:'Inaktiv setzen'}))) return;
     const upd={...loc,active:false};
     setLocations(ls=>ls.map(x=>x.id===loc.id?upd:x));
     saveLocationToDB(upd);
@@ -20303,7 +20321,7 @@ function LocationsView({employees}){
     setLocations(ls=>ls.map(x=>x.id===loc.id?upd:x));
     saveLocationToDB(upd);
   }
-  function deleteLoc(loc){
+  async function deleteLoc(loc){
     const r=locRefs(loc);
     if(r.emps>0||r.spaces>0||r.costs){
       alert('Standort "'+loc.name+'" ist noch referenziert:'
@@ -20313,7 +20331,7 @@ function LocationsView({employees}){
         +'\n\nHartes Loeschen nicht moeglich — setze ihn stattdessen auf inaktiv (Historie bleibt erhalten).');
       return;
     }
-    if(!window.confirm('Standort "'+loc.name+'" endgueltig loeschen? Keine Referenzen gefunden — dies kann nicht rueckgaengig gemacht werden.')) return;
+    if(!(await uiConfirm({title:'Standort löschen', text:'"'+loc.name+'" endgültig löschen. Keine Referenzen gefunden — dies kann nicht rückgängig gemacht werden.', danger:true, confirmLabel:'Löschen'}))) return;
     setLocations(ls=>ls.filter(x=>x.id!==loc.id));
     deleteLocationFromDB(loc.id);
   }
@@ -20322,7 +20340,7 @@ function LocationsView({employees}){
   async function migrateLocationsToDB(){
     let spacesLocal=[]; try{ spacesLocal=JSON.parse(localStorage.getItem('jsr_spaces_v1')||'[]')||[]; }catch(e){}
     const monthCount=Object.values(monthlyCosts).reduce((s,m)=>s+Object.keys(m||{}).length,0);
-    if(!window.confirm('In DB übernehmen (Upsert nach id):\n· '+locations.length+' Standorte\n· '+monthCount+' Monatskosten-Einträge\n· '+spacesLocal.length+' Spaces\n\nBestehende DB-Zeilen mit gleicher id werden überschrieben. Fortfahren?')) return;
+    if(!(await uiConfirm({title:'In DB übernehmen', text:'Upsert nach id. Bestehende DB-Zeilen mit gleicher id werden überschrieben.', items:[locations.length+' Standorte', monthCount+' Monatskosten-Einträge', spacesLocal.length+' Spaces'], confirmLabel:'Übernehmen'}))) return;
     // Alte Space-location_id ('tirana') auf echte Standort-id ('loc_tirana') mappen:
     // 1. schon gueltige id -> behalten, 2. Namensabgleich, 3. 'loc_'+alteId. Sonst null.
     const resolveLocId=(oldId)=>{
@@ -20984,7 +21002,7 @@ function LocationsView({employees}){
                   )}
                   <div style={{display:'flex',gap:6,marginTop:10}}>
                     <button className="btn btn-sm" style={{flex:1}} onClick={e=>{e.stopPropagation();setSpaceModal(space);}}>✏ Bearbeiten</button>
-                    <button className="btn btn-sm" style={{color:'var(--red)'}} onClick={e=>{e.stopPropagation();if(window.confirm('Space löschen?')){setSpaces(ss=>ss.filter(s=>s.id!==space.id));deleteSpaceFromDB(space.id);}}}>×</button>
+                    <button className="btn btn-sm" style={{color:'var(--red)'}} onClick={async e=>{e.stopPropagation();if(await uiConfirm({title:'Space löschen',danger:true,confirmLabel:'Löschen'})){setSpaces(ss=>ss.filter(s=>s.id!==space.id));deleteSpaceFromDB(space.id);}}}>×</button>
                   </div>
                 </div>
               );
@@ -21868,7 +21886,8 @@ function ClientAccountsTab({projects, clients, setClients}){
   }
 
   async function deleteClient(id){
-    if(!window.confirm('Kunden-Account loeschen?')) return;
+    const _c=(clients||[]).find(x=>x&&x.id===id);
+    if(!(await uiConfirm({title:'Kunden-Account löschen', text:'Wird endgültig entfernt.', items:[_c?(_c.company_name||'Kunde'):'Kunde'], danger:true, confirmLabel:'Löschen'}))) return;
     setClients(cs=>cs.filter(c=>c.id!==id));
     try{ await deleteClientAccountFromDB(id); }
     catch(e){ console.error('[25a] deleteClient', e); alert('Fehler beim Löschen: '+(e.message||'DB')); }
@@ -22035,7 +22054,7 @@ function WheelAdminView({employees}){
     loadAll();
   }
   async function delSpecial(id){
-    if(!window.confirm('Sonderaktion löschen?'))return;
+    if(!(await uiConfirm({title:'Sonderaktion löschen',danger:true,confirmLabel:'Löschen'})))return;
     const {error}=await sb.from('wheel_specials').delete().eq('id',id);
     if(error){ console.error('[wheel] delSpecial', error); alert('Löschen fehlgeschlagen.'); return; }
     loadAll();
@@ -22458,7 +22477,7 @@ function MaImportView({projects}){
     // Kein Doppel-Import-Blocker mehr: Re-Import ist gewollt (Merge). Bestätigung mit Plan-Zusammenfassung.
     const nNew=preview.news.length, nUpd=preview.updates.length;
     if(nNew+nUpd===0){ window.alert('Nichts auszuführen: keine neuen und keine zu ergänzenden Datensätze.'); return; }
-    if(!window.confirm('Ausführen?\n'+nNew+' neu anlegen'+(nNew?' (Nr. '+preview.numFrom+'–'+preview.numTo+')':'')+'\n'+nUpd+' bestehende ergänzen (nur leere Felder)\n'+preview.unchanged.length+' unverändert · '+preview.skipped.length+' übersprungen')) return;
+    if(!(await uiConfirm({title:'Import ausführen', items:[nNew+' neu anlegen'+(nNew?' (Nr. '+preview.numFrom+'–'+preview.numTo+')':''), nUpd+' bestehende ergänzen (nur leere Felder)', preview.unchanged.length+' unverändert · '+preview.skipped.length+' übersprungen'], confirmLabel:'Ausführen'}))) return;
     setBusy(true);setErr('');
     let okNew=0, okUpd=0; const fails=[];
     const run=async(list,tag,cnt)=>{
@@ -25271,7 +25290,7 @@ function ProjectsAdminTab({projects, setProjects, clients}){
   }
 
   async function deleteProject(id){
-    if(!window.confirm('Projekt loeschen? Alle Mitarbeiter-Zuordnungen bleiben erhalten.')) return;
+    if(!(await uiConfirm({title:'Projekt löschen', text:'Alle Mitarbeiter-Zuordnungen bleiben erhalten.', danger:true, confirmLabel:'Löschen'}))) return;
     const ok = await deleteProjectFromDB(id);
     if(!ok){ alert('Projekt konnte nicht geloescht werden (siehe Konsole).'); return; }
     setProjects(ps=>ps.filter(p=>p.id!==id));
@@ -25543,48 +25562,6 @@ function ProjectEditModal({project, onSave, onClose, clients}){
 
           {section==='skills'&&(
             <div>
-              {/* Project-level profiles */}
-              <div style={{marginBottom:16,padding:'10px 14px',background:'var(--surface-2)',borderRadius:8,border:'1px solid var(--border)'}}>
-                <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',marginBottom:8,textTransform:'uppercase'}}>
-                  Projekt-übergreifende Rollen (ohne Skill-Zuordnung)
-                </div>
-                <div style={{fontSize:11,color:'var(--muted)',marginBottom:8}}>
-                  z.B. Projektleiter — steht über allen Skills
-                </div>
-                <div style={{display:'flex',flexWrap:'wrap',gap:4,marginBottom:6}}>
-                  {(form.project_profiles||['Projektleiter']).map((p,pi)=>(
-                    <span key={pi} style={{display:'inline-flex',alignItems:'center',gap:3,
-                      background:'#0F566120',border:'1px solid #0F5661',
-                      borderRadius:20,padding:'2px 10px',fontSize:11,fontWeight:600,color:'#0F5661'}}>
-                      {p}
-                      <button type="button"
-                        onClick={()=>setF('project_profiles',(form.project_profiles||[]).filter((_,k)=>k!==pi))}
-                        style={{border:'none',background:'none',cursor:'pointer',color:'#dc2626',fontWeight:800,padding:'0 0 0 2px'}}>×</button>
-                    </span>
-                  ))}
-                </div>
-                <div style={{display:'flex',gap:6}}>
-                  <input id="proj_prof_input" className="form-input" style={{flex:1,fontSize:11,padding:'3px 8px'}}
-                    placeholder="z.B. Projektleiter — Enter zum Hinzufügen"
-                    onKeyDown={e=>{
-                      if(e.key==='Enter'&&e.target.value.trim()){
-                        e.preventDefault();
-                        const val=e.target.value.trim();
-                        setF('project_profiles',[...(form.project_profiles||[]),val]);
-                        e.target.value='';
-                      }
-                    }}/>
-                  <button type="button" className="btn btn-sm" style={{background:'#0F5661',color:'white'}}
-                    onClick={e=>{
-                      const inp=document.getElementById('proj_prof_input');
-                      if(inp&&inp.value.trim()){
-                        setF('project_profiles',[...(form.project_profiles||[]),inp.value.trim()]);
-                        inp.value='';
-                      }
-                    }}>+ Rolle</button>
-                </div>
-              </div>
-
               <div style={{fontSize:12,color:'var(--muted)',marginBottom:14,lineHeight:1.6}}>
                 Skills definieren welche Tätigkeiten in diesem Projekt verfügbar sind und zu welchem Stundensatz sie abgerechnet werden.
                 Mitarbeiter werden einem Skill zugewiesen. Der Stundensatz gilt für die Abrechnung gegenüber dem Kunden.
@@ -26065,8 +26042,8 @@ function SuperAdminView({employees, projects, setProjects, clients, setClients})
     setEditRole(null);
   }
 
-  function deleteRole(id){
-    if(window.confirm('Rolle löschen? Alle zugewiesenen Accounts verlieren ihre Rolle.'))
+  async function deleteRole(id){
+    if(await uiConfirm({title:'Rolle löschen', text:'Alle zugewiesenen Accounts verlieren ihre Rolle.', danger:true, confirmLabel:'Löschen'}))
       setRoles(rs=>rs.filter(r=>r.id!==id));
   }
 
@@ -26380,22 +26357,21 @@ async function loadEmployeesFromDB(){
 }
 
 // Etappe 2: Projekte relational aus Supabase laden + zum verschachtelten Consumer-Shape
-// zusammenbauen (skills[].profiles[], project_profiles[], trainings[] mit tkey->id).
+// zusammenbauen (skills[].profiles[], trainings[] mit tkey->id).
 // Bei Fehler/leer -> null, damit der Caller den synchronen LS-Erstwert behaelt.
 async function loadProjectsFromDB(){
   try{
-    const [pRes, skRes, spRes, prRes, trRes] = await Promise.all([
+    const [pRes, skRes, spRes, trRes] = await Promise.all([
       sb.from('projects').select('*'),
       sb.from('project_skills').select('*'),
       sb.from('project_skill_profiles').select('*'),
-      sb.from('project_profiles').select('*'),
       sb.from('project_trainings').select('*'),
     ]);
-    const err = pRes.error||skRes.error||spRes.error||prRes.error||trRes.error;
+    const err = pRes.error||skRes.error||spRes.error||trRes.error;
     if(err){ console.error('[proj] loadProjectsFromDB', err); return null; }
     const projs = pRes.data||[];
     if(!projs.length) return null;
-    const skills=skRes.data||[], sprofs=spRes.data||[], pprofs=prRes.data||[], trains=trRes.data||[];
+    const skills=skRes.data||[], sprofs=spRes.data||[], trains=trRes.data||[];
     const bySeq=(a,b)=>(a.seq||0)-(b.seq||0);
     return projs.map(p=>({
       ...p,
@@ -26407,7 +26383,6 @@ async function loadProjectsFromDB(){
         training_mode:s.training_mode, training_flat:s.training_flat,
         profiles: sprofs.filter(x=>x.project_id===p.id&&x.skill_key===s.key).sort(bySeq).map(x=>x.label),
       })),
-      project_profiles: pprofs.filter(x=>x.project_id===p.id).sort(bySeq).map(x=>x.label),
       trainings: trains.filter(t=>t.project_id===p.id).sort(bySeq).map(t=>({id:t.tkey, name:t.name, weeks:t.weeks, seq:t.seq})),
     }));
   }catch(e){ console.error('[proj] loadProjectsFromDB', e); return null; }
@@ -26438,7 +26413,7 @@ async function saveProjectToDB(project){
   }
   payload.id = pid;
   // 27x: sichtbare Warnung bei Feldern ohne Spalte (projects hat kein extra → Drop)
-  const PROJECT_HANDLED = new Set(['skills','project_profiles','trainings','id','created_at','quality_ratings']);
+  const PROJECT_HANDLED = new Set(['skills','trainings','id','created_at','quality_ratings']);
   if(!window.__PROJECT_WARNED) window.__PROJECT_WARNED = new Set();
   for(const pk of Object.keys(project)){
     if(PROJECT_COLS.has(pk) || PROJECT_HANDLED.has(pk)) continue;
@@ -26466,15 +26441,12 @@ async function saveProjectToDB(project){
       skillProfileRows.push({project_id: pid, skill_key: s.key, label, seq: pi});
     });
   });
-  const projProfileRows = (Array.isArray(project.project_profiles)?project.project_profiles:[])
-    .map((label,i)=>({project_id: pid, label, seq: i}));
   const trainingRows = (Array.isArray(project.trainings)?project.trainings:[])
     .map((t,i)=>({project_id: pid, tkey: t.id, name: t.name, weeks: t.weeks, seq: i}));
   // 3. je Tabelle: erst delete (scoped), dann insert (nur wenn nicht leer)
   const children = [
     ['project_skills', skillRows],
     ['project_skill_profiles', skillProfileRows],
-    ['project_profiles', projProfileRows],
     ['project_trainings', trainingRows],
   ];
   for(const [table, rows] of children){
@@ -27369,7 +27341,7 @@ let PAY_BY_KEY = {};  // aus salaryData (PayrollView), Key emp_id|month
 // überdauert den Mitarbeiter-Datensatz; Personendaten im Klartext wären ein Löschkonzept-Problem.
 const LOG_PLAINTEXT = new Set(['vacation_days_quota','status','position','project_id','project_skill','location','work_model','work_hours','work_saturday','work_sunday','work_holidays','work_split','shift_earliest','shift_latest','overtime_allowed']);
 // Rauschen/technisch/Arrays → gar nicht diffen.
-const LOG_SKIP = new Set(['id','created_at','updated_at','extra','absences','audios','videos','warnings','project_assignments','bonuses','referrals','quality_ratings','hardware','photo_url','photo_color','staff_number_old','import_source','skills','project_profiles','trainings']);
+const LOG_SKIP = new Set(['id','created_at','updated_at','extra','absences','audios','videos','warnings','project_assignments','bonuses','referrals','quality_ratings','hardware','photo_url','photo_color','staff_number_old','import_source','skills','trainings']);
 const _logEmpty = v => v==null || v==='';
 // Diff old→new ueber die Keys von newObj. Objekte/Arrays → nur "geändert".
 function diffLog(oldObj, newObj){
@@ -27881,14 +27853,10 @@ async function migrateToSupabase25a({dryRun = false, onProgress = null} = {}){
 
   // 4) Confirm (unterschiedlicher Text je nach DB-Zustand)
   const dbHasData = summary.empDb > 0 || summary.clientDb > 0;
-  const confirmMsg = dbHasData
-    ? 'DB hat bereits Datensaetze (' + summary.empDb + ' MAs, ' + summary.clientDb + ' Kunden).\n' +
-      'Migration fuehrt Upsert per id durch — bestehende Zeilen werden ueberschrieben.\n\n' +
-      empLocal.length + ' lokale MAs + ' + clientLocal.length + ' lokale Kunden migrieren?'
-    : 'Migration startet:\n' +
-      empLocal.length + ' Mitarbeiter + ' + clientLocal.length + ' Kunden werden nach Supabase geschrieben.\n\n' +
-      'Fortfahren?';
-  if(!window.confirm(confirmMsg)) return null;
+  const confirmOpts = dbHasData
+    ? {title:'Migration nach Supabase', text:'DB hat bereits Datensätze ('+summary.empDb+' MAs, '+summary.clientDb+' Kunden). Migration führt Upsert per id durch — bestehende Zeilen werden überschrieben.', items:[empLocal.length+' lokale MAs migrieren', clientLocal.length+' lokale Kunden migrieren'], danger:true, confirmLabel:'Migrieren'}
+    : {title:'Migration nach Supabase', text:'Migration startet — Daten werden nach Supabase geschrieben.', items:[empLocal.length+' Mitarbeiter', clientLocal.length+' Kunden'], confirmLabel:'Migrieren'};
+  if(!(await uiConfirm(confirmOpts))) return null;
 
   // 5) Employees zuerst (visuelle Prio)
   for(let i = 0; i < empLocal.length; i++){
@@ -28998,7 +28966,7 @@ function AppUsersView({employees, clients, showToast}){
     if(u.user_id===myUserId) return;                 // Self-Guard (Button ist ohnehin disabled)
     if(u.active && isAdminRole(u.role_keys) && activeAdminCount<=1){ showToast&&showToast('⚠ Letzter aktiver Admin — kann nicht deaktiviert werden.','error'); return; }
     const next=!u.active;
-    if(u.active && !window.confirm('User "'+(u.full_name||u.staff_number||String(u.user_id).slice(0,8))+'" deaktivieren? Der Login wird gesperrt.')) return;
+    if(u.active && !(await uiConfirm({title:'User deaktivieren', text:'Der Login wird gesperrt.', items:[(u.full_name||u.staff_number||String(u.user_id).slice(0,8))], danger:true, confirmLabel:'Deaktivieren'}))) return;
     const {error}=await sb.from('app_users').update({active:next}).eq('user_id', u.user_id);
     if(error){ showToast&&showToast('⚠ Änderung fehlgeschlagen: '+(error.message||'DB'),'error'); return; }
     setUsers(prev=>(prev||[]).map(x=>x.user_id===u.user_id?{...x,active:next}:x));
@@ -30328,7 +30296,7 @@ function App(){
 
   useEffect(()=>{
     if(!localStorage.getItem('jsr_projects_v1')||JSON.parse(localStorage.getItem('jsr_projects_v1')||'[]').length===0){
-      localStorage.setItem('jsr_projects_v1',JSON.stringify([{id:'proj_hc_a1b2c3d4',name:'Holidaycheck Support',status:'active',location:'al',project_profiles:['Projektleiter'],skills:[{key:'support',label:'Support',rate:28,rate_training:18,profiles:['Support Agent','Senior Support Agent','Team Lead Support','Support Trainer','Support QM']},{key:'sales',label:'Sales',rate:32,rate_training:20,profiles:['Sales Agent','Senior Sales Agent','Team Lead Sales','Sales Trainer','Sales QM']}]}]));
+      localStorage.setItem('jsr_projects_v1',JSON.stringify([{id:'proj_hc_a1b2c3d4',name:'Holidaycheck Support',status:'active',location:'al',skills:[{key:'support',label:'Support',rate:28,rate_training:18,profiles:['Support Agent','Senior Support Agent','Team Lead Support','Support Trainer','Support QM']},{key:'sales',label:'Sales',rate:32,rate_training:20,profiles:['Sales Agent','Senior Sales Agent','Team Lead Sales','Sales Trainer','Sales QM']}]}]));
     }
     // Etappe P2: kpi_cfg-Seed entfernt — Quelle ist jetzt Supabase (kpi_config).
     if(!localStorage.getItem('jsr_payroll_cfg_al')){localStorage.setItem('jsr_payroll_cfg_al',JSON.stringify({kv_employer:35.08,kv_employee:30.00,pension_employee_pct:5,pension_employer_pct:5,tax_bracket1_max:250,tax_bracket2_max:450,tax_bracket1_pct:0,tax_bracket2_pct:8,tax_bracket3_pct:10,vacation_days_default:20}));}
@@ -30911,7 +30879,7 @@ function App(){
             <div style={{fontSize:10,color:'#9CA3AF',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={team.role}>{team.role||'Angemeldet'}</div>
           </div>
           <button className="s-logout" title="Abmelden"
-            onClick={async()=>{ if(!window.confirm('Wirklich abmelden?')) return; try{await sb.auth.signOut();}catch(e){} sessionStorage.removeItem('jsr_team'); localStorage.removeItem('jsr_session_v1'); window.location.href=PORTAL_URLS.hr; }}>↩ Abmelden</button>
+            onClick={async()=>{ if(!(await uiConfirm({title:'Abmelden', text:'Wirklich abmelden?', confirmLabel:'Abmelden'}))) return; try{await sb.auth.signOut();}catch(e){} sessionStorage.removeItem('jsr_team'); localStorage.removeItem('jsr_session_v1'); window.location.href=PORTAL_URLS.hr; }}>↩ Abmelden</button>
         </div>
       </div>
 
@@ -30938,7 +30906,7 @@ function App(){
             )}
           </div>
           <button className="topbar-logout-mobile" title="Abmelden"
-            onClick={async()=>{ if(!window.confirm('Wirklich abmelden?')) return; try{await sb.auth.signOut();}catch(e){} sessionStorage.removeItem('jsr_team'); localStorage.removeItem('jsr_session_v1'); window.location.href=PORTAL_URLS.hr; }}>↩ Abmelden</button>
+            onClick={async()=>{ if(!(await uiConfirm({title:'Abmelden', text:'Wirklich abmelden?', confirmLabel:'Abmelden'}))) return; try{await sb.auth.signOut();}catch(e){} sessionStorage.removeItem('jsr_team'); localStorage.removeItem('jsr_session_v1'); window.location.href=PORTAL_URLS.hr; }}>↩ Abmelden</button>
         </div>
         <div className="content">
           <DialogHost/>

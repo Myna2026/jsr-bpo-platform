@@ -4,7 +4,7 @@
 // Faengt die Klasse "verwaiste Referenz": eine Variable/Funktion wird geloescht
 // (z.B. bei einem Aufraeum-Block), Referenzen darauf bleiben stehen. Solche
 // freien Bezeichner sind ein Laufzeit-ReferenceError, aber KEIN Syntaxfehler —
-// balcheck/jsxcheck/syntaxcheck sehen sie nicht.
+// jsxcheck/syntaxcheck sehen sie nicht.
 //
 // Trick: die 20 <script type="text/babel">-Bloecke teilen sich zur Laufzeit EINE
 // globale Scope (eine in Block 3 definierte Funktion wird in Block 11 genutzt).
