@@ -5019,7 +5019,7 @@ function yiqText(hex){
   if([r,g,b].some(n=>isNaN(n))) return '#fff';
   return (r*299+g*587+b*114)/1000 >= 128 ? '#000' : '#fff';
 }
-function EmployeeList({employees, setEmployees, projects, seedSearch, navFilter, onClearNavFilter, onEdit, onAdd, onAbsence, onBonus, onReferral, onQuality, onComm}){
+function EmployeeList({employees, setEmployees, projects, seedSearch, navFilter, onClearNavFilter, canImport, onEdit, onAdd, onAbsence, onBonus, onReferral, onQuality, onComm}){
   const [filter, setFilter] = useState('all');
   const [search, setSearch] = useState('');
   // Datenqualität-Klick: Suche auf den betroffenen MA vorbelegen (Filter zurücksetzen, damit er sichtbar ist).
@@ -5141,6 +5141,7 @@ function EmployeeList({employees, setEmployees, projects, seedSearch, navFilter,
   const [importResult, setImportResult] = useState(null);
 
   function handleEmpImport(file,e){
+    if(!canImport){ alert('Kein Import-Recht für diesen Zugang.'); if(e&&e.target) e.target.value=''; return; }
     if(!file) return;
     const reader=new FileReader();
     reader.onload=ev=>{
@@ -5203,6 +5204,7 @@ function EmployeeList({employees, setEmployees, projects, seedSearch, navFilter,
   }
 
   async function confirmEmpImport(){
+    if(!canImport){ alert('Kein Import-Recht für diesen Zugang.'); setImportResult(null); return; }
     if(!importResult) return;
     const existing=(employees||[]).filter(e=>
       !importResult.imported.find(i=>i.staff_number&&i.staff_number===e.staff_number)
@@ -5259,6 +5261,9 @@ function EmployeeList({employees, setEmployees, projects, seedSearch, navFilter,
             ⬇ Excel ({sorted.length})
           </button>
           <button className="btn btn-green btn-sm" onClick={onAdd}>+ Mitarbeiter</button>
+          {/* Import + Vorlage nur für berechtigte Zugänge (jsr_ma_import_v1). Rendert für andere gar nicht
+              — kein Datei-Input, kein Umweg; zusätzlich prüft der Handler selbst (siehe handleEmpImport). */}
+          {canImport && <React.Fragment>
           <label style={{cursor:'pointer',display:'flex'}}>
             <input type="file" accept=".xlsx,.xls" style={{display:'none'}}
               onChange={e=>handleEmpImport(e.target.files[0],e)}/>
@@ -5272,6 +5277,7 @@ function EmployeeList({employees, setEmployees, projects, seedSearch, navFilter,
             style={{justifyContent:'center',color:'var(--muted)',border:'1px solid var(--border)'}}>
             📋 Vorlage
           </a>
+          </React.Fragment>}
         </div>
       </div>
       {importResult&&(
@@ -6964,6 +6970,9 @@ function saveUserCockpits(obj){ const o=obj||{}; localStorage.setItem('jsr_user_
 const MOBILE_NAV_KEYS = ['start','cockpit','employees','shiftplan','absences'];
 // Gelesen wird der Flag frisch aus der DB (loadConfigFromDB) beim Login + in der Matrix; hier nur Schreiben.
 function saveMobileFull(obj){ const o=obj||{}; localStorage.setItem('jsr_mobile_full_v1', JSON.stringify(o)); saveConfigToDB('jsr_mobile_full_v1', o); }
+// MA-Import-Berechtigung pro Nutzer über jsr_ma_import_v1 = { [user_id]: true } (analog Tab-Sperren).
+// Standard AUS. Gelesen frisch aus der DB beim Login (team.ma_import) + in der Matrix; hier nur Schreiben.
+function saveMaImport(obj){ const o=obj||{}; localStorage.setItem('jsr_ma_import_v1', JSON.stringify(o)); saveConfigToDB('jsr_ma_import_v1', o); }
 function roleForTeam(team){
   if(team && team.access==='all') return 'admin';
   const keys=(team&&team.role_keys)||[];
@@ -28980,6 +28989,7 @@ function HrTabLocksView(){
   const [q,setQ]=useState('');
   const [myUid,setMyUid]=useState(null); // Self-Guard: eigenen hrtablocks-Zugang nicht entziehbar
   const [mobileFull,setMobileFull]=useState({}); // jsr_mobile_full_v1: {user_id:true} = voller mobiler Zugriff
+  const [maImport,setMaImport]=useState({});     // jsr_ma_import_v1: {user_id:true} = MA-Import/Vorlage sichtbar
   useEffect(()=>{
     let alive=true;
     (async()=>{
@@ -28987,9 +28997,11 @@ function HrTabLocksView(){
         const uData=await sb.auth.getUser();
         const m=await loadConfigFromDB('jsr_hr_tab_locks_v1');
         const mf=await loadConfigFromDB('jsr_mobile_full_v1');
+        const mi=await loadConfigFromDB('jsr_ma_import_v1');
         const uRes=await sb.from('app_users').select('user_id, full_name, role_keys, active');
         if(!alive) return;
         setMobileFull((mf&&typeof mf==='object'&&!Array.isArray(mf))?mf:{});
+        setMaImport((mi&&typeof mi==='object'&&!Array.isArray(mi))?mi:{});
         setMyUid(uData&&uData.data&&uData.data.user?uData.data.user.id:null);
         const lm=(m&&typeof m==='object'&&!Array.isArray(m))?{...m}:{};
         const activeUsers=(uRes.data||[]).filter(u=>u&&u.active&&u.user_id&&Array.isArray(u.role_keys)&&u.role_keys.length);
@@ -29024,6 +29036,9 @@ function HrTabLocksView(){
   }
   function toggleMobileFull(uid){
     setMobileFull(prev=>{ const next={...prev}; if(next[uid]) delete next[uid]; else next[uid]=true; saveMobileFull(next); return next; });
+  }
+  function toggleMaImport(uid){
+    setMaImport(prev=>{ const next={...prev}; if(next[uid]) delete next[uid]; else next[uid]=true; saveMaImport(next); return next; });
   }
   const rows=(users||[])
     .filter(u=>{const n=(u.full_name||'').toLowerCase();return !q.trim()||n.includes(q.trim().toLowerCase());})
@@ -29062,6 +29077,9 @@ function HrTabLocksView(){
                   <span style={{color:'var(--muted)',fontSize:11}}> · {(u.role_keys||[]).map(k=>ROLE_LABELS[k]||k).join(', ')}</span>
                   <label style={{display:'inline-flex',alignItems:'center',gap:4,marginLeft:10,fontSize:11,color:mobileFull[u.user_id]?'#0F5661':'var(--muted)',cursor:'pointer',fontWeight:600}} title="Mobil vollen Zugriff geben (sonst nur Cockpit/MA/Schichtplan/Abwesenheiten)">
                     <input type="checkbox" checked={!!mobileFull[u.user_id]} onChange={()=>toggleMobileFull(u.user_id)} style={{cursor:'pointer'}}/>📱 Mobil voll
+                  </label>
+                  <label style={{display:'inline-flex',alignItems:'center',gap:4,marginLeft:10,fontSize:11,color:maImport[u.user_id]?'#0F5661':'var(--muted)',cursor:'pointer',fontWeight:600}} title="MA-Import + Vorlage in der Mitarbeiterliste sichtbar machen (Standard aus)">
+                    <input type="checkbox" checked={!!maImport[u.user_id]} onChange={()=>toggleMaImport(u.user_id)} style={{cursor:'pointer'}}/>📥 Import
                   </label>
                 </td>
                 {HR_LOCKABLE_TABS.map(t=>{
@@ -30789,6 +30807,7 @@ function App(){
       // (identische Daten, Architekturregel), nur team.locked blendet einzelne Tabs aus.
       let hrTabLocks={}; try{ const m=await loadConfigFromDB('jsr_hr_tab_locks_v1'); if(m&&typeof m==='object'&&!Array.isArray(m)) hrTabLocks=m; }catch(e){}
       let mobileFullCfg={}; try{ const mf=await loadConfigFromDB('jsr_mobile_full_v1'); if(mf&&typeof mf==='object'&&!Array.isArray(mf)) mobileFullCfg=mf; }catch(e){}
+      let maImportCfg={}; try{ const mi=await loadConfigFromDB('jsr_ma_import_v1'); if(mi&&typeof mi==='object'&&!Array.isArray(mi)) maImportCfg=mi; }catch(e){}
       const loginPayload = {
         name: au.full_name || session.user.email,
         icon: '⬡',
@@ -30802,6 +30821,7 @@ function App(){
         portals: portals,
         user_id: session.user.id,   // fuer per-User-Cockpits (jsr_user_cockpits_v1) + Tab-Sperren
         mobile_full: !!mobileFullCfg[session.user.id],   // voller mobiler Zugriff (sonst reduziert)
+        ma_import: !!maImportCfg[session.user.id],        // MA-Import/Vorlage sichtbar (Standard aus)
         employee_id: await matchEmployeeToUserSb(session.user.email, au.staff_number),  // 25a: Auto-Match über Supabase
         email: session.user.email
       };
@@ -31514,7 +31534,7 @@ function App(){
           <WorkforcePlanningView employees={employees} projects={projects} showToast={showToast}/>
           </div>
         )}
-          {view==='employees'&&<EmployeeList employees={employees} setEmployees={setEmployees} projects={projects} seedSearch={empSeed} navFilter={navFilter} onClearNavFilter={()=>setNavFilter(null)} onEdit={e=>{setModalTab('hr');setModal(e);}} onAdd={()=>setModal('add')} onAbsence={e=>setAbsenceModal(e)} onBonus={e=>setBonusModal(e)} onReferral={e=>setReferralModal(e)} onQuality={e=>setQualityModal(e)} onComm={e=>setCommModal([e])}/>}
+          {view==='employees'&&<EmployeeList employees={employees} setEmployees={setEmployees} projects={projects} seedSearch={empSeed} navFilter={navFilter} onClearNavFilter={()=>setNavFilter(null)} canImport={!!(team&&team.ma_import)} onEdit={e=>{setModalTab('hr');setModal(e);}} onAdd={()=>setModal('add')} onAbsence={e=>setAbsenceModal(e)} onBonus={e=>setBonusModal(e)} onReferral={e=>setReferralModal(e)} onQuality={e=>setQualityModal(e)} onComm={e=>setCommModal([e])}/>}
           {view==='timetracking'&&(
             <div>
               <div style={{background:'linear-gradient(135deg,#0F5661,#7c3aed)',borderRadius:'var(--r-lg)',padding:'20px 24px',marginBottom:16,display:'flex',alignItems:'center',justifyContent:'space-between',cursor:'pointer',boxShadow:'0 4px 20px rgba(15,86,97,.3)'}}
