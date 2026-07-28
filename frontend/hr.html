@@ -384,12 +384,16 @@ textarea.form-input{resize:vertical;min-height:70px}
 .pay-cards{display:none}
 /* Startseiten-Hinweis „mobile Version" — nur mobil sichtbar (Basis versteckt). Markenfarben (Teal),
    auffällig aber keine Fehlermeldung: getönter Hintergrund + kräftiger Akzent-Rand links. */
-.start-mobile-note{display:none;position:relative;overflow:hidden;min-height:104px;margin-bottom:20px;padding:16px 18px;border-radius:14px;
-  background:linear-gradient(135deg,var(--blue-bg),#e8f3f3);border:1px solid rgba(15,86,97,.25);border-left:5px solid #0F5661;text-align:left}
-.start-net-canvas{position:absolute;inset:0;width:100%;height:100%;display:block;z-index:0;pointer-events:auto}
-.start-mobile-note-inner{position:relative;z-index:1;pointer-events:none}
-.start-mobile-note-h{font-size:17px;font-weight:800;color:#0F5661;margin-bottom:4px}
+/* Mobile-Hinweis nimmt die Kugel-Farbe (Blau #2563eb/#38bdf8) auf, damit Kugel + Kasten zusammen wirken. */
+.start-mobile-note{display:none;margin-bottom:20px;padding:14px 16px;border-radius:12px;
+  background:linear-gradient(135deg,rgba(37,99,235,.10),rgba(56,189,248,.10));border:1px solid rgba(37,99,235,.28);border-left:5px solid #2563eb;text-align:left}
+.start-mobile-note-h{font-size:17px;font-weight:800;color:#2563eb;margin-bottom:4px}
 .start-mobile-note-t{font-size:13px;line-height:1.5;color:var(--text)}
+/* Weltkugel (Gamification, tive360-Optik) — nur mobile Startseite, ÜBER dem Hinweis. Eigene Touch-Fläche. */
+.start-globe{display:none;width:100%;max-width:320px;aspect-ratio:1/1;margin:2px auto 0;touch-action:none;cursor:grab}
+.start-globe-hint{display:none;text-align:center;font-size:12px;color:#2563eb;margin:2px 0 16px;transition:opacity .5s;animation:globeHintPulse 2.4s ease-in-out infinite}
+.start-globe-hint.is-hidden{opacity:0;animation:none}
+@keyframes globeHintPulse{0%,100%{opacity:.55}50%{opacity:1}}
 /* Wirtschaftlichkeit: Zurück-zum-Cockpit nur mobil (Basis versteckt) — Rückweg aus dem Projektkarten-Sprung */
 .prof-back-mobile{display:none;align-items:center;gap:6px;margin-bottom:12px;padding:8px 14px;border-radius:9px;border:1px solid var(--border);background:var(--card);color:#0F5661;font-size:13px;font-weight:700;cursor:pointer}
 .pay-card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px 14px}
@@ -508,6 +512,8 @@ textarea.form-input{resize:vertical;min-height:70px}
   .abs-cards{display:flex;flex-direction:column;gap:10px}
   .pay-cards{display:flex;flex-direction:column;gap:10px}
   .start-mobile-note{display:block}
+  .start-globe{display:block}
+  .start-globe-hint{display:block}
   .prof-back-mobile{display:inline-flex}
   .abs-mobile-month{display:block}
   /* Cockpit: eine Spalte */
@@ -801,74 +807,95 @@ textarea.form-input{resize:vertical;min-height:70px}
 })();
 </script>
 <script>
-/* TIVE Partikelnetz — nur mobile Startseite, hinter dem "Mobile Version"-Hinweis. Vanilla-Canvas, KEIN Babel.
-   Akku:  pausiert bei document.hidden UND wenn der Kasten aus dem Viewport scrollt (IntersectionObserver).
-   Leistung: Punktzahl an Fläche gekoppelt + gedeckelt, DPR<=2, ~30 FPS.
-   Zugänglichkeit: prefers-reduced-motion -> statisches Standbild, keine Loop, keine Vibration. */
+/* TIVE Weltkugel — mobile Startseite, portiert von tive360.de (#sphere). Vanilla-Canvas 2D, KEIN Babel.
+   Ergänzt ggü. Original: Touch-Handling (Original ignoriert Touch via pointerType-Check), Pause bei
+   document.hidden UND IntersectionObserver, größengekoppelte Punktzahl, einmalige Intro-Geste +
+   onInteract-Callback, defensive Vibration.
+   Zugänglichkeit: prefers-reduced-motion -> statisches Standbild, keine Loop, kein Zeiger, keine Vibration. */
 (function(){
   function mount(canvas, opts){
     opts = opts || {};
     var ctx = canvas.getContext('2d'); if(!ctx) return { destroy:function(){} };
+    var reduce = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
     var DPR = Math.min(window.devicePixelRatio||1, 2);
-    var reduced = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
-    var C1='#0d9488', C2='#0F5661', LINE='15,86,97';
-    var LINK=108, GRAB=90, MAXN=70, FRAME=1000/30;
-    var W=0,H=0, parts=[], raf=0, last=0, running=false, visible=!document.hidden, onScreen=true;
-    var pointer={x:null,y:null,active:false};
-    function rnd(a,b){ return a+(b-a)*Math.random(); }
-    function seed(){
-      var n=Math.max(10, Math.min(MAXN, Math.round((W*H)/9000))); parts=[];
-      for(var i=0;i<n;i++) parts.push({x:rnd(0,W),y:rnd(0,H),vx:rnd(-.15,.15),vy:rnd(-.15,.15),r:rnd(1.2,2.4),c:Math.random()<.5?C1:C2});
+    var S = 0, pts = [], ang = 0, raf = 0, running = false, visible = !document.hidden, onScreen = true;
+    var usx = 0, usy = 0, userAct = false, interacted = false, introN = 0;
+    function build(){
+      // Punktzahl an Canvas-Größe koppeln (klein = weniger) + Deckel — schont kleine/ältere Geräte
+      var count = Math.max(80, Math.min(170, Math.round(S * 0.55)));
+      var off = 2/count, inc = Math.PI*(3 - Math.sqrt(5)); pts = [];
+      for(var i=0;i<count;i++){ var y=i*off-1+off/2, r=Math.sqrt(Math.max(0,1-y*y)), phi=i*inc;
+        pts.push({ x:Math.cos(phi)*r, y:y, z:Math.sin(phi)*r, ox:0, oy:0, vx:0, vy:0 }); }
     }
-    function resize(){
-      var r=canvas.getBoundingClientRect(); W=Math.max(1,r.width); H=Math.max(1,r.height);
-      canvas.width=Math.round(W*DPR); canvas.height=Math.round(H*DPR); ctx.setTransform(DPR,0,0,DPR,0,0); seed();
+    function size(){
+      DPR = Math.min(window.devicePixelRatio||1, 2);
+      S = canvas.clientWidth || 260;
+      canvas.width = Math.floor(S*DPR); canvas.height = Math.floor(S*DPR); ctx.setTransform(DPR,0,0,DPR,0,0);
+      build();
     }
-    function step(dt){
-      for(var i=0;i<parts.length;i++){ var p=parts[i]; p.x+=p.vx*dt; p.y+=p.vy*dt;
-        if(pointer.active && pointer.x!=null){ var dx=pointer.x-p.x, dy=pointer.y-p.y, d2=dx*dx+dy*dy;
-          if(d2<GRAB*GRAB){ var d=Math.sqrt(d2)||1, f=(1-d/GRAB)*0.6; p.x+=(dx/d)*f*dt; p.y+=(dy/d)*f*dt; } }
-        if(p.x<0){p.x=0;p.vx*=-1;} else if(p.x>W){p.x=W;p.vx*=-1;}
-        if(p.y<0){p.y=0;p.vy*=-1;} else if(p.y>H){p.y=H;p.vy*=-1;}
+    function drawStep(){
+      ctx.clearRect(0,0,S,S);
+      if(!reduce) ang += 0.004;
+      var cx=S/2, cy=S/2, R=S*0.4;
+      var ca=Math.cos(ang), sa=Math.sin(ang), tilt=0.42, ct=Math.cos(tilt), st=Math.sin(tilt);
+      // Zeiger: echte Nutzer-Berührung, sonst einmalige Intro-Geste (bis zur ersten echten Berührung)
+      var act=false, px=0, py=0;
+      if(userAct){ act=true; px=usx; py=usy; }
+      else if(!reduce && !interacted && introN<120){ var ph=introN/120;
+        px=cx+Math.cos(ph*6.283)*R*0.5; py=cy+Math.sin(ph*6.283*2)*R*0.28; act=true; introN++; }
+      var proj=[], i, b;
+      for(i=0;i<pts.length;i++){
+        var p=pts[i];
+        var x=p.x*ca - p.z*sa, z=p.x*sa + p.z*ca, y=p.y;
+        var y2=y*ct - z*st, z2=y*st + z*ct;
+        var bx=cx+x*R, by=cy+y2*R;
+        if(!reduce){
+          var tx=0, ty=0;
+          if(act){ var AR=R*0.95, dm=Math.hypot(px-bx, py-by);
+            if(dm<AR){ var pull=(1-dm/AR)*0.9; tx=(px-bx)*pull; ty=(py-by)*pull; } }
+          p.vx += (tx-p.ox)*0.06; p.vy += (ty-p.oy)*0.06; p.vx*=0.86; p.vy*=0.86; p.ox+=p.vx; p.oy+=p.vy;
+        } else { p.ox=0; p.oy=0; }
+        proj.push({ sx:bx+p.ox, sy:by+p.oy, z:z2 });
       }
-    }
-    function draw(){
-      ctx.clearRect(0,0,W,H);
-      for(var i=0;i<parts.length;i++) for(var j=i+1;j<parts.length;j++){
-        var a=parts[i],b=parts[j],dx=a.x-b.x,dy=a.y-b.y,d=Math.sqrt(dx*dx+dy*dy);
-        if(d<LINK){ ctx.strokeStyle='rgba('+LINE+','+(0.16*(1-d/LINK)).toFixed(3)+')'; ctx.lineWidth=1;
-          ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke(); }
+      var TH=R*0.32; ctx.lineWidth=1;
+      for(i=0;i<proj.length;i++) for(b=i+1;b<proj.length;b++){
+        var dx=proj[i].sx-proj[b].sx, dy=proj[i].sy-proj[b].sy, d=Math.sqrt(dx*dx+dy*dy);
+        if(d<TH){ var depth=(proj[i].z+proj[b].z)/2; var al=(1-d/TH)*0.20*(0.4+0.6*(depth+1)/2);
+          ctx.strokeStyle='rgba(56,189,248,'+al.toFixed(3)+')';
+          ctx.beginPath(); ctx.moveTo(proj[i].sx,proj[i].sy); ctx.lineTo(proj[b].sx,proj[b].sy); ctx.stroke(); }
       }
-      for(var k=0;k<parts.length;k++){ var p=parts[k]; ctx.globalAlpha=.55; ctx.fillStyle=p.c;
-        ctx.beginPath(); ctx.arc(p.x,p.y,p.r,0,6.2832); ctx.fill(); }
-      ctx.globalAlpha=1;
+      for(i=0;i<proj.length;i++){ var pn=proj[i], t=(pn.z+1)/2, rad=0.8+t*2.2;
+        var cr=Math.round(37+(56-37)*t), cg=Math.round(99+(189-99)*t), cb=Math.round(235+(248-235)*t), pa=0.25+t*0.7;
+        ctx.fillStyle='rgba('+cr+','+cg+','+cb+','+pa.toFixed(3)+')';
+        ctx.beginPath(); ctx.arc(pn.sx,pn.sy,rad,0,6.283); ctx.fill(); }
     }
-    function frame(ts){ raf=requestAnimationFrame(frame); if(!running) return;
-      if(!last) last=ts; var dt=ts-last; if(dt<FRAME) return; last=ts-(dt%FRAME);
-      step(Math.min(dt,50)/16); draw();
-    }
-    function play(){ if(reduced||running||!visible||!onScreen) return; running=true; last=0; raf=requestAnimationFrame(frame); }
+    function frame(){ raf=requestAnimationFrame(frame); if(!running) return; drawStep(); }
+    function play(){ if(reduce||running||!visible||!onScreen) return; running=true; raf=requestAnimationFrame(frame); }
     function pause(){ running=false; if(raf) cancelAnimationFrame(raf); raf=0; }
-    function pt(e){ var r=canvas.getBoundingClientRect(), t=e.touches&&e.touches[0];
-      var cx=t?t.clientX:e.clientX, cy=t?t.clientY:e.clientY; pointer.x=cx-r.left; pointer.y=cy-r.top; pointer.active=true; }
-    function ptEnd(){ pointer.active=false; pointer.x=pointer.y=null; }
-    function onTouch(e){ pt(e); if(!reduced && navigator.vibrate){ try{ navigator.vibrate(8); }catch(_){} } }
+    function markUser(e){ var r=canvas.getBoundingClientRect(), tp=e.touches&&e.touches[0];
+      var X=tp?tp.clientX:e.clientX, Y=tp?tp.clientY:e.clientY; usx=X-r.left; usy=Y-r.top; userAct=true;
+      if(!interacted){ interacted=true; if(opts.onInteract){ try{ opts.onInteract(); }catch(_){} } } }
+    function endUser(){ userAct=false; }
+    function onTouch(e){ markUser(e); if(!reduce && navigator.vibrate){ try{ navigator.vibrate(8); }catch(_){} } }
     function onVis(){ visible=!document.hidden; if(visible) play(); else pause(); }
     var io=null, ro=null;
     if('IntersectionObserver' in window){ io=new IntersectionObserver(function(es){ onScreen=es[0].isIntersecting; if(onScreen) play(); else pause(); },{threshold:0}); io.observe(canvas); }
-    if('ResizeObserver' in window){ ro=new ResizeObserver(resize); ro.observe(canvas); } else window.addEventListener('resize',resize);
+    if('ResizeObserver' in window){ ro=new ResizeObserver(function(){ size(); if(reduce) drawStep(); }); ro.observe(canvas); }
+    else window.addEventListener('resize', function(){ size(); if(reduce) drawStep(); });
     document.addEventListener('visibilitychange',onVis);
-    canvas.addEventListener('mousemove',pt); canvas.addEventListener('mouseleave',ptEnd);
-    canvas.addEventListener('touchstart',onTouch,{passive:true}); canvas.addEventListener('touchmove',pt,{passive:true}); canvas.addEventListener('touchend',ptEnd);
-    resize(); if(reduced) draw(); else play();
+    canvas.addEventListener('mousemove',markUser); canvas.addEventListener('mouseleave',endUser);
+    canvas.addEventListener('touchstart',onTouch,{passive:true}); canvas.addEventListener('touchmove',markUser,{passive:true});
+    canvas.addEventListener('touchend',endUser); canvas.addEventListener('touchcancel',endUser);
+    size(); if(reduce) drawStep(); else play();
     return { destroy:function(){ pause();
-      if(io)io.disconnect(); if(ro)ro.disconnect(); else window.removeEventListener('resize',resize);
+      if(io)io.disconnect(); if(ro)ro.disconnect(); else window.removeEventListener('resize',size);
       document.removeEventListener('visibilitychange',onVis);
-      canvas.removeEventListener('mousemove',pt); canvas.removeEventListener('mouseleave',ptEnd);
-      canvas.removeEventListener('touchstart',onTouch); canvas.removeEventListener('touchmove',pt); canvas.removeEventListener('touchend',ptEnd);
+      canvas.removeEventListener('mousemove',markUser); canvas.removeEventListener('mouseleave',endUser);
+      canvas.removeEventListener('touchstart',onTouch); canvas.removeEventListener('touchmove',markUser);
+      canvas.removeEventListener('touchend',endUser); canvas.removeEventListener('touchcancel',endUser);
     }};
   }
-  window.TIVEParticleNet={mount:mount};
+  window.TIVEGlobe={mount:mount};
 })();
 </script>
 <div id="root"></div><script type="text/babel">const { useState, useEffect, useRef, useMemo, useCallback } = React;
@@ -7396,12 +7423,13 @@ function CockpitGrid({employees, projects, plans, forecast, team, onNavigate}){
 // Klick auf Datensatz → onNavigate(view, query) (Mitarbeiter werden per Namens-Seed gefiltert).
 // ═══ WILLKOMMENS-STARTSEITE: persönliche Begrüßung + Badge-Erklärung ═══
 function WelcomePage({firstName}){
-  // Partikelnetz hinter dem Mobile-Hinweis: nur mobil mounten (Engine ist ein Plain-Script ohne Babel).
-  const netRef = useRef(null);
+  // Weltkugel (tive360-Optik) über dem Mobile-Hinweis: nur mobil mounten (Engine = Plain-Script ohne Babel).
+  const globeRef = useRef(null);
+  const [globeTouched, setGlobeTouched] = useState(false);
   useEffect(()=>{
-    if(!netRef.current || !window.TIVEParticleNet) return;
+    if(!globeRef.current || !window.TIVEGlobe) return;
     if(!(window.matchMedia && window.matchMedia('(max-width:768px)').matches)) return;
-    const ctrl = window.TIVEParticleNet.mount(netRef.current);
+    const ctrl = window.TIVEGlobe.mount(globeRef.current, { onInteract:()=>setGlobeTouched(true) });
     return ()=>{ try{ ctrl && ctrl.destroy(); }catch(_){ } };
   },[]);
   const EXP=[
@@ -7423,13 +7451,12 @@ function WelcomePage({firstName}){
   return (
     <div className="welcome-wrap">
       <div className="welcome-inner">
-        {/* Nur mobil, nur hier: markenfarbener Hinweis, dass die Handy-Ansicht ein Überblick ist. */}
+        {/* Nur mobil: Weltkugel (Gamification) OBEN, darunter der schlichte "Mobile Version"-Hinweis. */}
+        <canvas ref={globeRef} className="start-globe" aria-hidden="true"></canvas>
+        <div className={"start-globe-hint"+(globeTouched?" is-hidden":"")}>👆 Play with me</div>
         <div className="start-mobile-note">
-          <canvas ref={netRef} className="start-net-canvas" aria-hidden="true"></canvas>
-          <div className="start-mobile-note-inner">
-            <div className="start-mobile-note-h">📱 Mobile Version</div>
-            <div className="start-mobile-note-t">Diese Ansicht zeigt bewusst nur einen Auszug der Funktionen, ein Überblick für unterwegs. Zum Arbeiten am Desktop öffnen.</div>
-          </div>
+          <div className="start-mobile-note-h">📱 Mobile Version</div>
+          <div className="start-mobile-note-t">Diese Ansicht zeigt bewusst nur einen Auszug der Funktionen, ein Überblick für unterwegs. Zum Arbeiten am Desktop öffnen.</div>
         </div>
         <div style={{fontSize:44,lineHeight:1}}>👋</div>
         <div className="welcome-eyebrow">Willkommen</div>
