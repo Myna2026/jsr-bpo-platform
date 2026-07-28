@@ -449,6 +449,7 @@ textarea.form-input{resize:vertical;min-height:70px}
 .ckm-proj-n{font-size:24px;font-weight:800;color:#0F5661;font-family:var(--mono)}
 .ckm-proj-sub{font-size:10px;color:var(--muted)}
 .ckm-marge{align-self:flex-start;font-size:11px;font-weight:800;padding:1px 9px;border-radius:99px}
+.ckm-db{font-size:10px;color:var(--muted);margin-top:4px}
 /* Zusammengelegte Projekt-Karte (MA je Projekt + Projekte): volle Breite, Skill-Aufschlüsselung */
 .ckm-projlist{padding:10px;display:flex;flex-direction:column;gap:8px}
 .ckm-projrow{padding:10px 12px;background:var(--surface);border:1px solid var(--border);border-radius:10px}
@@ -8023,6 +8024,7 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
       {/* 2+3) Projekte — Kopfzahl, Skill-Aufschlüsselung und Marge in EINER Karte (früher doppelt) */}
       <div className="ckm-card">
         <div className="ckm-h">Projekte</div>
+        {(()=>{ const mc=payrollCfgMissingCountries(employees); return mc.length>0?<div style={{margin:'0 10px 6px',padding:'7px 10px',borderRadius:8,background:'var(--red-bg)',border:'1px solid var(--red)',fontSize:11,color:'var(--red)',fontWeight:600}}>⚠ Lohn-Sätze für {mc.join(', ')} fehlen: AG-Kosten zu niedrig, Marge zu hoch. System → 💶 Pauschalen.</div>:null; })()}
         <div className="ckm-projlist">
           {projects.map(p=>{
             const projActive=active.filter(e=>e.project_id===p.id);
@@ -8033,8 +8035,9 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
             projActive.forEach(e=>{ const k=e.project_skill||'—'; bySkill[k]=(bySkill[k]||0)+1; });
             const skLabel=k=>{ const s=(p.skills||[]).find(x=>x.key===k); return s?(s.label||s.key):k; };
             const rev=Math.round((_planRev[p.id]&&_planRev[p.id].revenue)||0);
-            const cost=projActive.reduce((s,e)=>s+(empCostEurForMonth(e,ym)||0),0)+inTraining.filter(e=>e.project_id===p.id).reduce((s,e)=>s+(empCostEurForMonth(e,ym)||0),0);
-            const mg=rev>0?Math.round((rev-cost)/rev*100):null;
+            const _ac=projectAutoCostsForMonth(p.id, ym, employees, projects);   // Vollkosten inkl. Umlagen
+            const _wf=projectDbWaterfall(_ac, rev);
+            const mg=_wf.mgIV;
             const mgc=mg==null?'var(--muted)':mg>=20?'#059669':mg>=10?'#d97706':'#dc2626';
             return (
               <div key={p.id} className="ckm-projrow" style={{cursor:'pointer'}} onClick={()=>onNavigate&&onNavigate({kind:'view',view:'profitability',projSel:p.id})} title="Zur Wirtschaftlichkeit">
@@ -8043,8 +8046,9 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
                     <div className="ckm-proj-name">{p.name} <span className="ckm-arrow">→</span></div>
                     <div><span className="ckm-proj-n">{n}</span> <span className="ckm-proj-sub">aktiv{t>0?' · +'+t+' Schulung':''}</span></div>
                   </div>
-                  <span className="ckm-marge" style={{background:mgc+'1f',color:mgc}}>{mg==null?'Marge — (ohne Umlagen)':'Marge '+mg+'% (ohne Umlagen)'}</span>
+                  <span className="ckm-marge" style={{background:mgc+'1f',color:mgc}}>{mg==null?'Marge —':'Marge '+mg+'%'}</span>
                 </div>
+                {rev>0&&<div className="ckm-db">DB I {_wf.mgI}% · II {_wf.mgII}% · III {_wf.mgIII}% · IV <b>{_wf.mgIV}%</b></div>}
                 {Object.keys(bySkill).length>0 && <div className="ckm-projrow-skills">
                   {Object.entries(bySkill).map(([k,c])=><span key={k} className="ckm-skill"><b>{c}</b> {skLabel(k)}</span>)}
                 </div>}
@@ -8416,15 +8420,16 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
         {hasW('projekte_karte') && <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--r-lg)',overflow:'hidden'}}>
           <div style={{padding:'10px 14px',borderBottom:'1px solid var(--border)',fontSize:12,fontWeight:600}}>Projekte</div>
           {_fxMissingCk&&<div style={{padding:'8px 14px',borderBottom:'1px solid var(--border)',fontSize:11,color:'var(--red)',fontWeight:600,background:'var(--red-bg)'}}>⚠ Kein Wechselkurs für {_cockpitYm}: LEK-Gehälter fehlen in den Kosten (kein 1:1). Unter System → 💱 Wechselkurse pflegen.</div>}
+          {(()=>{ const mc=payrollCfgMissingCountries(employees); return mc.length>0?<div style={{padding:'8px 14px',borderBottom:'1px solid var(--border)',fontSize:11,color:'var(--red)',fontWeight:600,background:'var(--red-bg)'}}>⚠ Lohn-Sätze für {mc.join(', ')} fehlen: Arbeitgeberkosten (AG-Sozial) mit Platzhaltern, Marge zu hoch. System → 💶 Pauschalen & Steuer.</div>:null; })()}
           {/* Redesign: große Kacheln, auf einen Blick — Besetzung groß, Marge als Ampel; keine Roh-€ */}
           <div style={{padding:12,display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(150px,1fr))',gap:10}}>
             {projects.map(p=>{
               const n=active.filter(e=>e.project_id===p.id).length;
               const t=inTraining.filter(e=>e.project_id===p.id).length;
               const rev=Math.round((_planRevMap[p.id]&&_planRevMap[p.id].revenue)||0);
-              const cost=active.filter(e=>e.project_id===p.id).reduce((s,e)=>s+(empCostEurForMonth(e,_cockpitYm)||0),0)+
-                inTraining.filter(e=>e.project_id===p.id).reduce((s,e)=>s+(empCostEurForMonth(e,_cockpitYm)||0),0);
-              const mg=rev>0?Math.round((rev-cost)/rev*100):null;
+              const _ac=projectAutoCostsForMonth(p.id, _cockpitYm, employees, projects);   // Vollkosten inkl. Umlagen
+              const _wf=projectDbWaterfall(_ac, rev);
+              const mg=_wf.mgIV;
               const mgColor=mg==null?'var(--muted)':mg>=20?'#059669':mg>=10?'#d97706':'#dc2626';
               return(
                 <div key={p.id} onClick={()=>onNavigate&&onNavigate({kind:'view',view:'profitability',projSel:p.id})} title="Zur Wirtschaftlichkeit"
@@ -8435,6 +8440,7 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
                     <span style={{fontSize:11,color:'var(--muted)'}}>aktiv{t>0?' · +'+t+' Schulung':''}</span>
                   </div>
                   <span style={{alignSelf:'flex-start',fontSize:12,fontWeight:800,padding:'2px 10px',borderRadius:99,background:mgColor+'1f',color:mgColor}}>{mg==null?'Marge —':'Marge '+mg+'%'}</span>
+                  {rev>0&&<div style={{fontSize:10,color:'var(--muted)'}}>DB I {_wf.mgI}% · IV <b>{_wf.mgIV}%</b></div>}
                 </div>
               );
             })}
@@ -10816,6 +10822,91 @@ function empAssignments(emp){
 }
 // Kopf-Anteil eines MA auf einem Projekt (Σ share_pct der Zuweisungen auf pid)/100.
 function empProjShare(emp, pid){ return empAssignments(emp).filter(a=>a.project_id===pid).reduce((s,a)=>s+(Number(a.share_pct)||0),0)/100; }
+
+// ── VOLLKOSTEN je MA/Monat (Arbeitgeber-Gesamtkosten, EUR) ───────────────────────
+// Reuse von calcFullPayslip mit leerem Record (deduction_absence_days:0 → KEIN Doppel-Abzug bei
+// Stundenlöhnern): Grundlohn auf ECHTE Werktage + AG-Sozial (kvEmployer steckt in grossTotal) +
+// pensionEmployer. KEINE variablen Bestandteile (Boni/Zuschläge) = Plan-/Struktur-Vollkostenbasis.
+// Danach FX→EUR wie empCostEur + anteiliger Unpaid-Abzug wie empCostEurForMonth. Fehlender Kurs → null.
+function employerCostFullNative(emp, month){
+  if(!emp) return 0;
+  const c = calcFullPayslip(emp, month, {deduction_absence_days:0}, [], []);
+  return (Number(c.grossTotal)||0) + (Number(c.pensionEmployer)||0);
+}
+function employerCostEurForMonth(emp, month){
+  if(!emp) return 0;
+  const native = employerCostFullNative(emp, month);
+  if(native<=0) return 0;
+  let full;
+  if(salaryCurrency(emp)==='EUR') full = native;
+  else { const fx=fxRateForMonth(month); if(!fx.rate) return null; full = native/fx.rate; }
+  full = Math.round(full);
+  const up=empUnpaidWorkdays(emp, month);
+  if(up<=0) return full;
+  const wd=workdaysInMonth(month)||22;
+  return Math.max(0, Math.round(full - (full/wd)*Math.min(up, wd)));
+}
+
+// ── PROJEKT-VOLLKOSTEN je Monat (EINE WAHRHEIT für Cockpit-Marge UND DB-Wasserfall) ──
+// Gehälter Agenten/Overhead/Schulung anteilig (empProjShare, Vollkosten), Firmen-/Sachkosten-Pool
+// kopf-anteilig (Largest-Remainder, exakte Summe) über alle Projekte umgelegt. Selbe Formeln wie in
+// ProjectProfitability, nur top-level + wiederverwendbar. Fehlender Kurs → Gehälter fallen als 0 rein
+// (Banner via fxMissingFor greift getrennt).
+function projectAutoCostsForMonth(pid, month, employees, projects){
+  const emps=(employees||[]).filter(Boolean);
+  const actives=emps.filter(e=>e.status==='active');
+  const trainings=emps.filter(e=>e.status==='training');
+  const companyEmps=actives.filter(e=>isCompanyEmp(e));
+  const agents   = actives.filter(e=>!isOverheadEmp(e)&&!isCompanyEmp(e)).reduce((s,e)=>s+(employerCostEurForMonth(e,month)||0)*empProjShare(e,pid),0);
+  const overhead = actives.filter(e=>isOverheadEmp(e)&&!isCompanyEmp(e)).reduce((s,e)=>s+(employerCostEurForMonth(e,month)||0)*empProjShare(e,pid),0);
+  const training = trainings.filter(e=>!isCompanyEmp(e)).reduce((s,e)=>s+(employerCostEurForMonth(e,month)||0)*empProjShare(e,pid),0);
+  const companyPool = companyEmps.reduce((s,e)=>s+(employerCostEurForMonth(e,month)||0),0);
+  let companyOverhead=0; try{ (JSON.parse(localStorage.getItem('jsr_company_overhead_v1')||'[]')||[]).forEach(c=>{ companyOverhead+=Number((c&&c.amount)||0); }); }catch(e){}
+  const rkFixVar=(locId,ym)=>{ try{ const raw=localStorage.getItem('jsr_rk_'+locId+'_'+String(ym).replace('-','_')); if(!raw) return null; const d=JSON.parse(raw)||{}; const sum=arr=>(Array.isArray(arr)?arr:[]).reduce((x,z)=>x+(Number(z&&z.amount)||0),0); return sum(d.fix)+sum(d.variable); }catch(e){ return null; } };
+  let materialPool=companyOverhead, materialHasRk=false; (getLocations()||[]).forEach(l=>{ if(!l||!l.id) return; const mc=rkFixVar(l.id,month); if(mc!=null){ materialHasRk=true; materialPool+=mc; } });
+  const baseEmp=(e)=>e&&(e.status==='active'||e.status==='training')&&!isCompanyEmp(e);
+  const allocBase=emps.filter(baseEmp).reduce((s,e)=>s+empAssignments(e).reduce((x,a)=>x+(Number(a.share_pct)||0),0)/100,0)||1;
+  const projShare=(q)=>emps.filter(baseEmp).reduce((s,e)=>s+empProjShare(e,q),0);
+  const projIds=(projects||[]).map(p=>p&&p.id).filter(Boolean);
+  const allocMap=(pool)=>{ const rp=Math.round(Number(pool)||0); const out={}; const w={}; let tot=0;
+    projIds.forEach(q=>{ const b=projShare(q); w[q]=b; tot+=b; });
+    if(tot<=0||rp<=0){ projIds.forEach(q=>out[q]=0); return out; }
+    const rema=[]; let sum=0; projIds.forEach(q=>{ const x=rp*w[q]/tot; const f=Math.floor(x); out[q]=f; sum+=f; rema.push([q,x-f]); });
+    let rest=rp-sum; rema.sort((a,b)=>b[1]-a[1]); for(let i=0;i<rema.length&&rest>0;i++){ out[rema[i][0]]++; rest--; } return out; };
+  const company  = allocMap(companyPool)[pid]||0;
+  const material = allocMap(materialPool)[pid]||0;
+  return { agents, overhead, training, material, company, total:agents+overhead+training+material+company,
+           companyPool, materialPool, materialHasRk, allocBase, projShareBase:projShare(pid) };
+}
+// DB-Deckungsbeitrags-Wasserfall aus Umsatz + Projekt-Vollkosten. Reihenfolge (fachlich fix):
+// Umsatz −Agenten = DB I −Schulung −Overhead = DB II −Sachkosten = DB III −Firmenkosten = DB IV.
+function projectDbWaterfall(costs, revenue){
+  const rev=Math.round(Number(revenue)||0);
+  const dbI  = rev - costs.agents;
+  const dbII = dbI - costs.training - costs.overhead;
+  const dbIII= dbII - costs.material;
+  const dbIV = dbIII - costs.company;
+  const mg=(v)=> rev>0 ? Math.round(v/rev*100) : null;
+  return { rev, agents:costs.agents, training:costs.training, overhead:costs.overhead, material:costs.material, company:costs.company,
+           dbI, dbII, dbIII, dbIV, mgI:mg(dbI), mgII:mg(dbII), mgIII:mg(dbIII), mgIV:mg(dbIV) };
+}
+// Lohn-Config eines Landes „leer / noch nicht gesetzt"? = keine Amount-Felder ODER Platzhalter in
+// falscher Währung (die AL-Defaults 35.08/250/450 sehen als LEK falsch aus). Solange true, rechnet die
+// Vollkosten-Basis mit Fallback-Sätzen (zu niedrig) → sichtbarer Hinweis. Verschwindet, sobald echte Sätze rein.
+function payrollCfgIncomplete(country){
+  if(!country) return false;
+  const cfg=getPayrollCfg(country);
+  const hasAmounts=PAYROLL_AMOUNT_FIELDS.some(k=>parseFloat(cfg&&cfg[k])>0);
+  if(!hasAmounts) return true;
+  return payrollCfgCurrencyWarnings(cfg, country).length>0;
+}
+const PAYROLL_COUNTRY_LABEL={al:'Albanien (Tirana)', xk:'Kosovo (Prishtina)'};
+// Länder mit unvollständiger Lohn-Config unter den aktiven/Schulungs-MA einer Liste (für den Kosten-Warnhinweis).
+function payrollCfgMissingCountries(employees){
+  const set=new Set();
+  (employees||[]).forEach(e=>{ if(!e||!['active','training'].includes(e.status)) return; const c=payrollCountry(e.location); if(c && payrollCfgIncomplete(c)) set.add(c); });
+  return [...set].map(c=>PAYROLL_COUNTRY_LABEL[c]||c);
+}
 // MA eines Projekts/Skills auflösen — über die EINE Wahrheit empAssignments
 // (offene project_assignments bevorzugt, flaches Feld als virtuelle 100%-Zuweisung).
 // Multi-Skill: Edi taucht in Sales UND Support auf. Nur status 'active'.
@@ -20238,11 +20329,11 @@ function ProjectProfitability({projects, employees, forecast, setForecast, onNav
   const _actives = employees.filter(e=>e&&e.status==='active');
   const _trainings = employees.filter(e=>e&&e.status==='training');            // Schulung = bereits in Bezahlung -> Kosten + Nenner
   // Gehaelter ANTEILIG je Zuweisung (share_pct via empProjShare) — Multi-Projekt/Multi-Skill sauber gesplittet.
-  const agentSalaries    = (pid, month)=>_actives.filter(e=>!isOverheadEmp(e)&&!isCompanyEmp(e)).reduce((s,e)=>s+(empCostEurForMonth(e,month)||0)*empProjShare(e,pid),0);
-  const overheadSalaries = (pid, month)=>_actives.filter(e=>isOverheadEmp(e)&&!isCompanyEmp(e)).reduce((s,e)=>s+(empCostEurForMonth(e,month)||0)*empProjShare(e,pid),0);
-  const trainingSalaries = (pid, month)=>_trainings.filter(e=>!isCompanyEmp(e)).reduce((s,e)=>s+(empCostEurForMonth(e,month)||0)*empProjShare(e,pid),0);   // eigene, explizite Zeile (EUR, Unpaid-bereinigt)
+  const agentSalaries    = (pid, month)=>_actives.filter(e=>!isOverheadEmp(e)&&!isCompanyEmp(e)).reduce((s,e)=>s+(employerCostEurForMonth(e,month)||0)*empProjShare(e,pid),0);
+  const overheadSalaries = (pid, month)=>_actives.filter(e=>isOverheadEmp(e)&&!isCompanyEmp(e)).reduce((s,e)=>s+(employerCostEurForMonth(e,month)||0)*empProjShare(e,pid),0);
+  const trainingSalaries = (pid, month)=>_trainings.filter(e=>!isCompanyEmp(e)).reduce((s,e)=>s+(employerCostEurForMonth(e,month)||0)*empProjShare(e,pid),0);   // eigene, explizite Zeile (EUR, Unpaid-bereinigt)
   const _companyEmps    = _actives.filter(e=>isCompanyEmp(e));
-  const companyPoolEur  = (month)=>_companyEmps.reduce((s,e)=>s+(empCostEurForMonth(e,month)||0),0);   // Firmenkosten-Pool in EUR (Unpaid-bereinigt)
+  const companyPoolEur  = (month)=>_companyEmps.reduce((s,e)=>s+(employerCostEurForMonth(e,month)||0),0);   // Firmenkosten-Pool in EUR (Vollkosten, Unpaid-bereinigt)
   const companyNoSalary = _companyEmps.filter(e=>empMonthlyCost(e)<=0);        // Firmenfunktionen ohne gepflegtes Gehalt
   // Umlage-Nenner: Kopf-ANTEILE (share_pct) der Agenten+Overhead+Schulung, ohne Firmenfunktionen.
   const _baseEmp  = (e)=>e&&(e.status==='active'||e.status==='training')&&!isCompanyEmp(e);
@@ -20264,7 +20355,9 @@ function ProjectProfitability({projects, employees, forecast, setForecast, onNav
   const materialAllocForMonth = (pid,ym)=>allocMapExact(materialPoolForMonth(ym).total)[pid]||0;
 
   const _curYm = (()=>{ const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); })();
-  const autoPersonnel = agentSalaries(selProj,_curYm)+overheadSalaries(selProj,_curYm);      // Gehaelter Agenten+Overhead (EUR, aktueller Monat)
+  const autoAgents    = agentSalaries(selProj,_curYm);                          // Agenten-Gehaelter (EUR, Vollkosten, aktueller Monat)
+  const autoOverhead  = overheadSalaries(selProj,_curYm);                       // Overhead-Gehaelter (EUR, Vollkosten)
+  const autoPersonnel = autoAgents+autoOverhead;                                // Agenten+Overhead zusammen
   const autoTraining  = trainingSalaries(selProj,_curYm);                       // Schulungs-Gehaelter (EUR)
   const projBaseSel   = projBase(selProj);
   const _curMat       = materialPoolForMonth(_curYm);
@@ -20440,29 +20533,74 @@ function ProjectProfitability({projects, employees, forecast, setForecast, onNav
         ))}
       </div>
 
-      {/* Kosten-Aufschluesselung (aktueller Monat, auto aus MA-Datensaetzen) */}
-      <div style={{padding:14,background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--r-lg)',marginBottom:16}}>
-        <div style={{fontSize:12,color:'var(--muted)',marginBottom:8}}>💡 Monatskosten {proj?.name} (automatisch aus MA-Datensätzen, EUR, {_curYm})</div>
-        {_fxMissingCur&&(
-          <div style={{padding:'8px 12px',marginBottom:10,borderRadius:8,background:'var(--red-bg)',border:'1px solid var(--red)',fontSize:12,color:'var(--red)',fontWeight:600}}>
-            ⚠ Kein Wechselkurs für {_curYm} hinterlegt: LEK-Gehälter werden NICHT umgerechnet und fehlen in den Kosten. Kurs unter System → 💱 Wechselkurse pflegen. (Kein stilles 1:1.)
+      {/* Deckungsbeitrags-Wasserfall (aktueller Monat, Plan, Vollkosten) — ersetzt die alte Kostenbox */}
+      {(()=>{
+        const rev = (planRevenueByProject(employees, projects, _curYm)[selProj]||{}).revenue||0;
+        const costs = {agents:autoAgents, overhead:autoOverhead, training:autoTraining, material:matAllocSel, company:compAllocSel};
+        const wf = projectDbWaterfall(costs, rev);
+        const missingCfg = payrollCfgMissingCountries(employees);
+        const skLabel=k=>{ const s=((proj&&proj.skills)||[]).find(x=>x.key===k); return s?(s.label||s.key):(k||'—'); };
+        // Skill-Aufschlüsselung NUR bis DB I: Umsatz je Skill (inkl. Overhead-Anteil) − Agenten-Vollkosten je Skill.
+        const skMap={};
+        employees.filter(e=>e&&['active','training'].includes(e.status)&&!isCompanyEmp(e)).forEach(e=>{
+          empAssignments(e).filter(a=>a.project_id===selProj).forEach(a=>{
+            const sk=a.skill||'—', share=(Number(a.share_pct)||0)/100, ovh=isOverheadEmp(e), ovhF=ovh?(Number(e.overhead_productive_pct)||0)/100:1;
+            const ph=productiveHours(e,_curYm), br=billingRevenue(billingFor(proj,a.skill), ph.prod*share, e.status==='training');
+            const row=skMap[sk]||(skMap[sk]={skill:sk,revenue:0,agents:0,miss:false});
+            if(br.revenue!=null) row.revenue += ovh? br.revenue*ovhF : br.revenue; else row.miss=true;
+            if(e.status==='active' && !ovh) row.agents += (employerCostEurForMonth(e,_curYm)||0)*share;
+          });
+        });
+        const skillRows=Object.values(skMap).filter(r=>r.revenue>0||r.agents>0);
+        const eur=v=>Math.round(Math.abs(v)).toLocaleString('de-DE')+' €';
+        const mgCol=m=>m==null?'var(--muted)':m>=20?'var(--green)':m>=10?'var(--amber)':'var(--red)';
+        const line=(label,val,strong)=>(<div style={{display:'flex',justifyContent:'space-between',padding:'2px 0',fontWeight:strong?700:400,color:val<0?'var(--red)':'var(--text)'}}><span>{label}</span><span style={{fontFamily:'var(--mono)'}}>{val<0?'−':''}{eur(val)}</span></div>);
+        const db=(label,val,mg,strong)=>(<div style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'3px 0',borderTop:'1px solid var(--border)',fontWeight:strong?800:700}}><span>= {label}</span><span style={{display:'flex',gap:8,alignItems:'center'}}><span style={{fontFamily:'var(--mono)'}}>{val<0?'−':''}{eur(val)}</span><span style={{fontSize:11,fontWeight:800,padding:'1px 7px',borderRadius:99,background:mgCol(mg)+'22',color:mgCol(mg)}}>{mg==null?'—':(mg+'%')}</span></span></div>);
+        return (
+        <div style={{padding:14,background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--r-lg)',marginBottom:16}}>
+          <div style={{fontSize:12,color:'var(--muted)',marginBottom:10}}>💧 Deckungsbeitrag {proj?.name} — Plan, Vollkosten (EUR, {_curYm})</div>
+          {missingCfg.length>0&&(
+            <div style={{padding:'8px 12px',marginBottom:10,borderRadius:8,background:'var(--red-bg)',border:'1px solid var(--red)',fontSize:12,color:'var(--red)',fontWeight:600}}>
+              ⚠ Lohn-Sätze für {missingCfg.join(', ')} noch nicht hinterlegt: die Arbeitgeberkosten (AG-Sozialabgaben) rechnen mit Platzhaltern und sind ZU NIEDRIG. Unter System → 💶 Pauschalen & Steuer pflegen. Das Ergebnis passt sich automatisch an, sobald die Sätze stehen.
+            </div>
+          )}
+          {_fxMissingCur&&(
+            <div style={{padding:'8px 12px',marginBottom:10,borderRadius:8,background:'var(--red-bg)',border:'1px solid var(--red)',fontSize:12,color:'var(--red)',fontWeight:600}}>
+              ⚠ Kein Wechselkurs für {_curYm} hinterlegt: LEK-Gehälter werden NICHT umgerechnet und fehlen in den Kosten. Kurs unter System → 💱 Wechselkurse pflegen. (Kein stilles 1:1.)
+            </div>
+          )}
+          {_unpaidCut>0&&(
+            <div style={{padding:'8px 12px',marginBottom:10,borderRadius:8,background:'var(--surface-2)',border:'1px dashed var(--border)',fontSize:12,color:'var(--muted)'}}>
+              ℹ Unbezahlte Abwesenheit reduziert die Personalkosten dieses Projekts im {_curYm} um <b>{Math.round(_unpaidCut).toLocaleString('de-DE')} €</b> (anteilig nach Werktagen, nur genehmigte Tage).
+            </div>
+          )}
+          <div style={{display:'flex',flexDirection:'column',gap:1,fontSize:13,maxWidth:560}}>
+            {line('Umsatz (Plan)', wf.rev, true)}
+            {line('− Agenten', -costs.agents)}
+            {db('DB I', wf.dbI, wf.mgI)}
+            {skillRows.length>0&&(
+              <div style={{margin:'2px 0 5px 12px',paddingLeft:10,borderLeft:'2px solid var(--border)'}}>
+                {skillRows.map(r=>{ const dbi=Math.round(r.revenue-r.agents); const mg=r.revenue>0?Math.round(dbi/r.revenue*100):null; return (
+                  <div key={r.skill} style={{display:'flex',justifyContent:'space-between',gap:10,fontSize:11,color:'var(--muted)',padding:'1px 0'}}>
+                    <span>{skLabel(r.skill)}{r.miss?' ⚠':''}</span>
+                    <span>Umsatz {eur(r.revenue)} · Agenten {eur(r.agents)} · <b style={{color:mgCol(mg)}}>DB I {dbi<0?'−':''}{eur(dbi)}{mg!=null?' ('+mg+'%)':''}</b></span>
+                  </div>); })}
+              </div>
+            )}
+            {line('− Schulung', -costs.training)}
+            {line('− Overhead', -costs.overhead)}
+            {db('DB II', wf.dbII, wf.mgII)}
+            {line('− Sachkosten-Umlage', -costs.material)}
+            {db('DB III', wf.dbIII, wf.mgIII)}
+            {line('− Firmenkosten-Umlage', -costs.company)}
+            {db('DB IV', wf.dbIV, wf.mgIV, true)}
           </div>
-        )}
-        {_unpaidCut>0&&(
-          <div style={{padding:'8px 12px',marginBottom:10,borderRadius:8,background:'var(--surface-2)',border:'1px dashed var(--border)',fontSize:12,color:'var(--muted)'}}>
-            ℹ Unbezahlte Abwesenheit reduziert die Personalkosten dieses Projekts im {_curYm} um <b>{Math.round(_unpaidCut).toLocaleString('de-DE')} €</b> (anteilig nach Werktagen, nur genehmigte Tage).
-          </div>
-        )}
-        <div style={{display:'flex',gap:24,flexWrap:'wrap',fontSize:12}}>
-          <div>Agenten+Overhead-Gehälter <strong style={{color:'var(--red)'}}>{autoPersonnel.toLocaleString('de-DE')} €</strong></div>
-          <div title="Schulungs-MA werden bereits bezahlt">📚 Schulungs-Gehälter <strong style={{color:'var(--red)'}}>{autoTraining.toLocaleString('de-DE')} €</strong></div>
-          <div>Firmenkosten-Umlage (CEO/Verwaltung) <strong style={{color:'var(--red)'}}>{compAllocSel.toLocaleString('de-DE')} €</strong> <span style={{color:'var(--muted)'}}>({companyPoolEur(_curYm).toLocaleString('de-DE')} € × {projBaseSel}/{allocBase})</span></div>
-          <div>Sachkosten-Umlage <strong style={{color:'var(--red)'}}>{matAllocSel.toLocaleString('de-DE')} €</strong> <span style={{color:'var(--muted)'}}>({_curMat.total.toLocaleString('de-DE')} € × {projBaseSel}/{allocBase})</span></div>
+          <div style={{fontSize:11,color:'var(--muted)',marginTop:8}}>Vollkosten = Grundlohn (echte Werktage) + AG-Sozialabgaben. Umlage-Nenner = {allocBase} Agenten+Overhead-Anteile mit Projekt; Firmenkosten {eur(companyPoolEur(_curYm))} + Sachkosten {eur(_curMat.total)} kopf-anteilig ({projBaseSel}/{allocBase}). Skill-Aufschlüsselung nur bis DB I (Overhead/Umlagen haben keinen Skill-Treiber).</div>
+          {companyNoSalary.length>0&&<div style={{fontSize:12,color:'var(--amber)',fontWeight:700,marginTop:6}} title={companyNoSalary.map(e=>e.first_name+' '+e.last_name).join(', ')}>⚠ Firmenfunktionen ohne gepflegtes Gehalt: {companyNoSalary.length} → Firmenkosten-Umlage entsprechend zu niedrig.</div>}
+          {!_curMat.hasRk&&<div style={{fontSize:11,color:'var(--amber)',fontWeight:600,marginTop:4}}>⚠ Keine Standortkosten für {_curYm} hinterlegt (System → Raumkosten): Sachkosten-Umlage nur aus Firmenkosten-Beträgen.</div>}
         </div>
-        <div style={{fontSize:11,color:'var(--muted)',marginTop:8}}>Nenner = {allocBase} Agenten+Overhead mit Projekt (Firmenfunktionen nicht im Nenner). rk_overhead abgeschafft: Overhead automatisch über Position.</div>
-        {companyNoSalary.length>0&&<div style={{fontSize:12,color:'var(--amber)',fontWeight:700,marginTop:6}} title={companyNoSalary.map(e=>e.first_name+' '+e.last_name).join(', ')}>⚠ Firmenfunktionen ohne gepflegtes Gehalt: {companyNoSalary.length}: Firmenkosten-Umlage entsprechend zu niedrig.</div>}
-        {!_curMat.hasRk&&<div style={{fontSize:11,color:'var(--amber)',fontWeight:600,marginTop:4}}>⚠ Keine Standortkosten für {_curYm} hinterlegt (System → Raumkosten): Sachkosten-Umlage nur aus Firmenkosten-Beträgen.</div>}
-      </div>
+        );
+      })()}
 
       {/* Summary KPIs */}
       {filledRows.length>0&&(
