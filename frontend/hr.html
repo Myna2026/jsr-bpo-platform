@@ -5019,11 +5019,15 @@ function yiqText(hex){
   if([r,g,b].some(n=>isNaN(n))) return '#fff';
   return (r*299+g*587+b*114)/1000 >= 128 ? '#000' : '#fff';
 }
-function EmployeeList({employees, setEmployees, projects, seedSearch, onEdit, onAdd, onAbsence, onBonus, onReferral, onQuality, onComm}){
+function EmployeeList({employees, setEmployees, projects, seedSearch, navFilter, onClearNavFilter, onEdit, onAdd, onAbsence, onBonus, onReferral, onQuality, onComm}){
   const [filter, setFilter] = useState('all');
   const [search, setSearch] = useState('');
   // Datenqualität-Klick: Suche auf den betroffenen MA vorbelegen (Filter zurücksetzen, damit er sichtbar ist).
   useEffect(()=>{ if(seedSearch){ setSearch(seedSearch); setFilter('all'); setShowTerminated(true); } },[seedSearch]);
+  // „Heute zu erledigen"-Sprung mit emp-Filter: Status-/Suchfilter zurücksetzen, damit die Teilmenge sichtbar ist.
+  const _navEmp = navFilter && String(navFilter.type||'').startsWith('emp_') ? navFilter : null;
+  const _navPred = (_navEmp && COCKPIT_FILTERS[_navEmp.type]) || null;
+  useEffect(()=>{ if(_navEmp){ setFilter('all'); setSearch(''); setShowTerminated(false); } },[navFilter]);
   const [showTerminated, setShowTerminated] = useState(false);
   const [sortCol, setSortCol] = useState('last_name');
   const [sortDir, setSortDir] = useState('asc');
@@ -5040,6 +5044,7 @@ function EmployeeList({employees, setEmployees, projects, seedSearch, onEdit, on
   }
 
   const filtered = employees.filter(e => {
+    if(_navPred && !_navPred(e)) return false;   // Sprung-Filter (Verträge/ohne Lohn) — Teilmenge aus „Heute zu erledigen"
     if(!showTerminated && e.status==='terminated') return false;
     if(filter!=='all' && e.status!==filter) return false;
     if(projectFilter!=='all' && e.project_id!==projectFilter) return false;
@@ -5213,6 +5218,7 @@ function EmployeeList({employees, setEmployees, projects, seedSearch, onEdit, on
 
   return(
     <div>
+      <FilterBanner label={_navEmp?_navEmp.label:''} onClear={onClearNavFilter}/>
       <div className="ma-toolbar" style={{display:'flex',gap:8,marginBottom:14,flexWrap:'wrap',alignItems:'center'}}>
         <input className="ma-search"
           style={{background:'var(--card)',border:'1px solid var(--border)',borderRadius:'var(--r)',
@@ -7924,7 +7930,7 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
         <div className="ckm-card">
           <div className="ckm-h">Heute zu erledigen</div>
           {tasks.map((t,i)=>(
-            <div key={i} className="ckm-task" onClick={()=>onNavigate&&onNavigate(t.nav||{kind:'view',view:t.tab})}>
+            <div key={i} className="ckm-task" onClick={()=>onNavigate&&onNavigate(t.nav||{kind:'view',view:t.tab,navFilter:t.filter?{...t.filter,label:t.label}:null})}>
               <span style={{fontSize:17}}>{t.icon}</span>
               <span style={{flex:1,fontWeight:600,color:t.color}}>{t.label}</span>
               <span className="ckm-arrow">→</span>
@@ -7937,40 +7943,51 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
   );
 }
 
+// Geteilte Prädikate für „Heute zu erledigen": EINE Wahrheit für die Zählung (computeCockpitTasks)
+// UND das Vorfiltern der Zielansicht (Sprung mit Filter-Banner). Sonst driftet „welche 3" auseinander.
+// emp_*: Prädikat über einen Mitarbeiter · cv_*: über einen CV.
+const COCKPIT_FILTERS = {
+  emp_contract_expiring: e=>{ const ce=e&&((e.contract&&e.contract.end)||e.contract_end); if(!ce||e.status==='terminated'||e.status==='inactive') return false; const cM=parseInt(localStorage.getItem('jsr_contract_reminder_months')||'1'); const cut=new Date(); cut.setMonth(cut.getMonth()+cM); const end=new Date(ce); return end>=new Date()&&end<=cut; },
+  emp_no_salary: e=>!!e&&e.status==='active'&&!parseFloat(e.hourly_rate||0),
+  cv_new: c=>{ const wk=new Date(Date.now()-7*864e5).toISOString().slice(0,10); return !!c&&c.cv_date>=wk&&c.status==='cv_inbound'; },
+  cv_stuck: c=>{ if(!c) return false; if(['active','rejected_by_us','blacklist','rejected_by_applicant','rejected_by_client'].includes(c.status)) return false; const last=c.last_status_change||c.cv_date; if(!last) return false; return Math.round((new Date()-new Date(last))/(864e5))>7; },
+};
+// Sichtbares Filter-Banner in der Zielansicht nach einem „Heute zu erledigen"-Sprung — zeigt, WELCHE
+// Teilmenge gemeint war, mit „Aufheben". Wirkt Desktop wie mobil.
+function FilterBanner({label, onClear}){
+  if(!label) return null;
+  return (
+    <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:12,padding:'9px 14px',borderRadius:10,
+      background:'var(--blue-bg)',border:'1px solid rgba(15,86,97,.3)'}}>
+      <span style={{fontSize:13,fontWeight:600,color:'#0F5661',flex:1,minWidth:0}}>🔎 Gefiltert: {label}</span>
+      <button className="btn btn-sm" style={{flexShrink:0}} onClick={onClear}>Aufheben ✕</button>
+    </div>
+  );
+}
 // „Heute zu erledigen"-Liste — abgeleitete Aktionsposten. Top-level, damit Desktop-Cockpit
-// UND das mobile Cockpit dieselbe Liste bauen (eine Wahrheit).
+// UND das mobile Cockpit dieselbe Liste bauen (eine Wahrheit). filter:{type} → Sprung filtert die Zielansicht.
 function computeCockpitTasks({employees, projects, cvsDb, payslipsDb, feedbackTodayDb}){
   const today=new Date().toISOString().slice(0,10);
   const tasks=[];
   try{
     const month=today.slice(0,7);
     const open=(payslipsDb||[]).filter(s=>s.month===month&&s.status!=='paid');
-    if(open.length) tasks.push({icon:'💰',label:open.length+' Gehaltsabrechnungen offen',color:'var(--amber)',tab:'payroll'});
+    if(open.length) tasks.push({icon:'💰',label:open.length+' Gehaltsabrechnungen offen',color:'var(--amber)',tab:'payroll',filter:{type:'payroll_open'}});
   }catch(e){}
   try{
-    const cvs=cvsDb||[];
-    const weekAgo=new Date(Date.now()-7*864e5).toISOString().slice(0,10);
-    const newCvs=cvs.filter(c=>c.cv_date>=weekAgo&&c.status==='cv_inbound');
-    if(newCvs.length) tasks.push({icon:'📥',label:newCvs.length+' neue CVs diese Woche (Inbound)',color:'var(--blue)',tab:'cvs'});
+    const newCvs=(cvsDb||[]).filter(COCKPIT_FILTERS.cv_new);
+    if(newCvs.length) tasks.push({icon:'📥',label:newCvs.length+' neue CVs diese Woche (Inbound)',color:'var(--blue)',tab:'cvs',filter:{type:'cv_new'}});
   }catch(e){}
   try{
-    const cvs=cvsDb||[];
-    const stuck=cvs.filter(c=>{
-      if(['active','rejected_by_us','blacklist','rejected_by_applicant','rejected_by_client'].includes(c.status)) return false;
-      const last=c.last_status_change||c.cv_date;
-      if(!last) return false;
-      return Math.round((new Date()-new Date(last))/(864e5))>7;
-    });
-    if(stuck.length) tasks.push({icon:'⏳',label:stuck.length+' CVs seit >7 Tagen ohne Aktion',color:'var(--red)',tab:'cvs'});
+    const stuck=(cvsDb||[]).filter(COCKPIT_FILTERS.cv_stuck);
+    if(stuck.length) tasks.push({icon:'⏳',label:stuck.length+' CVs seit >7 Tagen ohne Aktion',color:'var(--red)',tab:'cvs',filter:{type:'cv_stuck'}});
   }catch(e){}
-  const noSal=(employees||[]).filter(e=>e&&e.status==='active'&&!parseFloat(e.hourly_rate||0));
+  const noSal=(employees||[]).filter(COCKPIT_FILTERS.emp_no_salary);
   try{
-    const cMonths=parseInt(localStorage.getItem('jsr_contract_reminder_months')||'1');
-    const cCutoff=new Date();cCutoff.setMonth(cCutoff.getMonth()+cMonths);
-    const cExp=(employees||[]).filter(e=>{const ce=e.contract?.end||e.contract_end; return ce&&e.status!=='terminated'&&e.status!=='inactive'&&new Date(ce)>=new Date()&&new Date(ce)<=cCutoff;});
-    if(cExp.length) tasks.push({icon:'📋',label:cExp.length+' Vertrag'+(cExp.length>1?'e':'')+(cExp.length>1?' laufen':' läuft')+' bald ab',color:'var(--red)',tab:'employees'});
+    const cExp=(employees||[]).filter(COCKPIT_FILTERS.emp_contract_expiring);
+    if(cExp.length) tasks.push({icon:'📋',label:cExp.length+' Vertrag'+(cExp.length>1?'e':'')+(cExp.length>1?' laufen':' läuft')+' bald ab',color:'var(--red)',tab:'employees',filter:{type:'emp_contract_expiring'}});
   }catch(e){}
-  if(noSal.length) tasks.push({icon:'⚠️',label:noSal.length+' aktive MA ohne Stundenlohn',color:'var(--red)',tab:'employees'});
+  if(noSal.length) tasks.push({icon:'⚠️',label:noSal.length+' aktive MA ohne Stundenlohn',color:'var(--red)',tab:'employees',filter:{type:'emp_no_salary'}});
   try{
     const fb=feedbackTodayDb||[];
     if(fb.length===0){
@@ -8158,7 +8175,7 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
             </div>
             {tasks.map((t,i)=>(
               <div key={i} style={{display:'flex',alignItems:'center',gap:10,padding:'10px 16px',borderBottom:i<tasks.length-1?'1px solid var(--border)':'none',cursor:'pointer'}}
-                onClick={()=>{ if(onNavigate) onNavigate(t.nav||{kind:'view',view:t.tab}); else if(window.dispatchEvent) window.dispatchEvent(new CustomEvent('navigate',{detail:t.tab})); }}>
+                onClick={()=>{ const _n=t.nav||{kind:'view',view:t.tab,navFilter:t.filter?{...t.filter,label:t.label}:null}; if(onNavigate) onNavigate(_n); else if(window.dispatchEvent) window.dispatchEvent(new CustomEvent('navigate',{detail:t.tab})); }}>
                 <span style={{fontSize:18}}>{t.icon}</span>
                 <span style={{fontSize:13,fontWeight:600,color:t.color,flex:1}}>{t.label}</span>
                 <span style={{fontSize:11,color:'var(--muted)'}}>→</span>
@@ -8605,7 +8622,7 @@ function OrgChart({projects, employees, orgCharts, setOrgCharts}){
   );
 }
 
-function PayrollView({employees, projects, showToast}){
+function PayrollView({employees, projects, showToast, navFilter, onClearNavFilter}){
   const [salaryData, setSalaryData] = useState(()=>{try{return JSON.parse(localStorage.getItem('jsr_payroll_v1')||'{}')}catch(e){return {};}});
   useEffect(()=>{ const m={}; Object.entries(salaryData||{}).forEach(([month,arr])=>{ (arr||[]).forEach(r=>{ if(r&&r.emp_id) m[r.emp_id+'|'+(r.month||month)]=r; }); }); PAY_BY_KEY=m; },[salaryData]); // Snapshot fürs Protokoll-Diff
   const [payslips, setPayslips] = useState({});  // 27c: initial leer, Load in useEffect (Supabase-First)
@@ -8614,6 +8631,9 @@ function PayrollView({employees, projects, showToast}){
   const [selMonth, setSelMonth] = useState(()=>{const d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');});
   const [payMigBusy, setPayMigBusy] = useState(false);
   const [selEmp, setSelEmp] = useState('all');
+  // „Heute zu erledigen"-Sprung „Gehaltsabrechnungen offen": auf aktuellen Monat + alle MA springen, offene filtern.
+  const _navPay = navFilter && navFilter.type==='payroll_open' ? navFilter : null;
+  useEffect(()=>{ if(_navPay){ const d=new Date(); setSelMonth(d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')); setSelEmp('all'); } },[navFilter]);
   const [bonusModal, setBonusModal] = useState(null);
   const [bonusForm, setBonusForm] = useState({referral_bonus:0,target_bonus:0,special_bonus:0,notes:'',deduction_tax:0,deduction_social:0,deduction_other:0,deduction_notes:'',
     overtime_hours:0,saturday_hours:0,sunday_hours:0,holiday_hours:0,night_hours:0,total_worked_hours:'',surcharge_source:''});
@@ -9133,7 +9153,7 @@ function PayrollView({employees, projects, showToast}){
     alert('Übernahme fertig.\nErfolgreich: '+ok+'\nFehler: '+err+(err?'\n\nDetails in der Konsole (F12).':''));
   }
 
-  const displayEmps = selEmp==='all'?activeEmps:activeEmps.filter(e=>e.id===selEmp);
+  const displayEmps = (selEmp==='all'?activeEmps:activeEmps.filter(e=>e.id===selEmp)).filter(e=>{ if(!_navPay) return true; const sl=getSlip(e.id,selMonth); return sl && sl.status!=='paid'; });
   const monthSlips  = payslips[selMonth]||[];
   const draftCount  = monthSlips.filter(s=>s.status==='draft').length;
   const confirmedCount = monthSlips.filter(s=>s.status==='confirmed').length;
@@ -9160,6 +9180,7 @@ function PayrollView({employees, projects, showToast}){
 
   return(
     <div>
+      <FilterBanner label={_navPay?_navPay.label:''} onClear={onClearNavFilter}/>
       {/* Bank CSV Modal */}
       {bankUploadModal&&(
         <div className="modal-overlay">
@@ -17504,7 +17525,7 @@ function CVResultsModal({cv, onClose, onPromote}){
 // ── CV List View ──────────────────────────────────────────
 
 
-function CVsView({cvList, setCvList, projects, onPromoteToEmployee, team, showToast}){
+function CVsView({cvList, setCvList, projects, onPromoteToEmployee, team, showToast, navFilter, onClearNavFilter}){
   const [modal, setModal] = useState(null);
   const [testView, setTestView] = useState(null);
   const [savedFeedback, setSavedFeedback] = useState(null);
@@ -17548,7 +17569,11 @@ function CVsView({cvList, setCvList, projects, onPromoteToEmployee, team, showTo
 
   const STATUS_NORM={'new':'cv_inbound','test_sent':'cv_inbound','test_done':'cv_accepted','reviewed':'cv_accepted','rejected':'rejected_by_us','accepted':'contract'};
   const normStatus=(s)=>STATUS_NORM[s]||s;
-  const filtered = filter==='all' ? cvList : cvList.filter(c=>normStatus(c.status)===filter);
+  // „Heute zu erledigen"-Sprung mit cv-Filter (neue/steckengebliebene CVs): Status-Filter zurücksetzen.
+  const _navCv = navFilter && String(navFilter.type||'').startsWith('cv_') ? navFilter : null;
+  const _navCvPred = (_navCv && COCKPIT_FILTERS[_navCv.type]) || null;
+  useEffect(()=>{ if(_navCv) setFilter('all'); },[navFilter]);
+  const filtered = (filter==='all' ? cvList : cvList.filter(c=>normStatus(c.status)===filter)).filter(c=>!_navCvPred||_navCvPred(c));
 
   // If test token in URL
   if(testView){
@@ -17568,6 +17593,7 @@ function CVsView({cvList, setCvList, projects, onPromoteToEmployee, team, showTo
       {modal&&<CVModal cv={modal==='add'?null:modal} projects={projects} team={team} onSave={saveCv} onClose={()=>setModal(null)}/>}
       {resultsModal&&<CVResultsModal cv={resultsModal} onClose={()=>setResultsModal(null)} onPromote={cv=>{onPromoteToEmployee(cv);setResultsModal(null);}}/>}
 
+      <FilterBanner label={_navCv?_navCv.label:''} onClear={onClearNavFilter}/>
       {/* Toolbar */}
       <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8,flexWrap:'wrap'}}>
         <button className="btn btn-primary btn-sm" onClick={()=>setModal('add')}>+ Neuer Bewerber</button>
@@ -30800,6 +30826,7 @@ function App(){
   }, []);
   const [view, setView] = useState('start');
   const [empSeed, setEmpSeed] = useState(''); // Datenqualität-Klick → Mitarbeiter-Suche vorbelegen
+  const [navFilter, setNavFilter] = useState(null); // „Heute zu erledigen"-Sprung → Zielansicht vorfiltern {type,label,view}
   const [feedbackNav, setFeedbackNav] = useState(null); // Cockpit → Feedback: {session:id} | {draw:true}
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const isMobile = () => window.innerWidth < 768;
@@ -31345,8 +31372,11 @@ function App(){
     if(!nav) return;
     if(nav.kind==='emp'){ const e=employees.find(x=>x.id===nav.id); if(e){ setModalTab(nav.tab||'hr'); setModal(e); } }
     else if(nav.kind==='view'){ setView(nav.view); if(nav.view==='employees'&&nav.query) setEmpSeed(nav.query);
+      setNavFilter(nav.navFilter?{...nav.navFilter, view:nav.view}:null);   // Sprung-Filter für die Zielansicht (oder aufheben)
       if(nav.view==='feedback') setFeedbackNav(nav.feedbackSession?{session:nav.feedbackSession}:(nav.feedbackDraw?{draw:true}:null)); }
   };
+  // Stale-Schutz: Sprung-Filter verfällt, sobald man die zugehörige Ansicht verlässt (z.B. übers Menü).
+  useEffect(()=>{ setNavFilter(nf=> (nf && nf.view!==view) ? null : nf); },[view]);
   const allNavSections = isEmpUser
     ? [{sec:'Mein Bereich', items:[{key:'mein-plan',label:'Mein Schichtplan',icon:'📋'}]}, ...navSections]
     : navSections;
@@ -31484,7 +31514,7 @@ function App(){
           <WorkforcePlanningView employees={employees} projects={projects} showToast={showToast}/>
           </div>
         )}
-          {view==='employees'&&<EmployeeList employees={employees} setEmployees={setEmployees} projects={projects} seedSearch={empSeed} onEdit={e=>{setModalTab('hr');setModal(e);}} onAdd={()=>setModal('add')} onAbsence={e=>setAbsenceModal(e)} onBonus={e=>setBonusModal(e)} onReferral={e=>setReferralModal(e)} onQuality={e=>setQualityModal(e)} onComm={e=>setCommModal([e])}/>}
+          {view==='employees'&&<EmployeeList employees={employees} setEmployees={setEmployees} projects={projects} seedSearch={empSeed} navFilter={navFilter} onClearNavFilter={()=>setNavFilter(null)} onEdit={e=>{setModalTab('hr');setModal(e);}} onAdd={()=>setModal('add')} onAbsence={e=>setAbsenceModal(e)} onBonus={e=>setBonusModal(e)} onReferral={e=>setReferralModal(e)} onQuality={e=>setQualityModal(e)} onComm={e=>setCommModal([e])}/>}
           {view==='timetracking'&&(
             <div>
               <div style={{background:'linear-gradient(135deg,#0F5661,#7c3aed)',borderRadius:'var(--r-lg)',padding:'20px 24px',marginBottom:16,display:'flex',alignItems:'center',justifyContent:'space-between',cursor:'pointer',boxShadow:'0 4px 20px rgba(15,86,97,.3)'}}
@@ -31527,14 +31557,14 @@ function App(){
           {view==='forecast'&&<ForecastView employees={employees} projects={projects}/>}
           {view==='payroll'&&(
             <div>
-              <PayrollView employees={employees} projects={projects} showToast={showToast}/>
+              <PayrollView employees={employees} projects={projects} showToast={showToast} navFilter={navFilter} onClearNavFilter={()=>setNavFilter(null)}/>
             </div>
           )}
           {view==='orgchart'&&<OrgChart projects={projects} employees={employees} orgCharts={orgCharts} setOrgCharts={setOrgCharts}/>}
           {view==='skillmatrix'&&<SkillMatrix employees={employees} projects={projects}/>}
           {view==='kanban'&&<RecruitingKanban employees={employees} setEmployees={setEmployees} cvList={cvList} setCvList={setCvList} projects={projects} onPromoteToEmployee={promoteToEmployee} showToast={showToast}/>}
           {view==='onboarding'&&<OnboardingView employees={employees} setEmployees={setEmployees} showToast={showToast}/>}
-          {view==='cvs'&&<CVsView cvList={cvList} setCvList={setCvList} projects={projects} onPromoteToEmployee={promoteToEmployee} testQuestions={testQuestions} showToast={showToast}/>}
+          {view==='cvs'&&<CVsView cvList={cvList} setCvList={setCvList} projects={projects} onPromoteToEmployee={promoteToEmployee} testQuestions={testQuestions} showToast={showToast} navFilter={navFilter} onClearNavFilter={()=>setNavFilter(null)}/>}
           {view==='showcase'&&(
             <div>
               <CandidateShowcase cvList={cvList} setCvList={setCvList} projects={projects}/>
