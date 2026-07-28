@@ -8189,6 +8189,10 @@ function computeCockpitTasks({employees, projects, cvsDb, payslipsDb, feedbackTo
         tasks.push({icon:'💬',label:'Feedbackgespräch: '+nm+(pr?' · '+pr:''),color:'#c026d3',nav:{kind:'view',view:'feedback',feedbackSession:s.id}}); });
     }
   }catch(e){}
+  try{
+    const fx=fxRateReminder();
+    if(fx) tasks.push({icon:'💱', label:'Wechselkurs für '+fx.month+' eintragen'+(fx.urgent?' (überfällig!)':''), color: fx.urgent?'var(--red)':'var(--amber)', nav:{kind:'view',view:'superadmin',sysSection:'fx_rates'}});
+  }catch(e){}
   return tasks;
 }
 
@@ -10775,6 +10779,17 @@ function empCostEur(emp, month){
 function fxMissingFor(employees, month){
   if(fxRateForMonth(month).rate) return false;
   return (employees||[]).some(e=>e && salaryCurrency(e)==='ALL' && empMonthlyCost(e)>0);
+}
+// FX-Kurs-Reminder für das Cockpit: ab dem 15. erinnern, den Kurs für den FOLGEMONAT zu pflegen;
+// ab dem 20. dringlich (bleibt dann stehen, bis er steht). Verschwindet, sobald der Folgemonats-Kurs
+// gesetzt ist. new Date() im Frontend ist ok (nur Workflow-Skripte verbieten es). {month, urgent} | null.
+function fxRateReminder(){
+  const now=new Date(); const day=now.getDate();
+  if(day<15) return null;
+  const nm=new Date(now.getFullYear(), now.getMonth()+1, 1);
+  const nextMonth=nm.getFullYear()+'-'+String(nm.getMonth()+1).padStart(2,'0');
+  if(Number(loadFxRates()[nextMonth])>0) return null;
+  return { month: nextMonth, urgent: day>=20 };
 }
 // Genehmigte UNBEZAHLTE Werktage im Monat. Filter geht auf den TYP ('unpaid') + approved —
 // das paid-Flag wird NICHT ausgewertet (im Bestand immer true, unbrauchbar; bei type 'unpaid' redundant).
@@ -23643,10 +23658,14 @@ function FxRatesEditor(){
       </div>
     ))}
     {months.length===0&&<div style={{padding:'10px 16px',fontSize:12,color:'var(--muted)'}}>Noch keine Monatskurse hinterlegt.</div>}
-    <div style={{display:'flex',gap:8,alignItems:'center',padding:'12px 16px'}}>
-      <input type="month" value={mo} onChange={e=>setMo(e.target.value)} style={{padding:'6px 8px',border:'1px solid var(--border)',borderRadius:'var(--r)',fontSize:13}}/>
-      <input type="number" min="0" step="0.1" value={rt} onChange={e=>setRt(e.target.value)} placeholder="Kurs" style={{width:120,padding:'6px 8px',border:'1px solid var(--border)',borderRadius:'var(--r)',fontSize:13}}/>
-      <button className="btn btn-sm btn-primary" onClick={add}>+ Monat</button>
+    <div style={{padding:'12px 16px'}}>
+      <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
+        <input type="month" value={mo} onChange={e=>setMo(e.target.value)} style={{padding:'6px 8px',border:'1px solid var(--border)',borderRadius:'var(--r)',fontSize:13}}/>
+        <input type="number" min="0" step="0.1" value={rt} onChange={e=>setRt(e.target.value)} placeholder="Lek je Euro" style={{width:130,padding:'6px 8px',border:'1px solid var(--border)',borderRadius:'var(--r)',fontSize:13,textAlign:'right'}}/>
+        <button className="btn btn-sm btn-primary" onClick={add}>+ Monat</button>
+        <a className="btn btn-sm" href="https://www.bankofalbania.org/Markets/Official_exchange_rate/" target="_blank" rel="noopener noreferrer" title="Offizieller Kurs der albanischen Zentralbank: börsentäglich aus den Interbank-Notierungen berechnet">🔗 Aktuellen Kurs nachschlagen</a>
+      </div>
+      <div style={{fontSize:11,color:'var(--muted)',marginTop:6,lineHeight:1.5}}>Richtung: <strong>Lek je Euro</strong> (z. B. 100,5 = 100,5 LEK für 1 €). Quelle = <strong>offizieller Kurs der albanischen Zentralbank</strong> (börsentäglich aus Interbank-Notierungen), nicht der schwankende Marktmittelkurs der Umrechnungsdienste.</div>
     </div>
   </div>);
 }
@@ -23725,7 +23744,8 @@ function OverheadScopeEditor({projects}){
   );
 }
 function SystemSettingsTab({projects, setProjects, employees, clients}){
-  const [activeSection, setActiveSection] = useState('skills');
+  // Deeplink aus dem Cockpit (z.B. „Wechselkurs eintragen" → Section fx_rates). Einmalig beim Mount.
+  const [activeSection, setActiveSection] = useState(()=>{ try{ const j=window.__sysJump; if(j){ window.__sysJump=null; return j; } }catch(e){} return 'skills'; });
   // Feld-Ampel: Einstufung je Feldname; jede Änderung sofort nach app_config (mit sichtbarer Fehlermeldung, kein stilles Verwerfen).
   const [fieldPriority, setFieldPriority] = useState(()=>loadFieldPriority());
   const setFieldPri=(key,sev)=>{ const next={...fieldPriority}; if(sev)next[key]=sev; else delete next[key]; setFieldPriority(next); saveFieldPriorityToDB(next); };
@@ -31770,7 +31790,8 @@ function App(){
   const dqNavigate = (nav)=>{
     if(!nav) return;
     if(nav.kind==='emp'){ const e=employees.find(x=>x.id===nav.id); if(e){ setModalTab(nav.tab||'hr'); setModal(e); } }
-    else if(nav.kind==='view'){ setView(nav.view); if(nav.view==='employees'&&nav.query) setEmpSeed(nav.query);
+    else if(nav.kind==='view'){ setView(nav.view); if(nav.sysSection){ try{ window.__sysJump=nav.sysSection; }catch(e){} }   // System-Section-Deeplink (z.B. Wechselkurse)
+      if(nav.view==='employees'&&nav.query) setEmpSeed(nav.query);
       setNavFilter(nav.navFilter?{...nav.navFilter, view:nav.view}:null);   // Sprung-Filter für die Zielansicht (oder aufheben)
       if(nav.view==='profitability') setProfitProj(nav.projSel||null);      // Projektkarte → Wirtschaftlichkeit mit vorgewähltem Projekt
       if(nav.view==='feedback') setFeedbackNav(nav.feedbackSession?{session:nav.feedbackSession}:(nav.feedbackDraw?{draw:true}:null)); }
