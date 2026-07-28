@@ -6179,15 +6179,22 @@ function calcAlbanianPayroll(slip, cfg){
 // PAYSLIP ENGINE — Full Albanian payroll calculation
 // ══════════════════════════════════════════════════════════════════════════════
 
+// EINE Wahrheit für die Standort→Land-Zuordnung der Lohn-Konfiguration: 'xk' Kosovo, 'al' Albanien,
+// null = nicht zuordenbar. Genutzt von getPayrollCfg UND dem KV/Steuer-Zweig in calcFullPayslip —
+// kein zweiter, abweichender Check mehr. Prefix-Matching deckt Schreibvarianten/Diakritika ab
+// (Prishtina/Prishtinë/Pristina, Tirana/Tiranë, Kosovo/Kosovë). null → sichtbare Warnung im
+// DataQualityPanel, statt stillem Albanien-Default.
+function payrollCountry(location){
+  const s=String(location||'').trim().toLowerCase();
+  if(!s) return null;
+  if(/prishtin|pristin|kosov/.test(s) || s==='xk') return 'xk';
+  if(/tiran|albania|shqip/.test(s) || s==='al') return 'al';
+  return null;
+}
 function getPayrollCfg(location){
-  // jsr_payroll_cfg_al = Albanien (Tirana), jsr_payroll_cfg_xk = Kosovo (Prishtina)
-  const isKosovo = location && (
-    String(location).toLowerCase().includes('prishtina') ||
-    String(location).toLowerCase().includes('pristina') ||
-    String(location).toLowerCase().includes('kosovo') ||
-    String(location).toLowerCase() === 'xk'
-  );
-  const key = isKosovo ? 'jsr_payroll_cfg_xk' : 'jsr_payroll_cfg_al';
+  // jsr_payroll_cfg_al = Albanien (Tirana), jsr_payroll_cfg_xk = Kosovo (Prishtina).
+  // Nicht zuordenbar (null) → al als Notfall-Basis, aber sichtbar via DataQualityPanel (payroll_loc).
+  const key = payrollCountry(location)==='xk' ? 'jsr_payroll_cfg_xk' : 'jsr_payroll_cfg_al';
   try{ return JSON.parse(localStorage.getItem(key)||'null') || {}; }
   catch(e){ return {}; }
 }
@@ -6265,8 +6272,8 @@ function calcFullPayslip(emp, month, salaryRec, employees, absences){
   const totalBonuses = bonusPerf + bonusSpecial + bonusReferral + bonusWheel;
 
   // ── KV (Krankenversicherung) ───────────────────────────────────────────────
-  // Country-specific fallback defaults
-  const isKv = (emp.location||'').toLowerCase().includes('prishtina')||(emp.location||'').toLowerCase().includes('kosovo');
+  // Country-specific fallback defaults — SELBER Resolver wie getPayrollCfg (keine zweite Logik).
+  const isKv = payrollCountry(emp.location)==='xk';
   const defKvEr = isKv ? 0     : 35.08;
   const defKvEe = isKv ? 0     : 30.00;
   const defB1   = isKv ? 0     : 250;
@@ -6718,7 +6725,8 @@ function PayslipArchiveView({payslips, employees, projects, fmtMonth, eur, onOpe
           <tbody>
             {allSlips.length===0&&<tr><td colSpan={6} style={{textAlign:'center',padding:24,color:'var(--muted)'}}>Keine Abrechnungen im Archiv</td></tr>}
             {allSlips.map((s,i)=>{
-              const cfg=JSON.parse(localStorage.getItem('jsr_payroll_cfg_al') || localStorage.getItem('jsr_payroll_cfg_xk') || '{}'||'{}');
+              const _emp=(employees||[]).find(e=>e&&e.id===s.emp_id);
+              const cfg=getPayrollCfg((_emp&&_emp.location)||s.location||'');   // standortabhängig statt al||xk
               const salaryData=JSON.parse(localStorage.getItem('jsr_payroll_v1')||'{}');
               const rec=((salaryData[s.month]||[]).find(r=>r.emp_id===s.emp_id))||{};
               const P=calcAlbanianPayroll({...s,_rec:rec},cfg);
@@ -7575,6 +7583,7 @@ function DataQualityPanel({employees, projects, plans, onNavigate, summary, onOp
     add('red','dup_staff','Doppelte Personalnummern',empItems(dupBy(emp,e=>(e.staff_number||'').trim()),'hr'));
     add('red','proj_no_rate','Projekt ohne gültigen Abrechnungssatz (Forecast rechnet 0/—)',projItems((projects||[]).filter(p=>{ if(!p) return false; const units=(p.skills&&p.skills.length)?p.skills:[p]; return units.some(u=>billingIncomplete(u)); })));
     add('red','orphan_emp','Mitarbeiter zeigt auf gelöschtes Projekt',empItems(emp.filter(e=>e.project_id&&!projIds.has(e.project_id)),'projekt'));
+    add('red','payroll_loc','Standort nicht dem Lohn-Land (Albanien/Kosovo) zuordenbar — Steuer/KV fallen still auf Albanien',empItems(emp.filter(e=>CONTRACTED.includes(e.status)&&payrollCountry(e.location)===null),'profil'));
     add('red','open_sess','Offene Zeit-Sessions (eingestempelt, nie ausgestempelt)',asyncState.openSessions.map(s=>{const e=(employees||[]).find(x=>x.id===s.emp_id);return {id:s.id,name:(e?nm(e):'MA '+String(s.emp_id||'').slice(0,8))+(s.date?' · '+s.date:''),nav:{kind:'view',view:'timetracking'}};}));
 
     // 🟡 sollte ergänzt werden
@@ -24416,9 +24425,9 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
           const lohnSave=(k,v)=>{const c=JSON.parse(localStorage.getItem(cfgKey)||'{}');c[k]=v;localStorage.setItem(cfgKey,JSON.stringify(c));saveConfigToDB(cfgKey,c);};
           const DEFAULTS={
             al:{kv_employer:35.08,kv_employee:30.00,pension_employee_pct:5,pension_employer_pct:5,
-              tax_bracket1_max:250,tax_bracket2_max:450,tax_bracket1_pct:0,tax_bracket2_pct:8,tax_bracket3_pct:10,vacation_days_default:20},
+              tax_bracket1_max:250,tax_bracket2_max:450,tax_bracket1_pct:0,tax_bracket2_pct:8,tax_bracket3_pct:10},
             xk:{kv_employer:0,kv_employee:0,pension_employee_pct:5,pension_employer_pct:5,
-              tax_bracket1_max:0,tax_bracket2_max:960,tax_bracket1_pct:0,tax_bracket2_pct:4,tax_bracket3_pct:10,vacation_days_default:20},
+              tax_bracket1_max:0,tax_bracket2_max:960,tax_bracket1_pct:0,tax_bracket2_pct:4,tax_bracket3_pct:10},
           };
           const def=DEFAULTS[payTab]||DEFAULTS.al;
           const rows=[
@@ -24435,7 +24444,6 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
             {key:'tax_bracket2_pct',label:'Bracket 2 (%)',step:'0.1'},
             {key:'tax_bracket3_pct',label:'Bracket 3 (%)',step:'0.1'},
             {section:'Sonstiges'},
-            {key:'vacation_days_default',label:'Urlaubstage/Jahr',step:'1'},
           ];
           return(
             <div className="card">
@@ -30796,7 +30804,7 @@ function App(){
       localStorage.setItem('jsr_projects_v1',JSON.stringify([{id:'proj_hc_a1b2c3d4',name:'Holidaycheck Support',status:'active',location:'al',skills:[{key:'support',label:'Support',rate:28,rate_training:18,profiles:['Support Agent','Senior Support Agent','Team Lead Support','Support Trainer','Support QM']},{key:'sales',label:'Sales',rate:32,rate_training:20,profiles:['Sales Agent','Senior Sales Agent','Team Lead Sales','Sales Trainer','Sales QM']}]}]));
     }
     // Etappe P2: kpi_cfg-Seed entfernt — Quelle ist jetzt Supabase (kpi_config).
-    if(!localStorage.getItem('jsr_payroll_cfg_al')){localStorage.setItem('jsr_payroll_cfg_al',JSON.stringify({kv_employer:35.08,kv_employee:30.00,pension_employee_pct:5,pension_employer_pct:5,tax_bracket1_max:250,tax_bracket2_max:450,tax_bracket1_pct:0,tax_bracket2_pct:8,tax_bracket3_pct:10,vacation_days_default:20}));}
+    if(!localStorage.getItem('jsr_payroll_cfg_al')){localStorage.setItem('jsr_payroll_cfg_al',JSON.stringify({kv_employer:35.08,kv_employee:30.00,pension_employee_pct:5,pension_employer_pct:5,tax_bracket1_max:250,tax_bracket2_max:450,tax_bracket1_pct:0,tax_bracket2_pct:8,tax_bracket3_pct:10}));}
     if(!localStorage.getItem('jsr_hw_types')){localStorage.setItem('jsr_hw_types',JSON.stringify([{id:'hw_headset',name:'Headset',icon:'🎧',description:'USB Headset'},{id:'hw_laptop',name:'Laptop',icon:'💻',description:'Firmenlaptop'},{id:'hw_mouse',name:'Maus',icon:'🖱',description:'Computermaus'}]));}
     // Etappe P2: perf-Seed entfernt — Quelle ist jetzt Supabase (kpi_entries).
     if(!localStorage.getItem('jsr_shift_cfg')){localStorage.setItem('jsr_shift_cfg',JSON.stringify({"proj_hc_sales":[{"id":"s1","label":"Frueh","value":"08:00-16:30","hours":8.0,"net":7.5,"split":false},{"id":"s2","label":"Frueh lang","value":"09:00-17:30","hours":8.5,"net":8.0,"split":false},{"id":"s3","label":"Spaet frueh","value":"11:30-20:00","hours":8.5,"net":8.0,"split":false},{"id":"s4","label":"Spaet","value":"13:30-22:00","hours":8.5,"net":8.0,"split":false},{"id":"s5","label":"Frueh kurz","value":"08:00-15:30","hours":7.5,"net":7.0,"split":false},{"id":"s6","label":"Split 08-12+16-20","value":"08:00-12:00","value2":"16:00-20:00","hours":8.0,"net":7.5,"split":true},{"id":"s7","label":"Split 08-12+18-22","value":"08:00-12:00","value2":"18:00-22:00","hours":8.0,"net":7.5,"split":true}],"proj_hc_support":[{"id":"s1","label":"Frueh lang","value":"08:00-17:30","hours":9.5,"net":9.0,"split":false},{"id":"s2","label":"Spaet frueh","value":"11:30-20:00","hours":8.5,"net":8.0,"split":false},{"id":"s3","label":"Split 08-12+16-20","value":"08:00-12:00","value2":"16:00-20:00","hours":8.0,"net":7.5,"split":true}],"proj_giga_all":[{"id":"s1","label":"Standard","value":"09:00-17:30","hours":8.5,"net":8.0,"split":false},{"id":"s2","label":"Spaet","value":"10:30-19:00","hours":8.5,"net":8.0,"split":false},{"id":"s3","label":"Split 09-13+17-21","value":"09:00-13:00","value2":"17:00-21:00","hours":8.0,"net":7.5,"split":true}]}));}
