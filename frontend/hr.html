@@ -6198,6 +6198,22 @@ function getPayrollCfg(location){
   try{ return JSON.parse(localStorage.getItem(key)||'null') || {}; }
   catch(e){ return {}; }
 }
+// Währung je Lohn-Land: Albanien rechnet in LEK, Kosovo in EUR (jeder Zettel in Auszahlungswährung;
+// Umrechnung nach EUR nur in der Kalkulation über den Monatskurs). Prozentsätze sind währungsneutral.
+function payrollCurrency(country){ return country==='xk' ? 'EUR' : 'LEK'; }
+// Amount-Felder der Lohn-Config (währungsabhängig; die *_pct-Felder sind neutral).
+const PAYROLL_AMOUNT_FIELDS=['kv_employer','kv_employee','tax_bracket1_max','tax_bracket2_max'];
+// Plausibilität: liefert die Amount-Felder, deren Wert nach der FALSCHEN Währung aussieht.
+// al=LEK → große Beträge (ein Wert <1000 ist offensichtlich ein EUR-Wert, z.B. Freibetrag 250).
+// xk=EUR → kleine Beträge (ein Wert >5000 ist offensichtlich ein LEK-Wert). Warnen, nicht rechnen.
+function payrollCfgCurrencyWarnings(cfg, country){
+  const out=[];
+  PAYROLL_AMOUNT_FIELDS.forEach(k=>{ const v=parseFloat(cfg&&cfg[k]); if(!(v>0)) return;
+    if(country==='al' && v<1000) out.push(k);
+    if(country==='xk' && v>5000) out.push(k);
+  });
+  return out;
+}
 
 function calcFullPayslip(emp, month, salaryRec, employees, absences){
   const cfg = getPayrollCfg(emp.location||emp.location_id||'');
@@ -8804,6 +8820,11 @@ function PayrollView({employees, projects, showToast}){
   async function createPayslip(emp){
     const _hasComp = parseFloat(emp.hourly_rate||0)>0 || (emp.salary_type==='fixed' && parseFloat(emp.fixed_salary||0)>0);
     if(!_hasComp){alert('Keine Vergütungsbasis (weder Fixgehalt noch Stundenlohn) für '+emp.first_name+'.');return;}
+    // Punkt 4 (Währung): nicht rechnen bei nicht zuordenbarem Standort oder falsch-skalierter Länder-Config.
+    const _pc=payrollCountry(emp.location);
+    if(!_pc){alert('Standort von '+emp.first_name+' ist keinem Lohn-Land (Albanien/Kosovo) zuordenbar — kein Zettel erstellt. Standort korrigieren.');return;}
+    const _cfgWarn=payrollCfgCurrencyWarnings(getPayrollCfg(emp.location), _pc);
+    if(_cfgWarn.length){alert('Lohn-Konfiguration ('+(_pc==='xk'?'Kosovo/EUR':'Albanien/LEK')+') sieht nach falscher Währung aus — Felder: '+_cfgWarn.join(', ')+'. Unter System → 💶 Pauschalen & Steuer in '+payrollCurrency(_pc)+' korrigieren. Kein Zettel erstellt.');return;}
     const existing=getSlip(emp.id,selMonth);
     if(existing&&isLocked(existing)){alert('Abrechnung bereits überwiesen und gesperrt.');return;}
     // Workforce-Auto-Sync entfernt: Ist-Stunden/Boni werden manuell im Bonus-Modal
@@ -8889,9 +8910,14 @@ function PayrollView({employees, projects, showToast}){
   async function createAllDrafts(){
     const missing=activeEmps.filter(e=>(parseFloat(e.hourly_rate||0)>0||(e.salary_type==='fixed'&&parseFloat(e.fixed_salary||0)>0))&&!getSlip(e.id,selMonth));
     if(!missing.length){alert('Alle Abrechnungen bereits vorhanden.');return;}
-    if(!(await uiConfirm({title:'Entwürfe erstellen', items:[missing.length+' Mitarbeiter'], confirmLabel:'Erstellen'}))) return;
+    // Punkt 4: Standort/Währungs-Guard — Zettel mit unklarer Länder-Config gar nicht erst rechnen.
+    const _blocked=missing.filter(e=>{ const pc=payrollCountry(e.location); return !pc || payrollCfgCurrencyWarnings(getPayrollCfg(e.location), pc).length>0; });
+    const _bSet=new Set(_blocked.map(e=>e.id));
+    const doable=missing.filter(e=>!_bSet.has(e.id));
+    if(!doable.length){ alert(_blocked.length+' Mitarbeiter übersprungen (Standort/Währung der Lohn-Config unklar) — keine Entwürfe. Erst System → 💶 Pauschalen & Steuer prüfen.'); return; }
+    if(!(await uiConfirm({title:'Entwürfe erstellen', items:[doable.length+' Mitarbeiter', ...(_blocked.length?[_blocked.length+' übersprungen (Config unklar)']:[])], confirmLabel:'Erstellen'}))) return;
     // 27c: Q3(a) — Promise.all mit einzelnem catch pro Save, Summary-Toast am Ende.
-    const results = await Promise.all(missing.map(async emp => {
+    const results = await Promise.all(doable.map(async emp => {
       const s = calcSalary(emp);
       const slipData = {
         employee_id: emp.id, month: selMonth, status: 'draft',
@@ -8929,9 +8955,9 @@ function PayrollView({employees, projects, showToast}){
       });
     }
     if(errors.length === 0){
-      showToast('✅ '+successes.length+' Entwürfe erstellt');
+      showToast('✅ '+successes.length+' Entwürfe erstellt'+(_blocked.length?' · '+_blocked.length+' übersprungen (Config)':''));
     }else{
-      showToast('⚠ '+successes.length+' erstellt, '+errors.length+' Fehler — Konsole prüfen', 'error');
+      showToast('⚠ '+successes.length+' erstellt, '+errors.length+' Fehler'+(_blocked.length?', '+_blocked.length+' übersprungen':'')+' — Konsole prüfen', 'error');
     }
   }
 
@@ -24430,6 +24456,8 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
               tax_bracket1_max:0,tax_bracket2_max:960,tax_bracket1_pct:0,tax_bracket2_pct:4,tax_bracket3_pct:10},
           };
           const def=DEFAULTS[payTab]||DEFAULTS.al;
+          const cur=payrollCurrency(payTab);                        // al→LEK, xk→EUR
+          const wrongFields=payrollCfgCurrencyWarnings(cfg, payTab); // Amount-Felder mit falsch aussehender Währung
           const rows=[
             {section:'Krankenversicherung'},
             {key:'kv_employer',label:'KV Arbeitgeber',step:'0.01'},
@@ -24438,8 +24466,8 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
             {key:'pension_employee_pct',label:'Rente Arbeitnehmer (%)',step:'0.1'},
             {key:'pension_employer_pct',label:'Rente Arbeitgeber (%)',step:'0.1'},
             {section:'Einkommensteuer'},
-            {key:'tax_bracket1_max',label:'Steuerfrei bis (EUR)',step:'1'},
-            {key:'tax_bracket2_max',label:'Bracket 2 bis (EUR)',step:'1'},
+            {key:'tax_bracket1_max',label:'Steuerfrei bis',step:'1'},
+            {key:'tax_bracket2_max',label:'Bracket 2 bis',step:'1'},
             {key:'tax_bracket1_pct',label:'Bracket 1 (%)',step:'0.1'},
             {key:'tax_bracket2_pct',label:'Bracket 2 (%)',step:'0.1'},
             {key:'tax_bracket3_pct',label:'Bracket 3 (%)',step:'0.1'},
@@ -24466,6 +24494,18 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
                 <div style={{padding:'6px 16px 10px',fontSize:12,color:'var(--muted)',borderBottom:'1px solid var(--border)',marginBottom:4}}>
                   {payTab==='al'?'Tirana — Albanisches Steuerrecht':'Prishtina — Kosovarisches Steuerrecht'}
                 </div>
+                {/* Punkt 3: sichtbarer Währungs-Hinweis (LEK vs EUR) */}
+                <div style={{margin:'0 16px 8px',padding:'8px 12px',borderRadius:8,fontSize:12,lineHeight:1.5,
+                  background:'var(--blue-bg)',border:'1px solid rgba(15,86,97,.25)',color:'#0F5661'}}>
+                  💱 Beträge in <b>{cur}</b> eintragen — KV und Steuer-Grenzen in der Auszahlungswährung
+                  ({payTab==='al'?'Albanien = LEK':'Kosovo = EUR'}). Prozentsätze (Rente, Steuer-Sätze) sind währungsneutral.
+                </div>
+                {/* Punkt 4: Plausibilitäts-Warnung — Wert sieht nach falscher Währung aus */}
+                {wrongFields.length>0 && <div style={{margin:'0 16px 8px',padding:'8px 12px',borderRadius:8,fontSize:12,lineHeight:1.5,
+                  background:'var(--red-bg)',border:'1px solid rgba(239,68,68,.35)',color:'var(--red)',fontWeight:600}}>
+                  ⚠ {wrongFields.length} Wert{wrongFields.length>1?'e sehen':' sieht'} nach der falschen Währung aus (offensichtlich {cur==='LEK'?'EUR im LEK-Feld':'LEK im EUR-Feld'}).
+                  Die Lohnrechnung verweigert solche Zettel, bis die Werte in {cur} korrigiert sind.
+                </div>}
                 {rows.map((row,i)=>row.section?(
                   <div key={i} style={{padding:'8px 16px 4px',fontSize:10,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.08em',marginTop:i>0?4:0,borderTop:i>0?'1px solid var(--border)':'none'}}>
                     {row.section}
@@ -24481,8 +24521,10 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
                       style={{width:80,padding:'5px 8px',border:'1.5px solid var(--border)',borderRadius:'var(--r)',
                         fontFamily:'var(--font)',fontSize:13,fontWeight:700,textAlign:'right',
                         color:'var(--blue)',background:'var(--blue-bg)'}}/>
-                    <span style={{fontSize:12,color:'var(--muted)',width:16}}>
-                      {row.label.includes('%')?'%':'EUR'}
+                    <span style={{fontSize:12,fontWeight:wrongFields.includes(row.key)?700:400,whiteSpace:'nowrap',
+                      color:wrongFields.includes(row.key)?'var(--red)':'var(--muted)'}}
+                      title={wrongFields.includes(row.key)?('Wert sieht nach falscher Währung aus — '+cur+' erwartet'):''}>
+                      {row.label.includes('%')?'%':(wrongFields.includes(row.key)?'⚠ ':'')+cur}
                     </span>
                   </div>
                 ))}
@@ -30805,6 +30847,8 @@ function App(){
     }
     // Etappe P2: kpi_cfg-Seed entfernt — Quelle ist jetzt Supabase (kpi_config).
     if(!localStorage.getItem('jsr_payroll_cfg_al')){localStorage.setItem('jsr_payroll_cfg_al',JSON.stringify({kv_employer:35.08,kv_employee:30.00,pension_employee_pct:5,pension_employer_pct:5,tax_bracket1_max:250,tax_bracket2_max:450,tax_bracket1_pct:0,tax_bracket2_pct:8,tax_bracket3_pct:10}));}
+    // Kosovo (EUR) — bisher kein Seed; Beträge in EUR (Startwerte, Johannes trägt die echten Sätze ein).
+    if(!localStorage.getItem('jsr_payroll_cfg_xk')){localStorage.setItem('jsr_payroll_cfg_xk',JSON.stringify({kv_employer:0,kv_employee:0,pension_employee_pct:5,pension_employer_pct:5,tax_bracket1_max:0,tax_bracket2_max:960,tax_bracket1_pct:0,tax_bracket2_pct:4,tax_bracket3_pct:10}));}
     if(!localStorage.getItem('jsr_hw_types')){localStorage.setItem('jsr_hw_types',JSON.stringify([{id:'hw_headset',name:'Headset',icon:'🎧',description:'USB Headset'},{id:'hw_laptop',name:'Laptop',icon:'💻',description:'Firmenlaptop'},{id:'hw_mouse',name:'Maus',icon:'🖱',description:'Computermaus'}]));}
     // Etappe P2: perf-Seed entfernt — Quelle ist jetzt Supabase (kpi_entries).
     if(!localStorage.getItem('jsr_shift_cfg')){localStorage.setItem('jsr_shift_cfg',JSON.stringify({"proj_hc_sales":[{"id":"s1","label":"Frueh","value":"08:00-16:30","hours":8.0,"net":7.5,"split":false},{"id":"s2","label":"Frueh lang","value":"09:00-17:30","hours":8.5,"net":8.0,"split":false},{"id":"s3","label":"Spaet frueh","value":"11:30-20:00","hours":8.5,"net":8.0,"split":false},{"id":"s4","label":"Spaet","value":"13:30-22:00","hours":8.5,"net":8.0,"split":false},{"id":"s5","label":"Frueh kurz","value":"08:00-15:30","hours":7.5,"net":7.0,"split":false},{"id":"s6","label":"Split 08-12+16-20","value":"08:00-12:00","value2":"16:00-20:00","hours":8.0,"net":7.5,"split":true},{"id":"s7","label":"Split 08-12+18-22","value":"08:00-12:00","value2":"18:00-22:00","hours":8.0,"net":7.5,"split":true}],"proj_hc_support":[{"id":"s1","label":"Frueh lang","value":"08:00-17:30","hours":9.5,"net":9.0,"split":false},{"id":"s2","label":"Spaet frueh","value":"11:30-20:00","hours":8.5,"net":8.0,"split":false},{"id":"s3","label":"Split 08-12+16-20","value":"08:00-12:00","value2":"16:00-20:00","hours":8.0,"net":7.5,"split":true}],"proj_giga_all":[{"id":"s1","label":"Standard","value":"09:00-17:30","hours":8.5,"net":8.0,"split":false},{"id":"s2","label":"Spaet","value":"10:30-19:00","hours":8.5,"net":8.0,"split":false},{"id":"s3","label":"Split 09-13+17-21","value":"09:00-13:00","value2":"17:00-21:00","hours":8.0,"net":7.5,"split":true}]}));}
