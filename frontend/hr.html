@@ -384,8 +384,10 @@ textarea.form-input{resize:vertical;min-height:70px}
 .pay-cards{display:none}
 /* Startseiten-Hinweis „mobile Version" — nur mobil sichtbar (Basis versteckt). Markenfarben (Teal),
    auffällig aber keine Fehlermeldung: getönter Hintergrund + kräftiger Akzent-Rand links. */
-.start-mobile-note{display:none;margin-bottom:20px;padding:14px 16px;border-radius:12px;
-  background:var(--blue-bg);border:1px solid rgba(15,86,97,.25);border-left:5px solid #0F5661;text-align:left}
+.start-mobile-note{display:none;position:relative;overflow:hidden;min-height:104px;margin-bottom:20px;padding:16px 18px;border-radius:14px;
+  background:linear-gradient(135deg,var(--blue-bg),#e8f3f3);border:1px solid rgba(15,86,97,.25);border-left:5px solid #0F5661;text-align:left}
+.start-net-canvas{position:absolute;inset:0;width:100%;height:100%;display:block;z-index:0;pointer-events:auto}
+.start-mobile-note-inner{position:relative;z-index:1;pointer-events:none}
 .start-mobile-note-h{font-size:17px;font-weight:800;color:#0F5661;margin-bottom:4px}
 .start-mobile-note-t{font-size:13px;line-height:1.5;color:var(--text)}
 /* Wirtschaftlichkeit: Zurück-zum-Cockpit nur mobil (Basis versteckt) — Rückweg aus dem Projektkarten-Sprung */
@@ -796,6 +798,77 @@ textarea.form-input{resize:vertical;min-height:70px}
   } catch(e) {
     console.error('JSR Seed Error:', e);
   }
+})();
+</script>
+<script>
+/* TIVE Partikelnetz — nur mobile Startseite, hinter dem "Mobile Version"-Hinweis. Vanilla-Canvas, KEIN Babel.
+   Akku:  pausiert bei document.hidden UND wenn der Kasten aus dem Viewport scrollt (IntersectionObserver).
+   Leistung: Punktzahl an Fläche gekoppelt + gedeckelt, DPR<=2, ~30 FPS.
+   Zugänglichkeit: prefers-reduced-motion -> statisches Standbild, keine Loop, keine Vibration. */
+(function(){
+  function mount(canvas, opts){
+    opts = opts || {};
+    var ctx = canvas.getContext('2d'); if(!ctx) return { destroy:function(){} };
+    var DPR = Math.min(window.devicePixelRatio||1, 2);
+    var reduced = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+    var C1='#0d9488', C2='#0F5661', LINE='15,86,97';
+    var LINK=108, GRAB=90, MAXN=70, FRAME=1000/30;
+    var W=0,H=0, parts=[], raf=0, last=0, running=false, visible=!document.hidden, onScreen=true;
+    var pointer={x:null,y:null,active:false};
+    function rnd(a,b){ return a+(b-a)*Math.random(); }
+    function seed(){
+      var n=Math.max(10, Math.min(MAXN, Math.round((W*H)/9000))); parts=[];
+      for(var i=0;i<n;i++) parts.push({x:rnd(0,W),y:rnd(0,H),vx:rnd(-.15,.15),vy:rnd(-.15,.15),r:rnd(1.2,2.4),c:Math.random()<.5?C1:C2});
+    }
+    function resize(){
+      var r=canvas.getBoundingClientRect(); W=Math.max(1,r.width); H=Math.max(1,r.height);
+      canvas.width=Math.round(W*DPR); canvas.height=Math.round(H*DPR); ctx.setTransform(DPR,0,0,DPR,0,0); seed();
+    }
+    function step(dt){
+      for(var i=0;i<parts.length;i++){ var p=parts[i]; p.x+=p.vx*dt; p.y+=p.vy*dt;
+        if(pointer.active && pointer.x!=null){ var dx=pointer.x-p.x, dy=pointer.y-p.y, d2=dx*dx+dy*dy;
+          if(d2<GRAB*GRAB){ var d=Math.sqrt(d2)||1, f=(1-d/GRAB)*0.6; p.x+=(dx/d)*f*dt; p.y+=(dy/d)*f*dt; } }
+        if(p.x<0){p.x=0;p.vx*=-1;} else if(p.x>W){p.x=W;p.vx*=-1;}
+        if(p.y<0){p.y=0;p.vy*=-1;} else if(p.y>H){p.y=H;p.vy*=-1;}
+      }
+    }
+    function draw(){
+      ctx.clearRect(0,0,W,H);
+      for(var i=0;i<parts.length;i++) for(var j=i+1;j<parts.length;j++){
+        var a=parts[i],b=parts[j],dx=a.x-b.x,dy=a.y-b.y,d=Math.sqrt(dx*dx+dy*dy);
+        if(d<LINK){ ctx.strokeStyle='rgba('+LINE+','+(0.16*(1-d/LINK)).toFixed(3)+')'; ctx.lineWidth=1;
+          ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke(); }
+      }
+      for(var k=0;k<parts.length;k++){ var p=parts[k]; ctx.globalAlpha=.55; ctx.fillStyle=p.c;
+        ctx.beginPath(); ctx.arc(p.x,p.y,p.r,0,6.2832); ctx.fill(); }
+      ctx.globalAlpha=1;
+    }
+    function frame(ts){ raf=requestAnimationFrame(frame); if(!running) return;
+      if(!last) last=ts; var dt=ts-last; if(dt<FRAME) return; last=ts-(dt%FRAME);
+      step(Math.min(dt,50)/16); draw();
+    }
+    function play(){ if(reduced||running||!visible||!onScreen) return; running=true; last=0; raf=requestAnimationFrame(frame); }
+    function pause(){ running=false; if(raf) cancelAnimationFrame(raf); raf=0; }
+    function pt(e){ var r=canvas.getBoundingClientRect(), t=e.touches&&e.touches[0];
+      var cx=t?t.clientX:e.clientX, cy=t?t.clientY:e.clientY; pointer.x=cx-r.left; pointer.y=cy-r.top; pointer.active=true; }
+    function ptEnd(){ pointer.active=false; pointer.x=pointer.y=null; }
+    function onTouch(e){ pt(e); if(!reduced && navigator.vibrate){ try{ navigator.vibrate(8); }catch(_){} } }
+    function onVis(){ visible=!document.hidden; if(visible) play(); else pause(); }
+    var io=null, ro=null;
+    if('IntersectionObserver' in window){ io=new IntersectionObserver(function(es){ onScreen=es[0].isIntersecting; if(onScreen) play(); else pause(); },{threshold:0}); io.observe(canvas); }
+    if('ResizeObserver' in window){ ro=new ResizeObserver(resize); ro.observe(canvas); } else window.addEventListener('resize',resize);
+    document.addEventListener('visibilitychange',onVis);
+    canvas.addEventListener('mousemove',pt); canvas.addEventListener('mouseleave',ptEnd);
+    canvas.addEventListener('touchstart',onTouch,{passive:true}); canvas.addEventListener('touchmove',pt,{passive:true}); canvas.addEventListener('touchend',ptEnd);
+    resize(); if(reduced) draw(); else play();
+    return { destroy:function(){ pause();
+      if(io)io.disconnect(); if(ro)ro.disconnect(); else window.removeEventListener('resize',resize);
+      document.removeEventListener('visibilitychange',onVis);
+      canvas.removeEventListener('mousemove',pt); canvas.removeEventListener('mouseleave',ptEnd);
+      canvas.removeEventListener('touchstart',onTouch); canvas.removeEventListener('touchmove',pt); canvas.removeEventListener('touchend',ptEnd);
+    }};
+  }
+  window.TIVEParticleNet={mount:mount};
 })();
 </script>
 <div id="root"></div><script type="text/babel">const { useState, useEffect, useRef, useMemo, useCallback } = React;
@@ -7323,6 +7396,14 @@ function CockpitGrid({employees, projects, plans, forecast, team, onNavigate}){
 // Klick auf Datensatz → onNavigate(view, query) (Mitarbeiter werden per Namens-Seed gefiltert).
 // ═══ WILLKOMMENS-STARTSEITE: persönliche Begrüßung + Badge-Erklärung ═══
 function WelcomePage({firstName}){
+  // Partikelnetz hinter dem Mobile-Hinweis: nur mobil mounten (Engine ist ein Plain-Script ohne Babel).
+  const netRef = useRef(null);
+  useEffect(()=>{
+    if(!netRef.current || !window.TIVEParticleNet) return;
+    if(!(window.matchMedia && window.matchMedia('(max-width:768px)').matches)) return;
+    const ctrl = window.TIVEParticleNet.mount(netRef.current);
+    return ()=>{ try{ ctrl && ctrl.destroy(); }catch(_){ } };
+  },[]);
   const EXP=[
     {id:'prio1',   title:'Rollout-Phase 1', text:'Diese Bereiche gehen zuerst live: bitte hier zuerst arbeiten.'},
     {id:'prio2',   title:'Rollout-Phase 2', text:'Kommt in der zweiten Welle: danach dran.'},
@@ -7344,14 +7425,18 @@ function WelcomePage({firstName}){
       <div className="welcome-inner">
         {/* Nur mobil, nur hier: markenfarbener Hinweis, dass die Handy-Ansicht ein Überblick ist. */}
         <div className="start-mobile-note">
-          <div className="start-mobile-note-h">📱 Mobile Version</div>
-          <div className="start-mobile-note-t">Diese Ansicht zeigt bewusst nur einen Auszug der Funktionen, ein Überblick für unterwegs. Zum Arbeiten am Desktop öffnen.</div>
+          <canvas ref={netRef} className="start-net-canvas" aria-hidden="true"></canvas>
+          <div className="start-mobile-note-inner">
+            <div className="start-mobile-note-h">📱 Mobile Version</div>
+            <div className="start-mobile-note-t">Diese Ansicht zeigt bewusst nur einen Auszug der Funktionen, ein Überblick für unterwegs. Zum Arbeiten am Desktop öffnen.</div>
+          </div>
         </div>
         <div style={{fontSize:44,lineHeight:1}}>👋</div>
         <div className="welcome-eyebrow">Willkommen</div>
         <h1 className="welcome-hero">Hallo{firstName?' '+firstName:''}!</h1>
-        <p className="welcome-sub">Schön, dass du da bist. Im Menü kennzeichnen farbige Badges, was gerade dran ist und worauf du achten solltest, hier ein kurzer Überblick:</p>
-        <div className="welcome-grid">
+        {/* Badge-Legende (Block A): erklärt Menü-Kennzeichnungen — mobil ausgeblendet, dort zählt nur "was das System tut". */}
+        <p className="welcome-sub hide-on-mobile">Schön, dass du da bist. Im Menü kennzeichnen farbige Badges, was gerade dran ist und worauf du achten solltest, hier ein kurzer Überblick:</p>
+        <div className="welcome-grid hide-on-mobile">
           {EXP.map((e,i)=>{ const b=BUILTIN_BADGES[e.id]; return (
             <div key={e.id} className="welcome-card" style={{animationDelay:(i*90)+'ms', '--wc-accent':b.color}}>
               <span className="tab-badge" style={{marginLeft:0,background:b.bg,color:b.color,border:'1px solid '+(b.border||b.color)}}>{b.label}</span>
