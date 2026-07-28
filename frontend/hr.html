@@ -7961,6 +7961,29 @@ const COCKPIT_FILTERS = {
   cv_new: c=>{ const wk=new Date(Date.now()-7*864e5).toISOString().slice(0,10); return !!c&&c.cv_date>=wk&&c.status==='cv_inbound'; },
   cv_stuck: c=>{ if(!c) return false; if(['active','rejected_by_us','blacklist','rejected_by_applicant','rejected_by_client'].includes(c.status)) return false; const last=c.last_status_change||c.cv_date; if(!last) return false; return Math.round((new Date()-new Date(last))/(864e5))>7; },
 };
+// Sichtbare Jahre für Jahres-Dropdowns — datengetrieben statt fester Liste. Tote Vergangenheitsjahre
+// (z.B. 2025 vor Firmenstart) verschwinden von selbst; künftige erscheinen, sobald Daten sie erreichen.
+// Quellen: Eintrittsdaten (contract.start/hire) + Abwesenheits-Daten; plus aktuelles Jahr und optional
+// Zukunft (future) sowie extraYears (z.B. Jahre mit erfassten Raumkosten, damit alte Werte erreichbar bleiben).
+function activeYears(employees, opts){
+  opts=opts||{};
+  const cur=new Date().getFullYear();
+  const set=new Set([cur]);
+  const add=s=>{ const y=parseInt(String(s||'').slice(0,4)); if(y>=2000&&y<=2100) set.add(y); };
+  (employees||[]).forEach(e=>{ if(!e) return;
+    add((e.contract&&e.contract.start)||e.contract_start||e.hire_date);
+    (e.absences||[]).forEach(a=>{ if(!a) return; add(a.from||a.date); add(a.to||a.from||a.date); });
+  });
+  (opts.extraYears||[]).forEach(add);
+  for(let i=1;i<=(opts.future||0);i++) set.add(cur+i);
+  return [...set].sort((a,b)=>a-b);
+}
+// Jahre, für die Standortkosten (rk_monthly) erfasst sind — beide Key-Formate (mit/ohne Standort-ID).
+function rkCostYears(){
+  const set=new Set();
+  try{ for(let i=0;i<localStorage.length;i++){ const k=localStorage.key(i); const m=k&&k.match(/^jsr_rk_(?:.+_)?(\d{4})_\d{2}$/); if(m) set.add(parseInt(m[1])); } }catch(e){}
+  return [...set];
+}
 // Sichtbares Filter-Banner in der Zielansicht nach einem „Heute zu erledigen"-Sprung — zeigt, WELCHE
 // Teilmenge gemeint war, mit „Aufheben". Wirkt Desktop wie mobil.
 function FilterBanner({label, onClear}){
@@ -11619,6 +11642,8 @@ function WorkforcePlanningView({employees,projects,showToast}){
   const [projId,setProjId]=useState('');
   const [skill,setSkill]=useState('');
   const [year,setYear]=useState(today.getFullYear());
+  const wfYears = activeYears(employees, {future:1});   // datengetrieben + nächstes Jahr (Planung)
+  useEffect(()=>{ if(wfYears.length && !wfYears.includes(year)){ const c=new Date().getFullYear(); setYear(wfYears.includes(c)?c:wfYears[wfYears.length-1]); } },[wfYears.join(',')]);
   const [month,setMonth]=useState(today.getMonth()+1);
   const [day,setDay]=useState('');
   const [plan,setPlan]=useState({});
@@ -13004,7 +13029,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
           {MNAMES.map((m,i)=><option key={i+1} value={i+1}>{m}</option>)}
         </select>
         <select className="form-select" style={{width:88}} value={year} onChange={e=>setYear(+e.target.value)}>
-          {[2024,2025,2026,2027].map(y=><option key={y} value={y}>{y}</option>)}
+          {wfYears.map(y=><option key={y} value={y}>{y}</option>)}
         </select>
         {projId&&(
           <>
@@ -20342,6 +20367,11 @@ function ProjectProfitability({projects, employees, forecast, setForecast}){
   const activeEmps = employees.filter(e=>e && (showTerminated || !['terminated'].includes(e.status)));
   const termCount = employees.filter(e=>e&&e.status==='terminated').length;
   const currentYear = new Date().getFullYear();
+  // Jahres-Dropdowns datengetrieben (Abwesenheiten + Eintritte); 2025 & Co. verschwinden von selbst.
+  const years = activeYears(employees);
+  // Snap-back: fällt das gewählte Jahr aus der Liste (keine Daten mehr), sinnvoll zurückspringen.
+  useEffect(()=>{ if(years.length && !years.includes(yearFilter)) setYearFilter(years.includes(currentYear)?currentYear:years[years.length-1]); },[years.join(',')]);
+  useEffect(()=>{ if(years.length && !years.includes(viewYear)) setViewYear(years.includes(currentYear)?currentYear:years[years.length-1]); },[years.join(',')]);
 
   // Anzeige-Fenster: laufender Monat + kommende 6 Monate. Nur MA mit mindestens einer
   // Abwesenheit (alle Typen), die in dieses Fenster fällt/überlappt — es sei denn "alle anzeigen".
@@ -20370,7 +20400,7 @@ function ProjectProfitability({projects, employees, forecast, setForecast}){
       {/* Jahr-Filter & Übersicht */}
       <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:16,flexWrap:'wrap'}}>
         <span style={{fontSize:13,fontWeight:600,color:'var(--text)'}}>Jahr:</span>
-        {[currentYear-1,currentYear,currentYear+1].map(y=>(
+        {years.map(y=>(
           <button key={y} className={`btn btn-sm ${yearFilter===y?'btn-primary':''}`} onClick={()=>setYearFilter(y)}
             style={{fontFamily:'var(--mono)'}}>{y}</button>
         ))}
@@ -20499,7 +20529,7 @@ function ProjectProfitability({projects, employees, forecast, setForecast}){
             {['Januar','Februar','März','April','Mai','Juni','Juli','August','September','Oktober','November','Dezember'].map((mn,i)=><option key={i} value={i}>{mn}</option>)}
           </select>
           <select className="form-select" style={{width:'auto'}} value={viewYear} onChange={e=>setViewYear(parseInt(e.target.value))}>
-            {[currentYear-1,currentYear,currentYear+1].map(y=><option key={y} value={y}>{y}</option>)}
+            {years.map(y=><option key={y} value={y}>{y}</option>)}
           </select>
           <button className="btn btn-sm" onClick={()=>{ let m=viewMonth+1,y=viewYear; if(m>11){m=0;y++;} setViewMonth(m);setViewYear(y); }}>▶</button>
         </div>
@@ -23663,6 +23693,10 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
   const [rkCfg,setRkCfgRaw]=useState(()=>{try{return JSON.parse(localStorage.getItem('jsr_rk_cfg')||'null')||{fix:DEF_FIX,variable:DEF_VAR};}catch(e){return{fix:DEF_FIX,variable:DEF_VAR};}});
   const saveRkCfg=c=>{localStorage.setItem('jsr_rk_cfg',JSON.stringify(c));saveConfigToDB('jsr_rk_cfg',c);setRkCfgRaw({...c});};
   const [rkYear,setRkYear]=useState(new Date().getFullYear());
+  // Datengetrieben + nächstes Jahr (Vorkonfiguration) + Jahre mit ERFASSTEN Raumkosten (rk_monthly),
+  // damit alte hinterlegte Werte erreichbar bleiben, auch ohne Mitarbeiterdaten in dem Jahr.
+  const rkYears = activeYears(employees, {future:1, extraYears:rkCostYears()});
+  useEffect(()=>{ if(rkYears.length && !rkYears.includes(rkYear)){ const c=new Date().getFullYear(); setRkYear(rkYears.includes(c)?c:rkYears[rkYears.length-1]); } },[rkYears.join(',')]);
   const [rkMonth,setRkMonth]=useState(new Date().getMonth()+1);
   const rkKey=(y,m)=>'jsr_rk_'+y+'_'+String(m).padStart(2,'0');
   // Schnitt 1: RK nutzt die echten Standorte (getLocations) statt der eigenen jsr_rk_locations-Liste.
@@ -24827,7 +24861,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
                     </select>
                     <select className="form-select" style={{width:90}} value={rkYear}
                       onChange={e=>setRkYear(parseInt(e.target.value))}>
-                      {[2024,2025,2026,2027].map(y=><option key={y} value={y}>{y}</option>)}
+                      {rkYears.map(y=><option key={y} value={y}>{y}</option>)}
                     </select>
                     <button className="btn btn-sm" disabled={rkMigBusy} onClick={migrateRkToDB} title="Vorhandene lokale Raumkosten (Monatswerte + Overhead) in die Supabase-DB übernehmen">{rkMigBusy?'⬆ Übernehme…':'⬆ In DB übernehmen'}</button>
                     <div style={{fontWeight:800,fontSize:15,color:'var(--blue)',marginLeft:8}}>
