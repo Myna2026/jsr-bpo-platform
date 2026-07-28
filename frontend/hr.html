@@ -420,6 +420,13 @@ textarea.form-input{resize:vertical;min-height:70px}
 .ckm-proj-n{font-size:24px;font-weight:800;color:#0F5661;font-family:var(--mono)}
 .ckm-proj-sub{font-size:10px;color:var(--muted)}
 .ckm-marge{align-self:flex-start;font-size:11px;font-weight:800;padding:1px 9px;border-radius:99px}
+/* Zusammengelegte Projekt-Karte (MA je Projekt + Projekte): volle Breite, Skill-Aufschlüsselung */
+.ckm-projlist{padding:10px;display:flex;flex-direction:column;gap:8px}
+.ckm-projrow{padding:10px 12px;background:var(--surface);border:1px solid var(--border);border-radius:10px}
+.ckm-projrow-top{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}
+.ckm-projrow-skills{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}
+.ckm-skill{font-size:11px;color:var(--muted);background:var(--card);border:1px solid var(--border);border-radius:20px;padding:2px 9px}
+.ckm-skill b{color:var(--text);font-family:var(--mono)}
 .ckm-perf{padding:10px 14px;border-bottom:1px solid var(--border)}
 .ckm-perf:last-child{border-bottom:none}
 .ckm-perf-h{font-size:12px;font-weight:700;margin-bottom:6px}
@@ -7768,16 +7775,6 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
     setReqTick(t=>t+1);
   }
 
-  // Offene Tagesaufgaben (geteilte 9-Punkte-Checkliste) — offen = nicht in daily_tasks_done.
-  const [doneKeys,setDoneKeys]=useState(null);
-  useEffect(()=>{ let alive=true;
-    const load=()=>sb.from('daily_tasks_done').select('task_key').eq('date',todayStr).then(({data})=>{ if(alive) setDoneKeys(new Set((data||[]).map(x=>x.task_key))); });
-    load();
-    const ch=sb.channel('ckm-dailytasks').on('postgres_changes',{event:'*',schema:'public',table:'daily_tasks_done'},load).subscribe();
-    return ()=>{ alive=false; try{ sb.removeChannel(ch); }catch(e){} };
-  },[todayStr]);
-  const openTasks = doneKeys ? DAILY_TASKS.filter(t=>!doneKeys.has(t.key)) : [];
-
   // KPI-Einträge für die Bestenlisten (jüngste Woche mit Daten). Lädt Config + Ist-Werte einmalig.
   const [perfEntries,setPerfEntries]=useState({});
   useEffect(()=>{ let alive=true;
@@ -7796,6 +7793,18 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
   },[employees.length]);
 
   const kpiCfg=getKpiCfg();
+  // Leistung je Projekt·Skill: NUR Projekte mit KPI-Konfig UND Skills mit Ist-Daten. Sonst gar nicht
+  // (kein „noch nicht gepflegt"-Hinweis); ist perfRows leer, entfällt der ganze Abschnitt.
+  const perfRows=[];
+  projects.forEach(p=>{
+    if(!kpiCfg.some(k=>k.project_id===p.id)) return;
+    const projEmps=active.filter(e=>e.project_id===p.id&&e.project_skill);
+    [...new Set(projEmps.map(e=>e.project_skill))].forEach(sk=>{
+      const ranked=skillRanking(p.id, sk, active, perfEntries);
+      if(!ranked.length) return;
+      perfRows.push({proj:p.name, skill:sk, top:ranked.slice(0,3), bottom:ranked.length>3?ranked.slice(-3).reverse():[]});
+    });
+  });
   const _planRev=planRevenueByProject(employees, projects, ym);
   const tasks=computeCockpitTasks({employees,projects,cvsDb,payslipsDb,feedbackTodayDb});
   const cvToday=(cvsDb||[]).filter(c=>c.cv_date===todayStr).length;
@@ -7845,67 +7854,61 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
         </div>
       )}
 
-      {/* 2) MA je Projekt */}
-      <div className="ckm-sec"><Widget_MaPerProject employees={employees} projects={projects}/></div>
-
-      {/* 3) Projekte */}
+      {/* 2+3) Projekte — Kopfzahl, Skill-Aufschlüsselung und Marge in EINER Karte (früher doppelt) */}
       <div className="ckm-card">
         <div className="ckm-h">Projekte</div>
-        <div className="ckm-projs">
+        <div className="ckm-projlist">
           {projects.map(p=>{
-            const n=active.filter(e=>e.project_id===p.id).length;
+            const projActive=active.filter(e=>e.project_id===p.id);
+            const n=projActive.length;
             const t=inTraining.filter(e=>e.project_id===p.id).length;
+            if(n+t===0) return null;
+            const bySkill={};
+            projActive.forEach(e=>{ const k=e.project_skill||'—'; bySkill[k]=(bySkill[k]||0)+1; });
+            const skLabel=k=>{ const s=(p.skills||[]).find(x=>x.key===k); return s?(s.label||s.key):k; };
             const rev=Math.round((_planRev[p.id]&&_planRev[p.id].revenue)||0);
-            const cost=active.filter(e=>e.project_id===p.id).reduce((s,e)=>s+(empCostEurForMonth(e,ym)||0),0)+inTraining.filter(e=>e.project_id===p.id).reduce((s,e)=>s+(empCostEurForMonth(e,ym)||0),0);
+            const cost=projActive.reduce((s,e)=>s+(empCostEurForMonth(e,ym)||0),0)+inTraining.filter(e=>e.project_id===p.id).reduce((s,e)=>s+(empCostEurForMonth(e,ym)||0),0);
             const mg=rev>0?Math.round((rev-cost)/rev*100):null;
             const mgc=mg==null?'var(--muted)':mg>=20?'#059669':mg>=10?'#d97706':'#dc2626';
             return (
-              <div key={p.id} className="ckm-proj">
-                <div className="ckm-proj-name">{p.name}</div>
-                <div><span className="ckm-proj-n">{n}</span> <span className="ckm-proj-sub">aktiv{t>0?' · +'+t+' Schulung':''}</span></div>
-                <span className="ckm-marge" style={{background:mgc+'1f',color:mgc}}>{mg==null?'Marge —':'Marge '+mg+'%'}</span>
+              <div key={p.id} className="ckm-projrow">
+                <div className="ckm-projrow-top">
+                  <div>
+                    <div className="ckm-proj-name">{p.name}</div>
+                    <div><span className="ckm-proj-n">{n}</span> <span className="ckm-proj-sub">aktiv{t>0?' · +'+t+' Schulung':''}</span></div>
+                  </div>
+                  <span className="ckm-marge" style={{background:mgc+'1f',color:mgc}}>{mg==null?'Marge — (ohne Umlagen)':'Marge '+mg+'% (ohne Umlagen)'}</span>
+                </div>
+                {Object.keys(bySkill).length>0 && <div className="ckm-projrow-skills">
+                  {Object.entries(bySkill).map(([k,c])=><span key={k} className="ckm-skill"><b>{c}</b> {skLabel(k)}</span>)}
+                </div>}
               </div>
             );
           })}
         </div>
       </div>
 
-      {/* 4) Leistung je Projekt · Skill: 3 beste / 3 schlechteste (je Skill gegen eigene Schwellen) */}
-      <div className="ckm-card">
-        <div className="ckm-h">Leistung je Projekt · Skill</div>
-        {(()=>{
-          const anyCfg=kpiCfg.length>0;
-          const rows=[];
-          projects.forEach(p=>{
-            const projEmps=active.filter(e=>e.project_id===p.id&&e.project_skill);
-            if(!projEmps.length) return;
-            if(!kpiCfg.some(k=>k.project_id===p.id)){ rows.push({proj:p.name, noCfg:true}); return; }
-            [...new Set(projEmps.map(e=>e.project_skill))].forEach(sk=>{
-              const ranked=skillRanking(p.id, sk, active, perfEntries);
-              if(!ranked.length) return;
-              rows.push({proj:p.name, skill:sk, top:ranked.slice(0,3), bottom:ranked.length>3?ranked.slice(-3).reverse():[]});
-            });
-          });
-          if(!rows.length) return <div className="ckm-empty">{anyCfg?'Für diese Woche sind noch keine KPIs eingetragen.':'KPIs noch nicht gepflegt.'}</div>;
-          return rows.map((r,i)=>(
+      {/* 4) Leistung je Projekt · Skill — nur konfigurierte Kombis mit Daten; sonst Abschnitt weg */}
+      {perfRows.length>0 && (
+        <div className="ckm-card">
+          <div className="ckm-h">Leistung je Projekt · Skill</div>
+          {perfRows.map((r,i)=>(
             <div key={i} className="ckm-perf">
-              <div className="ckm-perf-h">{r.proj}{r.skill?' · '+r.skill:''}</div>
-              {r.noCfg
-                ? <div className="ckm-empty">KPIs noch nicht gepflegt.</div>
-                : <div className="ckm-perf-cols">
-                    <div>
-                      <div className="ckm-perf-lbl" style={{color:'#059669'}}>Beste</div>
-                      {r.top.map((x,j)=><div key={j} className="ckm-perf-row">{['🥇','🥈','🥉'][j]||'•'} {shortName(x.emp)}</div>)}
-                    </div>
-                    {r.bottom.length>0 && <div>
-                      <div className="ckm-perf-lbl" style={{color:'#dc2626'}}>Schwächste</div>
-                      {r.bottom.map((x,j)=><div key={j} className="ckm-perf-row">{shortName(x.emp)}</div>)}
-                    </div>}
-                  </div>}
+              <div className="ckm-perf-h">{r.proj} · {r.skill}</div>
+              <div className="ckm-perf-cols">
+                <div>
+                  <div className="ckm-perf-lbl" style={{color:'#059669'}}>Beste</div>
+                  {r.top.map((x,j)=><div key={j} className="ckm-perf-row">{['🥇','🥈','🥉'][j]||'•'} {shortName(x.emp)}</div>)}
+                </div>
+                {r.bottom.length>0 && <div>
+                  <div className="ckm-perf-lbl" style={{color:'#dc2626'}}>Schwächste</div>
+                  {r.bottom.map((x,j)=><div key={j} className="ckm-perf-row">{shortName(x.emp)}</div>)}
+                </div>}
+              </div>
             </div>
-          ));
-        })()}
-      </div>
+          ))}
+        </div>
+      )}
 
       {/* 5) CV-Eingang gestern & heute (Link ins Recruiting) */}
       <div className="ckm-card ckm-clik" onClick={()=>nav('kanban')}>
@@ -7930,20 +7933,6 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
         </div>
       )}
 
-      {/* 7) Offene Tagesaufgaben (geteilte Checkliste) */}
-      <div className="ckm-card">
-        <div className="ckm-h">Offene Tagesaufgaben{doneKeys?(' ('+openTasks.length+')'):''}</div>
-        {doneKeys===null
-          ? <div className="ckm-empty">Lädt…</div>
-          : openTasks.length===0
-            ? <div className="ckm-empty" style={{color:'#059669'}}>Alles erledigt ✓</div>
-            : openTasks.map(t=>(
-                <div key={t.key} className="ckm-task" onClick={()=>nav(t.view)}>
-                  <span style={{flex:1,fontWeight:600}}>{t.title}</span>
-                  <span className="ckm-arrow">→</span>
-                </div>
-              ))}
-      </div>
     </div>
   );
 }
