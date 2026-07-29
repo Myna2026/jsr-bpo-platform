@@ -6338,13 +6338,44 @@ function calcAlbanianPayroll(slip, cfg){
 // kein zweiter, abweichender Check mehr. Prefix-Matching deckt Schreibvarianten/Diakritika ab
 // (Prishtina/Prishtinë/Pristina, Tirana/Tiranë, Kosovo/Kosovë). null → sichtbare Warnung im
 // DataQualityPanel, statt stillem Albanien-Default.
-function payrollCountry(location){
-  const s=String(location||'').trim().toLowerCase();
+// ── LÄNDER-MODELL (jsr_countries_v1): länderoffene Lohnregeln ────────────────────
+// Beiträge als Liste (pct|fixed, optionaler Deckel), Steuerstufen beliebiger Länge, gestaffelter
+// Freibetrag. Ersetzt schrittweise die hart verdrahteten al/xk-Configs. Phase 1 = nur Datenschicht:
+// payrollCountry/payrollCurrency delegieren hierher (verhaltenskompatibel), der Rechenkern folgt in Phase 2.
+// AL = an 80 echten Abrechnungen verifiziert; XK = Bestandswerte, verified:false → Config-Hinweis bis bestätigt.
+const COUNTRY_SEED = [
+  { id:'al', name:'Albanien', currency:'LEK', decimals:0, verified:true,
+    contributions:[
+      { name:'Sozialversicherung',  employer:{mode:'pct',value:15},  employee:{mode:'pct',value:9.5}, cap:186416 },
+      { name:'Krankenversicherung', employer:{mode:'pct',value:1.7}, employee:{mode:'pct',value:1.7}, cap:null },
+    ],
+    allowance:[ {grossUpto:50000, amount:50000}, {grossUpto:60000, amount:35000}, {grossUpto:null, amount:30000} ],
+    taxBrackets:[ {upto:200000, pct:13}, {upto:null, pct:23} ] },
+  { id:'xk', name:'Kosovo', currency:'EUR', decimals:2, verified:false,
+    contributions:[
+      { name:'Rentenversicherung', employer:{mode:'pct',value:5}, employee:{mode:'pct',value:5}, cap:null },
+    ],
+    allowance:[ {grossUpto:null, amount:0} ],
+    taxBrackets:[ {upto:960, pct:4}, {upto:null, pct:10} ] },
+];
+function getCountries(){
+  try{ const r=JSON.parse(localStorage.getItem('jsr_countries_v1')||'null'); if(Array.isArray(r)&&r.length) return r; }catch(e){}
+  return COUNTRY_SEED;
+}
+function getCountryById(id){ return getCountries().find(c=>c&&c.id===id)||null; }
+// Standort → Land-id: erst über den zugewiesenen Standort (country_id), sonst Bestands-Heuristik
+// (loc.country-Label oder der rohe String). Ersetzt die alte reine Namens-Regex.
+function countryForLocation(location){
+  const s=String(location||'').trim();
   if(!s) return null;
-  if(/prishtin|pristin|kosov/.test(s) || s==='xk') return 'xk';
-  if(/tiran|albania|shqip/.test(s) || s==='al') return 'al';
+  const loc=(getLocations()||[]).find(l=>l&&(l.id===s || String(l.name||'').toLowerCase()===s.toLowerCase()));
+  if(loc && loc.country_id && getCountryById(loc.country_id)) return loc.country_id;
+  const hay=((loc&&loc.country)||s).toLowerCase();
+  if(/prishtin|pristin|kosov/.test(hay) || hay==='xk') return 'xk';
+  if(/tiran|albania|shqip/.test(hay) || hay==='al') return 'al';
   return null;
 }
+function payrollCountry(location){ return countryForLocation(location); }
 function getPayrollCfg(location){
   // jsr_payroll_cfg_al = Albanien (Tirana), jsr_payroll_cfg_xk = Kosovo (Prishtina).
   // Nicht zuordenbar (null) → al als Notfall-Basis, aber sichtbar via DataQualityPanel (payroll_loc).
@@ -6354,7 +6385,7 @@ function getPayrollCfg(location){
 }
 // Währung je Lohn-Land: Albanien rechnet in LEK, Kosovo in EUR (jeder Zettel in Auszahlungswährung;
 // Umrechnung nach EUR nur in der Kalkulation über den Monatskurs). Prozentsätze sind währungsneutral.
-function payrollCurrency(country){ return country==='xk' ? 'EUR' : 'LEK'; }
+function payrollCurrency(country){ return (getCountryById(country)||{}).currency || (country==='xk' ? 'EUR' : 'LEK'); }
 // Amount-Felder der Lohn-Config (währungsabhängig; die *_pct-Felder sind neutral).
 const PAYROLL_AMOUNT_FIELDS=['kv_employer','kv_employee','tax_bracket1_max','tax_bracket2_max'];
 // Plausibilität: liefert die Amount-Felder, deren Wert nach der FALSCHEN Währung aussieht.
@@ -31324,6 +31355,11 @@ function App(){
     if(!localStorage.getItem('jsr_payroll_cfg_al')){localStorage.setItem('jsr_payroll_cfg_al',JSON.stringify({kv_employer:35.08,kv_employee:30.00,pension_employee_pct:5,pension_employer_pct:5,tax_bracket1_max:250,tax_bracket2_max:450,tax_bracket1_pct:0,tax_bracket2_pct:8,tax_bracket3_pct:10}));}
     // Kosovo (EUR) — bisher kein Seed; Beträge in EUR (Startwerte, Johannes trägt die echten Sätze ein).
     if(!localStorage.getItem('jsr_payroll_cfg_xk')){localStorage.setItem('jsr_payroll_cfg_xk',JSON.stringify({kv_employer:0,kv_employee:0,pension_employee_pct:5,pension_employer_pct:5,tax_bracket1_max:0,tax_bracket2_max:960,tax_bracket1_pct:0,tax_bracket2_pct:4,tax_bracket3_pct:10}));}
+    // Ländermodell (Phase 1): Seed + einmalige Standort→Land-Zuweisung (country_id aus Name/country-Label).
+    if(!localStorage.getItem('jsr_countries_v1')){ localStorage.setItem('jsr_countries_v1', JSON.stringify(COUNTRY_SEED)); }
+    try{ const _locs=JSON.parse(localStorage.getItem('jsr_locations_v1')||'null');
+      if(Array.isArray(_locs)){ let _ch=false; _locs.forEach(l=>{ if(l&&!l.country_id){ const cid=countryForLocation(l.name)||countryForLocation(l.id)||countryForLocation(l.country); if(cid){ l.country_id=cid; _ch=true; } } });
+        if(_ch) localStorage.setItem('jsr_locations_v1', JSON.stringify(_locs)); } }catch(e){}
     if(!localStorage.getItem('jsr_hw_types')){localStorage.setItem('jsr_hw_types',JSON.stringify([{id:'hw_headset',name:'Headset',icon:'🎧',description:'USB Headset'},{id:'hw_laptop',name:'Laptop',icon:'💻',description:'Firmenlaptop'},{id:'hw_mouse',name:'Maus',icon:'🖱',description:'Computermaus'}]));}
     // Etappe P2: perf-Seed entfernt — Quelle ist jetzt Supabase (kpi_entries).
     if(!localStorage.getItem('jsr_shift_cfg')){localStorage.setItem('jsr_shift_cfg',JSON.stringify({"proj_hc_sales":[{"id":"s1","label":"Frueh","value":"08:00-16:30","hours":8.0,"net":7.5,"split":false},{"id":"s2","label":"Frueh lang","value":"09:00-17:30","hours":8.5,"net":8.0,"split":false},{"id":"s3","label":"Spaet frueh","value":"11:30-20:00","hours":8.5,"net":8.0,"split":false},{"id":"s4","label":"Spaet","value":"13:30-22:00","hours":8.5,"net":8.0,"split":false},{"id":"s5","label":"Frueh kurz","value":"08:00-15:30","hours":7.5,"net":7.0,"split":false},{"id":"s6","label":"Split 08-12+16-20","value":"08:00-12:00","value2":"16:00-20:00","hours":8.0,"net":7.5,"split":true},{"id":"s7","label":"Split 08-12+18-22","value":"08:00-12:00","value2":"18:00-22:00","hours":8.0,"net":7.5,"split":true}],"proj_hc_support":[{"id":"s1","label":"Frueh lang","value":"08:00-17:30","hours":9.5,"net":9.0,"split":false},{"id":"s2","label":"Spaet frueh","value":"11:30-20:00","hours":8.5,"net":8.0,"split":false},{"id":"s3","label":"Split 08-12+16-20","value":"08:00-12:00","value2":"16:00-20:00","hours":8.0,"net":7.5,"split":true}],"proj_giga_all":[{"id":"s1","label":"Standard","value":"09:00-17:30","hours":8.5,"net":8.0,"split":false},{"id":"s2","label":"Spaet","value":"10:30-19:00","hours":8.5,"net":8.0,"split":false},{"id":"s3","label":"Split 09-13+17-21","value":"09:00-13:00","value2":"17:00-21:00","hours":8.0,"net":7.5,"split":true}]}));}
