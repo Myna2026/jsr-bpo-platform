@@ -6419,20 +6419,8 @@ function getPayrollCfg(location){
 }
 // Währung je Lohn-Land: Albanien rechnet in LEK, Kosovo in EUR (jeder Zettel in Auszahlungswährung;
 // Umrechnung nach EUR nur in der Kalkulation über den Monatskurs). Prozentsätze sind währungsneutral.
-function payrollCurrency(country){ return (getCountryById(country)||{}).currency || (country==='xk' ? 'EUR' : 'LEK'); }
-// Amount-Felder der Lohn-Config (währungsabhängig; die *_pct-Felder sind neutral).
-const PAYROLL_AMOUNT_FIELDS=['kv_employer','kv_employee','tax_bracket1_max','tax_bracket2_max'];
-// Plausibilität: liefert die Amount-Felder, deren Wert nach der FALSCHEN Währung aussieht.
-// al=LEK → große Beträge (ein Wert <1000 ist offensichtlich ein EUR-Wert, z.B. Freibetrag 250).
-// xk=EUR → kleine Beträge (ein Wert >5000 ist offensichtlich ein LEK-Wert). Warnen, nicht rechnen.
-function payrollCfgCurrencyWarnings(cfg, country){
-  const out=[];
-  PAYROLL_AMOUNT_FIELDS.forEach(k=>{ const v=parseFloat(cfg&&cfg[k]); if(!(v>0)) return;
-    if(country==='al' && v<1000) out.push(k);
-    if(country==='xk' && v>5000) out.push(k);
-  });
-  return out;
-}
+// (payrollCfgCurrencyWarnings/PAYROLL_AMOUNT_FIELDS entfernt — Plausibilität läuft jetzt über das
+//  Ländermodell + den verified-Schalter, nicht mehr über die alte al/xk-Amount-Config.)
 
 function calcFullPayslip(emp, month, salaryRec, employees, absences){
   const r   = parseFloat(emp.hourly_rate||0);
@@ -11017,17 +11005,17 @@ function projectDbWaterfall(costs, revenue){
 // Vollkosten-Basis mit Fallback-Sätzen (zu niedrig) → sichtbarer Hinweis. Verschwindet, sobald echte Sätze rein.
 function payrollCfgIncomplete(country){
   if(!country) return false;
-  const cfg=getPayrollCfg(country);
-  const hasAmounts=PAYROLL_AMOUNT_FIELDS.some(k=>parseFloat(cfg&&cfg[k])>0);
-  if(!hasAmounts) return true;
-  return payrollCfgCurrencyWarnings(cfg, country).length>0;
+  const c=getCountryById(country);
+  if(!c) return true;                                                   // kein Land hinterlegt
+  if(!((c.contributions||[]).length && (c.taxBrackets||[]).length)) return true;  // keine Regeln
+  return c.verified===false;                                           // Sätze im Editor noch nicht „bestätigt"
 }
 const PAYROLL_COUNTRY_LABEL={al:'Albanien (Tirana)', xk:'Kosovo (Prishtina)'};
 // Länder mit unvollständiger Lohn-Config unter den aktiven/Schulungs-MA einer Liste (für den Kosten-Warnhinweis).
 function payrollCfgMissingCountries(employees){
   const set=new Set();
   (employees||[]).forEach(e=>{ if(!e||!['active','training'].includes(e.status)) return; const c=payrollCountry(e.location); if(c && payrollCfgIncomplete(c)) set.add(c); });
-  return [...set].map(c=>PAYROLL_COUNTRY_LABEL[c]||c);
+  return [...set].map(c=>(getCountryById(c)||{}).name || PAYROLL_COUNTRY_LABEL[c] || c);
 }
 // MA eines Projekts/Skills auflösen — über die EINE Wahrheit empAssignments
 // (offene project_assignments bevorzugt, flaches Feld als virtuelle 100%-Zuweisung).
@@ -21225,8 +21213,12 @@ function ProjectProfitability({projects, employees, forecast, setForecast, onNav
               <input className="form-input" value={form.name} onChange={e=>setF('name',e.target.value)} placeholder="z.B. Tirana"/>
             </div>
             <div className="form-group">
-              <label className="form-label">Land</label>
-              <input className="form-input" value={form.country||''} onChange={e=>setF('country',e.target.value)} placeholder="z.B. Albanien"/>
+              <label className="form-label">Land (Lohnregeln)</label>
+              <select className="form-select" value={form.country_id||''} onChange={e=>{ const cid=e.target.value; const c=getCountryById(cid); setF('country_id',cid); if(c) setF('country',c.name); }}>
+                <option value="">— kein Land —</option>
+                {getCountries().map(c=><option key={c.id} value={c.id}>{c.name} ({c.currency})</option>)}
+              </select>
+              <div style={{fontSize:11,color:'var(--muted)',marginTop:3}}>Bestimmt Währung + Lohnregeln (Beiträge/Steuer) der Mitarbeiter an diesem Standort. Pflege unter „💶 Länder & Lohnregeln".</div>
             </div>
             <div className="form-group">
               <label className="form-label">Flag / Icon (Emoji)</label>
@@ -23896,6 +23888,103 @@ function OverheadScopeEditor({projects}){
     </div>
   );
 }
+// Länderoffener Lohn-Config-Editor (jsr_countries_v1): Länder + Beiträge-Liste + Freibetrag-Staffel + Steuerstufen.
+// Ersetzt den alten al/xk-Tab-Editor (der die tote jsr_payroll_cfg_* pflegte). Speichert wie FxRatesEditor.
+function CountryPayrollEditor(){
+  const [countries, setCountries] = useState(()=>getCountries());
+  const [sel, setSel] = useState(()=>getCountries()[0]?.id||'al');
+  const persist = (next)=>{ setCountries(next); try{ localStorage.setItem('jsr_countries_v1', JSON.stringify(next)); }catch(e){} saveConfigToDB('jsr_countries_v1', next); };
+  const cur = countries.find(c=>c.id===sel) || countries[0];
+  if(!cur) return <div className="card"><div style={{padding:16,fontSize:13}}>Keine Länder hinterlegt. <button className="btn btn-sm btn-primary" onClick={()=>{ persist(COUNTRY_SEED); setSel('al'); }}>Standard-Länder anlegen</button></div></div>;
+  const patch = (upd)=>persist(countries.map(c=>c.id===cur.id?{...c,...upd}:c));
+  const numOrNull = v => (v===''||v==null)?null:Number(v);
+  const sym = cur.currency||'?';
+  const contribs=cur.contributions||[], brackets=cur.taxBrackets||[], allow=cur.allowance||[];
+  const inp={padding:'5px 8px',border:'1px solid var(--border)',borderRadius:'var(--r)',fontSize:13,fontFamily:'var(--font)'};
+  const lblC={fontSize:10,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em',margin:'14px 16px 6px',borderTop:'1px solid var(--border)',paddingTop:10};
+  async function addCountry(){
+    const name=await uiPrompt({title:'Neues Land', label:'Name (z. B. Nordmazedonien)'});
+    if(!name) return;
+    let id=String(name).toLowerCase().replace(/[^a-z0-9]/g,'').slice(0,10)||('c'+countries.length);
+    if(countries.some(c=>c.id===id)) id=id+countries.length;
+    persist([...countries,{id,name:String(name),currency:'EUR',decimals:2,verified:false,contributions:[],allowance:[{grossUpto:null,amount:0}],taxBrackets:[{upto:null,pct:0}]}]);
+    setSel(id);
+  }
+  async function delCountry(){
+    if(countries.length<=1) return;
+    const ok=await uiConfirm({title:'Land löschen', text:'„'+cur.name+'" samt Regeln löschen? Standorte mit diesem Land verlieren ihre Zuordnung.', danger:true, confirmLabel:'Löschen'});
+    if(!ok) return;
+    const next=countries.filter(c=>c.id!==cur.id); persist(next); setSel(next[0].id);
+  }
+  return (
+    <div className="card">
+      <div className="card-header">
+        <span className="card-title">💶 Länder & Lohnregeln</span>
+        <div style={{display:'flex',gap:4,flexWrap:'wrap',alignItems:'center'}}>
+          {countries.map(c=>(
+            <button key={c.id} onClick={()=>setSel(c.id)} style={{padding:'5px 12px',borderRadius:6,cursor:'pointer',fontSize:12,fontWeight:700,border:'1.5px solid '+(sel===c.id?'var(--blue)':'var(--border)'),background:sel===c.id?'var(--blue-bg)':'transparent',color:sel===c.id?'var(--blue)':'var(--muted)'}} title={c.verified?'bestätigt':'Sätze noch nicht bestätigt'}>{c.name}{c.verified?'':' ⚠'}</button>
+          ))}
+          <button className="btn btn-sm" onClick={addCountry}>+ Land</button>
+        </div>
+      </div>
+      <div style={{padding:'10px 16px'}}>
+        <div style={{display:'flex',gap:12,flexWrap:'wrap',alignItems:'flex-end'}}>
+          <div><div style={{fontSize:11,color:'var(--muted)'}}>Name</div><input style={{...inp,width:170}} value={cur.name||''} onChange={e=>patch({name:e.target.value})}/></div>
+          <div><div style={{fontSize:11,color:'var(--muted)'}}>Währung</div><input style={{...inp,width:80,textAlign:'center'}} value={cur.currency||''} onChange={e=>patch({currency:e.target.value.toUpperCase()})} placeholder="LEK"/></div>
+          <div><div style={{fontSize:11,color:'var(--muted)'}}>Nachkommast.</div><input type="number" min="0" max="2" style={{...inp,width:70,textAlign:'center'}} value={cur.decimals??0} onChange={e=>patch({decimals:Math.max(0,Math.min(2,parseInt(e.target.value)||0))})}/></div>
+          <label style={{display:'flex',gap:6,alignItems:'center',fontSize:13,cursor:'pointer'}}><input type="checkbox" checked={!!cur.verified} onChange={e=>patch({verified:e.target.checked})}/> Sätze bestätigt (kein Hinweis mehr)</label>
+          {countries.length>1&&<button className="btn btn-sm" style={{color:'var(--red)',marginLeft:'auto'}} onClick={delCountry}>Land löschen</button>}
+        </div>
+        <div style={{fontSize:11,color:'var(--muted)',marginTop:8,lineHeight:1.5}}>Beträge (Deckel, Freibetrag, Festbeträge) in <b>{sym}</b> eintragen. Prozentsätze sind währungsneutral. Solange „bestätigt" aus ist, zeigt das System den Platzhalter-Hinweis in Wirtschaftlichkeit/Cockpit.</div>
+      </div>
+
+      <div style={lblC}>Beiträge / Sozialabgaben</div>
+      <div style={{padding:'0 16px 8px'}}>
+        <div style={{display:'grid',gridTemplateColumns:'1.5fr 1.1fr 1.1fr 1fr auto',gap:8,fontSize:10,color:'var(--muted)',fontWeight:700,marginBottom:4}}><span>Name</span><span>Arbeitgeber</span><span>Arbeitnehmer</span><span>Deckel</span><span></span></div>
+        {contribs.map((c,i)=>(
+          <div key={i} style={{display:'grid',gridTemplateColumns:'1.5fr 1.1fr 1.1fr 1fr auto',gap:8,alignItems:'center',marginBottom:6}}>
+            <input style={inp} value={c.name||''} onChange={e=>patch({contributions:contribs.map((x,j)=>j===i?{...x,name:e.target.value}:x)})}/>
+            {['employer','employee'].map(side=>(
+              <div key={side} style={{display:'flex',gap:3}}>
+                <input type="number" step="0.01" style={{...inp,width:'58%',textAlign:'right'}} value={(c[side]&&c[side].value)??0} onChange={e=>patch({contributions:contribs.map((x,j)=>j===i?{...x,[side]:{...(x[side]||{}),value:parseFloat(e.target.value)||0}}:x)})}/>
+                <select style={{...inp,padding:'5px 2px'}} value={(c[side]&&c[side].mode)||'pct'} onChange={e=>patch({contributions:contribs.map((x,j)=>j===i?{...x,[side]:{...(x[side]||{}),mode:e.target.value}}:x)})}><option value="pct">%</option><option value="fixed">{sym}</option></select>
+              </div>
+            ))}
+            <input type="number" step="1" placeholder="kein" style={{...inp,textAlign:'right'}} value={c.cap??''} onChange={e=>patch({contributions:contribs.map((x,j)=>j===i?{...x,cap:numOrNull(e.target.value)}:x)})}/>
+            <button className="btn btn-sm" style={{color:'var(--red)'}} onClick={()=>patch({contributions:contribs.filter((_,j)=>j!==i)})}>×</button>
+          </div>
+        ))}
+        <button className="btn btn-sm" onClick={()=>patch({contributions:[...contribs,{name:'Neuer Beitrag',employer:{mode:'pct',value:0},employee:{mode:'pct',value:0},cap:null}]})}>+ Beitrag</button>
+      </div>
+
+      <div style={lblC}>Freibetrag (gestaffelt nach Brutto)</div>
+      <div style={{padding:'0 16px 8px'}}>
+        <div style={{fontSize:11,color:'var(--muted)',marginBottom:6}}>Erste passende Zeile gilt (aufsteigend nach „Brutto bis"). „Brutto bis" leer = alles darüber. Der Freibetrag ist die 0 %-Zone der Steuer.</div>
+        {allow.map((a,i)=>(
+          <div key={i} style={{display:'grid',gridTemplateColumns:'1fr 1fr auto',gap:8,alignItems:'center',marginBottom:6}}>
+            <input type="number" placeholder="Brutto bis (leer = darüber)" style={inp} value={a.grossUpto??''} onChange={e=>patch({allowance:allow.map((x,j)=>j===i?{...x,grossUpto:numOrNull(e.target.value)}:x)})}/>
+            <input type="number" placeholder={'Freibetrag ('+sym+')'} style={{...inp,textAlign:'right'}} value={a.amount??0} onChange={e=>patch({allowance:allow.map((x,j)=>j===i?{...x,amount:parseFloat(e.target.value)||0}:x)})}/>
+            <button className="btn btn-sm" style={{color:'var(--red)'}} onClick={()=>patch({allowance:allow.filter((_,j)=>j!==i)})}>×</button>
+          </div>
+        ))}
+        <button className="btn btn-sm" onClick={()=>patch({allowance:[...allow,{grossUpto:null,amount:0}]})}>+ Stufe</button>
+      </div>
+
+      <div style={lblC}>Steuerstufen (auf Brutto, erste Grenze = Freibetrag)</div>
+      <div style={{padding:'0 16px 14px'}}>
+        <div style={{fontSize:11,color:'var(--muted)',marginBottom:6}}>„bis" = Obergrenze der Stufe in {sym}, leer = darüber (∞). Reihenfolge aufsteigend.</div>
+        {brackets.map((b,i)=>(
+          <div key={i} style={{display:'grid',gridTemplateColumns:'1fr 1fr auto',gap:8,alignItems:'center',marginBottom:6}}>
+            <input type="number" placeholder="bis (leer = ∞)" style={inp} value={b.upto??''} onChange={e=>patch({taxBrackets:brackets.map((x,j)=>j===i?{...x,upto:numOrNull(e.target.value)}:x)})}/>
+            <div style={{display:'flex',gap:4,alignItems:'center'}}><input type="number" step="0.1" style={{...inp,width:90,textAlign:'right'}} value={b.pct??0} onChange={e=>patch({taxBrackets:brackets.map((x,j)=>j===i?{...x,pct:parseFloat(e.target.value)||0}:x)})}/><span style={{color:'var(--muted)'}}>%</span></div>
+            <button className="btn btn-sm" style={{color:'var(--red)'}} onClick={()=>patch({taxBrackets:brackets.filter((_,j)=>j!==i)})}>×</button>
+          </div>
+        ))}
+        <button className="btn btn-sm" onClick={()=>patch({taxBrackets:[...brackets,{upto:null,pct:0}]})}>+ Stufe</button>
+      </div>
+    </div>
+  );
+}
 function SystemSettingsTab({projects, setProjects, employees, clients}){
   // Deeplink aus dem Cockpit (z.B. „Wechselkurs eintragen" → Section fx_rates). Einmalig beim Mount.
   const [activeSection, setActiveSection] = useState(()=>{ try{ const j=window.__sysJump; if(j){ window.__sysJump=null; return j; } }catch(e){} return 'skills'; });
@@ -24170,7 +24259,6 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
   useEffect(()=>{if(_cfgMounted.current)saveConfigToDB('jsr_vacation_cfg',vcfg);},[vcfg]);
   useEffect(()=>{_cfgMounted.current=true;},[]);
 
-  const [payTab, setPayTab] = useState('al');
   const [kpiCfg, setKpiCfgState] = useState(()=>getKpiCfg());
   function saveKpi(cfg){saveKpiConfigToDB(cfg);saveKpiCfg(cfg);setKpiCfgState([...cfg]);}
   const [hwTypes, setHwTypesState] = useState(()=>{try{return JSON.parse(localStorage.getItem('jsr_hw_types')||'[]');}catch(e){return[];}});
@@ -25020,93 +25108,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
 
         <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.1em',padding:'4px 0 8px',borderBottom:'2px solid var(--border)',marginBottom:12,marginTop:8}}>💶 Lohnbuchhaltung</div>
 
-          {activeSection==='lohncfg'&&(()=>{
-          const cfgKey='jsr_payroll_cfg_'+payTab;
-          const cfg=JSON.parse(localStorage.getItem(cfgKey)||'{}');
-          const lohnSave=(k,v)=>{const c=JSON.parse(localStorage.getItem(cfgKey)||'{}');c[k]=v;localStorage.setItem(cfgKey,JSON.stringify(c));saveConfigToDB(cfgKey,c);};
-          const DEFAULTS={
-            al:{kv_employer:35.08,kv_employee:30.00,pension_employee_pct:5,pension_employer_pct:5,
-              tax_bracket1_max:250,tax_bracket2_max:450,tax_bracket1_pct:0,tax_bracket2_pct:8,tax_bracket3_pct:10},
-            xk:{kv_employer:0,kv_employee:0,pension_employee_pct:5,pension_employer_pct:5,
-              tax_bracket1_max:0,tax_bracket2_max:960,tax_bracket1_pct:0,tax_bracket2_pct:4,tax_bracket3_pct:10},
-          };
-          const def=DEFAULTS[payTab]||DEFAULTS.al;
-          const cur=payrollCurrency(payTab);                        // al→LEK, xk→EUR
-          const wrongFields=payrollCfgCurrencyWarnings(cfg, payTab); // Amount-Felder mit falsch aussehender Währung
-          const rows=[
-            {section:'Krankenversicherung'},
-            {key:'kv_employer',label:'KV Arbeitgeber',step:'0.01'},
-            {key:'kv_employee',label:'KV Arbeitnehmer',step:'0.01'},
-            {section:'Rentenversicherung'},
-            {key:'pension_employee_pct',label:'Rente Arbeitnehmer (%)',step:'0.1'},
-            {key:'pension_employer_pct',label:'Rente Arbeitgeber (%)',step:'0.1'},
-            {section:'Einkommensteuer'},
-            {key:'tax_bracket1_max',label:'Steuerfrei bis',step:'1'},
-            {key:'tax_bracket2_max',label:'Bracket 2 bis',step:'1'},
-            {key:'tax_bracket1_pct',label:'Bracket 1 (%)',step:'0.1'},
-            {key:'tax_bracket2_pct',label:'Bracket 2 (%)',step:'0.1'},
-            {key:'tax_bracket3_pct',label:'Bracket 3 (%)',step:'0.1'},
-            {section:'Sonstiges'},
-          ];
-          return(
-            <div className="card">
-              <div className="card-header">
-                <span className="card-title">📋 Lohnbuchhaltung: Steuersätze</span>
-                <div style={{display:'flex',gap:4}}>
-                  {[{v:'al',label:'🇦🇱 Albanien'},{v:'xk',label:'🇽🇰 Kosovo'}].map(c=>(
-                    <button key={c.v} onClick={()=>setPayTab(c.v)}
-                      style={{padding:'5px 12px',borderRadius:6,cursor:'pointer',fontFamily:'var(--font)',
-                        fontSize:12,fontWeight:700,
-                        border:'1.5px solid '+(payTab===c.v?'var(--blue)':'var(--border)'),
-                        background:payTab===c.v?'var(--blue-bg)':'transparent',
-                        color:payTab===c.v?'var(--blue)':'var(--muted)'}}>
-                      {c.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <div style={{padding:'8px 0'}}>
-                <div style={{padding:'6px 16px 10px',fontSize:12,color:'var(--muted)',borderBottom:'1px solid var(--border)',marginBottom:4}}>
-                  {payTab==='al'?'Tirana, Albanisches Steuerrecht':'Prishtina, Kosovarisches Steuerrecht'}
-                </div>
-                {/* Punkt 3: sichtbarer Währungs-Hinweis (LEK vs EUR) */}
-                <div style={{margin:'0 16px 8px',padding:'8px 12px',borderRadius:8,fontSize:12,lineHeight:1.5,
-                  background:'var(--blue-bg)',border:'1px solid rgba(15,86,97,.25)',color:'#0F5661'}}>
-                  💱 Beträge in <b>{cur}</b> eintragen, KV und Steuer-Grenzen in der Auszahlungswährung
-                  ({payTab==='al'?'Albanien = LEK':'Kosovo = EUR'}). Prozentsätze (Rente, Steuer-Sätze) sind währungsneutral.
-                </div>
-                {/* Punkt 4: Plausibilitäts-Warnung — Wert sieht nach falscher Währung aus */}
-                {wrongFields.length>0 && <div style={{margin:'0 16px 8px',padding:'8px 12px',borderRadius:8,fontSize:12,lineHeight:1.5,
-                  background:'var(--red-bg)',border:'1px solid rgba(239,68,68,.35)',color:'var(--red)',fontWeight:600}}>
-                  ⚠ {wrongFields.length} Wert{wrongFields.length>1?'e sehen':' sieht'} nach der falschen Währung aus (offensichtlich {cur==='LEK'?'EUR im LEK-Feld':'LEK im EUR-Feld'}).
-                  Die Lohnrechnung verweigert solche Zettel, bis die Werte in {cur} korrigiert sind.
-                </div>}
-                {rows.map((row,i)=>row.section?(
-                  <div key={i} style={{padding:'8px 16px 4px',fontSize:10,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.08em',marginTop:i>0?4:0,borderTop:i>0?'1px solid var(--border)':'none'}}>
-                    {row.section}
-                  </div>
-                ):(
-                  <div key={row.key} style={{display:'grid',gridTemplateColumns:'1fr auto auto auto',alignItems:'center',gap:10,padding:'8px 16px',borderBottom:'1px solid var(--border)'}}>
-                    <div style={{fontSize:13,fontWeight:500}}>{row.label}</div>
-                    <div style={{fontSize:10,color:'var(--dim)'}}>Std: {def[row.key]}</div>
-                    <input type="number" min="0" step={row.step||'1'}
-                      key={payTab+'_'+row.key}
-                      defaultValue={cfg[row.key]!==undefined?cfg[row.key]:def[row.key]}
-                      onChange={e=>lohnSave(row.key,parseFloat(e.target.value)||0)}
-                      style={{width:80,padding:'5px 8px',border:'1.5px solid var(--border)',borderRadius:'var(--r)',
-                        fontFamily:'var(--font)',fontSize:13,fontWeight:700,textAlign:'right',
-                        color:'var(--blue)',background:'var(--blue-bg)'}}/>
-                    <span style={{fontSize:12,fontWeight:wrongFields.includes(row.key)?700:400,whiteSpace:'nowrap',
-                      color:wrongFields.includes(row.key)?'var(--red)':'var(--muted)'}}
-                      title={wrongFields.includes(row.key)?('Wert sieht nach falscher Währung aus: '+cur+' erwartet'):''}>
-                      {row.label.includes('%')?'%':(wrongFields.includes(row.key)?'⚠ ':'')+cur}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          );
-        })()}
+          {activeSection==='lohncfg'&&<CountryPayrollEditor/>}
 
         {/* ── SURCHARGE ── */}
         {activeSection==='surcharge'&&(
