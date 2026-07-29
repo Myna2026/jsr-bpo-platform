@@ -6376,6 +6376,8 @@ function countryForLocation(location){
   return null;
 }
 function payrollCountry(location){ return countryForLocation(location); }
+// Vollständiges Regelwerk eines Standort-Landes (Beiträge/Stufen/Freibetrag/Währung) für calcFullPayslip.
+function getCountryRules(location){ return getCountryById(countryForLocation(location)); }
 function getPayrollCfg(location){
   // jsr_payroll_cfg_al = Albanien (Tirana), jsr_payroll_cfg_xk = Kosovo (Prishtina).
   // Nicht zuordenbar (null) → al als Notfall-Basis, aber sichtbar via DataQualityPanel (payroll_loc).
@@ -6401,7 +6403,6 @@ function payrollCfgCurrencyWarnings(cfg, country){
 }
 
 function calcFullPayslip(emp, month, salaryRec, employees, absences){
-  const cfg = getPayrollCfg(emp.location||emp.location_id||'');
   const r   = parseFloat(emp.hourly_rate||0);
   const hpd = parseFloat(emp.work_hours||8);
 
@@ -6472,47 +6473,48 @@ function calcFullPayslip(emp, month, salaryRec, employees, absences){
   const bonusWheel   = parseFloat(rec.wheel_bonus||0);   // G4: Glücksrad-Gewinne des Monats (automatisch, Brutto)
   const totalBonuses = bonusPerf + bonusSpecial + bonusReferral + bonusWheel;
 
-  // ── KV (Krankenversicherung) ───────────────────────────────────────────────
-  // Country-specific fallback defaults — SELBER Resolver wie getPayrollCfg (keine zweite Logik).
-  const isKv = payrollCountry(emp.location)==='xk';
-  const defKvEr = isKv ? 0     : 35.08;
-  const defKvEe = isKv ? 0     : 30.00;
-  const defB1   = isKv ? 0     : 250;
-  const defB2   = isKv ? 960   : 450;
-  const defT1   = isKv ? 0     : 0;
-  const defT2   = isKv ? 4     : 8;
-  const defT3   = isKv ? 10    : 10;
-  const kvEmployer = parseFloat(cfg.kv_employer!==undefined?cfg.kv_employer:defKvEr);
-  const kvEmployee = parseFloat(cfg.kv_employee!==undefined?cfg.kv_employee:defKvEe);
+  // ── LÄNDER-REGELN (jsr_countries_v1): Beiträge-Liste + Steuerstufen + gestaffelter Freibetrag ──
+  // al als Notfall-Basis (nicht zuordenbarer Standort wird von DataQuality payroll_loc sichtbar geflaggt).
+  const country = getCountryRules(emp.location) || getCountryById('al') || {contributions:[],allowance:[],taxBrackets:[],currency:'LEK',decimals:0};
+  const _dec = (country.decimals!=null) ? Number(country.decimals) : 0;
+  const _rnd = v => { const f=Math.pow(10,_dec); return Math.round((Number(v)||0)*f)/f; };
 
-  // ── GROSS TOTAL ───────────────────────────────────────────────────────────
-  const grossTotal = grossRegular + grossSurcharges + totalBonuses + kvEmployer;
+  // ── BRUTTO = Bemessungsbasis (Grundlohn + Zuschläge + Boni). AG-Beiträge sind KEIN Brutto-Bestandteil. ──
+  const grossTotal = grossRegular + grossSurcharges + totalBonuses;
 
-  // ── PENSION ───────────────────────────────────────────────────────────────
-  const pensionEmpPct = parseFloat(cfg.pension_employee_pct!==undefined?cfg.pension_employee_pct:5)/100;
-  const pensionEmrPct = parseFloat(cfg.pension_employer_pct!==undefined?cfg.pension_employer_pct:5)/100;
-  const pensionEmployee = Math.round(grossTotal * pensionEmpPct * 100)/100;
-  const pensionEmployer = Math.round(grossTotal * pensionEmrPct * 100)/100;
-  const pensionTotal    = pensionEmployee + pensionEmployer;
+  // ── BEITRÄGE (Liste): AG/AN je pct×min(Brutto,Deckel) ODER Festbetrag. Beträge intern PRÄZISE,
+  //    Rundung erst bei Summen/Netto (sonst kippt die Gegenrechnung um 1 LEK durch Per-Bein-Rundung). ──
+  const contributions = (country.contributions||[]).map(cn=>{
+    const cap  = (cn.cap!=null && Number(cn.cap)>0) ? Number(cn.cap) : null;
+    const base = cap!=null ? Math.min(grossTotal, cap) : grossTotal;
+    const er = cn.employer||{}, ee = cn.employee||{};
+    const employer = er.mode==='fixed' ? (Number(er.value)||0) : base*(Number(er.value)||0)/100;
+    const employee = ee.mode==='fixed' ? (Number(ee.value)||0) : base*(Number(ee.value)||0)/100;
+    return { name:cn.name||'Beitrag', base, cap, employer, employee,
+             employerPct: er.mode==='pct'?(Number(er.value)||0):null,
+             employeePct: ee.mode==='pct'?(Number(ee.value)||0):null };
+  });
+  const socialEmployer = _rnd(contributions.reduce((s,c)=>s+c.employer,0));
+  const socialEmployee = _rnd(contributions.reduce((s,c)=>s+c.employee,0));
 
-  // ── INCOME TAX ────────────────────────────────────────────────────────────
-  const taxableIncome = grossTotal - pensionEmployee;
-  const b1max = parseFloat(cfg.tax_bracket1_max!==undefined?cfg.tax_bracket1_max:defB1);
-  const b2max = parseFloat(cfg.tax_bracket2_max!==undefined?cfg.tax_bracket2_max:defB2);
-  const b1pct = parseFloat(cfg.tax_bracket1_pct!==undefined?cfg.tax_bracket1_pct:defT1)/100;
-  const b2pct = parseFloat(cfg.tax_bracket2_pct!==undefined?cfg.tax_bracket2_pct:defT2)/100;
-  const b3pct = parseFloat(cfg.tax_bracket3_pct!==undefined?cfg.tax_bracket3_pct:defT3)/100;
-  let incomeTax=0;
-  if(taxableIncome>b2max){
-    incomeTax = Math.round(((b1max*b1pct) + ((b2max-b1max)*b2pct) + ((taxableIncome-b2max)*b3pct))*100)/100;
-  } else if(taxableIncome>b1max){
-    incomeTax = Math.round(((b1max*b1pct) + ((taxableIncome-b1max)*b2pct))*100)/100;
-  } else {
-    incomeTax = Math.round(taxableIncome*b1pct*100)/100;
+  // ── FREIBETRAG (gestaffelt nach Brutto) ──
+  let allowance = 0;
+  for(const a of (country.allowance||[])){ if(a.grossUpto==null || grossTotal<=Number(a.grossUpto)){ allowance=Number(a.amount)||0; break; } }
+
+  // ── STEUER: Stufen auf BRUTTO, erste Grenze = Freibetrag (0 %-Zone). Stufengrenzen absolut aufs Brutto. ──
+  let _taxRaw=0, _lo=allowance; const taxBands=[];
+  for(const b of (country.taxBrackets||[])){
+    const hi = (b.upto==null) ? grossTotal : Math.min(grossTotal, Number(b.upto)||0);
+    if(hi>_lo){ const amt=(hi-_lo)*(Number(b.pct)||0)/100; _taxRaw+=amt; taxBands.push({from:_lo,to:hi,pct:Number(b.pct)||0,amount:_rnd(amt)}); _lo=hi; }
+    if(_lo>=grossTotal) break;
   }
+  const incomeTax = _rnd(_taxRaw);
 
-  // ── NET ───────────────────────────────────────────────────────────────────
-  const netPay = Math.round((grossTotal - pensionEmployee - incomeTax - kvEmployee - absenceDeduct - advanceDeduct - otherDeduct)*100)/100;
+  // ── NETTO + ARBEITGEBERKOSTEN (aus präzisen Beträgen, einmal gerundet) ──
+  const _sumEe = contributions.reduce((s,c)=>s+c.employee,0);
+  const _sumEr = contributions.reduce((s,c)=>s+c.employer,0);
+  const netPay = _rnd(grossTotal - _sumEe - _taxRaw - absenceDeduct - advanceDeduct - otherDeduct);
+  const employerCost = _rnd(grossTotal + _sumEr);
 
   // ── VACATION ──────────────────────────────────────────────────────────────
   const vacCalc = calcVacationEntitlement(emp, month);
@@ -6537,14 +6539,13 @@ function calcFullPayslip(emp, month, salaryRec, employees, absences){
     grossRegular, gross20, gross30, gross50, grossSurcharges,
     // Bonuses
     bonusPerf, bonusSpecial, bonusReferral, bonusWheel, totalBonuses,
-    // KV
-    kvEmployer, kvEmployee,
+    // Länder-Modell: Beiträge-Liste (AG/AN je Beitrag) + Summen + AG-Kosten
+    currency: country.currency||null, decimals:_dec,
+    contributions, socialEmployer, socialEmployee, employerCost,
     // Gross total
     grossTotal,
-    // Pension
-    pensionEmpPct, pensionEmrPct, pensionEmployee, pensionEmployer, pensionTotal,
-    // Tax
-    taxableIncome, b1max, b2max, b1pct, b2pct, b3pct, incomeTax,
+    // Steuer: Freibetrag + dynamische Stufen
+    allowance, taxBands, incomeTax,
     // Deductions
     absenceDays, absenceDeduct, advanceDeduct, otherDeduct,
     // Net
@@ -6552,6 +6553,25 @@ function calcFullPayslip(emp, month, salaryRec, employees, absences){
     // Vacation
     vacationQuota, vacUsed, vacMonth, vacLeft, sickYear, sickMonth,
   };
+}
+
+// Selbsttest der Lohn-Mathematik gegen die zwei verifizierten albanischen Gegenrechnungen (100k/430k).
+// Läuft einmal beim Start; meldet Abweichungen in der Konsole (blockiert nichts).
+function payrollSelfTest(){
+  try{
+    const mk=(sal)=>({first_name:'Test',last_name:'AL',salary_type:'fixed',fixed_salary:sal,hourly_rate:0,work_hours:8,location:'Tirana',absences:[],contract:{start:'2020-01-01'}});
+    const c1=calcFullPayslip(mk(100000),'2026-06',{deduction_absence_days:0},[],[]);
+    const soc1=(c1.contributions||[]).find(c=>/sozial/i.test(c.name))||{};
+    const kv1=(c1.contributions||[]).filter(c=>/kranken/i.test(c.name)).reduce((s,c)=>s+c.employer+c.employee,0);
+    const c2=calcFullPayslip(mk(430026),'2026-06',{deduction_absence_days:0},[],[]);
+    const soc2=(c2.contributions||[]).find(c=>/sozial/i.test(c.name))||{};
+    const kv2=(c2.contributions||[]).filter(c=>/kranken/i.test(c.name)).reduce((s,c)=>s+c.employer+c.employee,0);
+    const R=Math.round;
+    const ok1 = c1.grossTotal===100000 && R(soc1.employer)===15000 && R(soc1.employee)===9500 && R(kv1)===3400 && c1.incomeTax===9100 && c1.netPay===79700 && c1.employerCost===116700;
+    const ok2 = R(soc2.employer)===27962 && R(kv2)===14621 && c2.incomeTax===75006;
+    if(ok1&&ok2) console.info('✓ Lohn-Selbsttest (Albanien) ok: 100k→Steuer 9.100/Netto 79.700/AG 116.700 · 430k→AG-Sozial 27.962/KV 14.621/Steuer 75.006');
+    else console.warn('⚠ Lohn-SELBSTTEST FEHLGESCHLAGEN', {ok1, ok2, c1, c2});
+  }catch(e){ console.warn('Lohn-Selbsttest Fehler:', e); }
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -6574,6 +6594,44 @@ function generatePayslipHTML(ps){
     ? '<img src="'+logo+'" style="height:40px;max-width:160px;object-fit:contain" alt="Logo"/>'
     : '<div style="font-size:22px;font-weight:900;color:#1a1a2e;letter-spacing:-.02em">TIVE 360°</div>';
 
+  // Neues Ländermodell (ps.contributions) vs. Altzettel-Snapshot (feste kv/pension/bracket-Felder).
+  const _isNew = Array.isArray(ps.contributions);
+  const _zuschlag = (Number(ps.grossSurcharges)||0) + (Number(ps.totalBonuses)||0) + (_isNew?0:(Number(ps.kvEmployer)||0));
+  const _kvErLine = _isNew ? '' : '<tr><td>Krankenversicherungsprämie (Arbeitgeber)</td><td>—</td><td>'+fmt(ps.kvEmployer)+'</td></tr>';
+  let _contribSection, _taxSection, _netDeduct;
+  if(_isNew){
+    _contribSection='<div class="section"><div class="section-title">Sozialabgaben / Beiträge</div><table class="table"><tr><th>Position</th><th>Satz</th><th>Betrag</th></tr>'
+      +(ps.contributions||[]).map(c=>'<tr><td>'+c.name+' (Arbeitnehmer)</td><td>'+(c.employeePct!=null?c.employeePct+'%':'—')+'</td><td>'+fmt(c.employee)+'</td></tr>'
+        +'<tr><td>'+c.name+' (Arbeitgeber)</td><td>'+(c.employerPct!=null?c.employerPct+'%':'—')+'</td><td>'+fmt(c.employer)+'</td></tr>'
+        +(c.cap!=null?'<tr><td style="color:#94a3b8;font-size:9pt">↳ Bemessungsgrenze</td><td>—</td><td style="color:#94a3b8">'+fmt(c.cap)+'</td></tr>':'')).join('')
+      +'<tr class="total"><td>Arbeitnehmer-Anteil gesamt</td><td>—</td><td>'+fmt(ps.socialEmployee)+'</td></tr>'
+      +'<tr class="total"><td>Arbeitgeber-Anteil gesamt</td><td>—</td><td>'+fmt(ps.socialEmployer)+'</td></tr>'
+      +'</table></div>';
+    _taxSection='<div class="section"><div class="section-title">Einkommensteuer</div><table class="table"><tr><th>Stufe</th><th>Satz</th><th>Betrag</th></tr>'
+      +'<tr><td>Steuerpflichtiges Brutto</td><td>—</td><td>'+fmt(ps.grossTotal)+'</td></tr>'
+      +'<tr><td>Freibetrag (0 %)</td><td>—</td><td>'+fmt(ps.allowance)+'</td></tr>'
+      +(ps.taxBands||[]).map(b=>'<tr><td>'+fmt(b.from).replace(' '+_sym,'')+' – '+(b.to!=null?fmt(b.to):'∞')+'</td><td>'+b.pct+'%</td><td>'+fmt(b.amount)+'</td></tr>').join('')
+      +'<tr class="total"><td>Gesamtsteuern</td><td>—</td><td>'+fmt(ps.incomeTax)+'</td></tr>'
+      +'</table></div>';
+    _netDeduct=(ps.contributions||[]).map(c=>'<tr class="red"><td>– '+c.name+' (Arbeitnehmer)</td><td>—</td><td>'+fmt(c.employee)+'</td></tr>').join('')
+      +'<tr class="red"><td>– Einkommensteuer</td><td>—</td><td>'+fmt(ps.incomeTax)+'</td></tr>';
+  } else {
+    _contribSection='<div class="section"><div class="section-title">Rentenversicherung</div><table class="table"><tr><th>Position</th><th>%</th><th>Betrag</th></tr>'
+      +'<tr><td>Arbeitnehmer-Anteil</td><td>'+pct(ps.pensionEmpPct)+'</td><td>'+fmt(ps.pensionEmployee)+'</td></tr>'
+      +'<tr><td>Arbeitgeber-Anteil</td><td>'+pct(ps.pensionEmrPct)+'</td><td>'+fmt(ps.pensionEmployer)+'</td></tr>'
+      +'<tr class="total"><td>Gesamt Rentenbeitrag</td><td>—</td><td>'+fmt(ps.pensionTotal)+'</td></tr>'
+      +'</table></div>';
+    _taxSection='<div class="section"><div class="section-title">Gehaltsversteuerung / Einkommensteuer</div><table class="table"><tr><th>Bracket</th><th>Satz</th><th>Betrag</th></tr>'
+      +'<tr><td>Gehalt vor Steuer (Brutto - Rentenbeitrag AN)</td><td>—</td><td>'+fmt(ps.taxableIncome)+'</td></tr>'
+      +'<tr><td>0 – '+fmt(ps.b1max)+'</td><td>'+pct(ps.b1pct)+'</td><td>'+fmt(0)+'</td></tr>'
+      +'<tr><td>'+fmt(ps.b1max).replace(' '+_sym,'')+' – '+fmt(ps.b2max)+'</td><td>'+pct(ps.b2pct)+'</td><td>'+fmt(Math.min(Math.max(0,ps.taxableIncome-ps.b1max),ps.b2max-ps.b1max)*ps.b2pct)+'</td></tr>'
+      +'<tr><td>über '+fmt(ps.b2max)+'</td><td>'+pct(ps.b3pct)+'</td><td>'+fmt(Math.max(0,ps.taxableIncome-ps.b2max)*ps.b3pct)+'</td></tr>'
+      +'<tr class="total"><td>Gesamtsteuern</td><td>—</td><td>'+fmt(ps.incomeTax)+'</td></tr>'
+      +'</table></div>';
+    _netDeduct='<tr class="red"><td>– Rentenbeitrag Arbeitnehmer</td><td>'+pct(ps.pensionEmpPct)+'</td><td>'+fmt(ps.pensionEmployee)+'</td></tr>'
+      +'<tr class="red"><td>– Einkommensteuer</td><td>—</td><td>'+fmt(ps.incomeTax)+'</td></tr>'
+      +'<tr class="red"><td>– Krankenversicherungsprämie Arbeitnehmer</td><td>—</td><td>'+fmt(ps.kvEmployee)+'</td></tr>';
+  }
   return '<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Gehaltsabrechnung '+emp.first_name+' '+emp.last_name+'</title><style>'
   +'*{box-sizing:border-box;margin:0;padding:0}'
   +'body{font-family:"Segoe UI",Arial,sans-serif;font-size:10.5pt;color:#1a1a2e;background:#fff;padding:20px 28px;max-width:820px;margin:0 auto}'
@@ -6671,8 +6729,8 @@ function generatePayslipHTML(ps){
   +(ps.bonusSpecial>0?'<tr><td>Sonderbonus</td><td>—</td><td>'+fmt(ps.bonusSpecial)+'</td></tr>':'')
   +(ps.bonusReferral>0?'<tr><td>Referral Bonus</td><td>—</td><td>'+fmt(ps.bonusReferral)+'</td></tr>':'')
   +(ps.bonusWheel>0?'<tr><td>Glücksrad-Bonus</td><td>—</td><td>'+fmt(ps.bonusWheel)+'</td></tr>':'')
-  +'<tr><td>Krankenversicherungsprämie (Arbeitgeber)</td><td>—</td><td>'+fmt(ps.kvEmployer)+'</td></tr>'
-  +'<tr class="total"><td>Gesamte Gehaltszuschläge</td><td>—</td><td>'+fmt(ps.grossSurcharges+ps.totalBonuses+ps.kvEmployer)+'</td></tr>'
+  +_kvErLine
+  +'<tr class="total"><td>Gesamte Gehaltszuschläge</td><td>—</td><td>'+fmt(_zuschlag)+'</td></tr>'
   +'</table></div>'
 
   // ── BRUTTOGEHALT ──────────────────────────────────────────────────────────
@@ -6680,29 +6738,15 @@ function generatePayslipHTML(ps){
   +'<table class="table">'
   +'<tr><th>Position</th><th></th><th>Betrag</th></tr>'
   +'<tr><td>Bruttogehalt reguläre Arbeitszeit</td><td>—</td><td>'+fmt(ps.grossRegular)+'</td></tr>'
-  +'<tr><td>Gesamt Zuschläge</td><td>—</td><td>'+fmt(ps.grossSurcharges+ps.totalBonuses+ps.kvEmployer)+'</td></tr>'
+  +'<tr><td>Gesamt Zuschläge</td><td>—</td><td>'+fmt(_zuschlag)+'</td></tr>'
   +'<tr class="blue total"><td>Total Bruttogehalt</td><td>—</td><td>'+fmt(ps.grossTotal)+'</td></tr>'
   +'</table></div>'
 
-  // ── RENTE ─────────────────────────────────────────────────────────────────
-  +'<div class="section"><div class="section-title">Rentenversicherung</div>'
-  +'<table class="table">'
-  +'<tr><th>Position</th><th>%</th><th>Betrag</th></tr>'
-  +'<tr><td>Arbeitnehmer-Anteil</td><td>'+pct(ps.pensionEmpPct)+'</td><td>'+fmt(ps.pensionEmployee)+'</td></tr>'
-  +'<tr><td>Arbeitgeber-Anteil</td><td>'+pct(ps.pensionEmrPct)+'</td><td>'+fmt(ps.pensionEmployer)+'</td></tr>'
-  +'<tr class="total"><td>Gesamt Rentenbeitrag</td><td>—</td><td>'+fmt(ps.pensionTotal)+'</td></tr>'
-  +'</table></div>'
+  // ── SOZIALABGABEN / BEITRÄGE (neu: dynamische Liste · alt: Rente) ──────────
+  +_contribSection
 
-  // ── STEUER ────────────────────────────────────────────────────────────────
-  +'<div class="section"><div class="section-title">Gehaltsversteuerung / Einkommensteuer</div>'
-  +'<table class="table">'
-  +'<tr><th>Bracket</th><th>Satz</th><th>Betrag</th></tr>'
-  +'<tr><td>Gehalt vor Steuer (Brutto - Rentenbeitrag AN)</td><td>—</td><td>'+fmt(ps.taxableIncome)+'</td></tr>'
-  +'<tr><td>0 – '+fmt(ps.b1max)+'</td><td>'+pct(ps.b1pct)+'</td><td>'+fmt(0)+'</td></tr>'
-  +'<tr><td>'+fmt(ps.b1max).replace(' '+_sym,'')+' – '+fmt(ps.b2max)+'</td><td>'+pct(ps.b2pct)+'</td><td>'+fmt(Math.min(Math.max(0,ps.taxableIncome-ps.b1max),ps.b2max-ps.b1max)*ps.b2pct)+'</td></tr>'
-  +'<tr><td>über '+fmt(ps.b2max)+'</td><td>'+pct(ps.b3pct)+'</td><td>'+fmt(Math.max(0,ps.taxableIncome-ps.b2max)*ps.b3pct)+'</td></tr>'
-  +'<tr class="total"><td>Gesamtsteuern</td><td>—</td><td>'+fmt(ps.incomeTax)+'</td></tr>'
-  +'</table></div>'
+  // ── STEUER (neu: dynamische Stufen + Freibetrag · alt: 3 Brackets) ────────
+  +_taxSection
   +'</div>'
 
   // ── NETTO ─────────────────────────────────────────────────────────────────
@@ -6710,9 +6754,7 @@ function generatePayslipHTML(ps){
   +'<table class="table">'
   +'<tr><th>Position</th><th></th><th>Betrag</th></tr>'
   +'<tr><td>Bruttogehalt</td><td>—</td><td>'+fmt(ps.grossTotal)+'</td></tr>'
-  +'<tr class="red"><td>– Rentenbeitrag Arbeitnehmer</td><td>'+pct(ps.pensionEmpPct)+'</td><td>'+fmt(ps.pensionEmployee)+'</td></tr>'
-  +'<tr class="red"><td>– Einkommensteuer</td><td>—</td><td>'+fmt(ps.incomeTax)+'</td></tr>'
-  +'<tr class="red"><td>– Krankenversicherungsprämie Arbeitnehmer</td><td>—</td><td>'+fmt(ps.kvEmployee)+'</td></tr>'
+  +_netDeduct
   +(ps.absenceDeduct>0?'<tr class="red"><td>– Abzug Fehltage ('+ps.absenceDays+' Tage)</td><td>—</td><td>'+fmt(ps.absenceDeduct)+'</td></tr>':'')
   +(ps.advanceDeduct>0?'<tr class="red"><td>– Vorschuss-Rückzahlung</td><td>—</td><td>'+fmt(ps.advanceDeduct)+'</td></tr>':'')
   +(ps.otherDeduct>0?'<tr class="red"><td>– Sonstiger Abzug</td><td>—</td><td>'+fmt(ps.otherDeduct)+'</td></tr>':'')
@@ -6782,6 +6824,10 @@ function PayslipPreviewModal({slip, onClose, onApprove, onRetract}){
   }
 
   function exportCSV(){
+    const _new = Array.isArray(c.contributions);
+    const _contribRows = _new
+      ? c.contributions.reduce((a,x)=>a.concat([[x.name+' (AN)',Math.round(x.employee),_sym,''],[x.name+' (AG)',Math.round(x.employer),_sym,'']]),[])
+      : [['KV Arbeitgeber',c.kvEmployer||'',_sym,''],['Rentenbeitrag AN',c.pensionEmployee||'',_sym,''],['Rentenbeitrag AG',c.pensionEmployer||'',_sym,''],['KV Arbeitnehmer',c.kvEmployee||'',_sym,'']];
     const rows=[
       ['Gehaltsabrechnung',c.monthLabel||slip.month,'',''],
       ['Name',slip.first_name+' '+slip.last_name,'',''],
@@ -6790,16 +6836,13 @@ function PayslipPreviewModal({slip, onClose, onApprove, onRetract}){
       ['Bruttogehalt regulär',c.grossRegular||'',_sym,''],
       ['Gesamt Zuschläge',c.grossSurcharges||'',_sym,''],
       ['Boni',c.totalBonuses||'',_sym,''],
-      ['KV Arbeitgeber',c.kvEmployer||'',_sym,''],
       ['Total Bruttogehalt',c.grossTotal||slip.gross,_sym,''],
       ['','','',''],
-      ['Rentenbeitrag AN',c.pensionEmployee||'',_sym,''],
-      ['Rentenbeitrag AG',c.pensionEmployer||'',_sym,''],
+    ].concat(_contribRows).concat([
       ['Einkommensteuer',c.incomeTax||'',_sym,''],
-      ['KV Arbeitnehmer',c.kvEmployee||'',_sym,''],
       ['','','',''],
       ['NETTO ZU AUSZAHLUNG',c.netPay||slip.net,_sym,''],
-    ];
+    ]);
     const csv='\uFEFF'+rows.map(r=>r.map(v=>'"'+String(v||'').replace(/"/g,'""')+'"').join(';')).join('\n');
     const blob=new Blob([csv],{type:'text/csv;charset=utf-8'});
     const url=URL.createObjectURL(blob);
@@ -9061,8 +9104,8 @@ function PayrollView({employees, projects, showToast, navFilter, onClearNavFilte
     // Punkt 4 (Währung): nicht rechnen bei nicht zuordenbarem Standort oder falsch-skalierter Länder-Config.
     const _pc=payrollCountry(emp.location);
     if(!_pc){alert('Standort von '+emp.first_name+' ist keinem Lohn-Land (Albanien/Kosovo) zuordenbar, kein Zettel erstellt. Standort korrigieren.');return;}
-    const _cfgWarn=payrollCfgCurrencyWarnings(getPayrollCfg(emp.location), _pc);
-    if(_cfgWarn.length){alert('Lohn-Konfiguration ('+(_pc==='xk'?'Kosovo/EUR':'Albanien/LEK')+') sieht nach falscher Währung aus, Felder: '+_cfgWarn.join(', ')+'. Unter System → 💶 Pauschalen & Steuer in '+payrollCurrency(_pc)+' korrigieren. Kein Zettel erstellt.');return;}
+    const _rules=getCountryById(_pc);
+    if(!_rules || !((_rules.contributions||[]).length || (_rules.taxBrackets||[]).length)){alert('Für '+(_rules?.name||_pc)+' sind noch keine Lohnregeln hinterlegt (System → Länder & Lohnregeln). Kein Zettel erstellt.');return;}
     const existing=getSlip(emp.id,selMonth);
     if(existing&&isLocked(existing)){alert('Abrechnung bereits überwiesen und gesperrt.');return;}
     // Workforce-Auto-Sync entfernt: Ist-Stunden/Boni werden manuell im Bonus-Modal
@@ -9149,7 +9192,7 @@ function PayrollView({employees, projects, showToast, navFilter, onClearNavFilte
     const missing=activeEmps.filter(e=>(parseFloat(e.hourly_rate||0)>0||(e.salary_type==='fixed'&&parseFloat(e.fixed_salary||0)>0))&&!getSlip(e.id,selMonth));
     if(!missing.length){alert('Alle Abrechnungen bereits vorhanden.');return;}
     // Punkt 4: Standort/Währungs-Guard — Zettel mit unklarer Länder-Config gar nicht erst rechnen.
-    const _blocked=missing.filter(e=>{ const pc=payrollCountry(e.location); return !pc || payrollCfgCurrencyWarnings(getPayrollCfg(e.location), pc).length>0; });
+    const _blocked=missing.filter(e=>{ const pc=payrollCountry(e.location); const r=pc&&getCountryById(pc); return !pc || !r || !((r.contributions||[]).length||(r.taxBrackets||[]).length); });
     const _bSet=new Set(_blocked.map(e=>e.id));
     const doable=missing.filter(e=>!_bSet.has(e.id));
     if(!doable.length){ alert(_blocked.length+' Mitarbeiter übersprungen (Standort/Währung der Lohn-Config unklar), keine Entwürfe. Erst System → 💶 Pauschalen & Steuer prüfen.'); return; }
@@ -10877,7 +10920,7 @@ function empProjShare(emp, pid){ return empAssignments(emp).filter(a=>a.project_
 function employerCostFullNative(emp, month){
   if(!emp) return 0;
   const c = calcFullPayslip(emp, month, {deduction_absence_days:0}, [], []);
-  return (Number(c.grossTotal)||0) + (Number(c.pensionEmployer)||0);
+  return Number(c.employerCost)||0;   // Brutto + Σ Arbeitgeber-Beiträge (neues Ländermodell)
 }
 function employerCostEurForMonth(emp, month){
   if(!emp) return 0;
@@ -31360,6 +31403,7 @@ function App(){
     try{ const _locs=JSON.parse(localStorage.getItem('jsr_locations_v1')||'null');
       if(Array.isArray(_locs)){ let _ch=false; _locs.forEach(l=>{ if(l&&!l.country_id){ const cid=countryForLocation(l.name)||countryForLocation(l.id)||countryForLocation(l.country); if(cid){ l.country_id=cid; _ch=true; } } });
         if(_ch) localStorage.setItem('jsr_locations_v1', JSON.stringify(_locs)); } }catch(e){}
+    payrollSelfTest();   // Gegenrechnung 100k/430k in der Konsole prüfen
     if(!localStorage.getItem('jsr_hw_types')){localStorage.setItem('jsr_hw_types',JSON.stringify([{id:'hw_headset',name:'Headset',icon:'🎧',description:'USB Headset'},{id:'hw_laptop',name:'Laptop',icon:'💻',description:'Firmenlaptop'},{id:'hw_mouse',name:'Maus',icon:'🖱',description:'Computermaus'}]));}
     // Etappe P2: perf-Seed entfernt — Quelle ist jetzt Supabase (kpi_entries).
     if(!localStorage.getItem('jsr_shift_cfg')){localStorage.setItem('jsr_shift_cfg',JSON.stringify({"proj_hc_sales":[{"id":"s1","label":"Frueh","value":"08:00-16:30","hours":8.0,"net":7.5,"split":false},{"id":"s2","label":"Frueh lang","value":"09:00-17:30","hours":8.5,"net":8.0,"split":false},{"id":"s3","label":"Spaet frueh","value":"11:30-20:00","hours":8.5,"net":8.0,"split":false},{"id":"s4","label":"Spaet","value":"13:30-22:00","hours":8.5,"net":8.0,"split":false},{"id":"s5","label":"Frueh kurz","value":"08:00-15:30","hours":7.5,"net":7.0,"split":false},{"id":"s6","label":"Split 08-12+16-20","value":"08:00-12:00","value2":"16:00-20:00","hours":8.0,"net":7.5,"split":true},{"id":"s7","label":"Split 08-12+18-22","value":"08:00-12:00","value2":"18:00-22:00","hours":8.0,"net":7.5,"split":true}],"proj_hc_support":[{"id":"s1","label":"Frueh lang","value":"08:00-17:30","hours":9.5,"net":9.0,"split":false},{"id":"s2","label":"Spaet frueh","value":"11:30-20:00","hours":8.5,"net":8.0,"split":false},{"id":"s3","label":"Split 08-12+16-20","value":"08:00-12:00","value2":"16:00-20:00","hours":8.0,"net":7.5,"split":true}],"proj_giga_all":[{"id":"s1","label":"Standard","value":"09:00-17:30","hours":8.5,"net":8.0,"split":false},{"id":"s2","label":"Spaet","value":"10:30-19:00","hours":8.5,"net":8.0,"split":false},{"id":"s3","label":"Split 09-13+17-21","value":"09:00-13:00","value2":"17:00-21:00","hours":8.0,"net":7.5,"split":true}]}));}
