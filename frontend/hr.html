@@ -10975,8 +10975,9 @@ function employerCostEurForMonth(emp, month){
 // (Banner via fxMissingFor greift getrennt).
 function projectAutoCostsForMonth(pid, month, employees, projects){
   const emps=(employees||[]).filter(Boolean);
-  const actives=emps.filter(e=>e.status==='active');
-  const trainings=emps.filter(e=>e.status==='training');
+  const _ms=(month||'')+'-01';   // Monatsanfang als Austritts-Stichtag (Ausgetretene fallen ab Folgemonat raus)
+  const actives=emps.filter(e=>e.status==='active' && !empExitedBy(e,_ms));
+  const trainings=emps.filter(e=>e.status==='training' && !empExitedBy(e,_ms));
   const companyEmps=actives.filter(e=>isCompanyEmp(e));
   const agents   = actives.filter(e=>!isOverheadEmp(e)&&!isCompanyEmp(e)).reduce((s,e)=>s+(employerCostEurForMonth(e,month)||0)*empProjShare(e,pid),0);
   const overhead = actives.filter(e=>isOverheadEmp(e)&&!isCompanyEmp(e)).reduce((s,e)=>s+(employerCostEurForMonth(e,month)||0)*empProjShare(e,pid),0);
@@ -11031,11 +11032,16 @@ function payrollCfgMissingCountries(employees){
 // MA eines Projekts/Skills auflösen — über die EINE Wahrheit empAssignments
 // (offene project_assignments bevorzugt, flaches Feld als virtuelle 100%-Zuweisung).
 // Multi-Skill: Edi taucht in Sales UND Support auf. Nur status 'active'.
+// Offboarding: ist der MA am Stichtag über den Austritt hinaus? refDs='YYYY-MM-DD' (heute) bzw. Monatsanfang.
+// Ein „arbeitet bis Austritt"-MA (Status active + termination_date) fällt so datumsgetrieben aus Planung/
+// Forecast/Kosten/Sollbesetzung — bis zum Austritt drin, danach automatisch raus (ohne manuellen Statuswechsel).
+function empExitedBy(emp, refDs){ const ex=emp&&(emp.termination_date||emp.terminated_at); return !!(ex && refDs && String(refDs) > String(ex)); }
 function shiftMembersFor(employees, projId, skill){
   const sk=(skill||'').toLowerCase();
+  const _t=new Date().toISOString().slice(0,10);
   const skillMatch=v=>{ const x=(v||'').toLowerCase(); return !sk||x===sk||x===''; }; // fehlender Skill = Treffer, case-insensitiv
   return (employees||[]).filter(e=>{
-    if(!e||!['active','training'].includes(e.status)) return false; // Schulungs-MA (training) im Plan sichtbar
+    if(!e||!['active','training'].includes(e.status)||empExitedBy(e,_t)) return false; // Schulungs-MA sichtbar; Ausgetretene raus
     return empAssignments(e).some(a=>a.project_id===projId && skillMatch(a.skill));
   });
 }
@@ -12379,8 +12385,9 @@ function WorkforcePlanningView({employees,projects,showToast}){
 
   // ── Vorplanung ─────────────────────────────────────────────
   const selProj=(projects||[]).find(p=>p.id===projId)||null;
-  const planEmps=(employees||[]).filter(e=>e&&e.status==='active'&&e.project_id===projId&&(!skill||(e.project_skill||e.primary_skill||'all')===skill||(e.project_skill||e.primary_skill||'')===''));
-  const planEmpsAll=(employees||[]).filter(e=>e&&e.status==='active'&&e.project_id===projId);
+  const _pt=new Date().toISOString().slice(0,10);
+  const planEmps=(employees||[]).filter(e=>e&&e.status==='active'&&!empExitedBy(e,_pt)&&e.project_id===projId&&(!skill||(e.project_skill||e.primary_skill||'all')===skill||(e.project_skill||e.primary_skill||'')===''));
+  const planEmpsAll=(employees||[]).filter(e=>e&&e.status==='active'&&!empExitedBy(e,_pt)&&e.project_id===projId);
   const planEmpsDisplay=planEmps.length>0?planEmps:planEmpsAll;
   // Overhead = Team Lead, Supervisor, QM, Trainer, Projektleiter etc (not agents)
   const AGENT_ROLES=['agent','senior agent','call agent','junior agent'];
@@ -26953,7 +26960,7 @@ function productiveHours(emp, month){
 // Genutzt von Cockpit (Umsatzkacheln) und ProjectProfitability (Plan-Spalte) — kein 160h/productive_pct mehr.
 function planRevenueByProject(employees, projects, month){
   const out={};
-  const emps=(employees||[]).filter(e=>e && e.forecast_include!==false && ['active','training'].includes(e.status) && !isCompanyEmp(e));
+  const emps=(employees||[]).filter(e=>e && e.forecast_include!==false && ['active','training'].includes(e.status) && !isCompanyEmp(e) && !empExitedBy(e,(month||'')+'-01'));
   emps.forEach(e=>{
     const ph=productiveHours(e, month);
     const _ovh=isOverheadEmp(e);
