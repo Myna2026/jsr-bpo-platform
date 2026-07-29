@@ -3349,28 +3349,48 @@ function CommModal({recipients, onClose}){
 
 
 function TerminateModal({emp, onConfirm, onClose}){
-  const [date, setDate]=useState(new Date().toISOString().slice(0,10));
+  const _today=new Date().toISOString().slice(0,10);
+  const [exit, setExit]=useState(_today);            // Austrittsdatum (letzter Tag)
+  const [notice, setNotice]=useState('');            // Kündigungsdatum (optional, Fristbeginn)
+  const [mode, setMode]=useState('arbeitet');        // Modalität der Zwischenzeit
   const [reason, setReason]=useState('');
+  const MODES=[
+    {v:'arbeitet',       l:'Arbeitet bis zum Austritt', d:'bleibt planbar bis zum Austrittsdatum, Lohn läuft', status:'active'},
+    {v:'frei_bezahlt',   l:'Freigestellt (bezahlt)',    d:'nicht mehr planbar, Lohn läuft bis Austritt weiter', status:'freigestellt_bezahlt'},
+    {v:'frei_unbezahlt', l:'Freigestellt (unbezahlt)',  d:'nicht mehr planbar, kein Lohn', status:'freigestellt_unbezahlt'},
+    {v:'sofort',         l:'Sofort beendet',            d:'sofort raus aus allem, kein weiterer Lohn', status:'terminated'},
+  ];
+  const cur=MODES.find(m=>m.v===mode)||MODES[0];
+  const bad = !exit || (notice && notice>exit);
   return(
     <div className="modal-overlay">
       <div className="modal modal-sm">
         <div className="modal-header"><span className="modal-title">🚫 Mitarbeiter kündigen</span><button className="btn" onClick={onClose}>×</button></div>
         <div className="modal-body">
-          <div style={{marginBottom:16,padding:12,background:'var(--red-bg)',borderRadius:'var(--r)',border:'1px solid rgba(239,68,68,.3)'}}>
+          <div style={{marginBottom:14,padding:12,background:'var(--red-bg)',borderRadius:'var(--r)',border:'1px solid rgba(239,68,68,.3)'}}>
             <div style={{fontWeight:600}}>{emp.first_name} {emp.last_name}</div>
             <div style={{fontSize:12,color:'var(--muted)',marginTop:2}}>{emp.position} · {emp.location} · {emp.project_id?'Auf Projekt zugewiesen':'Kein Projekt'}</div>
           </div>
-          <div style={{fontSize:13,color:'var(--dim)',marginBottom:16}}>
-            Der Mitarbeiter wird als <strong>inaktiv</strong> markiert und aus Umsatz, Kosten und Projektzuweisung entfernt. Die Daten bleiben erhalten.
-          </div>
           <div className="form-row">
-            <div className="form-group"><label className="form-label">Datum</label><input className="form-input" type="date" value={date} onChange={e=>setDate(e.target.value)}/></div>
+            <div className="form-group"><label className="form-label">Austrittsdatum (letzter Tag)</label><input className="form-input" type="date" value={exit} onChange={e=>setExit(e.target.value)}/></div>
+            <div className="form-group"><label className="form-label">Kündigungsdatum (optional)</label><input className="form-input" type="date" value={notice} onChange={e=>setNotice(e.target.value)}/></div>
           </div>
-          <div className="form-group"><label className="form-label">Grund (optional)</label><textarea className="form-input" rows={2} value={reason} onChange={e=>setReason(e.target.value)} placeholder="z.B. Häufige Abwesenheit, Leistungsprobleme..."/></div>
+          {notice&&notice>exit&&<div style={{fontSize:12,color:'var(--red)',marginTop:-6,marginBottom:10}}>⚠ Kündigungsdatum liegt nach dem Austritt.</div>}
+          <div className="form-group">
+            <label className="form-label">Zwischenzeit bis zum Austritt</label>
+            {MODES.map(m=>(
+              <label key={m.v} style={{display:'flex',gap:8,alignItems:'flex-start',padding:'7px 10px',marginBottom:4,borderRadius:8,border:'1px solid '+(mode===m.v?'var(--blue)':'var(--border)'),background:mode===m.v?'var(--blue-bg)':'var(--surface)',cursor:'pointer'}}>
+                <input type="radio" name="termmode" checked={mode===m.v} onChange={()=>setMode(m.v)} style={{marginTop:2}}/>
+                <span><span style={{fontWeight:600,fontSize:13}}>{m.l}</span><span style={{display:'block',fontSize:11,color:'var(--muted)'}}>{m.d}</span></span>
+              </label>
+            ))}
+          </div>
+          <div className="form-group"><label className="form-label">Grund / Notiz</label><textarea className="form-input" rows={2} value={reason} onChange={e=>setReason(e.target.value)} placeholder="z.B. Häufige Abwesenheit, Leistungsprobleme..."/></div>
+          <div style={{fontSize:12,color:'var(--dim)'}}>Status wird auf <strong>{statusLabel(cur.status)}</strong> gesetzt. Die Daten bleiben erhalten.</div>
         </div>
         <div className="modal-footer">
           <button className="btn" onClick={onClose}>Abbrechen</button>
-          <button className="btn btn-red" onClick={()=>onConfirm(date,reason)}>🚫 Kündigung bestätigen</button>
+          <button className="btn btn-red" disabled={bad} onClick={()=>onConfirm({exit, notice, status:cur.status, reason})}>🚫 Kündigung bestätigen</button>
         </div>
       </div>
     </div>
@@ -3856,6 +3876,18 @@ function EmployeeModal({emp, projects, employees, onSave, onClose, initialTab, o
         </div>
 
         <div className="modal-body" style={{flex:1,overflowY:'auto',padding:'0 20px 20px'}}>
+            {/* Kündigungs-Info: Status + Austritts-/Kündigungsdatum + Notiz (bisher nirgends sichtbar) */}
+            {(()=>{ const st=emp.status; if(!['terminated','freigestellt_bezahlt','freigestellt_unbezahlt'].includes(st)) return null;
+              const exit=emp.termination_date||emp.terminated_at, notice=emp.notice_date, note=emp.termination_reason;
+              return (<div style={{margin:'12px 0 4px',padding:'10px 14px',background:'var(--red-bg)',border:'1px solid rgba(239,68,68,.3)',borderRadius:'var(--r)'}}>
+                <div style={{fontWeight:700,fontSize:13,color:'var(--red)'}}>{statusIcon(st)} {statusLabel(st)}</div>
+                <div style={{fontSize:12,color:'var(--muted)',marginTop:3,display:'flex',gap:16,flexWrap:'wrap'}}>
+                  {exit&&<span>Austritt: <b style={{color:'var(--text)'}}>{fmtDate(exit)}</b></span>}
+                  {notice&&<span>Kündigung: <b style={{color:'var(--text)'}}>{fmtDate(notice)}</b></span>}
+                </div>
+                {note&&<div style={{fontSize:12,marginTop:6,color:'var(--text)',whiteSpace:'pre-wrap'}}><b style={{color:'var(--muted)'}}>Notiz:</b> {note}</div>}
+              </div>);
+            })()}
             {/* Warnhinweis bei >= 3 Abmahnungen */}
             {(form.warnings||[]).length>=3&&(
               <div style={{margin:'12px 0 4px 0',padding:'10px 14px',
@@ -31667,8 +31699,10 @@ function App(){
     if(!keepOpen) setAbsenceModal(null);
     else setAbsenceModal(emp);
   }
-  async function confirmTerminate(date, reason){
-    const emp={...terminateModal,status:'terminated',terminated_at:date,termination_reason:reason};
+  async function confirmTerminate({exit, notice, status, reason}){
+    // Austrittsdatum → terminated_at (wird zu termination_date normalisiert). Kündigungsdatum + Notiz an den MA.
+    const emp={...terminateModal, status, terminated_at:exit, termination_reason:reason||''};
+    if(notice) emp.notice_date=notice;
     try{ await saveEmployeeToDB(emp); }
     catch(e){ showToast('⚠ Kündigung fehlgeschlagen: '+dbErrMsg(e),'error'); return; }
     setEmployees(es=>es.map(e=>e.id===emp.id?emp:e));
