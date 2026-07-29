@@ -75,22 +75,29 @@ echo ""
 BUILD="$TS"
 STAMP_TMP="$(mktemp -d)"
 trap 'rm -rf "$STAMP_TMP"' EXIT
-stamp_rsync() {  # $1 = lokale Quelle, $2 = Remote-Ziel
+PRECOMPILE="$SCRIPT_DIR/scripts/precompile/precompile.js"
+stamp_rsync() {  # ohne Babel: nur __BUILD_ID__ stempeln (mitarbeiter.html ist reines JS)
   local base; base="$(basename "$1")"
   sed "s/__BUILD_ID__/$BUILD/g" "$1" > "$STAMP_TMP/$base"
+  rsync -az --progress "$STAMP_TMP/$base" "$SERVER:$2"
+}
+compile_stamp_rsync() {  # mit Babel-Precompile (hr/client): uebersetzen+validieren → stempeln → rsync.
+  local base; base="$(basename "$1")"
+  node --no-warnings "$PRECOMPILE" "$1" > "$STAMP_TMP/$base.pre" || { echo "✗ Precompile $base fehlgeschlagen — nichts uebertragen."; exit 1; }
+  sed "s/__BUILD_ID__/$BUILD/g" "$STAMP_TMP/$base.pre" > "$STAMP_TMP/$base"
   rsync -az --progress "$STAMP_TMP/$base" "$SERVER:$2"
 }
 echo "  Build-Kennung: $BUILD"
 echo ""
 
-echo "→ HR-Portal..."
-stamp_rsync "$LOCAL_DIR/hr.html" "$REMOTE_BASE/hr/index.html"
+echo "→ HR-Portal (Precompile)..."
+compile_stamp_rsync "$LOCAL_DIR/hr.html" "$REMOTE_BASE/hr/index.html"
 
 echo "→ Mitarbeiter-Portal..."
 stamp_rsync "$LOCAL_DIR/mitarbeiter.html" "$REMOTE_BASE/mitarbeiter/index.html"
 
-echo "→ Client-Portal..."
-stamp_rsync "$LOCAL_DIR/client.html" "$REMOTE_BASE/client/index.html"
+echo "→ Client-Portal (Precompile)..."
+compile_stamp_rsync "$LOCAL_DIR/client.html" "$REMOTE_BASE/client/index.html"
 
 echo "→ Showcase (öffentlich)..."
 rsync -az --progress "$LOCAL_DIR/showcase.html" "$SERVER:$REMOTE_BASE/client/showcase.html"
