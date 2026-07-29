@@ -6212,164 +6212,11 @@ async function classifyShiftSurcharges(emp, month){
     return out;
   }catch(e){ console.error('[surcharge] classifyShiftSurcharges', e); return out; }
 }
-function calcAlbanianPayroll(slip, cfg){
-  // cfg from localStorage via getPayrollCfg(location)
-  const raw = (typeof getPayrollCfg !== 'undefined') ? getPayrollCfg(location) : {};
-  const C = {
-    pension_employee_pct: cfg.pension_employee_pct ?? 5,
-    pension_employer_pct: cfg.pension_employer_pct ?? 5,
-    health_employee:      cfg.health_employee ?? 30,
-    health_employer:      cfg.health_employer ?? 35.08,
-    tax_bracket1_max:     cfg.tax_bracket1_max ?? 250,
-    tax_bracket2_max:     cfg.tax_bracket2_max ?? 450,
-    tax_bracket2_pct:     cfg.tax_bracket2_pct ?? 8,
-    tax_bracket3_pct:     cfg.tax_bracket3_pct ?? 10,
-  };
-
-  const hourlyRate = parseFloat(slip.hourly_rate||0);
-  const workDays   = parseInt(slip.work_days||22);
-  const hoursPerDay= parseFloat(slip.hours_per_day||8);
-  // Monatssoll aus gesnapshottetem soll_days (Werktage − Abwesenheit). Alt-Slips ohne soll_days:
-  // Fallback work_days. effRate unten bleibt bewusst work_days-basiert (Contract-Stundenwert).
-  const sollDays   = (slip.soll_days!=null && slip.soll_days!=='') ? parseFloat(slip.soll_days) : workDays;
-  const monthTarget= sollDays * hoursPerDay;
-  // Effektiver Stundensatz NUR für Zuschläge. Fix-MA ohne hourly_rate: aus gesnapshottetem fixed_salary/Monatssoll.
-  const effRate = hourlyRate>0 ? hourlyRate : (workDays>0 && hoursPerDay>0 ? parseFloat(slip.fixed_salary||0)/(workDays*hoursPerDay) : 0);
-
-  // Hours breakdown from payroll data
-  const rec = slip._rec || {};
-  const totalWorked   = parseFloat(rec.total_worked_hours || monthTarget);
-  const satH          = parseFloat(rec.saturday_hours || 0);
-  const sunH          = parseFloat(rec.sunday_hours || 0);
-  const holH          = parseFloat(rec.holiday_hours || 0);
-  const nightH        = parseFloat(rec.night_hours || 0);
-
-  // Surcharge rates from cfg
-  const scCfg = JSON.parse(typeof localStorage!=='undefined'?localStorage.getItem('jsr_surcharge_cfg')||'{}':'{}');
-  const saP = (scCfg.surcharge_saturday??20)/100;
-  const suP = (scCfg.surcharge_sunday??50)/100;
-  const hoP = (scCfg.surcharge_holiday??50)/100;
-  const niP = (scCfg.surcharge_night??25)/100;
-  const otP = (scCfg.surcharge_overtime??30)/100;
-
-  // Overtime = hours above monthly target
-  const specialH = satH + sunH + holH;
-  const overtimeH = Math.max(0, totalWorked - monthTarget);
-  const otWeekday = Math.max(0, overtimeH - specialH);
-  const isOT = overtimeH > 0;
-
-  // Regular hours (Mo-Fr, no overtime)
-  const regularH = Math.max(0, monthTarget - Math.max(0, specialH - overtimeH));
-
-  // Gross from regular hours
-  // Fix-MA (Snapshot fixed_salary>0): voller Grundlohn = fixed_salary. Sonst regularH × Stundenlohn.
-  const grossRegular = parseFloat(slip.fixed_salary||0)>0
-    ? parseFloat(slip.fixed_salary)
-    : Math.round(regularH * hourlyRate * 100) / 100;
-
-  // Surcharges by rate
-  // Weg A: EIN Zuschlag je Stunde — Spezial vs. Ueberstunden nach Config kombinieren (cheapest=min, sonst max).
-  const _combineFn = (scCfg.surcharge_combine==='cheapest')?Math.min:Math.max;
-  const saRate = isOT ? _combineFn(saP, otP) : saP;
-  const suRate = isOT ? _combineFn(suP, otP) : suP;
-  const hoRate = isOT ? _combineFn(hoP, otP) : hoP;
-  const niRate = isOT ? _combineFn(niP, otP) : niP;
-
-  const surcharge20 = satH * effRate * saP;   // Saturday 20%
-  const surcharge30 = otWeekday * effRate * otP; // OT weekday 30%
-  const surcharge50 = (sunH + holH) * effRate * suP; // Sun/Holiday 50%
-  // Night might be any rate - simplified: night hours * night pct
-  const surchargeNight = nightH * effRate * niP;
-
-  // Adjust if Sa goes OT rate instead of Sa rate
-  const saActual = satH * effRate * saRate;
-  const suActual = sunH * effRate * suRate;
-  const hoActual = holH * effRate * hoRate;
-
-  const totalSurcharge = Math.round((otWeekday * effRate * otP + saActual + suActual + hoActual + surchargeNight) * 100) / 100;
-
-  // Deductions from rec
-  const absenceDays    = parseFloat(rec.deduction_absence_days || 0);
-  const absenceDeduct  = absenceDays * hourlyRate * hoursPerDay;
-  const advanceDeduct  = parseFloat(rec.deduction_social || 0);
-  const otherDeduct    = parseFloat(rec.deduction_other || 0);
-
-  // Bonuses
-  const referralBonus  = parseFloat(rec.referral_bonus || 0);
-  const targetBonus    = parseFloat(rec.target_bonus || 0);
-  const specialBonus   = parseFloat(rec.special_bonus || 0);
-  const totalBonus     = referralBonus + targetBonus + specialBonus;
-
-  // Health insurance (employer pays, but shown on slip)
-  const healthEmployee = C.health_employee;
-  const healthEmployer = C.health_employer;
-
-  // BRUTTOGEHALT TOTAL
-  const grossTotal = grossRegular + totalSurcharge + totalBonus;
-
-  // Pension
-  const pensionEmployee = Math.round(grossTotal * C.pension_employee_pct / 100 * 100) / 100;
-  const pensionEmployer = Math.round(grossTotal * C.pension_employer_pct / 100 * 100) / 100;
-
-  // Income before tax = gross - employee pension
-  const incomeBeforeTax = grossTotal - pensionEmployee;
-
-  // Albanian income tax
-  let incomeTax = 0;
-  const b1 = C.tax_bracket1_max;   // 250
-  const b2 = C.tax_bracket2_max;   // 450
-  const p2 = C.tax_bracket2_pct / 100; // 8%
-  const p3 = C.tax_bracket3_pct / 100; // 10%
-  if(incomeBeforeTax > b1){
-    const in2 = Math.min(incomeBeforeTax, b2) - b1;
-    incomeTax += in2 * p2;
-  }
-  if(incomeBeforeTax > b2){
-    incomeTax += (incomeBeforeTax - b2) * p3;
-  }
-  incomeTax = Math.round(incomeTax * 100) / 100;
-
-  // NET
-  const netPay = Math.round((grossTotal - pensionEmployee - incomeTax - healthEmployee - absenceDeduct - advanceDeduct - otherDeduct) * 100) / 100;
-
-  return {
-    // Hours
-    monthTarget, regularH, totalWorked, overtimeH, otWeekday, satH, sunH, holH, nightH,
-    // Rates
-    hourlyRate, saRate, suRate, hoRate, otP, niP,
-    // Gross
-    grossRegular, totalSurcharge,
-    surcharge20: Math.round(saActual*100)/100,
-    surcharge30: Math.round(otWeekday*hourlyRate*otP*100)/100,
-    surcharge50: Math.round((suActual+hoActual)*100)/100,
-    // Bonuses
-    referralBonus, targetBonus, specialBonus, totalBonus,
-    // Insurance
-    healthEmployee, healthEmployer,
-    // Totals
-    grossTotal: Math.round(grossTotal*100)/100,
-    pensionEmployee, pensionEmployer,
-    incomeBeforeTax: Math.round(incomeBeforeTax*100)/100,
-    incomeTax,
-    // Deductions
-    absenceDays, absenceDeduct: Math.round(absenceDeduct*100)/100,
-    advanceDeduct, otherDeduct,
-    // Net
-    netPay: Math.max(0, netPay),
-    C,
-  };
-}
 
 
-// ══════════════════════════════════════════════════════════════════════════════
-// PAYSLIP ENGINE — Full Albanian payroll calculation
-// ══════════════════════════════════════════════════════════════════════════════
-
-// EINE Wahrheit für die Standort→Land-Zuordnung der Lohn-Konfiguration: 'xk' Kosovo, 'al' Albanien,
-// null = nicht zuordenbar. Genutzt von getPayrollCfg UND dem KV/Steuer-Zweig in calcFullPayslip —
-// kein zweiter, abweichender Check mehr. Prefix-Matching deckt Schreibvarianten/Diakritika ab
-// (Prishtina/Prishtinë/Pristina, Tirana/Tiranë, Kosovo/Kosovë). null → sichtbare Warnung im
-// DataQualityPanel, statt stillem Albanien-Default.
+// EINE Wahrheit für die Standort→Land-Zuordnung: 'xk' Kosovo, 'al' Albanien, null = nicht zuordenbar.
+// Genutzt vom Ländermodell (getCountryRules/countryForLocation). Prefix-Matching deckt Schreibvarianten/
+// Diakritika ab (Prishtina/Prishtinë/Pristina, Tirana/Tiranë, Kosovo/Kosovë). null → Warnung im DataQualityPanel.
 // ── LÄNDER-MODELL (jsr_countries_v1): länderoffene Lohnregeln ────────────────────
 // Beiträge als Liste (pct|fixed, optionaler Deckel), Steuerstufen beliebiger Länge, gestaffelter
 // Freibetrag. Ersetzt schrittweise die hart verdrahteten al/xk-Configs. Phase 1 = nur Datenschicht:
@@ -6410,13 +6257,6 @@ function countryForLocation(location){
 function payrollCountry(location){ return countryForLocation(location); }
 // Vollständiges Regelwerk eines Standort-Landes (Beiträge/Stufen/Freibetrag/Währung) für calcFullPayslip.
 function getCountryRules(location){ return getCountryById(countryForLocation(location)); }
-function getPayrollCfg(location){
-  // jsr_payroll_cfg_al = Albanien (Tirana), jsr_payroll_cfg_xk = Kosovo (Prishtina).
-  // Nicht zuordenbar (null) → al als Notfall-Basis, aber sichtbar via DataQualityPanel (payroll_loc).
-  const key = payrollCountry(location)==='xk' ? 'jsr_payroll_cfg_xk' : 'jsr_payroll_cfg_al';
-  try{ return JSON.parse(localStorage.getItem(key)||'null') || {}; }
-  catch(e){ return {}; }
-}
 // Währung je Lohn-Land: Albanien rechnet in LEK, Kosovo in EUR (jeder Zettel in Auszahlungswährung;
 // Umrechnung nach EUR nur in der Kalkulation über den Monatskurs). Prozentsätze sind währungsneutral.
 // (payrollCfgCurrencyWarnings/PAYROLL_AMOUNT_FIELDS entfernt — Plausibilität läuft jetzt über das
@@ -6990,10 +6830,10 @@ function PayslipArchiveView({payslips, employees, projects, fmtMonth, eur, onOpe
             {allSlips.length===0&&<tr><td colSpan={6} style={{textAlign:'center',padding:24,color:'var(--muted)'}}>Keine Abrechnungen im Archiv</td></tr>}
             {allSlips.map((s,i)=>{
               const _emp=(employees||[]).find(e=>e&&e.id===s.emp_id);
-              const cfg=getPayrollCfg((_emp&&_emp.location)||s.location||'');   // standortabhängig statt al||xk
               const salaryData=JSON.parse(localStorage.getItem('jsr_payroll_v1')||'{}');
               const rec=((salaryData[s.month]||[]).find(r=>r.emp_id===s.emp_id))||{};
-              const P=calcAlbanianPayroll({...s,_rec:rec},cfg);
+              // Fallback (Zeilen ohne _calc-Snapshot/flaches gross) über den EINEN Kern (Ländermodell) statt der alten calcAlbanianPayroll.
+              const P=(()=>{ try{ return calcFullPayslip(_emp||s, s.month, rec, employees, []); }catch(e){ return {grossTotal:0, netPay:0}; } })();
               const statusCfg={
                 draft:{label:'✏ Entwurf',color:'var(--amber)'},
                 confirmed:{label:'✅ Bestätigt',color:'var(--blue)'},
@@ -31436,9 +31276,7 @@ function App(){
       localStorage.setItem('jsr_projects_v1',JSON.stringify([{id:'proj_hc_a1b2c3d4',name:'Holidaycheck Support',status:'active',location:'al',skills:[{key:'support',label:'Support',rate:28,rate_training:18,profiles:['Support Agent','Senior Support Agent','Team Lead Support','Support Trainer','Support QM']},{key:'sales',label:'Sales',rate:32,rate_training:20,profiles:['Sales Agent','Senior Sales Agent','Team Lead Sales','Sales Trainer','Sales QM']}]}]));
     }
     // Etappe P2: kpi_cfg-Seed entfernt — Quelle ist jetzt Supabase (kpi_config).
-    if(!localStorage.getItem('jsr_payroll_cfg_al')){localStorage.setItem('jsr_payroll_cfg_al',JSON.stringify({kv_employer:35.08,kv_employee:30.00,pension_employee_pct:5,pension_employer_pct:5,tax_bracket1_max:250,tax_bracket2_max:450,tax_bracket1_pct:0,tax_bracket2_pct:8,tax_bracket3_pct:10}));}
-    // Kosovo (EUR) — bisher kein Seed; Beträge in EUR (Startwerte, Johannes trägt die echten Sätze ein).
-    if(!localStorage.getItem('jsr_payroll_cfg_xk')){localStorage.setItem('jsr_payroll_cfg_xk',JSON.stringify({kv_employer:0,kv_employee:0,pension_employee_pct:5,pension_employer_pct:5,tax_bracket1_max:0,tax_bracket2_max:960,tax_bracket1_pct:0,tax_bracket2_pct:4,tax_bracket3_pct:10}));}
+    // (Alt-Seed jsr_payroll_cfg_al/xk entfernt — Lohnregeln liegen jetzt in jsr_countries_v1.)
     // Ländermodell (Phase 1): Seed + einmalige Standort→Land-Zuweisung (country_id aus Name/country-Label).
     if(!localStorage.getItem('jsr_countries_v1')){ localStorage.setItem('jsr_countries_v1', JSON.stringify(COUNTRY_SEED)); }
     // Kosovo-Steuer-Korrektur (Seed-Fix 2026-07-29): 0 % bis 250, 8 % bis 450, 10 % darüber (gestaffelt wie AL).
