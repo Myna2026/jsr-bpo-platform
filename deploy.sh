@@ -70,14 +70,27 @@ echo "  gesichert: $REMOTE_BASE/_backups/$TS  (die letzten $KEEP Staende bleiben
 echo ""
 
 # ── Uebertragen ────────────────────────────────────────────────────────────
+# ── Build-Stempel: Platzhalter __BUILD_ID__ → Deploy-Zeitstempel. Sichtbar via console.info
+#    ("TIVE build …") + window.TIVE_BUILD. Damit ist "echter Bug vs. alter Browser-Cache" sofort klaerbar.
+BUILD="$TS"
+STAMP_TMP="$(mktemp -d)"
+trap 'rm -rf "$STAMP_TMP"' EXIT
+stamp_rsync() {  # $1 = lokale Quelle, $2 = Remote-Ziel
+  local base; base="$(basename "$1")"
+  sed "s/__BUILD_ID__/$BUILD/g" "$1" > "$STAMP_TMP/$base"
+  rsync -az --progress "$STAMP_TMP/$base" "$SERVER:$2"
+}
+echo "  Build-Kennung: $BUILD"
+echo ""
+
 echo "→ HR-Portal..."
-rsync -az --progress "$LOCAL_DIR/hr.html" "$SERVER:$REMOTE_BASE/hr/index.html"
+stamp_rsync "$LOCAL_DIR/hr.html" "$REMOTE_BASE/hr/index.html"
 
 echo "→ Mitarbeiter-Portal..."
-rsync -az --progress "$LOCAL_DIR/mitarbeiter.html" "$SERVER:$REMOTE_BASE/mitarbeiter/index.html"
+stamp_rsync "$LOCAL_DIR/mitarbeiter.html" "$REMOTE_BASE/mitarbeiter/index.html"
 
 echo "→ Client-Portal..."
-rsync -az --progress "$LOCAL_DIR/client.html" "$SERVER:$REMOTE_BASE/client/index.html"
+stamp_rsync "$LOCAL_DIR/client.html" "$REMOTE_BASE/client/index.html"
 
 echo "→ Showcase (öffentlich)..."
 rsync -az --progress "$LOCAL_DIR/showcase.html" "$SERVER:$REMOTE_BASE/client/showcase.html"
