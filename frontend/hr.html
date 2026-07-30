@@ -3791,6 +3791,7 @@ function EmployeeModal({emp, projects, employees, onSave, onClose, initialTab, o
     {id:'projekt',    label:'Projekt',   icon:'🎯'},
   ];
   if(emp) TABS.push({id:'feedback', label:'Zufriedenheit', icon:'💬'});   // nur bei bestehendem MA (Feedbackgespräche = Sicht des MA)
+  if(emp&&emp.id) TABS.push({id:'dokumente', label:'Dokumente', icon:'📎'});   // Ablage: Arbeitsvertrag + Kündigungsoriginal (nur bei bestehendem MA)
 
 
   return(
@@ -3856,6 +3857,7 @@ function EmployeeModal({emp, projects, employees, onSave, onClose, initialTab, o
             )}
 
           {tab==='feedback'&&<FeedbackEmployeeTab emp={form}/>}
+          {tab==='dokumente'&&<EmployeeDocsPanel emp={emp}/>}
           {/* ── TAB: HR & VERWALTUNG ── */}
           {tab==='profil'&&(
             <div style={{paddingTop:16}}>
@@ -22402,6 +22404,110 @@ async function getSignedLogoUrl(v){
   if(/^https?:\/\//.test(v)) return v;            // schon volle URL
   try{ const {data,error}=await sb.storage.from('client-logos').createSignedUrl(v, 3600); if(error) return null; return (data&&data.signedUrl)||null; }catch(e){ return null; }
 }
+
+// ── Mitarbeiter-Dokumente · privater Bucket "employee-docs" + Tabelle employee_documents ──
+// Arbeitsvertrag + unterschriebenes Kuendigungsoriginal. RLS erzwingt DB-seitig:
+// management/hr sehen alles, der verknuepfte Mitarbeiter nur sein Eigenes, sonst niemand.
+// Signierte Links mit 300 s TTL. Der Frontend-Guard (isAdmin im Panel) ist nur UX.
+const EMP_DOC_BUCKET = 'employee-docs';
+const EMP_DOC_LABEL = { contract:'Arbeitsvertrag', termination:'Kündigungsoriginal' };
+async function empDocList(employeeId){
+  if(!employeeId) return [];
+  const {data,error}=await sb.from('employee_documents').select('*').eq('employee_id',employeeId).order('created_at',{ascending:false});
+  if(error){ console.warn('[empDoc] list', error); return []; }
+  return data||[];
+}
+async function empDocUpload(employeeId, file, docType){   // docType: 'contract' | 'termination'
+  if(!employeeId||!file) return {error:'Kein Mitarbeiter oder keine Datei.'};
+  if(file.type!=='application/pdf' && !/\.pdf$/i.test(file.name||'')) return {error:'Nur PDF erlaubt.'};
+  if(file.size > 10*1024*1024) return {error:'Datei über 10 MB.'};
+  const today=new Date().toISOString().slice(0,10);
+  const rand=Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+  const folder = docType==='termination' ? 'termination' : 'contract';
+  const stem   = docType==='termination' ? 'kuendigung' : 'arbeitsvertrag';
+  const path = employeeId+'/'+folder+'/'+today+'_'+stem+'_'+rand+'.pdf';
+  const up=await sb.storage.from(EMP_DOC_BUCKET).upload(path, file, {contentType:'application/pdf', upsert:false});
+  if(up.error){ console.warn('[empDoc] upload', up.error); return {error:(up.error.message||'Upload fehlgeschlagen')}; }
+  let uid=null; try{ const u=await sb.auth.getUser(); uid=u&&u.data&&u.data.user?u.data.user.id:null; }catch(e){}
+  const ins=await sb.from('employee_documents').insert({employee_id:employeeId, doc_type:docType, storage_path:path, original_name:(file.name||null), size_bytes:file.size||null, mime_type:'application/pdf', uploaded_by:uid});
+  if(ins.error){ console.warn('[empDoc] insert', ins.error); try{ await sb.storage.from(EMP_DOC_BUCKET).remove([path]); }catch(e){} return {error:'Metadaten speichern fehlgeschlagen: '+(ins.error.message||'')}; }
+  return {ok:true};
+}
+async function empDocOpen(path){   // 300 s signierter Link; RLS entscheidet, ob er ueberhaupt erzeugt wird
+  try{ const {data,error}=await sb.storage.from(EMP_DOC_BUCKET).createSignedUrl(path, 300); if(error||!data) return null; return data.signedUrl||null; }catch(e){ return null; }
+}
+async function empDocDelete(row){
+  const rm=await sb.storage.from(EMP_DOC_BUCKET).remove([row.storage_path]);
+  if(rm.error){ console.warn('[empDoc] remove', rm.error); return {error:'Datei löschen fehlgeschlagen: '+(rm.error.message||'')}; }
+  const {error}=await sb.from('employee_documents').delete().eq('id', row.id);
+  if(error){ return {error:'Metadaten löschen fehlgeschlagen: '+(error.message||'')}; }
+  return {ok:true};
+}
+function fmtBytes(n){ n=Number(n)||0; if(n<1024) return n+' B'; if(n<1048576) return Math.round(n/1024)+' KB'; return (n/1048576).toFixed(1)+' MB'; }
+
+function EmployeeDocsPanel({emp}){
+  const [docs,setDocs]=useState(null);           // null = laedt
+  const [busy,setBusy]=useState(false);
+  const [docType,setDocType]=useState('contract');
+  const [err,setErr]=useState('');
+  const [isAdmin,setIsAdmin]=useState(false);
+  const fileRef=useRef(null);
+  const reload=async()=>{ setDocs(await empDocList(emp&&emp.id)); };
+  useEffect(()=>{ if(emp&&emp.id) reload(); },[emp&&emp.id]);
+  useEffect(()=>{ (async()=>{ try{ const u=await sb.auth.getUser(); const uid=u&&u.data&&u.data.user&&u.data.user.id; if(!uid) return;
+    const {data}=await sb.from('app_users').select('role_keys').eq('user_id',uid).maybeSingle();
+    const ks=(data&&data.role_keys)||[]; setIsAdmin(ks.includes('management')||ks.includes('hr')); }catch(e){} })(); },[]);
+  async function onPick(e){
+    const file=e.target.files&&e.target.files[0]; if(e.target) e.target.value='';
+    if(!file) return;
+    setErr(''); setBusy(true);
+    const r=await empDocUpload(emp.id, file, docType);
+    setBusy(false);
+    if(r.error){ setErr(r.error); return; }
+    reload();
+  }
+  async function openDoc(row){
+    setErr('');
+    const url=await empDocOpen(row.storage_path);
+    if(!url){ setErr('Konnte Datei nicht öffnen (Zugriff verweigert oder Datei fehlt).'); return; }
+    window.open(url,'_blank','noopener');
+  }
+  async function delDoc(row){
+    const ok=await uiConfirm({title:'Dokument löschen', text:'„'+(row.original_name||row.storage_path.split('/').pop())+'" endgültig löschen?', danger:true, confirmLabel:'Löschen'});
+    if(!ok) return;
+    setErr(''); setBusy(true); const r=await empDocDelete(row); setBusy(false);
+    if(r.error){ setErr(r.error); return; }
+    reload();
+  }
+  return (<div style={{padding:'14px 0'}}>
+    {isAdmin && <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap',marginBottom:12}}>
+      <select className="form-select" style={{width:230}} value={docType} onChange={e=>setDocType(e.target.value)} disabled={busy}>
+        <option value="contract">Arbeitsvertrag</option>
+        <option value="termination">Kündigungsoriginal (unterschrieben)</option>
+      </select>
+      <input ref={fileRef} type="file" accept="application/pdf,.pdf" style={{display:'none'}} onChange={onPick}/>
+      <button className="btn btn-primary btn-sm" disabled={busy} onClick={()=>fileRef.current&&fileRef.current.click()}>{busy?'⏳ …':'⬆ PDF hochladen'}</button>
+    </div>}
+    <div style={{fontSize:11,color:'var(--muted)',marginBottom:10}}>Privat abgelegt, nur HR/Management und der Mitarbeiter selbst. Nur PDF, max. 10 MB. Links sind 5 Minuten gültig.</div>
+    {err&&<div style={{fontSize:12,color:'var(--red)',marginBottom:10}}>⚠ {err}</div>}
+    {docs===null ? <div style={{fontSize:13,color:'var(--muted)'}}>Lädt…</div>
+      : docs.length===0 ? <div style={{fontSize:13,color:'var(--muted)'}}>Noch keine Dokumente abgelegt.</div>
+      : <div style={{display:'flex',flexDirection:'column',gap:6}}>
+          {docs.map(row=>(
+            <div key={row.id} style={{display:'flex',alignItems:'center',gap:10,padding:'8px 12px',border:'1px solid var(--border)',borderRadius:'var(--r)'}}>
+              <span style={{fontSize:18}}>📄</span>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontSize:13,fontWeight:600,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{row.original_name||row.storage_path.split('/').pop()}</div>
+                <div style={{fontSize:11,color:'var(--muted)'}}>{EMP_DOC_LABEL[row.doc_type]||row.doc_type} · {fmtDate(row.created_at)} · {fmtBytes(row.size_bytes)}</div>
+              </div>
+              <button className="btn btn-sm" disabled={busy} onClick={()=>openDoc(row)}>Öffnen</button>
+              {isAdmin && <button className="btn btn-sm" style={{color:'var(--red)'}} disabled={busy} onClick={()=>delDoc(row)}>Löschen</button>}
+            </div>
+          ))}
+        </div>}
+  </div>);
+}
+
 function ClientEditModal({client, onSave, onClose, CLIENT_TABS, projects}){
   const [form, setForm] = useState(JSON.parse(JSON.stringify(client)));
   const [section, setSection] = useState('stamm');
