@@ -6305,14 +6305,14 @@ async function classifyShiftSurcharges(emp, month){
 // payrollCountry/payrollCurrency delegieren hierher (verhaltenskompatibel), der Rechenkern folgt in Phase 2.
 // AL = an 80 echten Abrechnungen verifiziert; XK = Bestandswerte, verified:false → Config-Hinweis bis bestätigt.
 const COUNTRY_SEED = [
-  { id:'al', name:'Albanien', currency:'LEK', decimals:0, verified:true,
+  { id:'al', name:'Albanien', currency:'LEK', decimals:0, verified:true, taxBase:'gross',
     contributions:[
       { name:'Sozialversicherung',  employer:{mode:'pct',value:15},  employee:{mode:'pct',value:9.5}, cap:186416 },
       { name:'Krankenversicherung', employer:{mode:'pct',value:1.7}, employee:{mode:'pct',value:1.7}, cap:null },
     ],
     allowance:[ {grossUpto:50000, amount:50000}, {grossUpto:60000, amount:35000}, {grossUpto:null, amount:30000} ],
     taxBrackets:[ {upto:200000, pct:13}, {upto:null, pct:23} ] },
-  { id:'xk', name:'Kosovo', currency:'EUR', decimals:2, verified:false,
+  { id:'xk', name:'Kosovo', currency:'EUR', decimals:2, verified:false, taxBase:'gross_minus_employee_contributions',
     contributions:[
       { name:'Rentenversicherung', employer:{mode:'pct',value:5}, employee:{mode:'pct',value:5}, cap:null },
     ],
@@ -6443,17 +6443,23 @@ function calcFullPayslip(emp, month, salaryRec, employees, absences){
   let allowance = 0;
   for(const a of (country.allowance||[])){ if(a.grossUpto==null || grossTotal<=Number(a.grossUpto)){ allowance=Number(a.amount)||0; break; } }
 
-  // ── STEUER: Stufen auf BRUTTO, erste Grenze = Freibetrag (0 %-Zone). Stufengrenzen absolut aufs Brutto. ──
+  // ── STEUER-BASIS je Land: 'gross' (AL: direkt aufs Brutto, an 80 Abrechnungen belegt) oder
+  //    'gross_minus_employee_contributions' (XK: Brutto abzüglich ALLER Arbeitnehmer-Beiträge — die
+  //    allgemeine Regel; Kosovo hat nur die Rente, künftige Länder mit mehreren AN-Beiträgen rechnen so korrekt). ──
+  const _sumEe = contributions.reduce((s,c)=>s+c.employee,0);
+  const taxableBase = (country.taxBase==='gross_minus_employee_contributions') ? (grossTotal - _sumEe) : grossTotal;
+
+  // ── STEUER: Stufen auf die Steuer-Basis, erste Grenze = Freibetrag (0 %-Zone). Der Freibetrag selbst
+  //    bleibt nach BRUTTO gestaffelt (AL-Regel), die Stufengrenzen laufen auf der Steuer-Basis. ──
   let _taxRaw=0, _lo=allowance; const taxBands=[];
   for(const b of (country.taxBrackets||[])){
-    const hi = (b.upto==null) ? grossTotal : Math.min(grossTotal, Number(b.upto)||0);
+    const hi = (b.upto==null) ? taxableBase : Math.min(taxableBase, Number(b.upto)||0);
     if(hi>_lo){ const amt=(hi-_lo)*(Number(b.pct)||0)/100; _taxRaw+=amt; taxBands.push({from:_lo,to:hi,pct:Number(b.pct)||0,amount:_rnd(amt)}); _lo=hi; }
-    if(_lo>=grossTotal) break;
+    if(_lo>=taxableBase) break;
   }
   const incomeTax = _rnd(_taxRaw);
 
   // ── NETTO + ARBEITGEBERKOSTEN (aus präzisen Beträgen, einmal gerundet) ──
-  const _sumEe = contributions.reduce((s,c)=>s+c.employee,0);
   const _sumEr = contributions.reduce((s,c)=>s+c.employer,0);
   const netPay = _rnd(grossTotal - _sumEe - _taxRaw - absenceDeduct - advanceDeduct - otherDeduct);
   const employerCost = _rnd(grossTotal + _sumEr);
@@ -6511,8 +6517,13 @@ function payrollSelfTest(){
     const R=Math.round;
     const ok1 = c1.grossTotal===100000 && R(soc1.employer)===15000 && R(soc1.employee)===9500 && R(kv1)===3400 && c1.incomeTax===9100 && c1.netPay===79700 && c1.employerCost===116700;
     const ok2 = R(soc2.employer)===27962 && R(kv2)===14621 && c2.incomeTax===75006;
-    if(ok1&&ok2) console.info('✓ Lohn-Selbsttest (Albanien) ok: 100k→Steuer 9.100/Netto 79.700/AG 116.700 · 430k→AG-Sozial 27.962/KV 14.621/Steuer 75.006');
-    else console.warn('⚠ Lohn-SELBSTTEST FEHLGESCHLAGEN', {ok1, ok2, c1, c2});
+    // Kosovo: Steuer auf Brutto MINUS Arbeitnehmer-Beiträge (Rente 5 %). 1.300 → Basis 1.235,
+    // davon 250 frei, 200 × 8 % (=16) + 785 × 10 % (=78,50) = 94,50 € Steuer.
+    const mkXk=(sal)=>({first_name:'Test',last_name:'XK',salary_type:'fixed',fixed_salary:sal,hourly_rate:0,work_hours:8,location:'Prishtina',absences:[],contract:{start:'2020-01-01'}});
+    const cx=calcFullPayslip(mkXk(1300),'2026-06',{deduction_absence_days:0},[],[]);
+    const okx = cx.grossTotal===1300 && cx.socialEmployee===65 && cx.incomeTax===94.5;
+    if(ok1&&ok2&&okx) console.info('✓ Lohn-Selbsttest ok: AL 100k→Steuer 9.100/Netto 79.700/AG 116.700 · AL 430k→AG-Sozial 27.962/KV 14.621/Steuer 75.006 · XK 1.300→Basis 1.235/Rente 65/Steuer 94,50');
+    else console.warn('⚠ Lohn-SELBSTTEST FEHLGESCHLAGEN', {ok1, ok2, okx, c1, c2, cx});
   }catch(e){ console.warn('Lohn-Selbsttest Fehler:', e); }
 }
 
@@ -23854,6 +23865,7 @@ function CountryPayrollEditor(){
           <div><div style={{fontSize:11,color:'var(--muted)'}}>Name</div><input style={{...inp,width:170}} value={cur.name||''} onChange={e=>patch({name:e.target.value})}/></div>
           <div><div style={{fontSize:11,color:'var(--muted)'}}>Währung</div><input style={{...inp,width:80,textAlign:'center'}} value={cur.currency||''} onChange={e=>patch({currency:e.target.value.toUpperCase()})} placeholder="LEK"/></div>
           <div><div style={{fontSize:11,color:'var(--muted)'}}>Nachkommast.</div><input type="number" min="0" max="2" style={{...inp,width:70,textAlign:'center'}} value={cur.decimals??0} onChange={e=>patch({decimals:Math.max(0,Math.min(2,parseInt(e.target.value)||0))})}/></div>
+          <div><div style={{fontSize:11,color:'var(--muted)'}}>Steuer-Basis</div><select style={{...inp,width:230}} value={cur.taxBase||'gross'} onChange={e=>patch({taxBase:e.target.value})}><option value="gross">Brutto direkt (z. B. Albanien)</option><option value="gross_minus_employee_contributions">Brutto minus AN-Beiträge (z. B. Kosovo)</option></select></div>
           <label style={{display:'flex',gap:6,alignItems:'center',fontSize:13,cursor:'pointer'}}><input type="checkbox" checked={!!cur.verified} onChange={e=>patch({verified:e.target.checked})}/> Sätze bestätigt (kein Hinweis mehr)</label>
           {countries.length>1&&<button className="btn btn-sm" style={{color:'var(--red)',marginLeft:'auto'}} onClick={delCountry}>Land löschen</button>}
         </div>
@@ -23892,9 +23904,9 @@ function CountryPayrollEditor(){
         <button className="btn btn-sm" onClick={()=>patch({allowance:[...allow,{grossUpto:null,amount:0}]})}>+ Stufe</button>
       </div>
 
-      <div style={lblC}>Steuerstufen (auf Brutto, erste Grenze = Freibetrag)</div>
+      <div style={lblC}>Steuerstufen (erste Grenze = Freibetrag)</div>
       <div style={{padding:'0 16px 14px'}}>
-        <div style={{fontSize:11,color:'var(--muted)',marginBottom:6}}>„bis" = Obergrenze der Stufe in {sym}, leer = darüber (∞). Reihenfolge aufsteigend.</div>
+        <div style={{fontSize:11,color:'var(--muted)',marginBottom:6}}>„bis" = Obergrenze der Stufe in {sym}, leer = darüber (∞). Reihenfolge aufsteigend. Angewandt auf die oben gewählte <b>Steuer-Basis</b> ({(cur.taxBase||'gross')==='gross'?'Brutto direkt':'Brutto minus AN-Beiträge'}). Der Freibetrag bleibt nach Brutto gestaffelt.</div>
         {brackets.map((b,i)=>(
           <div key={i} style={{display:'grid',gridTemplateColumns:'1fr 1fr auto',gap:8,alignItems:'center',marginBottom:6}}>
             <input type="number" placeholder="bis (leer = ∞)" style={inp} value={b.upto??''} onChange={e=>patch({taxBrackets:brackets.map((x,j)=>j===i?{...x,upto:numOrNull(e.target.value)}:x)})}/>
@@ -31366,6 +31378,12 @@ function App(){
       if(Array.isArray(_cs)){ const _xk=_cs.find(c=>c&&c.id==='xk');
         if(_xk && !_xk._taxFix2907){ _xk.allowance=[{grossUpto:null,amount:250}]; _xk.taxBrackets=[{upto:450,pct:8},{upto:null,pct:10}]; _xk._taxFix2907=true;
           localStorage.setItem('jsr_countries_v1', JSON.stringify(_cs)); } } }catch(e){}
+    // Steuer-Basis nachrüsten (2026-07-30): AL versteuert Brutto direkt, Kosovo Brutto abzüglich AN-Beiträgen (Rente).
+    // Fehlt taxBase noch (Altbestand), setzen: xk → gross_minus_employee_contributions, sonst gross.
+    try{ const _cs=JSON.parse(localStorage.getItem('jsr_countries_v1')||'null');
+      if(Array.isArray(_cs)){ let _ch=false;
+        _cs.forEach(c=>{ if(c && c.taxBase===undefined){ c.taxBase = (c.id==='xk') ? 'gross_minus_employee_contributions' : 'gross'; _ch=true; } });
+        if(_ch) localStorage.setItem('jsr_countries_v1', JSON.stringify(_cs)); } }catch(e){}
     try{ const _locs=JSON.parse(localStorage.getItem('jsr_locations_v1')||'null');
       if(Array.isArray(_locs)){ let _ch=false; _locs.forEach(l=>{ if(l&&!l.country_id){ const cid=countryForLocation(l.name)||countryForLocation(l.id)||countryForLocation(l.country); if(cid){ l.country_id=cid; _ch=true; } } });
         if(_ch) localStorage.setItem('jsr_locations_v1', JSON.stringify(_locs)); } }catch(e){}
