@@ -1587,7 +1587,7 @@ const MENU_BADGES_DEFAULT = { assignments:{
   employees:'prio1', locations:'prio1', orgchart:'prio1', absences:'prio1', urlaubantraege:'prio1',
   kanban:'prio1', onboarding:'prio1', cvs:'prio1', training_plans:'prio1', timeline:'prio1', projects:'prio1',
   spaces:'prio2', payroll:'prio2', showcase:'prio2', forecast:'prio2', profitability:'prio2', workforce:'beta',
-  backup:'warning', ma_import:'warning', migration25a:'warning', surcharge:'warning', lohncfg:'warning', pins:'warning', gdocsync:'warning',
+  backup:'warning', ma_import:'warning', migration25a:'warning', surcharge:'warning', lohncfg:'warning', pins:'warning',
   raumkosten:'input', company_overhead:'input', shift_cfg:'input', hardware_types:'input', positions:'input',
   kpicfg:'input', overtime_cfg:'input', overhead_cfg:'input', holidays:'input', referral:'input',
 }, custom:[] };
@@ -1794,140 +1794,6 @@ const REFERRAL_CONFIG_DEFAULT = {
 // LANGUAGE_LIST + ROLE_LIST_DEFAULT + CV_STATUS entfernt (2026-07-25): alle ungenutzt.
 // Sprachen sind in der UI direkt hinterlegt; Rollen-Liste wird woanders gefuehrt;
 // CV_STATUS war nur ein Alias auf STATUS_FLOW (das direkt genutzt wird).
-</script><script type="text/babel">// ══════════════════════════════════════════════════════════════════════════════
-// GOOGLE SHEET SYNC ENGINE
-// Sheet: 1SU1OoiHH1zYUN7BsXreossjWijqintl9zcJw3asBM2k
-// Columns: A=Zeitstempel B=Name C=Telefon D=Deutsch E=CC-Erfahrung F=CC-Name G=Start H=Arbeitszeit
-// ══════════════════════════════════════════════════════════════════════════════
-
-async function syncGoogleDoc(cfg, dryRun){
-  const docId = (cfg&&cfg.doc_id) || '1SU1OoiHH1zYUN7BsXreossjWijqintl9zcJw3asBM2k';
-  const gid   = (cfg&&cfg.gid)    || '817355119';
-
-  const url = 'https://docs.google.com/spreadsheets/d/'+docId+'/gviz/tq?tqx=out:csv&gid='+gid;
-
-  const resp = await fetch(url);
-  if(!resp.ok) throw new Error('HTTP '+resp.status+', Sheet nicht erreichbar. Bitte "Jeder mit dem Link kann ansehen" setzen.');
-  const text = await resp.text();
-
-  // CSV parser
-  function parseCSV(text){
-    const lines = text.split('\n').filter(l=>l.trim());
-    return lines.map(line=>{
-      const cols=[]; let cur=''; let inQ=false;
-      for(let i=0;i<line.length;i++){
-        const ch=line[i];
-        if(ch==='"'&&!inQ){inQ=true;}
-        else if(ch==='"'&&inQ&&line[i+1]==='"'){cur+='"';i++;}
-        else if(ch==='"'&&inQ){inQ=false;}
-        else if(ch===','&&!inQ){cols.push(cur.trim());cur='';}
-        else{cur+=ch;}
-      }
-      cols.push(cur.trim());
-      return cols;
-    });
-  }
-
-  const rows = parseCSV(text);
-  const dataRows = rows.slice(1); // skip header row
-  if(dryRun) return dataRows.length;
-
-  // Column mapping (0-indexed):
-  // A=0 Zeitstempel | B=1 Vor- und Nachname | C=2 Telefonnummer
-  // D=3 Deutschniveau | E=4 CC-Erfahrung | F=5 CC-Name | G=6 Startdatum | H=7 Arbeitszeit
-  // Override with cfg if set
-  function ci(letter, fallback){
-    if(cfg&&cfg['col_'+letter]) return cfg['col_'+letter].toUpperCase().charCodeAt(0)-65;
-    return fallback;
-  }
-  const COL = {
-    date:       ci('date',    0),  // A Zeitstempel
-    fullname:   ci('name',    1),  // B Vor- und Nachname
-    phone:      ci('phone',   2),  // C Telefonnummer
-    level:      ci('level',   3),  // D Deutschniveau
-    cc_exp:     ci('cc_exp',  4),  // E CC-Erfahrung
-    cc_name:    ci('cc_name', 5),  // F CC-Name
-    start_date: ci('start',   6),  // G Wann anfangen
-    work_hours: ci('hours',   7),  // H Arbeitszeit
-  };
-
-  // 4a-3: Dedup gegen DB (cvs.phone), nicht localStorage
-  const {data:existingRows} = await sb.from('cvs').select('phone');
-  const existingPhones = new Set((existingRows||[]).map(c=>(c.phone||'').replace(/\s/g,'').replace(/^\+/,'')).filter(Boolean));
-  const payloads = [];
-
-  const today = new Date().toISOString().slice(0,10);
-  let added = 0;
-
-  dataRows.forEach((row, i)=>{
-    const fullname   = (row[COL.fullname]||'').trim();
-    const phone      = (row[COL.phone]||'').trim();
-    const rawDate    = (row[COL.date]||'').trim();
-    const level      = (row[COL.level]||'').trim();
-    const ccExp      = (row[COL.cc_exp]||'').trim();
-    const ccName     = (row[COL.cc_name]||'').trim();
-    const startDate  = (row[COL.start_date]||'').trim();
-    const workHours  = (row[COL.work_hours]||'').trim();
-
-    if(!fullname && !phone) return;
-
-    // Dedup by phone number (normalized)
-    const phoneNorm = phone.replace(/\s/g,'').replace(/^\+/,'');
-    if(phoneNorm && existingPhones.has(phoneNorm)) return;
-    if(phoneNorm) existingPhones.add(phoneNorm);
-
-    // Split full name into first + last
-    const nameParts = fullname.split(/\s+/);
-    const firstName = nameParts[0]||'';
-    const lastName  = nameParts.slice(1).join(' ')||'';
-
-    // Parse entry date from timestamp (DD.MM.YYYY or MM/DD/YYYY or ISO)
-    let cvDate = today;
-    if(rawDate){
-      const dmy = rawDate.match(/(\d{1,2})\.(\d{1,2})\.(\d{4})/);
-      const mdy = rawDate.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-      const iso = rawDate.match(/(\d{4})-(\d{2})-(\d{2})/);
-      if(dmy)      cvDate = dmy[3]+'-'+dmy[2].padStart(2,'0')+'-'+dmy[1].padStart(2,'0');
-      else if(mdy) cvDate = mdy[3]+'-'+mdy[1].padStart(2,'0')+'-'+mdy[2].padStart(2,'0');
-      else if(iso) cvDate = iso[0];
-    }
-
-    // Map Arbeitszeit to work_hours value
-    let workHoursVal = '8';
-    if(workHours){
-      if(workHours.includes('4')||workHours.toLowerCase().includes('teilzeit')||workHours.includes('halbt')) workHoursVal='4';
-      else if(workHours.includes('6')) workHoursVal='6';
-      else if(workHours.includes('8')||workHours.toLowerCase().includes('vollzeit')||workHours.toLowerCase().includes('full')) workHoursVal='8';
-    }
-
-    // Build work_history note
-    let workHistory = '';
-    if(ccExp&&ccExp.toLowerCase()!=='nein'&&ccExp!=='0'&&ccExp!=='') workHistory += 'CC-Erfahrung: '+ccExp;
-    if(ccName) workHistory += (workHistory?' · ':'')+ccName;
-
-    // 4a-3: DB-Payload — keine id (uuid), work_hours→extra, available_from strikt (Rohtext→extra), '' → null
-    const availDate = dateOrNull(startDate);
-    payloads.push({
-      status:'cv_inbound', source:'Google Sheet', cv_date:cvDate,
-      first_name:nz(firstName), last_name:nz(lastName), phone:nz(phone),
-      language_level:nz(level), available_from:availDate,
-      work_history:nz(workHistory),
-      notes:nz('Import: '+new Date().toLocaleDateString('de-DE')+(rawDate?' · Eingang: '+rawDate:'')),
-      photo_color:'#7c3aed',
-      extra:{ work_hours:workHoursVal, ...(!availDate&&startDate?{available_text:startDate}:{}) },
-    });
-  });
-
-  // 4a-3: Bulk-Insert in cvs (Per-Row-Fallback bei Konflikt). Fehler → hoch (Button zeigt ihn).
-  const {inserted} = await bulkInsertCvs(payloads);
-  added = inserted;
-  localStorage.setItem('jsr_gdoc_last_sync', new Date().toISOString());
-  localStorage.setItem('jsr_gdoc_last_count', String(added));
-
-  return added;
-}
-
-// 4a-3: Auto-Scheduler entfernt — GDoc-Sync nur noch manuell (Button / GdocSyncWidget / CvSyncView).
 </script><script type="text/babel">// ══════════════════════════════════════════════════════════════════════════════
 // VACATION ENTITLEMENT ENGINE
 // Calculates vacation days based on contract start, seniority, admin config
@@ -7059,8 +6925,6 @@ function PayslipArchiveView({payslips, employees, projects, fmtMonth, eur, onOpe
 // ── Cockpit ───────────────────────────────────────────────
 
 
-// GdocSyncWidget (Cockpit-Button) entfernt — war nirgends gemountet (toter Code). Der Google-
-// Sheet-Import läuft ausschließlich über das Admin-Panel „📋 Google Sheet Sync" (syncGoogleDoc).
 
 // ═══ COCKPIT-GRID + 8 Basis-Widgets (6b) ═══
 const WIDGET_ICONS = {
@@ -24121,8 +23985,6 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
     {key:'_allgemein',  label:'── Allgemein ──',      divider:true},
     {key:'logo',        label:'🖼 Logo & Branding'},
     {key:'reminder',    label:'📅 Vertrags-Reminder'},
-    {key:'_bewerber',   label:'── Recruiting ──',     divider:true},
-    {key:'gdocsync',    label:'📋 Google Sheet Sync'},
     {key:'_personal',   label:'── Personal ──',       divider:true},
     {key:'vacationcfg', label:'🏖 Urlaubsanspruch'},
     {key:'skills',      label:'🎯 Skills & Kompetenzen'},
@@ -24156,31 +24018,6 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
   ];
 
   // ── Settings state (top-level — Rules of Hooks) ──────────────────────
-  const [gdocCfg, setGdocCfg] = useState(()=>{
-    try{const s=localStorage.getItem('jsr_gdoc_sync');
-      return s?JSON.parse(s):{doc_id:'1SU1OoiHH1zYUN7BsXreossjWijqintl9zcJw3asBM2k',gid:'817355119',skip_header:'1'};}
-    catch(e){return {doc_id:'1SU1OoiHH1zYUN7BsXreossjWijqintl9zcJw3asBM2k',gid:'817355119',skip_header:'1'};}
-  });
-  const [gdocTesting, setGdocTesting] = useState(false);
-  const [gdocTestResult, setGdocTestResult] = useState(null);
-  function gdocSave(k,v){const n={...gdocCfg,[k]:v};setGdocCfg(n);localStorage.setItem('jsr_gdoc_sync',JSON.stringify(n));saveConfigToDB('jsr_gdoc_sync',n);}
-  // Einmalige Übernahme nach app_config: falls lokal eine Config liegt, aber in der DB noch keine,
-  // einmal nachziehen (idempotent — loadConfigFromDB null → push, sonst nichts). loadAllConfigsFromDB
-  // spiegelt danach automatisch zurück.
-  useEffect(()=>{ (async()=>{
-    try{
-      const local = localStorage.getItem('jsr_gdoc_sync');
-      if(!local) return;
-      const inDb = await loadConfigFromDB('jsr_gdoc_sync');
-      if(inDb==null) saveConfigToDB('jsr_gdoc_sync', JSON.parse(local));
-    }catch(e){}
-  })(); },[]);
-  async function gdocTest(){
-    setGdocTesting(true);setGdocTestResult(null);
-    try{const r=await syncGoogleDoc(gdocCfg,true);setGdocTestResult({ok:true,msg:'OK · '+r+' Einträge'});}
-    catch(e){setGdocTestResult({ok:false,msg:e.message});}
-    setGdocTesting(false);
-  }
 
   const [vcfg, setVcfg] = useState(()=>{
     try{const s=localStorage.getItem('jsr_vacation_cfg');
@@ -24533,77 +24370,6 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
           </div>
         )}
 
-        {/* ── GDOC SYNC ── */}
-        {activeSection==='gdocsync'&&(
-          <div className="card" style={{marginBottom:12}}>
-            <div className="card-header">
-              <span className="card-title">📋 Google Doc / Sheet Sync: Bewerber Import</span>
-              <span style={{fontSize:11,padding:'3px 8px',borderRadius:20,background:gdocCfg.doc_id?'var(--green-bg)':'var(--surface-2)',color:gdocCfg.doc_id?'var(--green)':'var(--muted)',fontWeight:600}}>
-                {gdocCfg.doc_id?'✓ Konfiguriert':'Nicht konfiguriert'}
-              </span>
-            </div>
-            <div style={{padding:16}}>
-              <div style={{fontSize:12,color:'var(--muted)',marginBottom:14,lineHeight:1.6,background:'var(--blue-bg)',padding:'8px 12px',borderRadius:'var(--r)',border:'1px solid rgba(15,86,97,.15)'}}>
-                <strong>Anleitung:</strong> Google Sheet öffentlich freigeben (Ansicht für alle). Sheet-ID aus URL kopieren:<br/>
-                <code style={{fontSize:11,background:'rgba(0,0,0,.06)',padding:'1px 5px',borderRadius:3}}>docs.google.com/spreadsheets/d/<strong>[SHEET-ID]</strong>/edit</code>
-              </div>
-              <div className="form-row">
-                <div className="form-group"><label className="form-label">Google Sheet ID *</label>
-                  <input className="form-input" value={gdocCfg.doc_id||''} onChange={e=>{const c={...gdocCfg,doc_id:e.target.value};localStorage.setItem('jsr_gdoc_sync',JSON.stringify(c));saveConfigToDB('jsr_gdoc_sync',c);setGdocCfg(c);}}
-                    placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"/></div>
-                <div className="form-group"><label className="form-label">Tab-Name (Blatt)</label>
-                  <input className="form-input" value={gdocCfg.sheet_name||''} onChange={e=>{const c={...gdocCfg,sheet_name:e.target.value};localStorage.setItem('jsr_gdoc_sync',JSON.stringify(c));saveConfigToDB('jsr_gdoc_sync',c);setGdocCfg(c);}} placeholder="Tabelle1"/></div>
-                <div className="form-group"><label className="form-label">Sheet GID (aus URL)</label>
-                  <input className="form-input" value={gdocCfg.gid||''} onChange={e=>{const c={...gdocCfg,gid:e.target.value};localStorage.setItem('jsr_gdoc_sync',JSON.stringify(c));saveConfigToDB('jsr_gdoc_sync',c);setGdocCfg(c);}} placeholder="817355119"/></div>
-              </div>
-              <div className="form-row">
-                <div className="form-group"><label className="form-label">Spalte: Name</label>
-                  <input className="form-input" value={gdocCfg.col_firstname||''} onChange={e=>{const c={...gdocCfg,col_firstname:e.target.value};localStorage.setItem('jsr_gdoc_sync',JSON.stringify(c));saveConfigToDB('jsr_gdoc_sync',c);setGdocCfg(c);}} placeholder="C"/></div>
-                <div className="form-group"><label className="form-label">Spalte: Telefon</label>
-                  <input className="form-input" value={gdocCfg.col_phone||''} onChange={e=>{const c={...gdocCfg,col_phone:e.target.value};localStorage.setItem('jsr_gdoc_sync',JSON.stringify(c));saveConfigToDB('jsr_gdoc_sync',c);setGdocCfg(c);}} placeholder="C"/></div>
-                <div className="form-group"><label className="form-label">Spalte: E-Mail</label>
-                  <input className="form-input" value={gdocCfg.col_email||''} onChange={e=>{const c={...gdocCfg,col_email:e.target.value};localStorage.setItem('jsr_gdoc_sync',JSON.stringify(c));saveConfigToDB('jsr_gdoc_sync',c);setGdocCfg(c);}} placeholder="D"/></div>
-                <div className="form-group"><label className="form-label">Spalte: Deutschniveau</label>
-                  <input className="form-input" value={gdocCfg.col_level||''} onChange={e=>{const c={...gdocCfg,col_level:e.target.value};localStorage.setItem('jsr_gdoc_sync',JSON.stringify(c));saveConfigToDB('jsr_gdoc_sync',c);setGdocCfg(c);}} placeholder="E"/></div>
-              </div>
-              <div className="form-row">
-                <div className="form-group"><label className="form-label">Spalte: Stadt</label>
-                  <input className="form-input" value={gdocCfg.col_city||''} onChange={e=>{const c={...gdocCfg,col_city:e.target.value};localStorage.setItem('jsr_gdoc_sync',JSON.stringify(c));saveConfigToDB('jsr_gdoc_sync',c);setGdocCfg(c);}} placeholder="F"/></div>
-                <div className="form-group"><label className="form-label">Spalte: Datum</label>
-                  <input className="form-input" value={gdocCfg.col_date||''} onChange={e=>{const c={...gdocCfg,col_date:e.target.value};localStorage.setItem('jsr_gdoc_sync',JSON.stringify(c));saveConfigToDB('jsr_gdoc_sync',c);setGdocCfg(c);}} placeholder="G"/></div>
-                <div className="form-group"><label className="form-label">Kopfzeile überspringen</label>
-                  <select className="form-select" value={gdocCfg.skip_header||'1'} onChange={e=>{const c={...gdocCfg,skip_header:e.target.value};localStorage.setItem('jsr_gdoc_sync',JSON.stringify(c));saveConfigToDB('jsr_gdoc_sync',c);setGdocCfg(c);}}>
-                    <option value="0">Nein</option>
-                    <option value="1">Ja (1 Zeile)</option>
-                    <option value="2">2 Zeilen</option>
-                  </select></div>
-              </div>
-              <div style={{display:'flex',gap:8,marginTop:8,alignItems:'center',flexWrap:'wrap'}}>
-                <button className="btn btn-primary" disabled={!gdocCfg.doc_id||gdocTesting}
-                  onClick={async()=>{
-                    setGdocTesting(true);setGdocTestResult(null);
-                    try{const r=await syncGoogleDoc(gdocCfg,true);setGdocTestResult({ok:true,msg:'OK · '+r+' Einträge'});}
-                    catch(e){setGdocTestResult({ok:false,msg:e.message||'Fehler'});}
-                    setGdocTesting(false);
-                  }}>
-                  {gdocTesting?'⏳ Teste...':'🔗 Verbindung testen'}
-                </button>
-                <button className="btn" disabled={!gdocCfg.doc_id}
-                  onClick={()=>syncGoogleDoc(gdocCfg,false).then(n=>alert(n+' Bewerber importiert')).catch(e=>alert('Fehler: '+e.message))}>
-                  🔄 Jetzt synchronisieren
-                </button>
-                {gdocTestResult&&(
-                  <span style={{fontSize:12,fontWeight:600,color:gdocTestResult.ok?'var(--green)':'var(--red)'}}>
-                    {gdocTestResult.ok?'✓':'✗'} {gdocTestResult.msg}
-                  </span>
-                )}
-              </div>
-              <div style={{marginTop:12,fontSize:11,color:'var(--muted)'}}>
-                ⏰ Automatischer Sync: täglich 08:00, 12:00, 17:00 Uhr (wenn Tab offen)
-              </div>
-            </div>
-          </div>
-        )}
 
         <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.1em',padding:'4px 0 8px',borderBottom:'2px solid var(--border)',marginBottom:12,marginTop:4}}>👥 Personal & Urlaub</div>
 
@@ -31082,6 +30848,7 @@ function CvSyncView({setCvList, projects}){
           <div style={{fontSize:11,color:csvUrl?'#0F5661':'var(--red)',marginTop:4,wordBreak:'break-all'}}>
             {csvUrl?('→ CSV: '+csvUrl):'⚠ Keine gültige Sheet-URL erkannt'}
           </div>
+          {!cfg.sheet_url&&<div style={{fontSize:11,color:'var(--muted)',marginTop:4}}>Adresse des Bewerbungs-Sheets. Ist das Feld leer (z. B. nach Config-Verlust), hier die Sheet-URL erneut eintragen, Freigabe „Jeder mit dem Link kann ansehen".</div>}
         </div>
 
         <div className="form-group" style={{marginTop:10}}>

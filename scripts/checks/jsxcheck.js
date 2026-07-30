@@ -2,10 +2,10 @@
 // jsxcheck.js — Babel-Block-Integritaet fuer frontend/hr.html
 //
 // ┌───────────────────────────────────────────────────────────────────────────┐
-// │ BASELINE — ACHTUNG, DARF NICHT STILL VERALTEN:  20/20                       │
+// │ BASELINE — ACHTUNG, DARF NICHT STILL VERALTEN:  19/19                       │
 // │   (jeder <script type="text/babel">-Block sauber geschlossen + brace-       │
 // │   balanciert). Kommt EIN Babel-Block dazu oder faellt einer weg, ist die    │
-// │   erwartete Zahl unten (=== 20) VON HAND anzupassen und im Commit zu        │
+// │   erwartete Zahl unten (=== 19) VON HAND anzupassen und im Commit zu        │
 // │   begruenden. Der Check ist das Netz gegen kaputte Live-Deploys — nicht     │
 // │   stillschweigend ueber --force umgehen.                                    │
 // └───────────────────────────────────────────────────────────────────────────┘
@@ -24,8 +24,8 @@ while ((m = openRe.exec(s))) {
   const body = s.slice(m.index + m[0].length, end);
   if ((body.split("{").length - body.split("}").length) === 0) balanced++;
 }
-const ok = opened === 20 && closedOk === 20 && balanced === 20;
-console.log(`babel-Bloecke geoeffnet/geschlossen: ${closedOk}/${opened}   (baseline 20/20)   ${closedOk===opened&&opened===20?"ok":"DRIFT"}`);
+const ok = opened === 19 && closedOk === 19 && balanced === 19;
+console.log(`babel-Bloecke geoeffnet/geschlossen: ${closedOk}/${opened}   (baseline 19/19)   ${closedOk===opened&&opened===19?"ok":"DRIFT"}`);
 console.log(`brace-balanciert:                    ${balanced}/${opened}                        ${balanced===opened?"ok":"DRIFT"}`);
 console.log("RESULT:", ok ? "PASS" : "FAIL");
 process.exit(ok ? 0 : 1);
