@@ -3702,6 +3702,43 @@ function ampelStyle(key, form, fpMap){
   if(!fieldAmpelEmpty(key, form)) return null;
   return {background:c.bg, borderColor:c.bd, borderWidth:2, borderStyle:'solid'};
 }
+// ── Pflegestand je Mitarbeiter — AUS DER FELD-AMPEL abgeleitet (jsr_field_priority_v1), keine zweite
+//    Feldliste. Ein Bereich (=Ampel-Tab) gilt als gepflegt, wenn KEIN rot/gelb eingestuftes Feld dieses
+//    Tabs leer ist (grün = optional, zählt nicht). Gleiche Leer-Logik + Beschäftigungs-Gating wie die
+//    Profil-Ampel (via ampelStyle). Wer die Ampel im System-Tab umkonfiguriert, ändert beides zugleich.
+function empAreaOk(emp, tabName, fpMap){
+  const defs=fieldAmpelDefs().filter(d=>d.tab===tabName);
+  for(const d of defs){
+    const sev=fpMap&&fpMap[d.key];
+    if(sev!=='red'&&sev!=='yellow') continue;          // grün/unklassifiziert zählt nicht als „fehlt"
+    if(ampelStyle(d.key, emp, fpMap)) return false;    // eingestuft + leer + gated => fehlt
+  }
+  return true;
+}
+// contractDocs = Set von employee_id mit hochgeladenem Vertrag (employee_documents, doc_type='contract').
+function empCareStatus(emp, fpMap, contractDocs){
+  return [
+    {key:'contract_doc', label:'Vertrag hochgeladen', ok: !!(contractDocs&&contractDocs.has(emp&&emp.id))},
+    {key:'vertrag', label:'Vertragsdaten gepflegt',   ok: empAreaOk(emp,'Vertrag',fpMap)},
+    {key:'profil',  label:'Profil gepflegt',          ok: empAreaOk(emp,'Profil',fpMap)},
+    {key:'bank',    label:'Bankdaten gepflegt',        ok: empAreaOk(emp,'Bank',fpMap)},
+    {key:'projekt', label:'Projekt gepflegt',          ok: empAreaOk(emp,'Projekt',fpMap)},
+  ];
+}
+// Kompakte 5-Zeichen-Spalte: grüner Haken = gepflegt, roter Kreis = etwas fehlt. Tooltip je Zeichen.
+// contractDocs==null = Vertrags-Liste lädt noch → neutraler Punkt statt falschem Rot.
+function CareBadges({emp, fpMap, contractDocs}){
+  const items=empCareStatus(emp, fpMap, contractDocs);
+  return (<span style={{display:'inline-flex',gap:3,alignItems:'center'}}>
+    {items.map(it=>{
+      const loading = it.key==='contract_doc' && contractDocs==null;
+      const color = loading?'var(--muted)':(it.ok?'var(--green)':'var(--red)');
+      const mark  = loading?'·':(it.ok?'✓':'●');
+      return <span key={it.key} title={(loading?'… ':(it.ok?'✓ ':'✗ '))+it.label} style={{fontSize:12,lineHeight:1,minWidth:10,textAlign:'center',color,cursor:'default'}}>{mark}</span>;
+    })}
+  </span>);
+}
+
 function EmployeeModal({emp, projects, employees, onSave, onClose, initialTab, onTerminate}){
   // 27d-2: Salary-History-Panel liest direkt aus payslips-Table (Q3: kein Spinner)
   // fmtMonth lokal, da die Definition in PayrollView (7165) nicht im Scope von EmployeeModal liegt
@@ -5153,6 +5190,10 @@ function EmployeeList({employees, setEmployees, projects, seedSearch, navFilter,
   const [sortCol, setSortCol] = useState('last_name');
   const [sortDir, setSortDir] = useState('asc');
   const [projectFilter, setProjectFilter] = useState('all');
+  // Pflegestand: Feld-Ampel-Map (eine Wahrheit) + gebündelte Vertrags-Upload-Liste (1 Query für alle Zeilen).
+  const _fpMap = loadFieldPriority();
+  const [contractDocs, setContractDocs] = useState(null);
+  useEffect(()=>{ (async()=>{ try{ const {data}=await sb.from('employee_documents').select('employee_id').eq('doc_type','contract'); setContractDocs(new Set((data||[]).map(r=>r.employee_id))); }catch(e){ setContractDocs(new Set()); } })(); },[]);
 
   function toggleSort(col){
     if(sortCol === col) setSortDir(d => d==='asc'?'desc':'asc');
@@ -5473,13 +5514,14 @@ function EmployeeList({employees, setEmployees, projects, seedSearch, navFilter,
               <th style={thStyle('salary')} onClick={()=>toggleSort('salary')}>
                 Gehalt{sortIcon('salary')}
               </th>
+              <th title="Pflegestand (v.l.n.r.): Vertrag hochgeladen · Vertragsdaten · Profil · Bank · Projekt">Pflege</th>
               <th>Aktionen</th>
             </tr>
           </thead>
           <tbody>
             {sorted.length===0&&(
               <tr>
-                <td colSpan={8} style={{textAlign:'center',padding:24,color:'var(--muted)'}}>
+                <td colSpan={9} style={{textAlign:'center',padding:24,color:'var(--muted)'}}>
                   Keine Mitarbeiter
                 </td>
               </tr>
@@ -5535,6 +5577,7 @@ function EmployeeList({employees, setEmployees, projects, seedSearch, navFilter,
                   <td style={{fontSize:11,fontFamily:'var(--mono)',color:'var(--muted)'}}>
                     {isTerminated?'—':(()=>{const n=empMonthlyCost(e);return n>0?Number(n).toLocaleString('de-DE')+' '+paySym(e):'—';})()}
                   </td>
+                  <td><CareBadges emp={e} fpMap={_fpMap} contractDocs={contractDocs}/></td>
                   <td>
                     <div style={{display:'flex',gap:6,flexWrap:'wrap',alignItems:'stretch'}}>
                       <button className="btn btn-sm tip-r" data-tip="Abwesenheit erfassen" onClick={ev=>{ev.stopPropagation();onAbsence(e);}}>📅 Abwesenheit</button>
@@ -5571,6 +5614,7 @@ function EmployeeList({employees, setEmployees, projects, seedSearch, navFilter,
                   {proj?<span style={{fontSize:11,padding:'2px 10px',borderRadius:20,fontWeight:700,background:proj.color||'#6b7280',color:yiqText(proj.color||'#6b7280')}}>{proj.name}</span>:<span style={{fontSize:11,color:'var(--muted)'}}>Kein Projekt</span>}
                   {e.language_level?<span style={{fontSize:10,padding:'2px 8px',borderRadius:20,fontWeight:700,background:'var(--surface-2)',color:'var(--muted)'}}>{e.language_level}</span>:null}
                   {!isTerminated&&(()=>{const n=empMonthlyCost(e);return n>0?<span style={{fontSize:11,fontFamily:'var(--mono)',color:'var(--muted)'}}>{Number(n).toLocaleString('de-DE')} {paySym(e)}</span>:null;})()}
+                  <span style={{display:'inline-flex',gap:5,alignItems:'center'}}><span style={{fontSize:10,color:'var(--muted)'}}>Pflege</span><CareBadges emp={e} fpMap={_fpMap} contractDocs={contractDocs}/></span>
                 </div>
                 <div className="ma-card-actions" onClick={ev=>ev.stopPropagation()}>
                   <button className="btn btn-sm" onClick={()=>onAbsence(e)} title="Abwesenheit erfassen"><span className="mca-i">📅</span>Abwesenheit</button>
