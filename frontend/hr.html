@@ -11094,6 +11094,14 @@ function staffingConfigured(projId, skill){
   return Object.keys(cfg).some(dk=>(cfg[dk]||[]).some(w=>(parseInt(w.count)||0)>0));
 }
 
+// ── Öffnungszeiten je Projekt+Skill, PRO WOCHENTAG (jsr_open_hours_v1) ──────────
+// Form: { "<projId>_<skill>": { mo:{open:'09:00',close:'19:00'}|fehlt, di:…, … so:… } }
+// Fehlender/leerer Tag = an dem Tag geschlossen. GAR KEIN Eintrag fürs Projekt = NICHT konfiguriert →
+// die harte Planer-Grenze (Schnitt 2) darf dann NICHT greifen (fail-open), damit ohne Pflege planbar bleibt.
+// Schlüssel = staffingKeyFor (gleiche Konvention wie Sollbesetzung → eine Modell-Sprache).
+// Leser (openHoursFor/openHoursConfigured) kommen in Schnitt 2 dazu, wo der Planer sie konsumiert.
+function loadOpenHoursAll(){ try{ return JSON.parse(localStorage.getItem('jsr_open_hours_v1')||'{}'); }catch(e){ return {}; } }
+
 // Modal: Sollbesetzung je Wochentag/Zeitfenster erfassen (pro Projekt+Skill).
 function StaffingTargetModal({projId, skill, projName, onClose, onSaved}){
   const [cfg,setCfg]=useState(()=>{ const c=loadStaffingAll()[staffingKeyFor(projId,skill)]||{}; const o={}; STAFFING_DAYS.forEach(([d])=>{ o[d]=(c[d]||[]).map(w=>({...w})); }); return o; });
@@ -11135,6 +11143,59 @@ function StaffingTargetModal({projId, skill, projName, onClose, onSaved}){
         <div className="sp-modal-foot">
           <button className="sp-md-copy" onClick={()=>copyTo(['mo','di','mi','do','fr'])} title="Aktuellen Tag auf Mo–Fr kopieren">Mo–Fr kopieren</button>
           <button className="sp-md-copy" onClick={()=>copyTo(STAFFING_DAYS.map(x=>x[0]))} title="Aktuellen Tag auf alle Tage kopieren">Auf alle Tage</button>
+          <div style={{flex:1}}/>
+          <button className="sp-md-save" onClick={save}>Speichern</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Modal: Öffnungszeiten je Wochentag (pro Projekt+Skill). Bedienung Werktag/Wochenende (Default),
+// Ausnahmemodus „pro Tag einzeln". Ein Fenster je Tag (open–close) oder geschlossen. Speichert
+// jsr_open_hours_v1 (app_config + localStorage). Pro Wochentag gespeichert (wie Sollbesetzung).
+function OpenHoursModal({projId, skill, projName, onClose, onSaved}){
+  const [cfg,setCfg]=useState(()=>{ const c=loadOpenHoursAll()[staffingKeyFor(projId,skill)]||{}; const o={}; STAFFING_DAYS.forEach(([d])=>{ const w=c[d]; o[d]=(w&&w.open&&w.close)?{open:w.open,close:w.close}:null; }); return o; });
+  const uniform=days=>{ const v=days.map(d=>cfg[d]?cfg[d].open+'-'+cfg[d].close:'zu'); return v.every(x=>x===v[0]); };
+  const [mode,setMode]=useState(uniform(['mo','di','mi','do','fr'])&&uniform(['sa','so'])?'simple':'perday');
+  const setGroup=(days,val)=>setCfg(c=>{ const n={...c}; days.forEach(d=>n[d]=val?{open:val.open,close:val.close}:null); return n; });
+  const dayRow=(label,val,onChange)=>{
+    const closed=!val;
+    return (<div className="sp-md-win">
+      <span style={{minWidth:104,fontWeight:600,fontSize:13}}>{label}</span>
+      <label style={{display:'flex',gap:5,alignItems:'center',fontSize:12,color:'var(--muted)'}}>
+        <input type="checkbox" checked={closed} onChange={e=>onChange(e.target.checked?null:{open:'09:00',close:'17:00'})}/> geschlossen
+      </label>
+      {!closed && <React.Fragment>
+        <input type="time" value={val.open} onChange={e=>onChange({...val,open:e.target.value})}/>
+        <span>–</span>
+        <input type="time" value={val.close} onChange={e=>onChange({...val,close:e.target.value})}/>
+      </React.Fragment>}
+    </div>);
+  };
+  function save(){
+    const all=loadOpenHoursAll(), clean={};
+    STAFFING_DAYS.forEach(([d])=>{ const w=cfg[d]; if(w&&w.open&&w.close) clean[d]={open:w.open,close:w.close}; });
+    all[staffingKeyFor(projId,skill)]=clean;
+    try{ localStorage.setItem('jsr_open_hours_v1',JSON.stringify(all)); }catch(e){}
+    try{ saveConfigToDB('jsr_open_hours_v1',all); }catch(e){}
+    onSaved&&onSaved(); onClose&&onClose();
+  }
+  return (
+    <div className="sp-modal-ov" onClick={onClose}>
+      <div className="sp-modal" onClick={e=>e.stopPropagation()}>
+        <div className="sp-modal-head"><span>Öffnungszeiten: {projName}{skill?' · '+skill:''}</span><button className="sp-modal-x" onClick={onClose}>✕</button></div>
+        <div className="sp-modal-body">
+          <div style={{fontSize:11,color:'var(--muted)',marginBottom:8,lineHeight:1.5}}>Wann ist dieses Projekt/dieser Skill erreichbar? Außerhalb wird später nicht geplant. Ohne jeden Eintrag bleibt alles planbar.</div>
+          {mode==='simple' ? <React.Fragment>
+            {dayRow('Werktag (Mo–Fr)', cfg.mo, v=>setGroup(['mo','di','mi','do','fr'],v))}
+            {dayRow('Wochenende (Sa–So)', cfg.sa, v=>setGroup(['sa','so'],v))}
+          </React.Fragment> : STAFFING_DAYS.map(([d,l])=>(
+            <React.Fragment key={d}>{dayRow(l, cfg[d], v=>setCfg(c=>({...c,[d]:v})))}</React.Fragment>
+          ))}
+        </div>
+        <div className="sp-modal-foot">
+          <button className="sp-md-copy" onClick={()=>setMode(m=>m==='simple'?'perday':'simple')} title="Zwischen Werktag/Wochenende und pro Tag umschalten">{mode==='simple'?'Pro Tag einzeln':'Werktag/Wochenende'}</button>
           <div style={{flex:1}}/>
           <button className="sp-md-save" onClick={save}>Speichern</button>
         </div>
@@ -11330,6 +11391,7 @@ function SimpleShiftView({employees, projects, showToast}){
   // sonst KW-Start. Nur für den Mobile-Karten-Zwilling; Desktop nutzt ihn nicht.
   const [mDayIdx,setMDayIdx]=useState(()=>(new Date().getDay()+6)%7);
   const [staffModal,setStaffModal]=useState(false); // Sollbesetzung-Editor
+  const [openHoursModal,setOpenHoursModal]=useState(false); // Öffnungszeiten-Editor
   const [staffVer,setStaffVer]=useState(0);         // Re-Render nach Speichern
   const [abortModal,setAbortModal]=useState(null);  // {empId, ds, cell} — Schichtabbruch
   const [pauseModal,setPauseModal]=useState(null);  // {empId, ds, cell} — Pause am Balken
@@ -11780,6 +11842,7 @@ function SimpleShiftView({employees, projects, showToast}){
         {chartMode==='table'
           ? <button className="sp-copy" onClick={copyPrevWeek} disabled={!projId} title="Schichten der Vorwoche übernehmen">⧉ Vorwoche übernehmen</button>
           : <button className="sp-copy" onClick={()=>setStaffModal(true)} disabled={!projId} title="Sollbesetzung je Wochentag/Zeitfenster">⚙ Sollbesetzung</button>}
+        <button className="sp-copy hide-mobile" onClick={()=>setOpenHoursModal(true)} disabled={!projId} title="Öffnungszeiten je Wochentag (Werktag/Wochenende, mit Ausnahmen)">🕐 Öffnungszeiten</button>
         <button className="sp-copy hide-mobile" onClick={()=>exportShiftXlsx('week')} disabled={!projId} title="Aktuelle Woche als Excel exportieren">⬇ Excel Woche</button>
         <button className="sp-copy hide-mobile" onClick={()=>exportShiftXlsx('month')} disabled={!projId} title="Ganzen Monat als Excel exportieren (alle MA mit Zuweisung)">⬇ Excel Monat</button>
       </div>
@@ -11860,6 +11923,7 @@ function SimpleShiftView({employees, projects, showToast}){
       })()}
       {pop&&<div className="sp-backdrop" onClick={()=>setPop(null)}/>}
       {staffModal&&<StaffingTargetModal projId={projId} skill={effSkill} projName={(proj&&proj.name)||''} onClose={()=>setStaffModal(false)} onSaved={()=>setStaffVer(v=>v+1)}/>}
+      {openHoursModal&&<OpenHoursModal projId={projId} skill={effSkill} projName={(proj&&proj.name)||''} onClose={()=>setOpenHoursModal(false)} onSaved={()=>setStaffVer(v=>v+1)}/>}
       {abortModal&&<ShiftAbortModal emp={(employees||[]).find(x=>x.id===abortModal.empId)} ds={abortModal.ds} cell={abortModal.cell}
         onConfirm={(reason,endTime,note)=>abortShift(abortModal.empId,abortModal.ds,abortModal.cell,reason,endTime,note)}
         onClose={()=>setAbortModal(null)}/>}
