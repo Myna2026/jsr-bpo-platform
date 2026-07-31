@@ -3718,24 +3718,33 @@ function empAreaOk(emp, tabName, fpMap){
 // contractDocs = Set von employee_id mit hochgeladenem Vertrag (employee_documents, doc_type='contract').
 function empCareStatus(emp, fpMap, contractDocs){
   return [
-    {key:'contract_doc', label:'Vertrag hochgeladen', ok: !!(contractDocs&&contractDocs.has(emp&&emp.id))},
-    {key:'vertrag', label:'Vertragsdaten gepflegt',   ok: empAreaOk(emp,'Vertrag',fpMap)},
-    {key:'profil',  label:'Profil gepflegt',          ok: empAreaOk(emp,'Profil',fpMap)},
-    {key:'bank',    label:'Bankdaten gepflegt',        ok: empAreaOk(emp,'Bank',fpMap)},
-    {key:'projekt', label:'Projekt gepflegt',          ok: empAreaOk(emp,'Projekt',fpMap)},
+    {key:'contract_doc', label:'Vertrag hochgeladen', short:'Vertrag-PDF',   ok: !!(contractDocs&&contractDocs.has(emp&&emp.id))},
+    {key:'vertrag', label:'Vertragsdaten gepflegt',   short:'Vertragsdaten', ok: empAreaOk(emp,'Vertrag',fpMap)},
+    {key:'profil',  label:'Profil gepflegt',          short:'Profil',        ok: empAreaOk(emp,'Profil',fpMap)},
+    {key:'bank',    label:'Bankdaten gepflegt',        short:'Bank',          ok: empAreaOk(emp,'Bank',fpMap)},
+    {key:'projekt', label:'Projekt gepflegt',          short:'Projekt',       ok: empAreaOk(emp,'Projekt',fpMap)},
   ];
 }
-// Kompakte 5-Zeichen-Spalte: grüner Haken = gepflegt, roter Kreis = etwas fehlt. Tooltip je Zeichen.
-// contractDocs==null = Vertrags-Liste lädt noch → neutraler Punkt statt falschem Rot.
+// Ist bei diesem MA etwas ungepflegt? (Für Filter/Zählung.) Während die Vertrags-Liste lädt (contractDocs==null)
+// wird der Vertrag-PDF-Punkt NICHT als fehlend gewertet — sonst falsch-positiv bis zum Laden.
+function empCareIncomplete(emp, fpMap, contractDocs){
+  return empCareStatus(emp, fpMap, contractDocs).some(it=> !it.ok && !(contractDocs==null && it.key==='contract_doc'));
+}
+// Pflegestand kompakt: alles gepflegt → ein grüner Haken; sonst benannte Chips GENAU der fehlenden Bereiche
+// (kein Abzählen, kein Hover nötig, mobil identisch). Eine Wahrheit: empCareStatus (Feld-Ampel-Ableitung).
 function CareBadges({emp, fpMap, contractDocs}){
   const items=empCareStatus(emp, fpMap, contractDocs);
-  return (<span style={{display:'inline-flex',gap:3,alignItems:'center'}}>
-    {items.map(it=>{
-      const loading = it.key==='contract_doc' && contractDocs==null;
-      const color = loading?'var(--muted)':(it.ok?'var(--green)':'var(--red)');
-      const mark  = loading?'·':(it.ok?'✓':'●');
-      return <span key={it.key} title={(loading?'… ':(it.ok?'✓ ':'✗ '))+it.label} style={{fontSize:12,lineHeight:1,minWidth:10,textAlign:'center',color,cursor:'default'}}>{mark}</span>;
-    })}
+  const loading = contractDocs==null;
+  const missing = items.filter(it=> !it.ok && !(loading && it.key==='contract_doc'));   // Vertrag-PDF beim Laden ausklammern
+  if(missing.length===0){
+    if(loading) return <span style={{fontSize:11,color:'var(--muted)'}}>…</span>;        // Vertrag-PDF noch unbekannt
+    return <span title="Alle Bereiche gepflegt" style={{fontSize:12,fontWeight:700,color:'var(--green)',whiteSpace:'nowrap'}}>✓ Vollständig</span>;
+  }
+  return (<span style={{display:'inline-flex',gap:4,flexWrap:'wrap',alignItems:'center'}}>
+    <span style={{color:'var(--amber)',fontSize:11}} title={missing.length+' Bereich(e) unvollständig'}>⚠</span>
+    {missing.map(it=>(
+      <span key={it.key} title={it.label+' fehlt'} style={{fontSize:10,fontWeight:700,padding:'1px 6px',borderRadius:10,background:'var(--amber-bg)',color:'var(--amber)',whiteSpace:'nowrap'}}>{it.short}</span>
+    ))}
   </span>);
 }
 
@@ -5187,6 +5196,7 @@ function EmployeeList({employees, setEmployees, projects, seedSearch, navFilter,
   const _navPred = (_navEmp && COCKPIT_FILTERS[_navEmp.type]) || null;
   useEffect(()=>{ if(_navEmp){ setFilter('all'); setSearch(''); setShowTerminated(false); } },[navFilter]);
   const [showTerminated, setShowTerminated] = useState(false);
+  const [incompleteOnly, setIncompleteOnly] = useState(false);   // Filter: nur unvollständig gepflegte MA
   const [sortCol, setSortCol] = useState('last_name');
   const [sortDir, setSortDir] = useState('asc');
   const [projectFilter, setProjectFilter] = useState('all');
@@ -5210,6 +5220,7 @@ function EmployeeList({employees, setEmployees, projects, seedSearch, navFilter,
     if(!showTerminated && e.status==='terminated') return false;
     if(filter!=='all' && e.status!==filter) return false;
     if(projectFilter!=='all' && e.project_id!==projectFilter) return false;
+    if(incompleteOnly && !empCareIncomplete(e, _fpMap, contractDocs)) return false;
     if(search){
       const q = search.toLowerCase();
       return (e.first_name+' '+e.last_name+' '+(e.position||'')).toLowerCase().includes(q);
@@ -5400,6 +5411,9 @@ function EmployeeList({employees, setEmployees, projects, seedSearch, navFilter,
           <button className={`btn btn-sm ${showTerminated?'btn-red':''}`} onClick={()=>setShowTerminated(s=>!s)} title={showTerminated?'Gekündigte ausblenden':'Gekündigte anzeigen'}>
             🚫 Gekündigt ({employees.filter(e=>e&&e.status==='terminated').length})
           </button>
+          <button className="btn btn-sm" style={incompleteOnly?{background:'var(--amber)',color:'#fff',borderColor:'var(--amber)'}:undefined} onClick={()=>setIncompleteOnly(v=>!v)} title="Nur Mitarbeiter mit unvollständigem Pflegestand">
+            ⚠ Unvollständig ({employees.filter(e=>e&&e.status!=='terminated'&&empCareIncomplete(e,_fpMap,contractDocs)).length})
+          </button>
         </div>
         <select className="ma-projsel"
           value={projectFilter}
@@ -5514,7 +5528,7 @@ function EmployeeList({employees, setEmployees, projects, seedSearch, navFilter,
               <th style={thStyle('salary')} onClick={()=>toggleSort('salary')}>
                 Gehalt{sortIcon('salary')}
               </th>
-              <th title="Pflegestand (v.l.n.r.): Vertrag hochgeladen · Vertragsdaten · Profil · Bank · Projekt">Pflege</th>
+              <th title="Pflegestand: bei Lücken werden die fehlenden Bereiche benannt (Vertrag-PDF, Vertragsdaten, Profil, Bank, Projekt)">Pflege</th>
               <th>Aktionen</th>
             </tr>
           </thead>
