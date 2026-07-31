@@ -10643,10 +10643,13 @@ function shiftEmpAllowsShift(emp, shiftVal){
   return true;
 }
 // Gültige Schicht-Vorlagen für MA (tag-agnostisch) + Split-Option, wenn erlaubt.
-function shiftValidTemplates(emp, shifts){
+// openWin (optional): {open,close} des Tages → Schichten außerhalb werden ausgefiltert (harte Grenze).
+// Fehlt/null → keine Grenze (fail-open). Split-Zusatz respektiert das Fenster ebenso.
+function shiftValidTemplates(emp, shifts, openWin){
   const al=emp.allowed_shifts||[];
   const result=(shifts||[]).filter(s=>{
     if(!s.value) return false;
+    if(!shiftWithinOpen(s.value, openWin)) return false;
     if(emp.shift_earliest&&emp.shift_earliest!=='00:00'){
       const ep=emp.shift_earliest.split(':').map(Number);
       const sm2=s.value.match(/^(\d{1,2}):(\d{2})/);
@@ -10663,8 +10666,11 @@ function shiftValidTemplates(emp, shifts){
   if(emp.work_split===true||emp.work_split==='yes'){
     const sm3=emp.split_morning||'08:00-12:00';
     const sa=emp.split_afternoon||'14:00-18:00';
-    const r=shiftHours(sm3+'|'+sa);
-    result.push({value:sm3+'|'+sa,label:'Split',hours:r.brutto,net:r.net,isSplit:true});
+    const splitVal=sm3+'|'+sa;
+    if(shiftWithinOpen(splitVal, openWin)){
+      const r=shiftHours(splitVal);
+      result.push({value:splitVal,label:'Split',hours:r.brutto,net:r.net,isSplit:true});
+    }
   }
   return result;
 }
@@ -10951,8 +10957,16 @@ function shiftBridgeLocal(projId, skill, empId, ds, cellOrNull){
 }
 
 // Popover einer Zelle: Standard-Schichten + „Eigene Zeit" + „Split" (nur work_split).
-function ShiftCellPopover({options, defVal, filled, allowSplit, onPick, onClear, weekDays, clickedDs, dayLocked, cell, onAbort, onReclassify, onUncancel}){
+function ShiftCellPopover({options, defVal, filled, allowSplit, onPick, onClear, weekDays, clickedDs, dayLocked, cell, onAbort, onReclassify, onUncancel, openCtx, onEditHours}){
   const [mode,setMode]=useState('list'); // list | custom | split
+  const [blockMsg,setBlockMsg]=useState('');
+  // Eigene/Split-Zeit gegen Öffnungszeiten prüfen (harte Grenze auch abseits der Vorlagen).
+  const openBlockReason=(val)=>{
+    if(!openCtx) return null;
+    if(openCtx.closed) return 'An diesem Tag geschlossen (Öffnungszeiten)';
+    if(openCtx.win&&!shiftWithinOpen(val,openCtx.win)) return 'Außerhalb der Öffnungszeit '+openCtx.win.open+'–'+openCtx.win.close;
+    return null;
+  };
   const [f1,setF1]=useState('09:00'),[t1,setT1]=useState('14:00');
   const [f2,setF2]=useState('16:00'),[t2,setT2]=useState('20:00');
   // Mehrtage-Auswahl: 'day' (nur geklickter Tag, Standard) | 'week' (Mo–Fr) | 'pick' (einzelne)
@@ -10972,13 +10986,17 @@ function ShiftCellPopover({options, defVal, filled, allowSplit, onPick, onClear,
   const hoursOf=(a,b)=>{const s=mins(a),e=mins(b);return (s!=null&&e!=null&&e>s)?Math.round((e-s)/60*100)/100:null;};
   function pickCustom(){
     const h=hoursOf(f1,t1); if(h==null) return;
-    const val=f1+'-'+t1; const r=shiftHours(val);
+    const val=f1+'-'+t1;
+    const br=openBlockReason(val); if(br){ setBlockMsg(br); return; }
+    const r=shiftHours(val);
     doPick({value:val,label:val,hours:r.brutto,net:r.net});   // einheitliche Pausenregel (1,0 h)
   }
   function pickSplit(){
     const h1=hoursOf(f1,t1), h2=hoursOf(f2,t2); if(h1==null||h2==null) return;
-    const b1=f1+'-'+t1, b2=f2+'-'+t2, r=shiftHours(b1+'|'+b2);
-    doPick({value:b1+'|'+b2,label:'Split '+b1+'+'+b2,hours:r.brutto,net:r.net,isSplit:true,split_morning:b1,split_afternoon:b2});
+    const b1=f1+'-'+t1, b2=f2+'-'+t2, val=b1+'|'+b2;
+    const br=openBlockReason(val); if(br){ setBlockMsg(br); return; }
+    const r=shiftHours(val);
+    doPick({value:val,label:'Split '+b1+'+'+b2,hours:r.brutto,net:r.net,isSplit:true,split_morning:b1,split_afternoon:b2});
   }
   const TimeRow=({a,sa,b,sb})=>(
     <div className="sp-cust-row">
@@ -10994,6 +11012,7 @@ function ShiftCellPopover({options, defVal, filled, allowSplit, onPick, onClear,
         <div className="sp-cust-title">{mode==='custom'?'Eigene Zeit':'Split, zwei Blöcke'}</div>
         <TimeRow a={f1} sa={setF1} b={t1} sb={setT1}/>
         {mode==='split'&&<TimeRow a={f2} sa={setF2} b={t2} sb={setT2}/>}
+        {blockMsg&&<div style={{fontSize:11,color:'var(--red)',margin:'4px 0 2px'}}>⚠ {blockMsg}</div>}
         <div className="sp-cust-actions">
           <button className="sp-cust-back" onClick={()=>setMode('list')}>Zurück</button>
           <button className="sp-cust-ok" disabled={!ok} onClick={()=>mode==='custom'?pickCustom():pickSplit()}>Übernehmen</button>
@@ -11044,14 +11063,20 @@ function ShiftCellPopover({options, defVal, filled, allowSplit, onPick, onClear,
       {filled&&cell&&!cell.canceled&&onAbort&&(
         <button onClick={onAbort} style={{width:'100%',marginBottom:8,padding:'6px',fontSize:12,fontWeight:600,cursor:'pointer',border:'1px solid #fca5a5',borderRadius:6,background:'#fef2f2',color:'#dc2626'}}>⛔ Schicht abbrechen</button>
       )}
-      {options.length===0&&<div className="sp-pop-empty">Keine Standard-Schicht erlaubt</div>}
+      {options.length===0&&(
+        (openCtx&&openCtx.closed)
+          ? <div className="sp-pop-empty">🔒 Geschlossen laut Öffnungszeiten{onEditHours&&<> · <span onClick={onEditHours} style={{cursor:'pointer',color:'var(--blue)',fontWeight:600}}>ändern</span></>}</div>
+          : (openCtx&&openCtx.win)
+            ? <div className="sp-pop-empty" style={{lineHeight:1.4}}>Keine Schicht passt in die Öffnungszeit {openCtx.win.open}–{openCtx.win.close}.{onEditHours&&<> <span onClick={onEditHours} style={{cursor:'pointer',color:'var(--blue)',fontWeight:600}}>Öffnungszeiten/Vorlagen pflegen</span></>}</div>
+            : <div className="sp-pop-empty">Keine Standard-Schicht erlaubt</div>
+      )}
       {options.map(s=>(
         <button key={s.value} className={"sp-pop-opt"+(s.value===defVal?' def':'')} onClick={()=>doPick(s)}>
           <span className="sp-pop-lbl">{s.label}</span><span className="sp-pop-val">{s.value}</span>{s.value===defVal&&<em>üblich</em>}
         </button>
       ))}
-      <button className="sp-pop-extra" onClick={()=>setMode('custom')}>⊕ Eigene Zeit</button>
-      {allowSplit&&<button className="sp-pop-extra" onClick={()=>setMode('split')}>⊕ Split (2 Blöcke)</button>}
+      {!(openCtx&&openCtx.closed)&&<button className="sp-pop-extra" onClick={()=>{setBlockMsg('');setMode('custom');}}>⊕ Eigene Zeit</button>}
+      {allowSplit&&!(openCtx&&openCtx.closed)&&<button className="sp-pop-extra" onClick={()=>{setBlockMsg('');setMode('split');}}>⊕ Split (2 Blöcke)</button>}
       {scope!=='day'&&<div style={{fontSize:10,color:'var(--muted)',padding:'4px 2px 0'}}>Schicht wählen → wird auf {nSel} Tag{nSel===1?'':'e'} gesetzt. Gesperrte Tage werden übersprungen.</div>}
       {filled&&<button className="sp-pop-del" onClick={onClear}>✕ Entfernen</button>}
     </div>
@@ -11099,8 +11124,24 @@ function staffingConfigured(projId, skill){
 // Fehlender/leerer Tag = an dem Tag geschlossen. GAR KEIN Eintrag fürs Projekt = NICHT konfiguriert →
 // die harte Planer-Grenze (Schnitt 2) darf dann NICHT greifen (fail-open), damit ohne Pflege planbar bleibt.
 // Schlüssel = staffingKeyFor (gleiche Konvention wie Sollbesetzung → eine Modell-Sprache).
-// Leser (openHoursFor/openHoursConfigured) kommen in Schnitt 2 dazu, wo der Planer sie konsumiert.
 function loadOpenHoursAll(){ try{ return JSON.parse(localStorage.getItem('jsr_open_hours_v1')||'{}'); }catch(e){ return {}; } }
+function openHoursFor(projId, skill, dowKey){ const w=(loadOpenHoursAll()[staffingKeyFor(projId,skill)]||{})[dowKey]; return (w&&w.open&&w.close)?w:null; }
+function openHoursConfigured(projId, skill){ const cfg=loadOpenHoursAll()[staffingKeyFor(projId,skill)]||{}; return Object.keys(cfg).some(dk=>{ const w=cfg[dk]; return !!(w&&w.open&&w.close); }); }
+// Liegt eine (split-fähige) Schicht GANZ im Öffnungsfenster? win null/leer → keine Grenze (true).
+function shiftWithinOpen(shiftVal, win){
+  if(!win||!win.open||!win.close) return true;
+  const o=hm2min(win.open), c=hm2min(win.close); if(o==null||c==null) return true;
+  const blocks=shiftBlocks(shiftVal); if(!blocks.length) return true;
+  return blocks.every(b=>b.s>=o && b.e<=c);
+}
+// Öffnungs-Situation eines Tages: {configured, win, closed}. EINE WAHRHEIT für Planer-Grenze +
+// Hinweise. NICHT konfiguriert → fail-open (configured:false, keine Grenze). Konfiguriert + Tag ohne
+// Fenster → closed (nichts planbar). Konfiguriert + Fenster → win begrenzt die Schichten.
+function openDayCtx(projId, skill, ds){
+  if(!openHoursConfigured(projId, skill)) return {configured:false, win:null, closed:false};
+  const win=openHoursFor(projId, skill, STAFFING_DOW[new Date(ds).getDay()]);
+  return {configured:true, win:win||null, closed:!win};
+}
 
 // Modal: Sollbesetzung je Wochentag/Zeitfenster erfassen (pro Projekt+Skill).
 function StaffingTargetModal({projId, skill, projName, onClose, onSaved}){
@@ -11428,7 +11469,9 @@ function SimpleShiftView({employees, projects, showToast}){
 
   function optionsFor(emp,ds){
     if(!shiftEmpDayOk(emp,ds)) return [];
-    const opts=shiftValidTemplates(emp,shifts);
+    const ctx=openDayCtx(projId,effSkill,ds);
+    if(ctx.closed) return [];                              // laut Öffnungszeiten an dem Tag geschlossen
+    const opts=shiftValidTemplates(emp,shifts, ctx.win);   // ctx.win null (nicht konfiguriert) → keine Grenze
     const d=defShift[emp.id];
     return d ? [...opts].sort((a,b)=>((b.value===d)-(a.value===d))) : opts;
   }
@@ -11530,6 +11573,9 @@ function SimpleShiftView({employees, projects, showToast}){
     dsList.forEach(ds=>{
       if(!shiftEmpDayOk(emp,ds)){ skipped.push(shiftLockReason(emp,ds)||'nicht verfügbar'); return; }
       if(!shiftEmpAllowsShift(emp,t.value)){ skipped.push('Schicht nicht erlaubt'); return; }
+      const ctx=openDayCtx(projId,effSkill,ds);
+      if(ctx.closed){ skipped.push('geschlossen (Öffnungszeit)'); return; }
+      if(ctx.win&&!shiftWithinOpen(t.value,ctx.win)){ skipped.push('außerhalb Öffnungszeit'); return; }
       done.push(ds);
     });
     if(done.length) setCells(p=>{const n={...p};done.forEach(ds=>{n[emp.id+'|'+ds]=cell;});return n;});
@@ -11581,6 +11627,7 @@ function SimpleShiftView({employees, projects, showToast}){
                          : <span className="sp-add">＋</span>)}
             </div>
             {open&&<ShiftCellPopover options={optionsFor(emp,ds)} defVal={defShift[emp.id]} filled={!!cell} cell={cell}
+                     openCtx={openDayCtx(projId,effSkill,ds)} onEditHours={()=>{setPop(null);setOpenHoursModal(true);}}
                      allowSplit={emp.work_split===true||emp.work_split==='yes'}
                      weekDays={days.map((d,di)=>({i:di,short:DOW[di],dom:d.getDate()+'.',ds:isoD(d)}))}
                      clickedDs={ds} dayLocked={dsx=>!shiftEmpDayOk(emp,dsx)}
@@ -11853,6 +11900,14 @@ function SimpleShiftView({employees, projects, showToast}){
             border:'1px dashed var(--border)',borderRadius:8,cursor:'pointer',display:'flex',alignItems:'center',gap:7}}>
           <span style={{color:'var(--amber)',fontWeight:700}}>ℹ</span>
           <span>Keine Sollbesetzung für <b>{(proj&&proj.name)||'dieses Projekt'}</b>{effSkill?' · '+effSkill:''} hinterlegt: Unter-/Überbesetzung wird nicht geprüft. Zum Pflegen klicken (⚙ Sollbesetzung).</span>
+        </div>
+      )}
+      {projId && !openHoursConfigured(projId,effSkill) && (
+        <div onClick={()=>setOpenHoursModal(true)} title="Öffnungszeiten öffnen" className="hide-mobile"
+          style={{margin:'0 0 10px',padding:'7px 11px',fontSize:12,color:'var(--muted)',background:'var(--surface-2)',
+            border:'1px dashed var(--border)',borderRadius:8,cursor:'pointer',display:'flex',alignItems:'center',gap:7}}>
+          <span style={{color:'var(--amber)',fontWeight:700}}>ℹ</span>
+          <span>Keine Öffnungszeiten für <b>{(proj&&proj.name)||'dieses Projekt'}</b>{effSkill?' · '+effSkill:''} hinterlegt: alles planbar, ohne Zeitgrenze. Zum Pflegen klicken (🕐 Öffnungszeiten).</span>
         </div>
       )}
       {!projId ? <div className="sp-empty">Bitte ein Projekt wählen.</div>
