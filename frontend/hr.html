@@ -3794,6 +3794,7 @@ function EmployeeModal({emp, projects, employees, onSave, onClose, initialTab, o
   });
   const [tab, setTab] = useState(initialTab||'hr');
   const [linkTick, setLinkTick] = useState(0);
+  const [shWkndDiff, setShWkndDiff] = useState(()=>{ const p=allowedShiftsPair(emp&&emp.allowed_shifts); return JSON.stringify([...p.weekday].sort())!==JSON.stringify([...p.weekend].sort()); });
   const [abmahnungModal, setAbmahnungModal] = useState(false);
   const [abType, setAbType] = useState('Verspätung / Fehlen ohne Meldung');
   const [abFree, setAbFree] = useState('');
@@ -4182,61 +4183,63 @@ function EmployeeModal({emp, projects, employees, onSave, onClose, initialTab, o
                       </span>
                     </div>
                     {(()=>{
-                      const allSh=(()=>{try{const r=JSON.parse(localStorage.getItem('jsr_shift_cfg')||'[]');return Array.isArray(r)?r.filter(s=>s.value):[];}catch(e){return[];}})();
-                      if(!allSh.length) return(
+                      const shifts=shiftConfigFor(form.project_id, form.project_skill||form.skill).filter(s=>s&&s.value);
+                      if(!shifts.length) return(
                         <div style={{fontSize:11,color:'var(--dim)',fontStyle:'italic'}}>
-                          Erst Schichten unter Schichtkonfiguration anlegen
+                          Erst Schichten für das Projekt anlegen (Schichtkonfiguration)
                         </div>
                       );
                       const shColors=['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#84cc16','#f97316'];
-                      const allowed=form.allowed_shifts||[];
-                      const allOn=allowed.length===0;
-                      return(
-                        <div style={{display:'flex',gap:6,flexWrap:'wrap',alignItems:'center'}}>
-                          {allSh.map((sh,si)=>{
-                            const c=shColors[si%shColors.length];
-                            const on=allOn||allowed.includes(sh.value);
-                            return(
-                              <div key={si}
-                                onClick={()=>{
-                                  if(isTerminated) return;
-                                  const cur=form.allowed_shifts||[];
-                                  if(cur.length===0){
-                                    // Switch to restrict mode: all except this
-                                    set('allowed_shifts',allSh.filter(s=>s.value!==sh.value).map(s=>s.value));
-                                  } else if(on){
-                                    const next=cur.filter(v=>v!==sh.value);
-                                    set('allowed_shifts',next);
-                                  } else {
-                                    set('allowed_shifts',[...cur,sh.value]);
-                                  }
-                                }}
-                                style={{
-                                  display:'flex',alignItems:'center',gap:5,
-                                  padding:'5px 12px',borderRadius:16,
-                                  cursor:isTerminated?'default':'pointer',
-                                  border:'2px solid '+(on?c:'var(--border)'),
-                                  background:on?c+'18':'var(--surface-3)',
-                                  color:on?c:'var(--dim)',
-                                  fontWeight:700,fontSize:10,userSelect:'none',
-                                  transition:'all .12s',
-                                  opacity:on?1:.45,
-                                }}>
-                                <div style={{width:9,height:9,borderRadius:'50%',
-                                  background:on?c:'var(--border)',flexShrink:0}}/>
-                                <span>{sh.label}</span>
-                                <span style={{opacity:.7,fontWeight:400}}>{sh.value}</span>
+                      const pair=allowedShiftsPair(form.allowed_shifts);
+                      const writePair=np=>set('allowed_shifts', shWkndDiff ? {weekday:np.weekday, weekend:np.weekend} : {weekday:np.weekday, weekend:np.weekday});
+                      const toggle=(group,val)=>{
+                        const list=pair[group]; let next;
+                        if(list.length===0) next=shifts.filter(s=>s.value!==val).map(s=>s.value);   // vorher „alle" → auf alle außer diese einschränken
+                        else if(list.includes(val)) next=list.filter(v=>v!==val);
+                        else next=[...list,val];
+                        writePair({...pair,[group]:next});
+                      };
+                      const chipList=group=>{
+                        const list=pair[group], allOn=list.length===0;
+                        return(
+                          <div style={{display:'flex',gap:6,flexWrap:'wrap',alignItems:'center'}}>
+                            {shifts.map((sh,si)=>{ const c=shColors[si%shColors.length]; const on=allOn||list.includes(sh.value);
+                              return(
+                                <div key={si} onClick={()=>!isTerminated&&toggle(group,sh.value)}
+                                  style={{display:'flex',alignItems:'center',gap:5,padding:'5px 12px',borderRadius:16,
+                                    cursor:isTerminated?'default':'pointer',border:'2px solid '+(on?c:'var(--border)'),
+                                    background:on?c+'18':'var(--surface-3)',color:on?c:'var(--dim)',fontWeight:700,fontSize:10,
+                                    userSelect:'none',transition:'all .12s',opacity:on?1:.45}}>
+                                  <div style={{width:9,height:9,borderRadius:'50%',background:on?c:'var(--border)',flexShrink:0}}/>
+                                  <span>{sh.label}</span><span style={{opacity:.7,fontWeight:400}}>{sh.value}</span>
+                                </div>
+                              );
+                            })}
+                            {!allOn&&(
+                              <div onClick={()=>!isTerminated&&writePair({...pair,[group]:[]})}
+                                style={{padding:'5px 12px',borderRadius:16,cursor:'pointer',fontSize:10,fontWeight:700,
+                                  color:'var(--blue)',border:'1px dashed var(--blue)',background:'var(--blue-bg)'}}>
+                                Alle aktivieren
                               </div>
-                            );
-                          })}
-                          {!allOn&&(
-                            <div onClick={()=>!isTerminated&&set('allowed_shifts',[])}
-                              style={{padding:'5px 12px',borderRadius:16,cursor:'pointer',
-                                fontSize:10,fontWeight:700,color:'var(--blue)',
-                                border:'1px dashed var(--blue)',background:'var(--blue-bg)'}}>
-                              Alle aktivieren
-                            </div>
-                          )}
+                            )}
+                          </div>
+                        );
+                      };
+                      return(
+                        <div>
+                          <label style={{display:'flex',gap:6,alignItems:'center',fontSize:12,marginBottom:8,cursor:isTerminated?'default':'pointer'}}>
+                            <input type="checkbox" checked={shWkndDiff} disabled={isTerminated}
+                              onChange={e=>{ const on=e.target.checked; setShWkndDiff(on); if(!on) set('allowed_shifts',{weekday:pair.weekday, weekend:pair.weekday}); }}/>
+                            Wochenende weicht ab (andere Schichten Sa/So)
+                          </label>
+                          {shWkndDiff ? (
+                            <React.Fragment>
+                              <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',margin:'2px 0 4px'}}>Werktag (Mo–Fr)</div>
+                              {chipList('weekday')}
+                              <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',margin:'12px 0 4px'}}>Wochenende (Sa–So)</div>
+                              {chipList('weekend')}
+                            </React.Fragment>
+                          ) : chipList('weekday')}
                         </div>
                       );
                     })()}
@@ -10624,8 +10627,21 @@ function shiftLockReason(emp, ds){
 function shiftEmpDayOk(emp, ds){
   return !shiftLockReason(emp, ds);
 }
-// Darf MA diese konkrete Schicht? (Zeitfenster, allowed_shifts, Split) — ohne Tagbezug.
-function shiftEmpAllowsShift(emp, shiftVal){
+// allowed_shifts: Legacy = flaches Array (gilt alle Tage); neu = {weekday:[…], weekend:[…]}. Leere Liste
+// = keine Einschränkung (alle Vorlagen). Werktag = Mo–Fr, Wochenende = Sa/So (getDay 0/6).
+function allowedShiftsPair(a){
+  if(Array.isArray(a)) return {weekday:a.slice(), weekend:a.slice()};
+  if(a&&typeof a==='object') return {weekday:(a.weekday||[]).slice(), weekend:(a.weekend||[]).slice()};
+  return {weekday:[], weekend:[]};
+}
+// Erlaubte Schicht-values eines MA für einen Tag. ds==null → tag-agnostisch (Union beider Gruppen).
+function empAllowedShifts(emp, ds){
+  const p=allowedShiftsPair(emp&&emp.allowed_shifts);
+  if(ds==null) return [...new Set([...p.weekday, ...p.weekend])];
+  return [0,6].includes(new Date(ds).getDay()) ? p.weekend : p.weekday;
+}
+// Darf MA diese konkrete Schicht? (Zeitfenster, allowed_shifts je Tag, Split.) ds = Wochentagsbezug.
+function shiftEmpAllowsShift(emp, shiftVal, ds){
   if(!shiftVal) return true;
   if(emp.shift_earliest&&emp.shift_earliest!=='00:00'){
     const ep=emp.shift_earliest.split(':').map(Number);
@@ -10637,7 +10653,7 @@ function shiftEmpAllowsShift(emp, shiftVal){
     const em2=shiftVal.match(/-(\d{1,2}):(\d{2})$/);
     if(em2&&parseInt(em2[1])*60+parseInt(em2[2])>lp[0]*60+(lp[1]||0)) return false;
   }
-  const al=emp.allowed_shifts||[];
+  const al=empAllowedShifts(emp, ds);
   if(al.length>0&&!al.includes(shiftVal)) return false;
   if(shiftVal.includes('|')&&!(emp.work_split===true||emp.work_split==='yes')) return false;
   return true;
@@ -10645,8 +10661,8 @@ function shiftEmpAllowsShift(emp, shiftVal){
 // Gültige Schicht-Vorlagen für MA (tag-agnostisch) + Split-Option, wenn erlaubt.
 // openWin (optional): {open,close} des Tages → Schichten außerhalb werden ausgefiltert (harte Grenze).
 // Fehlt/null → keine Grenze (fail-open). Split-Zusatz respektiert das Fenster ebenso.
-function shiftValidTemplates(emp, shifts, openWin){
-  const al=emp.allowed_shifts||[];
+function shiftValidTemplates(emp, shifts, openWin, ds){
+  const al=empAllowedShifts(emp, ds);
   const result=(shifts||[]).filter(s=>{
     if(!s.value) return false;
     if(!shiftWithinOpen(s.value, openWin)) return false;
@@ -11471,7 +11487,7 @@ function SimpleShiftView({employees, projects, showToast}){
     if(!shiftEmpDayOk(emp,ds)) return [];
     const ctx=openDayCtx(projId,effSkill,ds);
     if(ctx.closed) return [];                              // laut Öffnungszeiten an dem Tag geschlossen
-    const opts=shiftValidTemplates(emp,shifts, ctx.win);   // ctx.win null (nicht konfiguriert) → keine Grenze
+    const opts=shiftValidTemplates(emp,shifts, ctx.win, ds);   // ctx.win null (nicht konfiguriert) → keine Grenze; ds → Werktag/Wochenende-Liste
     const d=defShift[emp.id];
     return d ? [...opts].sort((a,b)=>((b.value===d)-(a.value===d))) : opts;
   }
@@ -11572,7 +11588,7 @@ function SimpleShiftView({employees, projects, showToast}){
     const done=[], skipped=[];
     dsList.forEach(ds=>{
       if(!shiftEmpDayOk(emp,ds)){ skipped.push(shiftLockReason(emp,ds)||'nicht verfügbar'); return; }
-      if(!shiftEmpAllowsShift(emp,t.value)){ skipped.push('Schicht nicht erlaubt'); return; }
+      if(!shiftEmpAllowsShift(emp,t.value,ds)){ skipped.push('Schicht nicht erlaubt'); return; }
       const ctx=openDayCtx(projId,effSkill,ds);
       if(ctx.closed){ skipped.push('geschlossen (Öffnungszeit)'); return; }
       if(ctx.win&&!shiftWithinOpen(t.value,ctx.win)){ skipped.push('außerhalb Öffnungszeit'); return; }
@@ -11595,7 +11611,7 @@ function SimpleShiftView({employees, projects, showToast}){
       if(cells[emp.id+'|'+curDs]) return;                       // vorhandenes nicht überschreiben
       const pc=prev[emp.id+'|'+prevDs]; if(!pc||!pc.shift) return;
       if(!shiftEmpDayOk(emp,curDs)) return;                     // jetzt nicht verfügbar → skip
-      if(!shiftEmpAllowsShift(emp,pc.shift)) return;            // Schicht nicht mehr erlaubt → skip
+      if(!shiftEmpAllowsShift(emp,pc.shift,curDs)) return;      // Schicht (an dem Wochentag) nicht mehr erlaubt → skip
       todo.push({emp,ds:curDs,cell:pc});
     }); });
     if(!todo.length){ showToast&&showToast('Nichts zu übernehmen','info'); return; }
@@ -12431,7 +12447,7 @@ function WorkforcePlanningView({employees,projects,showToast}){
     function canWork(emp,ds,shiftVal){
       if(u['s_'+emp.id+'_'+ds]) return false;
       if(!shiftEmpDayOk(emp,ds)) return false;
-      if(shiftVal&&!shiftEmpAllowsShift(emp,shiftVal)) return false;
+      if(shiftVal&&!shiftEmpAllowsShift(emp,shiftVal,ds)) return false;
       return true;
     }
 
@@ -14490,7 +14506,7 @@ const prompt=sysPrompt+'\n\nPROJEKT: '+(selProj&&selProj.name?selProj.name:projI
                         .sort((a,b)=>(eT[b.id]-eP[b.id])-(eT[a.id]-eP[a.id]))
                         .forEach(emp=>{
                           if(eP[emp.id]>=eT[emp.id]-0.25) return;
-                          const al=emp.allowed_shifts||[];
+                          const al=empAllowedShifts(emp, ds);
                           const es=sh.filter(s=>{
                             if(!s.value) return false;
                             if(al.length>0&&!al.includes(s.value)) return false;
