@@ -850,6 +850,72 @@ function OrgView({client, employees}){
   );
 }
 
+// ── Dienstplan (read-only) — shifts_client_view (spaltenreduziert, projekt-scoped, security_definer).
+//    Laufende + kommende Woche, je Skill. Name aus employees; nicht auflösbare MA fallen STILL weg.
+function DienstplanView({client, employees}){
+  const [rows, setRows] = useState(undefined);
+  const range = React.useMemo(()=>{
+    const now=new Date(); const day=(now.getDay()+6)%7;   // Mo=0
+    const mon=new Date(now); mon.setDate(now.getDate()-day); mon.setHours(0,0,0,0);
+    const iso=d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+    const days=[]; for(let i=0;i<14;i++){ const d=new Date(mon); d.setDate(mon.getDate()+i); days.push(iso(d)); }
+    return { start:days[0], end:days[13], days };
+  }, []);
+  useEffect(()=>{ let alive=true;
+    if(!client.project_id){ setRows([]); return; }
+    (async()=>{
+      const {data,error}=await sb.from('shifts_client_view').select('*').gte('work_date',range.start).lte('work_date',range.end);
+      if(!alive) return;
+      if(error){ console.error('[shifts] load', error); setRows([]); return; }
+      setRows(data||[]);
+    })();
+    return ()=>{alive=false;};
+  }, [client.project_id, range.start]);
+  const empById = React.useMemo(()=>{ const m={}; (employees||[]).forEach(e=>{ m[e.id]=e; }); return m; }, [employees]);
+  if(rows===undefined) return <div style={{padding:40,textAlign:'center',color:'var(--muted)'}}>Lädt…</div>;
+
+  const bySkill={};
+  rows.forEach(r=>{ const e=empById[r.employee_id]; if(!e) return;   // Karteileiche still weg
+    const sk=r.skill||'—'; const ds=(''+r.work_date).slice(0,10);
+    bySkill[sk]=bySkill[sk]||{}; (bySkill[sk][ds]=bySkill[sk][ds]||[]).push({ name:((e.first_name||'')+' '+(e.last_name||'')).trim(), time:r.shift_value }); });
+  const skills=Object.keys(bySkill).sort();
+  if(!skills.length) return <div style={{padding:40,textAlign:'center',color:'var(--muted)',background:'#fff',borderRadius:12,border:'1px solid var(--border)'}}>Für die laufende und kommende Woche ist noch kein Dienstplan hinterlegt.</div>;
+
+  const DOW=['Mo','Di','Mi','Do','Fr','Sa','So'];
+  const fmtDay=ds=>{ const d=new Date(ds+'T12:00:00'); return DOW[(d.getDay()+6)%7]+' '+d.getDate()+'.'+(d.getMonth()+1)+'.'; };
+  return (
+    <div>
+      {skills.map(sk=>(
+        <div key={sk} className="card" style={{marginBottom:16}}>
+          <div className="card-header"><span className="card-title">{sk}</span></div>
+          <div className="card-body">
+            {[0,1].map(w=>(
+              <div key={w} style={{marginBottom:w===0?18:0}}>
+                <div style={{fontSize:11,fontWeight:700,color:'#0F5661',textTransform:'uppercase',letterSpacing:'.06em',marginBottom:8}}>{w===0?'Laufende Woche':'Kommende Woche'}</div>
+                <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(150px,1fr))',gap:10}}>
+                  {range.days.slice(w*7,w*7+7).map(ds=>{
+                    const list=(bySkill[sk][ds]||[]).slice().sort((a,b)=>(a.time||'').localeCompare(b.time||''));
+                    return (
+                      <div key={ds} style={{border:'1px solid var(--border)',borderRadius:8,padding:'8px 10px',background:list.length?'#fff':'#f9fafb'}}>
+                        <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',marginBottom:6}}>{fmtDay(ds)}</div>
+                        {list.length? list.map((x,i)=>(
+                          <div key={i} style={{fontSize:12,marginBottom:3,lineHeight:1.3}}>
+                            <span style={{fontWeight:600}}>{x.name}</span><span style={{color:'var(--muted)'}}> · {x.time}</span>
+                          </div>
+                        )) : <div style={{fontSize:11,color:'#9ca3af'}}>—</div>}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ── Document Upload ──────────────────────────────────────
 function DocumentUpload({client}){
   const [docs, setDocs] = React.useState(()=>{
@@ -1552,6 +1618,7 @@ function App(){
     {key:'overview',  label:'Übersicht',           icon:'⊞', tab:'overview'},
     {key:'staff',     label:'Unser Team',           icon:'◉', tab:'employees'},
     {key:'orgchart',  label:'Organigramm',          icon:'⬡', tab:'orgchart'},
+    {key:'shifts',    label:'Dienstplan',           icon:'🗓', tab:'shifts'},
     {key:'quality',   label:'Qualitätsberichte',    icon:'⭐', tab:'quality'},
     {key:'training',  label:'Schulungen',           icon:'📚', tab:'training'},
     {key:'calendar',  label:'Termine & Kalender',   icon:'⊣', tab:'calendar'},
@@ -1626,6 +1693,7 @@ function App(){
             {view==='overview'&&<span style={{display:'inline-flex',alignItems:'center',gap:7}}><span style={{display:'inline-flex'}} dangerouslySetInnerHTML={{__html:heroicon('chart-bar',18)}} />Projektübersicht</span>}
             {view==='staff'&&<span style={{display:'inline-flex',alignItems:'center',gap:7}}><span style={{display:'inline-flex'}} dangerouslySetInnerHTML={{__html:heroicon('users',18)}} />Ihr Team</span>}
             {view==='orgchart'&&<span style={{display:'inline-flex',alignItems:'center',gap:7}}><span style={{display:'inline-flex'}} dangerouslySetInnerHTML={{__html:heroicon('users',18)}} />Organigramm</span>}
+            {view==='shifts'&&<span style={{display:'inline-flex',alignItems:'center',gap:7}}><span style={{display:'inline-flex'}} dangerouslySetInnerHTML={{__html:heroicon('calendar',18)}} />Dienstplan</span>}
             {view==='invoices'&&<span style={{display:'inline-flex',alignItems:'center',gap:7}}><span style={{display:'inline-flex'}} dangerouslySetInnerHTML={{__html:heroicon('document-text',18)}} />Rechnungen & Vertrag</span>}
             {view==='messages'&&<span style={{display:'inline-flex',alignItems:'center',gap:7}}><span style={{display:'inline-flex'}} dangerouslySetInnerHTML={{__html:heroicon('chat-bubble-left-right',18)}} />Nachrichten</span>}
             {view==='calendar'&&<span style={{display:'inline-flex',alignItems:'center',gap:7}}><span style={{display:'inline-flex'}} dangerouslySetInnerHTML={{__html:heroicon('calendar',18)}} />Termine & Kalender</span>}
@@ -1640,6 +1708,7 @@ function App(){
           {view==='overview'&&<Overview client={client} onOpenTeam={()=>setView('staff')} employees={employees}/>}
           {view==='staff'&&<StaffView client={client} employees={employees}/>}
           {view==='orgchart'&&<OrgView client={client} employees={employees}/>}
+          {view==='shifts'&&<DienstplanView client={client} employees={employees}/>}
           {view==='invoices'&&<InvoicesView client={client}/>}
           {view==='messages'&&<MessagesView client={client}/>}
           {view==='calendar'&&<CalendarView client={client}/>}
