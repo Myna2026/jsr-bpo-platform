@@ -8448,6 +8448,37 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
   );
 }
 
+// Signatur der Organigramm-Bau-EINGABEN je Projekt-MA: id → {name, position, tier, skills}. NICHT die
+// Knoten-Anordnung → manuelles Verschieben ändert die Signatur nicht (kein Fehlalarm). Ausscheiden/
+// Projektwechsel fallen automatisch raus, weil die Liste schon active/training + Zuweisung-auf-Projekt ist.
+function orgSignature(list, projId){
+  const sig={};
+  (list||[]).forEach(e=>{
+    const skills=empAssignments(e).filter(a=>a&&a.project_id===projId).map(a=>a.skill).filter(Boolean).sort();
+    sig[e.id]={ name:(((e.first_name||'')+' '+(e.last_name||'')).trim())||'MA',
+      position:e.position||'', tier:(isOverheadEmp(e)?overheadTier(e.position):null), skills };
+  });
+  return sig;
+}
+function orgSigChanged(a, b){
+  a=a||{}; b=b||{}; const ak=Object.keys(a), bk=Object.keys(b);
+  if(ak.length!==bk.length) return true;
+  for(const id of bk){ const o=a[id], n=b[id];
+    if(!o || o.position!==n.position || o.tier!==n.tier || (o.skills||[]).join(',')!==(n.skills||[]).join(',')) return true; }
+  for(const id of ak){ if(!b[id]) return true; }
+  return false;
+}
+// Menschlich lesbarer Diff: was hat sich geändert (nicht nur DASS).
+function orgSigDiff(oldSig, newSig){
+  oldSig=oldSig||{}; newSig=newSig||{}; const added=[], removed=[], changed=[];
+  Object.keys(newSig).forEach(id=>{ if(!oldSig[id]) added.push(newSig[id].name); });
+  Object.keys(oldSig).forEach(id=>{ if(!newSig[id]) removed.push(oldSig[id].name); });
+  Object.keys(newSig).forEach(id=>{ const o=oldSig[id], n=newSig[id]; if(!o) return;
+    if(o.position!==n.position) changed.push(n.name+' ist jetzt '+(n.position||'ohne Position'));
+    else if(o.tier!==n.tier) changed.push(n.name+': Ebene geändert');
+    else if((o.skills||[]).join(',')!==(n.skills||[]).join(',')) changed.push(n.name+': Skill-Zuordnung geändert'); });
+  return {added, removed, changed};
+}
 function OrgChart({projects, employees, orgCharts, setOrgCharts}){
   const [selProj, setSelProj] = useState((projects||[])[0]?.id||'');
   const [editMode, setEditMode] = useState(false);
@@ -8515,7 +8546,8 @@ function OrgChart({projects, employees, orgCharts, setOrgCharts}){
       nodes[0].employees = [...nodes[0].employees, ...unmatched.map(e=>e.id)];
     }
 
-    const built={id:selProj,nodes,rootId,auto_built:new Date().toISOString().slice(0,10)};
+    const built={id:selProj,nodes,rootId,auto_built:new Date().toISOString().slice(0,10),
+      signature:orgSignature(projEmployees, selProj), manually_edited:false};
     setOrgCharts(prev=>({...prev,[selProj]:built}));
     saveOrgChartToDB(selProj, built);
   }
@@ -8524,10 +8556,27 @@ function OrgChart({projects, employees, orgCharts, setOrgCharts}){
   const nodes = chart?.nodes||[];
   const rootId = chart?.rootId||null;
 
+  // Hybrid-Aktualität: aktuelle Bau-Signatur vs. gespeicherte. Charts ohne signature (Altbestand) → kein Check.
+  const curSig = proj ? orgSignature(projEmployees, selProj) : {};
+  const stale = !!(chart && chart.signature && orgSigChanged(chart.signature, curSig));
+  const staleDiff = stale ? orgSigDiff(chart.signature, curSig) : null;
+  const staleSummary = staleDiff ? [
+    ...staleDiff.changed,
+    staleDiff.added.length?(staleDiff.added.length+' neu: '+staleDiff.added.slice(0,3).join(', ')+(staleDiff.added.length>3?' …':'')):null,
+    staleDiff.removed.length?(staleDiff.removed.length+' ausgeschieden/gewechselt: '+staleDiff.removed.slice(0,3).join(', ')+(staleDiff.removed.length>3?' …':'')):null,
+  ].filter(Boolean).join(' · ') : '';
+  // Auto-Heal NUR bei unberührtem Chart (nichts Manuelles zu verlieren) — der Edi-Normalfall.
+  useEffect(()=>{ if(chart && chart.signature && !chart.manually_edited && stale) autoBuild(); },[selProj, stale]);
+  async function rebuildChart(){
+    if(chart && chart.manually_edited && !(await uiConfirm({title:'Neu aufbauen?', text:'Die manuellen Anpassungen an diesem Organigramm gehen dabei verloren.', danger:true, confirmLabel:'Neu aufbauen'}))) return;
+    autoBuild();
+  }
+
   function getNode(id){return nodes.find(n=>n.id===id);}
   function updateChart(newNodes){
-    setOrgCharts(prev=>({...prev,[selProj]:{...prev[selProj],nodes:newNodes}}));
-    saveOrgChartToDB(selProj, {...(orgCharts[selProj]||{}), nodes:newNodes});
+    // Jeder manuelle Edit (Knoten/Drag&Drop) läuft hier → manually_edited:true → kein Auto-Heal mehr, nur Hinweis.
+    setOrgCharts(prev=>({...prev,[selProj]:{...prev[selProj],nodes:newNodes,manually_edited:true}}));
+    saveOrgChartToDB(selProj, {...(orgCharts[selProj]||{}), nodes:newNodes, manually_edited:true});
   }
   function addChildNode(parentId){
     const newId='node_'+Date.now();
@@ -8718,7 +8767,7 @@ function OrgChart({projects, employees, orgCharts, setOrgCharts}){
         <select className="form-select" style={{width:200}} value={selProj} onChange={e=>setSelProj(e.target.value)}>
           {(projects||[]).map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
         </select>
-        <button className="btn btn-primary btn-sm" onClick={autoBuild}>⚡ Auto-Build</button>
+        <button className="btn btn-primary btn-sm" onClick={rebuildChart}>⚡ Auto-Build</button>
         <button className="btn btn-sm" onClick={()=>setEditMode(e=>!e)}
           style={{background:editMode?'var(--amber-bg)':'transparent',
             color:editMode?'var(--amber)':'var(--muted)',
@@ -8732,6 +8781,15 @@ function OrgChart({projects, employees, orgCharts, setOrgCharts}){
       {chart && (!chart.auto_built || chart.auto_built < '2026-07-24') && (
         <div style={{margin:'0 0 12px',padding:'9px 13px',borderRadius:8,background:'var(--amber-bg)',border:'1px solid var(--amber)',fontSize:12,color:'var(--amber)',fontWeight:600}}>
           ⚠ Hierarchie-Update: Teamleiter werden jetzt aus der globalen Position erkannt und als eigene Ebene über den Agenten dargestellt. Dieses gespeicherte Diagramm ist noch nach der alten Logik gebaut, einmal <b>⚡ Auto-Build</b> klicken, damit die neue Struktur greift.
+        </div>
+      )}
+
+      {/* Hybrid: manuell bearbeiteter Chart + Daten geändert → erinnern (nicht überschreiben), MIT dem Was. */}
+      {stale && chart.manually_edited && (
+        <div style={{margin:'0 0 12px',padding:'9px 13px',borderRadius:8,background:'var(--amber-bg)',border:'1px solid var(--amber)',fontSize:12,color:'var(--amber)',display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+          <span style={{fontWeight:700}}>⚠ Organigramm veraltet:</span>
+          <span style={{color:'var(--text)',flex:1,minWidth:180}}>{staleSummary||'Mitarbeiterdaten haben sich geändert.'} Der Chart wurde manuell angepasst, deshalb kein automatischer Neuaufbau.</span>
+          <button className="btn btn-sm btn-primary" onClick={rebuildChart}>⚡ Neu aufbauen</button>
         </div>
       )}
 
