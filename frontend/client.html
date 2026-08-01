@@ -186,28 +186,8 @@ td{padding:8px 12px;font-size:12px;vertical-align:middle}
 .onode:hover{box-shadow:var(--shadow-md);transform:translateY(-1px)}
 .oskill{align-self:flex-start;font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;padding:2px 9px;border-radius:20px;margin-bottom:7px}
 
-/* ── Dienstplan: Gantt-Zeitachse ────────────────────────────────────────── */
+/* horizontaler Scroll-Wrapper (Organigramm-Baum) */
 .gantt{overflow-x:auto;-webkit-overflow-scrolling:touch}
-.gwrap{min-width:900px;border:1px solid var(--border);border-radius:12px;overflow:hidden;background:var(--surface)}
-.grow{display:grid;grid-template-columns:158px repeat(14,minmax(50px,1fr));border-top:1px solid var(--border)}
-.grow:first-child{border-top:0;background:var(--surface-2)}
-.gname{padding:0 10px;font-size:12px;font-weight:600;display:flex;align-items:center;border-right:1px solid var(--border-strong);background:var(--surface);position:sticky;left:0;z-index:2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.grow:first-child .gname{background:var(--surface-2)}
-.ghead{padding:5px 1px;font-size:9.5px;font-weight:700;color:var(--muted);text-align:center;border-left:1px solid var(--border);line-height:1.25}
-.ghead.today{color:var(--blue)}
-.ghead.wk2,.gcell.wk2{border-left:2px solid var(--border-strong)}
-.gcell{position:relative;height:36px;border-left:1px solid var(--border)}
-.gcell.wknd{background:var(--bg)}
-.gcell.today{background:rgba(15,86,97,.055)}
-.gbar{position:absolute;top:8px;height:20px;border-radius:5px;box-shadow:var(--shadow-xs);min-width:5px}
-
-/* mobile Tagesauswahl */
-.dchips{display:flex;gap:6px;overflow-x:auto;-webkit-overflow-scrolling:touch;padding:2px 0 10px}
-.dchip{flex:0 0 auto;padding:7px 9px;border-radius:10px;border:1px solid var(--border);background:var(--surface);cursor:pointer;text-align:center;min-width:44px;font-size:11px;line-height:1.3;color:var(--muted);transition:all .12s}
-.dchip.on{border-color:var(--blue);background:var(--blue-bg);color:var(--blue);font-weight:700}
-.dchip.today:not(.on){border-color:var(--blue-mid)}
-.dchip b{display:block;font-size:13px;color:var(--text)}
-.dchip.on b{color:var(--blue)}
 </style>
 </head>
 <body>
@@ -337,11 +317,8 @@ function langPill(level, big){
 const LANG_ORDER = ['A1','A2','B1','B2','C1','C2'];
 function langRank(level){ if(!level) return -1; var L=String(level).toUpperCase(); if(L.indexOf('MUTTER')>=0) return 6; return LANG_ORDER.indexOf(L); }
 function hexA(hex, a){ const h=hex.replace('#',''); return 'rgba('+parseInt(h.slice(0,2),16)+','+parseInt(h.slice(2,4),16)+','+parseInt(h.slice(4,6),16)+','+a+')'; }
-// Viewport-Umschalter (mobil = Tagesauswahl statt breiter Zeitachse).
-function useIsMobile(bp){ const [m,setM]=React.useState(false); React.useEffect(()=>{ const mq=window.matchMedia('(max-width:'+(bp||640)+'px)'); const on=()=>setM(mq.matches); on(); if(mq.addEventListener)mq.addEventListener('change',on); else mq.addListener(on); return ()=>{ if(mq.removeEventListener)mq.removeEventListener('change',on); else mq.removeListener(on); }; },[bp]); return m; }
 // "08:00-16:30" → {s:480,e:990} (Minuten ab Mitternacht). null wenn unparsebar → Fallback-Block.
 function parseShiftTimes(v){ if(!v) return null; var m=String(v).match(/(\d{1,2}):(\d{2})\s*[-–]\s*(\d{1,2}):(\d{2})/); if(!m) return null; var s=(+m[1])*60+(+m[2]), e=(+m[3])*60+(+m[4]); if(e<=s) e+=1440; return {s:s,e:e}; }
-function fmtMin(m){ return String(Math.floor(m/60)%24).padStart(2,'0')+':'+String(m%60).padStart(2,'0'); }
 // Projekt-Skill → Farbe (Sales/Support optisch trennen). Fallback stabil aus dem Namen.
 const SKILL_COLORS={sales:'#0d9488',support:'#7c3aed',retention:'#d97706'};
 function skillColor(skill){ if(!skill) return '#64748b'; var k=String(skill).toLowerCase().trim(); return SKILL_COLORS[k]||colorFromName(skill); }
@@ -953,8 +930,7 @@ function OrgView({client, employees}){
 //    Laufende + kommende Woche, je Skill. Name aus employees; nicht auflösbare MA fallen STILL weg.
 function DienstplanView({client, employees}){
   const [rows, setRows] = useState(undefined);
-  const [selDay, setSelDay] = useState(null);   // mobile Tagesauswahl (null = heute)
-  const isMobile = useIsMobile(640);
+  const [dayIdx, setDayIdx] = useState(null);   // gewählter Tag (null = heute), begrenzt auf 0..13
   const range = React.useMemo(()=>{
     const now=new Date(); const day=(now.getDay()+6)%7;   // Mo=0
     const mon=new Date(now); mon.setDate(now.getDate()-day); mon.setHours(0,0,0,0);
@@ -996,90 +972,89 @@ function DienstplanView({client, employees}){
   const pos=t=>({ left:(t.s-winS)/span*100, width:Math.max(4,(t.e-t.s)/span*100) });
 
   const DOW=['Mo','Di','Mi','Do','Fr','Sa','So'];
+  const DOW_LONG=['Montag','Dienstag','Mittwoch','Donnerstag','Freitag','Samstag','Sonntag'];
+  const MONTHS=['Januar','Februar','März','April','Mai','Juni','Juli','August','September','Oktober','November','Dezember'];
   const dinfo=range.days.map(ds=>{ const d=new Date(ds+'T12:00:00'); const dow=(d.getDay()+6)%7;
-    return { ds, dow, wknd:dow>=5, today:ds===range.todayIso, label:DOW[dow], dm:d.getDate()+'.'+(d.getMonth()+1) }; });
+    return { ds, dow, wknd:dow>=5, today:ds===range.todayIso, label:DOW[dow], dm:d.getDate()+'.'+(d.getMonth()+1), dateLong:d.getDate()+'. '+MONTHS[d.getMonth()] }; });
+  const dayHas=range.days.map(ds=>skills.some(sk=>Object.values(bySkill[sk]).some(emp=>(emp.byDate[ds]||[]).length)));
+  const todayIdx=dinfo.findIndex(d=>d.today);
+  const eff=dayIdx!=null?dayIdx:(todayIdx>=0?todayIdx:0);
+  const day=dinfo[eff];
 
-  // ── Mobil: Tagesauswahl, dann die Besetzung des gewählten Tages je Skill ──
-  if(isMobile){
-    const todayIdx=dinfo.findIndex(d=>d.today);
-    const eff=selDay!=null?selDay:(todayIdx>=0?todayIdx:0);
-    const day=dinfo[eff];
-    const dayHasAny=skills.some(sk=>Object.values(bySkill[sk]).some(emp=>(emp.byDate[day.ds]||[]).length));
-    return (
-      <div>
-        <div className="dchips">
-          {dinfo.map((d,i)=>(
-            <div key={d.ds} className={'dchip'+(i===eff?' on':'')+(d.today?' today':'')+(d.wknd?' wknd':'')} onClick={()=>setSelDay(i)}>
-              {d.label}<b>{d.dm}</b>
+  // Ein Tag: Zeitachse je Skill, Mitarbeiter untereinander, Schichten als Balken an ihrer Uhrzeit.
+  const hours=[]; for(let h=Math.ceil(winS/60); h<=Math.floor(winE/60); h++) hours.push(h);
+  const tickLeft=h=>(h*60-winS)/span*100;
+  const nameW=112, timeW=96;
+  const renderDay=(day)=>{
+    const groups=skills.map(sk=>({ sk, emps:Object.values(bySkill[sk])
+        .map(emp=>({ name:emp.name, shifts:(emp.byDate[day.ds]||[]) })).filter(x=>x.shifts.length)
+        .sort((a,b)=>a.name.localeCompare(b.name,'de')) })).filter(g=>g.emps.length);
+    if(!groups.length) return <EmptyHint icon="🗓" text={'Am '+DOW_LONG[day.dow]+', '+day.dateLong+' ist niemand eingeteilt.'} />;
+    return groups.map(g=>(
+      <div key={g.sk} className="card" style={{marginBottom:12}}>
+        <div className="card-header">
+          <span className="card-title" style={{display:'inline-flex',alignItems:'center',gap:8}}><span style={{width:10,height:10,borderRadius:3,background:skillColor(g.sk)}} />{g.sk}</span>
+          <span className="badge badge-blue">{g.emps.length} im Dienst</span>
+        </div>
+        <div className="card-body">
+          <div style={{display:'flex',alignItems:'flex-end',marginBottom:6}}>
+            <div style={{width:nameW,flexShrink:0}} />
+            <div style={{flex:1,position:'relative',height:13}}>
+              {hours.map(h=><span key={h} style={{position:'absolute',left:tickLeft(h)+'%',transform:'translateX(-50%)',fontSize:9.5,color:'var(--dim)',fontFamily:'var(--mono)'}}>{String(h).padStart(2,'0')}</span>)}
+            </div>
+            <div style={{width:timeW,flexShrink:0}} />
+          </div>
+          {g.emps.map(emp=>(
+            <div key={emp.name} style={{display:'flex',alignItems:'center',gap:10,marginBottom:7}}>
+              <div style={{width:nameW,flexShrink:0,fontSize:12,fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{emp.name}</div>
+              <div style={{flex:1,position:'relative',height:24,background:'var(--bg)',borderRadius:6,overflow:'hidden'}}>
+                {hours.map(h=><div key={h} style={{position:'absolute',top:0,bottom:0,left:tickLeft(h)+'%',width:1,background:'rgba(0,0,0,.05)'}} />)}
+                {emp.shifts.map((s,si)=>{ const t=parseShiftTimes(s.time); const p=t?pos(t):{left:6,width:88}; return (
+                  <div key={si} title={(s.label?s.label+' · ':'')+s.time} style={{position:'absolute',top:3,bottom:3,left:p.left+'%',width:p.width+'%',background:projColor,borderRadius:5,boxShadow:'var(--shadow-xs)'}} />
+                ); })}
+              </div>
+              <div style={{width:timeW,flexShrink:0,fontSize:10.5,color:'var(--muted)',fontFamily:'var(--mono)',textAlign:'right',lineHeight:1.25}}>{emp.shifts.map(s=>s.time).join(' · ')}</div>
             </div>
           ))}
         </div>
-        {dayHasAny ? skills.map(sk=>{
-          const emps=Object.values(bySkill[sk]).map(emp=>({ name:emp.name, shifts:(emp.byDate[day.ds]||[]) }))
-            .filter(x=>x.shifts.length).sort((a,b)=>a.name.localeCompare(b.name,'de'));
-          if(!emps.length) return null;
-          return (
-            <div key={sk} className="card" style={{marginBottom:12}}>
-              <div className="card-header"><span className="card-title" style={{display:'inline-flex',alignItems:'center',gap:8}}><span style={{width:9,height:9,borderRadius:3,background:skillColor(sk)}} />{sk}</span></div>
-              <div className="card-body" style={{display:'flex',flexDirection:'column',gap:9}}>
-                {emps.map(emp=>emp.shifts.map((s,si)=>{ const t=parseShiftTimes(s.time); const p=t?pos(t):null; return (
-                  <div key={emp.name+si} style={{display:'flex',alignItems:'center',gap:10}}>
-                    <div style={{width:108,flexShrink:0,fontSize:12,fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{emp.name}</div>
-                    <div style={{flex:1,position:'relative',height:22,background:'var(--bg)',borderRadius:6,overflow:'hidden'}}>
-                      <div title={(s.label?s.label+' · ':'')+s.time} style={{position:'absolute',top:0,bottom:0,left:(p?p.left:6)+'%',width:(p?p.width:88)+'%',background:projColor,borderRadius:6}} />
-                    </div>
-                    <div style={{fontSize:11,color:'var(--muted)',flexShrink:0,fontFamily:'var(--mono)',minWidth:82,textAlign:'right'}}>{s.time}</div>
-                  </div>
-                ); }))}
-              </div>
-            </div>
-          );
-        }) : <EmptyHint icon="🗓" text={'Am '+day.label+' '+day.dm+'. ist niemand eingeteilt.'} />}
       </div>
-    );
-  }
+    ));
+  };
 
-  // ── Desktop: Gantt-Zeitachse je Skill (14 Tage, Balken in Projektfarbe) ──
+  const arrow=(dir)=>{ const disabled=(dir<0&&eff===0)||(dir>0&&eff===13); return (
+    <button onClick={()=>{ if(!disabled) setDayIdx(Math.max(0,Math.min(13,eff+dir))); }} disabled={disabled}
+      style={{width:38,height:38,borderRadius:10,border:'1px solid var(--border)',background:'#fff',color:disabled?'var(--dim)':'var(--blue)',fontSize:20,lineHeight:1,cursor:disabled?'default':'pointer',flexShrink:0,opacity:disabled?.5:1}}>{dir<0?'‹':'›'}</button>
+  ); };
+
+  // ── Tagesansicht: ein Tag mit Pfeilen (begrenzt auf die 14 Tage), großem Datum, "Heute" + Punkte-Leiste ──
   return (
     <div>
-      {skills.map(sk=>{
-        const emps=Object.values(bySkill[sk]).sort((a,b)=>a.name.localeCompare(b.name,'de'));
-        return (
-          <div key={sk} className="card" style={{marginBottom:16,overflow:'hidden'}}>
-            <div className="card-header">
-              <span className="card-title" style={{display:'inline-flex',alignItems:'center',gap:8}}><span style={{width:10,height:10,borderRadius:3,background:skillColor(sk)}} />{sk}</span>
-              <span className="badge badge-blue">{emps.length} im Plan</span>
-            </div>
-            <div className="card-body" style={{paddingTop:6}}>
-              <div className="gantt">
-                <div className="gwrap">
-                  <div className="grow">
-                    <div className="gname" style={{fontSize:9.5,color:'var(--muted)',fontWeight:700,textTransform:'uppercase',letterSpacing:'.04em'}}>{fmtMin(winS)}–{fmtMin(winE)}</div>
-                    {dinfo.map((d,i)=>(
-                      <div key={d.ds} className={'ghead'+(d.today?' today':'')+(i===7?' wk2':'')}>{d.label}<br/>{d.dm}</div>
-                    ))}
-                  </div>
-                  {emps.map(emp=>(
-                    <div key={emp.name} className="grow">
-                      <div className="gname">{emp.name}</div>
-                      {dinfo.map((d,i)=>{
-                        const shifts=emp.byDate[d.ds]||[];
-                        return (
-                          <div key={d.ds} className={'gcell'+(d.wknd?' wknd':'')+(d.today?' today':'')+(i===7?' wk2':'')}>
-                            {shifts.map((s,si)=>{ const t=parseShiftTimes(s.time); const p=t?pos(t):{left:6,width:88}; return (
-                              <div key={si} className="gbar" title={(s.label?s.label+' · ':'')+s.time} style={{left:p.left+'%',width:p.width+'%',background:projColor}} />
-                            ); })}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
+      <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:14,padding:'12px 14px',marginBottom:10,boxShadow:'var(--shadow-sm)',display:'flex',alignItems:'center',gap:12}}>
+        {arrow(-1)}
+        <div style={{flex:1,textAlign:'center',minWidth:0}}>
+          <div style={{fontSize:19,fontWeight:700,color:'var(--text)',lineHeight:1.1}}>{DOW_LONG[day.dow]}</div>
+          <div style={{fontSize:13.5,color:'var(--muted)',marginTop:3,display:'inline-flex',alignItems:'center',gap:8}}>
+            {day.dateLong}
+            {day.today&&<span style={{fontSize:10,fontWeight:700,color:'var(--blue)',background:'var(--blue-bg)',padding:'1px 8px',borderRadius:20}}>Heute</span>}
           </div>
-        );
-      })}
+        </div>
+        {arrow(1)}
+        {eff!==todayIdx&&todayIdx>=0&&<button onClick={()=>setDayIdx(todayIdx)} style={{padding:'0 14px',height:38,borderRadius:10,border:'1px solid var(--blue)',background:'var(--blue-bg)',color:'var(--blue)',fontSize:12,fontWeight:700,fontFamily:'var(--font)',cursor:'pointer',flexShrink:0}}>Heute</button>}
+      </div>
+      {/* Punkte: markieren die Tage mit Einteilung; Lücke trennt laufende/kommende Woche */}
+      <div style={{display:'flex',justifyContent:'center',alignItems:'center',gap:6,marginBottom:16}}>
+        {dinfo.map((d,i)=>(
+          <React.Fragment key={d.ds}>
+            {i===7&&<span style={{width:12,flexShrink:0}} />}
+            <button onClick={()=>setDayIdx(i)} title={d.label+' '+d.dm+(dayHas[i]?'':' · keine Einteilung')}
+              style={{width:i===eff?12:10,height:i===eff?12:10,borderRadius:'50%',padding:0,border:'none',cursor:'pointer',flexShrink:0,
+                background:i===eff?'var(--blue)':(dayHas[i]?projColor:'var(--border-strong)'),
+                outline:d.today?'2px solid var(--blue-mid)':'none',outlineOffset:'2px',
+                boxShadow:i===eff?'0 0 0 3px '+hexA('#0F5661',.15):'none',transition:'all .12s'}} />
+          </React.Fragment>
+        ))}
+      </div>
+      {renderDay(day)}
     </div>
   );
 }
