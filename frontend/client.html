@@ -274,17 +274,14 @@ const isLead = s => LEAD_FUNCS.includes(s.function||'agent');
 // 3 Hierarchie-Ebenen von oben nach unten: 0 = Projektleitung, 1 = Overhead, 2 = Agent
 const empTier = s => s.function==='projektleiter' ? 0 : (OVERHEAD_FUNCS.includes(s.function) ? 1 : 2);
 
-// ── Rollen-Styling: Icon + Label je Overhead-Funktion. Die FARBE liefert roleStyle über
-//    posColorFor (Funktions-Farbsystem) — die color-Werte hier sind nur Fallback, kein bunt.
+// ── Rollen-Styling: nur Icon + Label je Overhead-Funktion (von funcInfo genutzt). Die FARBE
+//    kommt aus dem Funktions-Farbsystem (posColorFor) — die color-Werte hier sind nur Fallback.
 const ROLE_STYLES = {
   projektleiter: { color:'#0F5661', icon:'briefcase',    label:'Projektleiter' },
   teamlead:      { color:'#2E9E8F', icon:'user-group',   label:'Teamlead' },
   qm:            { color:'#3B6EA5', icon:'check-badge',  label:'QM' },
   trainer:       { color:'#6C8AA6', icon:'academic-cap', label:'Trainer' }
 };
-// Farbe kommt aus dem Funktions-Farbsystem (posColorFor) — dieselbe Sprache wie das Organigramm.
-// Icon/Label weiter aus ROLE_STYLES. cats = geladene Positions-Kategorien (Fallback: Defaults).
-const roleStyle = (s, cats) => { const base=ROLE_STYLES[s.function]; return base ? { icon:base.icon, label:base.label, color:posColorFor(s.role, cats||defaultPosCats()) } : null; };
 // ── Echte Mitarbeiter (employees_client_view) → Karten-Form. NUR Zusammenarbeits-Felder:
 //    Name, Rolle (position), Skill, Foto. Private/Showcase-Felder (Alter, Hobbys, Sprachen …) bewusst NICHT.
 function orgFuncFromPosition(position){
@@ -297,6 +294,10 @@ function orgFuncFromPosition(position){
 }
 const CARD_COLORS=['#667eea','#0d9488','#3b82f6','#8b5cf6','#059669','#ec4899','#f59e0b','#14b8a6','#6366f1','#ef4444'];
 function colorFromName(str){ let h=0; const s=String(str||''); for(let i=0;i<s.length;i++) h=(h*31+s.charCodeAt(i))>>>0; return CARD_COLORS[h%CARD_COLORS.length]; }
+// PERSONEN-Ebene: stabile Personenfarbe (Avatar). HR-Feld photo_color wenn gepflegt, sonst Hash der ID.
+// Immer aus der Rohzeile (employees_client_view) ableitbar → in Team, Organigramm, Dienstplan identisch.
+function personColor(e){ if(!e) return '#5B7A87'; return e.photo_color || colorFromName(e.id || ((e.first_name||'')+(e.last_name||''))); }
+function personInitials(e){ return ((((e&&e.first_name)||'').charAt(0))+(((e&&e.last_name)||'').charAt(0))).toUpperCase() || '?'; }
 function empToCard(e){
   const fn=e.first_name||'', ln=e.last_name||'';
   return { id:e.id, first_name:fn, last_name:ln,
@@ -307,7 +308,7 @@ function empToCard(e){
     language_level:e.language_level||'',
     photo_url:e.photo_url||null, photo_position:(e.photo_position!=null?e.photo_position:30),
     initials:((fn.charAt(0)||'')+(ln.charAt(0)||'')).toUpperCase(),
-    photo_color:colorFromName(e.id||(fn+ln)) };
+    photo_color:personColor(e) };
 }
 // Sprachniveau-Pill (Deutsch) — für deutsche Kunden die fachlich relevanteste Angabe. Farbe nach Niveau.
 function langPill(level, big){
@@ -371,11 +372,33 @@ async function loadPositionCatsForClient(){
 function defaultPosCats(){ return { overhead:new Set(DEFAULT_OVERHEAD_POS.map(s=>s.toLowerCase())), company:new Set(DEFAULT_COMPANY_POS.map(s=>s.toLowerCase())) }; }
 // Ruhiger Leer-Hinweis (kein Fehler-Look).
 function EmptyHint({icon,text}){ return <div style={{padding:'48px 24px',textAlign:'center',background:'var(--surface)',borderRadius:14,border:'1px solid var(--border)'}}><div style={{fontSize:30,opacity:.35,marginBottom:10}}>{icon}</div><div style={{fontSize:13.5,color:'var(--muted)',maxWidth:360,margin:'0 auto',lineHeight:1.5}}>{text}</div></div>; }
-const roleBadge = rs => (
-  <span style={{display:'inline-flex',alignItems:'center',gap:6,padding:'4px 10px',borderRadius:6,background:hexA(rs.color,0.08),color:rs.color,fontSize:12,fontWeight:500}}>
-    <span style={{display:'inline-flex'}} dangerouslySetInnerHTML={{__html:heroicon(rs.icon,16)}} />{rs.label}
-  </span>
-);
+// PERSONEN-Ebene: Avatar (Foto oder Initialen auf der stabilen Personenfarbe). Nur Person, keine Funktion.
+function PersonAvatar({emp, size, ring}){
+  const s=size||40, col=personColor(emp);
+  const pos=(emp&&emp.photo_position!=null)?emp.photo_position:30;
+  return (
+    <div style={{width:s,height:s,borderRadius:'50%',overflow:'hidden',flexShrink:0,background:col,display:'flex',alignItems:'center',justifyContent:'center',fontSize:Math.round(s*0.36),fontWeight:700,color:'#fff',border:ring?'2px solid #fff':'none',boxShadow:ring?'var(--shadow-sm)':'none'}}>
+      {emp&&emp.photo_url ? <img src={emp.photo_url} style={{width:'100%',height:'100%',objectFit:'cover',objectPosition:'center '+pos+'%'}}/> : personInitials(emp)}
+    </div>
+  );
+}
+// FUNKTIONS-Ebene: Label+Farbe je Funktion für ALLE (auch Agent). Farbe/Kategorie aus posColorFor/posCategory.
+function funcInfo(position, cats){
+  const ci=posCategory(position, cats), color=posColorFor(position, cats);
+  const label = ci.cat==='pl'?'Projektleiter' : ci.cat==='overhead'?position : ci.cat==='agent'?'Agent' : (position||'Team');
+  const icon = (ROLE_STYLES[orgFuncFromPosition(position)]||{}).icon || null;
+  return { label, color, icon, cat:ci.cat };
+}
+// Funktions-Badge: eigenes Element, klar getrennt vom Avatar (Icon für Overhead/PL, sonst Punkt).
+function FuncBadge({position, cats, big}){
+  const f=funcInfo(position, cats);
+  return (
+    <span style={{display:'inline-flex',alignItems:'center',gap:6,padding:big?'4px 10px':'3px 9px',borderRadius:6,background:hexA(f.color,0.10),color:f.color,fontSize:big?12:11,fontWeight:600,border:'1px solid '+hexA(f.color,0.22)}}>
+      {f.icon ? <span style={{display:'inline-flex'}} dangerouslySetInnerHTML={{__html:heroicon(f.icon, big?15:13)}} /> : <span style={{width:7,height:7,borderRadius:'50%',background:f.color,flexShrink:0}} />}
+      {f.label}
+    </span>
+  );
+}
 
 // ── Client Data ───────────────────────────────────────────
 // ── Supabase-User → Client-Objekt bauen (25a/25c/25e) ────
@@ -616,20 +639,16 @@ function Overview({client, onOpenTeam, employees, posCats}){
     return ()=>ro.disconnect();
   },[]);
   const renderTile = (s) => {
-    const rs = roleStyle(s, posCats);
+    const fcol = posColorFor(s.role, posCats);   // FUNKTIONS-Ebene (Streifen + Badge)
     return (
     <div key={s.id} onClick={onOpenTeam} style={{cursor:'pointer',borderRadius:12,border:'1px solid #E5E7EB',background:'#fff',textAlign:'center',overflow:'hidden',transition:'box-shadow .12s'}}
       onMouseEnter={e=>{e.currentTarget.style.boxShadow='0 4px 14px rgba(15,86,97,.10)';}}
       onMouseLeave={e=>{e.currentTarget.style.boxShadow='none';}}>
-      {rs&&<div style={{height:3,background:rs.color}} />}
+      <div style={{height:3,background:fcol}} />
       <div style={{padding:'14px 12px'}}>
-        <div style={{width:48,height:48,margin:'0 auto 8px',borderRadius:'50%',overflow:'hidden',background:s.photo_color||'#667eea',display:'flex',alignItems:'center',justifyContent:'center',fontSize:15,fontWeight:700,color:'#fff'}}>
-          {s.photo_url?<img src={s.photo_url} style={{width:'100%',height:'100%',objectFit:'cover'}}/>:s.initials}
-        </div>
+        <div style={{display:'flex',justifyContent:'center',marginBottom:8}}><PersonAvatar emp={s} size={48}/></div>
         <div style={{fontWeight:600,fontSize:13,lineHeight:1.2}}>{s.first_name} {s.last_name}</div>
-        {rs
-          ? <div style={{marginTop:6}}>{roleBadge(rs)}</div>
-          : <div style={{fontSize:11,color:'var(--muted)',marginTop:2}}>{s.role}</div>}
+        <div style={{marginTop:7,display:'flex',justifyContent:'center'}}><FuncBadge position={s.role} cats={posCats}/></div>
         {s.city&&<div style={{fontSize:10.5,color:'var(--muted)',marginTop:5,display:'flex',alignItems:'center',justifyContent:'center',gap:3}}><span style={{opacity:.6}}>📍</span>{s.city}</div>}
         {s.language_level&&<div style={{marginTop:6,display:'flex',justifyContent:'center'}}>{langPill(s.language_level)}</div>}
       </div>
@@ -811,7 +830,10 @@ function StaffView({client, employees, posCats}){
             </div>
             <div style={{padding:24}}>
               <div style={{fontSize:22,fontWeight:700}}>{selected.first_name} {selected.last_name}</div>
-              <div style={{fontSize:13,color:'var(--muted)',marginTop:2}}>{[selected.role, selected.city].filter(Boolean).join(' · ')||'—'}</div>
+              <div style={{marginTop:8,display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+                <FuncBadge position={selected.role} cats={posCats} big/>
+                {selected.city&&<span style={{fontSize:13,color:'var(--muted)',display:'inline-flex',alignItems:'center',gap:3}}><span style={{opacity:.6}}>📍</span>{selected.city}</span>}
+              </div>
               {selected.language_level&&<div style={{marginTop:14}}>
                 <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',marginBottom:6}}>Deutsch</div>
                 {langPill(selected.language_level, true)}
@@ -865,19 +887,13 @@ function StaffView({client, employees, posCats}){
       <div className="staff-grid">
         {filteredStaff.map(s=>(
           <div key={s.id} className="staff-card" onClick={()=>setSelected(s)} style={{cursor:'pointer'}}>
-            {roleStyle(s, posCats)&&<div style={{height:3,background:roleStyle(s, posCats).color}} />}
-            {s.photo_url
-              ? <div style={{padding:'20px 0 8px',display:'flex',justifyContent:'center',background:'#f9fafb',borderBottom:'1px solid #e5e7eb'}}>
-                  <img src={s.photo_url} style={{width:110,height:110,borderRadius:'50%',objectFit:'cover',objectPosition:`center ${s.photo_position}%`,border:'3px solid #fff',boxShadow:'0 2px 12px rgba(0,0,0,.15)'}}/>
-                </div>
-              : <div style={{padding:'20px 0 8px',display:'flex',justifyContent:'center',background:'#f9fafb',borderBottom:'1px solid #e5e7eb'}}>
-                  <div style={{width:110,height:110,borderRadius:'50%',background:s.photo_color||'#667eea',display:'flex',alignItems:'center',justifyContent:'center',fontSize:36,fontWeight:700,color:'#fff',border:'3px solid #fff',boxShadow:'0 2px 12px rgba(0,0,0,.15)'}}>{s.initials}</div>
-                </div>}
+            <div style={{height:3,background:posColorFor(s.role, posCats)}} />
+            <div style={{padding:'20px 0 8px',display:'flex',justifyContent:'center',background:'#f9fafb',borderBottom:'1px solid #e5e7eb'}}>
+              <PersonAvatar emp={s} size={110} ring/>
+            </div>
             <div className="staff-body">
               <div className="staff-name">{s.first_name} {s.last_name}</div>
-              {roleStyle(s, posCats)
-                ? <div style={{marginTop:6,marginBottom:2}}>{roleBadge(roleStyle(s, posCats))}</div>
-                : <div className="staff-role">{s.role||'—'}</div>}
+              <div style={{marginTop:6,marginBottom:2,display:'flex',justifyContent:'center'}}><FuncBadge position={s.role} cats={posCats}/></div>
               {s.city&&<div style={{fontSize:11,color:'var(--muted)',marginTop:6,display:'flex',alignItems:'center',justifyContent:'center',gap:4}}><span style={{opacity:.6}}>📍</span>{s.city}</div>}
               {s.language_level&&<div style={{marginTop:8}}>{langPill(s.language_level)}</div>}
             </div>
@@ -946,9 +962,12 @@ function OrgView({client, employees, posCats}){
         {node.subtitle&&<div style={{fontSize:10,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',marginTop:2}}>{node.subtitle}</div>}
         {members.length>0&&<div style={{marginTop:8,display:'flex',flexDirection:'column',gap:4}}>
           {members.map(e=>{ const c=posColorFor(e.position,posCats); return (
-            <div key={e.id} style={{background:'var(--surface)',border:'1px solid var(--border)',borderLeft:'3px solid '+c,borderRadius:6,padding:'4px 8px',boxShadow:'var(--shadow-xs)'}}>
-              <div style={{fontSize:11.5,fontWeight:600,color:'var(--text)',lineHeight:1.25}}>{e.first_name} {e.last_name}</div>
-              {e.position&&<div style={{fontSize:9.5,color:'var(--muted)',lineHeight:1.2,marginTop:1}}>{e.position}</div>}
+            <div key={e.id} style={{display:'flex',alignItems:'center',gap:7,background:'var(--surface)',border:'1px solid var(--border)',borderLeft:'3px solid '+c,borderRadius:6,padding:'4px 7px',boxShadow:'var(--shadow-xs)'}}>
+              <PersonAvatar emp={e} size={22}/>
+              <div style={{minWidth:0}}>
+                <div style={{fontSize:11.5,fontWeight:600,color:'var(--text)',lineHeight:1.2,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{e.first_name} {e.last_name}</div>
+                {e.position&&<div style={{fontSize:9.5,color:'var(--muted)',lineHeight:1.2}}>{e.position}</div>}
+              </div>
             </div>
           ); })}
         </div>}
@@ -997,7 +1016,7 @@ function OrgView({client, employees, posCats}){
 
 // ── Dienstplan (read-only) — shifts_client_view (spaltenreduziert, projekt-scoped, security_definer).
 //    Tagesansicht, 7 Tage ab heute, je Skill. Name aus employees; nicht auflösbare MA fallen STILL weg.
-function DienstplanView({client, employees}){
+function DienstplanView({client, employees, posCats}){
   const [rows, setRows] = useState(undefined);
   const [dayIdx, setDayIdx] = useState(null);   // gewählter Tag (null = heute), begrenzt auf 0..6
   const range = React.useMemo(()=>{
@@ -1026,7 +1045,7 @@ function DienstplanView({client, employees}){
   rows.forEach(r=>{ const e=empById[r.employee_id]; if(!e) return;
     const sk=r.skill||'—'; const ds=(''+r.work_date).slice(0,10);
     bySkill[sk]=bySkill[sk]||{};
-    const rec=bySkill[sk][r.employee_id]=bySkill[sk][r.employee_id]||{ name:((e.first_name||'')+' '+(e.last_name||'')).trim(), byDate:{} };
+    const rec=bySkill[sk][r.employee_id]=bySkill[sk][r.employee_id]||{ name:((e.first_name||'')+' '+(e.last_name||'')).trim(), emp:e, byDate:{} };
     (rec.byDate[ds]=rec.byDate[ds]||[]).push({ time:r.shift_value, label:r.label });
   });
   const skills=Object.keys(bySkill).sort();
@@ -1053,10 +1072,10 @@ function DienstplanView({client, employees}){
   // Ein Tag: Zeitachse je Skill, Mitarbeiter untereinander, Schichten als Balken an ihrer Uhrzeit.
   const hours=[]; for(let h=Math.ceil(winS/60); h<=Math.floor(winE/60); h++) hours.push(h);
   const tickLeft=h=>(h*60-winS)/span*100;
-  const nameW=112, timeW=96;
+  const nameW=134, timeW=96;
   const renderDay=(day)=>{
     const groups=skills.map(sk=>({ sk, emps:Object.values(bySkill[sk])
-        .map(emp=>({ name:emp.name, shifts:(emp.byDate[day.ds]||[]) })).filter(x=>x.shifts.length)
+        .map(emp=>({ name:emp.name, emp:emp.emp, shifts:(emp.byDate[day.ds]||[]) })).filter(x=>x.shifts.length)
         .sort((a,b)=>a.name.localeCompare(b.name,'de')) })).filter(g=>g.emps.length);
     if(!groups.length) return <EmptyHint icon="🗓" text={'Am '+DOW_LONG[day.dow]+', '+day.dateLong+' ist niemand eingeteilt.'} />;
     return groups.map(g=>(
@@ -1075,7 +1094,10 @@ function DienstplanView({client, employees}){
           </div>
           {g.emps.map(emp=>(
             <div key={emp.name} style={{display:'flex',alignItems:'center',gap:10,marginBottom:7}}>
-              <div style={{width:nameW,flexShrink:0,fontSize:12,fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{emp.name}</div>
+              <div style={{width:nameW,flexShrink:0,boxSizing:'border-box',display:'flex',alignItems:'center',gap:7,borderLeft:'3px solid '+posColorFor(emp.emp&&emp.emp.position, posCats),paddingLeft:7}}>
+                <PersonAvatar emp={emp.emp} size={22}/>
+                <span style={{fontSize:12,fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{emp.name}</span>
+              </div>
               <div style={{flex:1,position:'relative',height:24,background:'var(--bg)',borderRadius:6,overflow:'hidden'}}>
                 {hours.map(h=><div key={h} style={{position:'absolute',top:0,bottom:0,left:tickLeft(h)+'%',width:1,background:'rgba(0,0,0,.05)'}} />)}
                 {emp.shifts.map((s,si)=>{ const t=parseShiftTimes(s.time); const p=t?pos(t):{left:6,width:88}; return (
@@ -1932,7 +1954,7 @@ function App(){
           {view==='overview'&&<Overview client={client} onOpenTeam={()=>setView('staff')} employees={employees} posCats={posCats}/>}
           {view==='staff'&&<StaffView client={client} employees={employees} posCats={posCats}/>}
           {view==='orgchart'&&<OrgView client={client} employees={employees} posCats={posCats}/>}
-          {view==='shifts'&&<DienstplanView client={client} employees={employees}/>}
+          {view==='shifts'&&<DienstplanView client={client} employees={employees} posCats={posCats}/>}
           {view==='invoices'&&<InvoicesView client={client}/>}
           {view==='messages'&&<MessagesView client={client}/>}
           {view==='calendar'&&<CalendarView client={client}/>}
