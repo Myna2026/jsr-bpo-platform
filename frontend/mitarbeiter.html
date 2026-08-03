@@ -1317,6 +1317,8 @@ function gateSession(session, event){
             if(event==='SIGNED_IN') logActivity('login', 'session', authUser.id, au.full_name || authUser.email); // nur echte Logins
             buildPortalSwitcher(MY_PORTALS);
             boot();
+            // Zentrale Config (Urlaub/Feiertage) aus app_config laden, dann Ansicht mit echten Werten neu rendern.
+            loadAppConfigForMA().then(function(){ renderCurrentViewOnRealtime(); });
             dmInitChat();   // Team-Chat: DB laden + Realtime + localStorage-Altlasten entfernen
             showWelcomePopup(ME && ME.first_name);
             // 25h: Realtime auf eigene Row — HR-Aenderungen (absences, warnings, status) live
@@ -1638,7 +1640,38 @@ function openMobileMenu(){toggleSidebar();}
 // ═══════════════════════════════════════════════════════════════════════════
 // SHARED HELPERS
 // ═══════════════════════════════════════════════════════════════════════════
-function getAdminHolidays(){try{var r=localStorage.getItem('jsr_holidays_v1');if(r)return Object.values(JSON.parse(r)).reduce(function(a,v){return a.concat(v);},[]).map(function(h){return h.date;});}catch(e){}return [];}
+// ── Zentrale App-Config aus Supabase (app_config) — EINE Wahrheit ueber beide Portale ──────────
+// Das MA-Portal las bisher localStorage (pro Subdomain getrennt) und lief so gegenueber HR
+// auseinander. Jetzt: Urlaubs-Config + Feiertage aus app_config. Bei Ladefehler NICHT still auf
+// Default fallen, sondern sichtbar melden (wie beim fehlenden Wechselkurs in hr.html).
+var APP_CFG = { vacation:null, holidays:null };
+var CFG_LOAD_ERROR = false;
+function loadAppConfigForMA(){
+  return sb.from('app_config').select('key,value').in('key',['jsr_vacation_cfg','jsr_holidays_v1'])
+    .then(function(r){
+      if(r.error){ throw r.error; }
+      (r.data||[]).forEach(function(row){
+        if(row.key==='jsr_vacation_cfg') APP_CFG.vacation=row.value;
+        else if(row.key==='jsr_holidays_v1') APP_CFG.holidays=row.value;
+      });
+      // Erfolg: fehlende Zeile = Config nie gesetzt = dokumentierter Default (beide Portale gleich).
+      CFG_LOAD_ERROR=false; hideCfgErrorBanner();
+    })
+    .catch(function(err){
+      console.error('[cfg] app_config laden fehlgeschlagen', err);
+      CFG_LOAD_ERROR=true; showCfgErrorBanner();   // kein stiller Default
+    });
+}
+function showCfgErrorBanner(){
+  if(document.getElementById('cfgErrorBanner')) return;
+  document.body.insertAdjacentHTML('afterbegin',
+    '<div id="cfgErrorBanner" style="position:fixed;top:0;left:0;right:0;z-index:9999;background:var(--red-bg);border-bottom:1px solid var(--red);color:var(--red);padding:8px 14px;font-size:12px;text-align:center;font-weight:600;">'+
+    '⚠ Konfiguration (Urlaub/Feiertage) konnte nicht geladen werden. Angezeigte Anspruchs- und Feiertagswerte sind evtl. nicht aktuell. Bitte die Seite neu laden.'+
+    '</div>');
+}
+function hideCfgErrorBanner(){ var el=document.getElementById('cfgErrorBanner'); if(el&&el.parentNode) el.parentNode.removeChild(el); }
+// Feiertage: flache Liste der Datums-Strings aus der zentralen Config (app_config).
+function getAdminHolidays(){ try{ var r=APP_CFG.holidays; if(r) return Object.values(r).reduce(function(a,v){return a.concat(v);},[]).map(function(h){return h.date;}); }catch(e){} return []; }
 
 function getPlan(empId,yr,mo){
   // Schritt 2: Schichten kommen aus der DB (shift_assignments, self-read via RLS).
@@ -1669,7 +1702,7 @@ function vacQuotaFor(emp){
   try{
     var startDate=(emp&&emp.contract&&emp.contract.start)||(emp&&emp.contract_start)||(emp&&emp.hire_date)||'';
     if(!startDate) return 0;
-    var cfg=JSON.parse(localStorage.getItem('jsr_vacation_cfg')||'null')||{year1_days:18,year2_days:20,seniority:[]};
+    var cfg=APP_CFG.vacation||{year1_days:18,year2_days:20,seniority:[]};   // zentrale Config (app_config), nicht mehr localStorage
     var y1=Number(cfg.year1_days)||18, y2=Number(cfg.year2_days)||20;
     var start=new Date(startDate), startYear=start.getFullYear(), startMonth=start.getMonth()+1;
     var refYear=new Date().getFullYear();
