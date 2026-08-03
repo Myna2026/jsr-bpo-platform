@@ -1300,7 +1300,7 @@ const MENU_BADGES_DEFAULT = { assignments:{
 const MENU_BADGE_MAIN_ITEMS = [
   {key:'start',label:'Start'},{key:'daily_tasks',label:'Tagesaufgaben'},{key:'datacheck',label:'Daten-Checks'},
   {key:'wissen_system',label:'Wissen System'},{key:'cockpit',label:'Cockpit'},{key:'productivity',label:'Produktivität'},
-  {key:'performance',label:'Performance'},{key:'shiftplan',label:'Schichtplanung'},{key:'workforce',label:'Workforce (Beta)'},{key:'employees',label:'Mitarbeiter'},
+  {key:'performance',label:'Performance'},{key:'shiftplan',label:'Schichtplanung'},{key:'checkin',label:'Check-in'},{key:'workforce',label:'Workforce (Beta)'},{key:'employees',label:'Mitarbeiter'},
   {key:'timetracking',label:'Zeiterfassung'},{key:'locations',label:'Standorte'},{key:'spaces',label:'Spaces & Seats'},
   {key:'payroll',label:'Löhne'},{key:'orgchart',label:'Organigramm'},{key:'absences',label:'Abwesenheiten'},
   {key:'urlaubantraege',label:'Urlaubsanträge'},{key:'feedback',label:'Feedbackgespräche'},{key:'kanban',label:'Recruiting'},{key:'onboarding',label:'Onboarding'},
@@ -31091,6 +31091,148 @@ function DialogHost(){
     </div>
   );
 }
+// ── Check-in: IST-Ebene zum Schichtplan (Schnitt 2). Eigener Bereich, heutiger Tag,
+//    nach Projekt/Skill; Ein-Klick "Da", Abweichung als zweiter Schritt; Stand oben.
+//    Plan bleibt in der Zelle, Ist in shift_checkins. Schichtabbruch (cell.canceled) nur read-only.
+function CheckinView({employees, projects, team, showToast}){
+  const today = isoLocal(new Date());
+  const [plan, setPlan] = useState(null);
+  const [checkins, setCheckins] = useState({});
+  const [expand, setExpand] = useState(null);   // {key,status,arrival,departure,reason}
+  const [busy, setBusy] = useState(false);
+
+  const roleKeys = (team&&team.role_keys)||[];
+  const isAdmin = roleKeys.some(r=>r==='management'||r==='hr');
+  const isPlannerRole = isAdmin || roleKeys.some(r=>r==='teamlead'||r==='projektleiter');
+  const myEmp = (team&&team.employee_id) ? (employees||[]).find(e=>e&&e.id===team.employee_id) : null;
+  const myProject = myEmp && myEmp.project_id;
+  // Sichtbarer Hinweis statt stiller Wirkungslosigkeit: Teamleiter ohne Mitarbeiter-/Projektbezug.
+  const missingLink = isPlannerRole && !isAdmin && !myProject;
+
+  const empById = React.useMemo(()=>{const m={};(employees||[]).forEach(e=>{if(e)m[e.id]=e;});return m;},[employees]);
+  const projById = React.useMemo(()=>{const m={};(projects||[]).forEach(p=>{if(p)m[p.id]=p;});return m;},[projects]);
+  const ckey = r => r.project_id+'|'+r.skill+'|'+r.employee_id;
+
+  useEffect(()=>{ let alive=true;
+    (async()=>{
+      let q = sb.from('shift_assignments').select('project_id,skill,employee_id,work_date,shift_value,label,shift').eq('work_date',today);
+      if(!isAdmin && myProject) q=q.eq('project_id',myProject);
+      const {data:planRows}=await q;
+      const {data:ckRows}=await sb.from('shift_checkins').select('*').eq('work_date',today);
+      if(!alive) return;
+      setPlan(planRows||[]);
+      const m={}; (ckRows||[]).forEach(r=>{ m[r.project_id+'|'+r.skill+'|'+r.employee_id]=r; }); setCheckins(m);
+    })();
+    return ()=>{alive=false;};
+  }, [today, isAdmin, myProject]);
+
+  async function save(row, patch){
+    setBusy(true);
+    const rec = { project_id:row.project_id, skill:row.skill, employee_id:row.employee_id, work_date:today, source:'manual',
+      confirmed_by:(team&&team.user_id)||null, confirmed_by_name:(team&&team.name)||'HR',
+      confirmed_at:new Date().toISOString(), updated_at:new Date().toISOString(),
+      arrival:null, departure:null, reason:null, ...patch };
+    const {error}=await sb.from('shift_checkins').upsert(rec,{onConflict:'project_id,skill,employee_id,work_date,source'});
+    setBusy(false);
+    if(error){ showToast&&showToast('Speichern fehlgeschlagen: '+(error.message||''),'error'); return; }
+    setCheckins(m=>({...m,[ckey(row)]:rec})); setExpand(null);
+  }
+
+  const STATUS_LBL={present:'✓ Da',late:'⏱ Verspätet',early:'Früher da',sick:'🤒 Krank',no_show:'Kommt nicht mehr'};
+  const STATUS_COL={present:'#059669',late:'#d97706',early:'#0F5661',sick:'#dc2626',no_show:'#dc2626'};
+
+  if(plan===null) return <div style={{padding:40,textAlign:'center',color:'var(--muted)'}}>Lädt…</div>;
+
+  const rows=(plan||[]).filter(r=>empById[r.employee_id]);
+  const total=rows.length, confirmed=rows.filter(r=>checkins[ckey(r)]).length, open=total-confirmed;
+  const DOWL=['Sonntag','Montag','Dienstag','Mittwoch','Donnerstag','Freitag','Samstag'];
+  const now=new Date(); const dateLabel=DOWL[now.getDay()]+', '+now.getDate()+'.'+(now.getMonth()+1)+'.'+now.getFullYear();
+  const groups={}; rows.forEach(r=>{ (groups[r.project_id]=groups[r.project_id]||{}); (groups[r.project_id][r.skill]=groups[r.project_id][r.skill]||[]).push(r); });
+
+  return (
+    <div style={{maxWidth:900,margin:'0 auto'}}>
+      <div style={{background:'#fff',border:'1px solid var(--border)',borderRadius:14,padding:'14px 16px',marginBottom:14,display:'flex',alignItems:'center',justifyContent:'space-between',gap:12,flexWrap:'wrap'}}>
+        <div><div style={{fontSize:18,fontWeight:700}}>Check-in</div><div style={{fontSize:13,color:'var(--muted)'}}>{dateLabel}</div></div>
+        <div style={{display:'flex',gap:16,alignItems:'center'}}>
+          <div style={{textAlign:'center'}}><div style={{fontSize:20,fontWeight:800,color:'#059669'}}>{confirmed}</div><div style={{fontSize:11,color:'var(--muted)'}}>bestätigt</div></div>
+          <div style={{textAlign:'center'}}><div style={{fontSize:20,fontWeight:800,color:open?'#d97706':'var(--muted)'}}>{open}</div><div style={{fontSize:11,color:'var(--muted)'}}>offen</div></div>
+        </div>
+      </div>
+
+      {missingLink && (
+        <div style={{background:'var(--amber-bg)',border:'1px solid var(--amber)',color:'var(--amber)',borderRadius:12,padding:'12px 14px',marginBottom:14,fontSize:13,fontWeight:600,lineHeight:1.5}}>
+          ⚠ Für diesen Zugang ist kein Mitarbeiter-/Projektbezug hinterlegt. Der Check-in ist damit wirkungslos, du kannst nichts bestätigen. Bitte HR/Management, deinen Account mit deinem Projekt zu verknüpfen.
+        </div>
+      )}
+
+      {(!missingLink && total===0) && (
+        <div style={{padding:'40px 20px',textAlign:'center',color:'var(--muted)',background:'#fff',borderRadius:12,border:'1px solid var(--border)'}}>Für heute ist niemand eingeteilt.</div>
+      )}
+
+      {Object.keys(groups).sort((a,b)=>((projById[a]&&projById[a].name)||a).localeCompare((projById[b]&&projById[b].name)||b,'de')).map(pid=>(
+        <div key={pid} style={{marginBottom:16}}>
+          <div style={{fontSize:14,fontWeight:700,margin:'0 0 8px 2px'}}>{(projById[pid]&&projById[pid].name)||pid}</div>
+          {Object.keys(groups[pid]).sort().map(sk=>(
+            <div key={sk} style={{marginBottom:10}}>
+              {sk!=='all' && <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',margin:'0 0 4px 2px'}}>{sk}</div>}
+              <div style={{background:'#fff',border:'1px solid var(--border)',borderRadius:12,overflow:'hidden'}}>
+                {groups[pid][sk].slice().sort((a,b)=>{const ea=empById[a.employee_id],eb=empById[b.employee_id];return ((ea.first_name||'')+ea.last_name).localeCompare((eb.first_name||'')+eb.last_name,'de');}).map((r,i)=>{
+                  const e=empById[r.employee_id]; const ck=checkins[ckey(r)];
+                  const cell=(r.shift&&typeof r.shift==='object')?r.shift:null; const canceled=cell&&cell.canceled;
+                  const planTime=r.label||r.shift_value||(cell&&(cell.label||cell.shift))||'—';
+                  const isOpen=expand&&expand.key===ckey(r);
+                  return (
+                    <div key={r.employee_id} style={{borderTop:i?'1px solid var(--border)':'none',padding:'10px 12px'}}>
+                      <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+                        <div style={{flex:1,minWidth:160}}>
+                          <div style={{fontWeight:600,fontSize:13}}>{e.first_name} {e.last_name}</div>
+                          <div style={{fontSize:11,color:'var(--muted)',fontFamily:'var(--mono)'}}>{planTime}</div>
+                        </div>
+                        {canceled ? (
+                          <span style={{fontSize:12,fontWeight:700,color:'#dc2626',background:'#fee2e2',padding:'3px 10px',borderRadius:6}}>⛔ abgebrochen</span>
+                        ) : ck ? (
+                          <span style={{display:'inline-flex',alignItems:'center',gap:8}}>
+                            <span style={{fontSize:12,fontWeight:700,color:STATUS_COL[ck.status]||'var(--text)'}}>{STATUS_LBL[ck.status]||ck.status}{ck.arrival?(' · '+String(ck.arrival).slice(0,5)):''}{ck.departure?('–'+String(ck.departure).slice(0,5)):''}</span>
+                            <button className="btn btn-sm" onClick={()=>setExpand({key:ckey(r),status:ck.status,arrival:ck.arrival||'',departure:ck.departure||'',reason:ck.reason||''})}>ändern</button>
+                          </span>
+                        ) : (
+                          <span style={{display:'inline-flex',gap:6}}>
+                            <button className="btn btn-sm btn-primary" disabled={busy} onClick={()=>save(r,{status:'present'})}>Da</button>
+                            <button className="btn btn-sm" onClick={()=>setExpand({key:ckey(r),status:'',arrival:'',departure:'',reason:''})}>Abweichung</button>
+                          </span>
+                        )}
+                      </div>
+                      {isOpen && !canceled && (
+                        <div style={{marginTop:10,padding:'10px 12px',background:'#f1f3f5',borderRadius:8}}>
+                          <div style={{display:'flex',gap:6,flexWrap:'wrap',marginBottom:8}}>
+                            {[['late','Verspätet'],['early','Früher da'],['sick','Krank'],['no_show','Kommt nicht mehr']].map(([s,l])=>(
+                              <button key={s} className={"btn btn-sm"+(expand.status===s?' btn-primary':'')} onClick={()=>setExpand(x=>({...x,status:s}))}>{l}</button>
+                            ))}
+                          </div>
+                          {(expand.status==='late'||expand.status==='early') && (
+                            <div style={{display:'flex',gap:12,flexWrap:'wrap',marginBottom:8,fontSize:12}}>
+                              <label>Kommen <input type="time" value={expand.arrival} onChange={ev=>setExpand(x=>({...x,arrival:ev.target.value}))} style={{marginLeft:4}}/></label>
+                              <label>Gehen <input type="time" value={expand.departure} onChange={ev=>setExpand(x=>({...x,departure:ev.target.value}))} style={{marginLeft:4}}/></label>
+                            </div>
+                          )}
+                          <input value={expand.reason} onChange={ev=>setExpand(x=>({...x,reason:ev.target.value}))} placeholder="Grund (optional)" style={{width:'100%',padding:'6px 8px',border:'1px solid var(--border)',borderRadius:6,fontSize:12,boxSizing:'border-box',marginBottom:8}}/>
+                          <div style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
+                            <button className="btn btn-sm" onClick={()=>setExpand(null)}>Abbrechen</button>
+                            <button className="btn btn-sm btn-primary" disabled={busy||!expand.status} onClick={()=>save(r,{status:expand.status,arrival:expand.arrival||null,departure:expand.departure||null,reason:expand.reason||null})}>Speichern</button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
 function App(){
   migrateProjectData();
   const [loggedIn, setLoggedIn] = useState(false);
@@ -31642,6 +31784,7 @@ function App(){
     ]},
     {sec:'Workforce', items:[
       {key:'shiftplan',label:'Schichtplanung',icon:'🗓'},
+      {key:'checkin',label:'Check-in',icon:'🙋'},
       {key:'workforce',label:'Workforce (Beta)',icon:'📅'},
     ]},
     {sec:'Team', items:[
@@ -31711,6 +31854,7 @@ function App(){
       'productivity':'<path fill-rule="evenodd" d="M15.22 6.268a.75.75 0 0 1 .968-.431l5.942 2.28a.75.75 0 0 1 .431.97l-2.28 5.94a.75.75 0 1 1-1.4-.537l1.63-4.251-1.086.484a11.2 11.2 0 0 0-5.45 5.173.75.75 0 0 1-1.199.19L9 12.312l-6.22 6.22a.75.75 0 0 1-1.06-1.061l6.75-6.75a.75.75 0 0 1 1.06 0l3.606 3.606a12.695 12.695 0 0 1 5.68-4.974l1.086-.483-4.251-1.632a.75.75 0 0 1-.432-.97Z" clip-rule="evenodd"/>',
       'performance':'<path fill-rule="evenodd" d="M5.166 2.621v.858c-1.035.148-2.059.33-3.071.543a.75.75 0 0 0-.584.859 6.753 6.753 0 0 0 6.138 5.6 6.73 6.73 0 0 0 2.743 1.346A6.707 6.707 0 0 1 9.279 15H8.54c-1.036 0-1.875.84-1.875 1.875V19.5h-.75a2.25 2.25 0 0 0-2.25 2.25c0 .414.336.75.75.75h15a.75.75 0 0 0 .75-.75 2.25 2.25 0 0 0-2.25-2.25h-.75v-2.625c0-1.036-.84-1.875-1.875-1.875h-.739a6.706 6.706 0 0 1-1.112-3.173 6.73 6.73 0 0 0 2.743-1.347 6.753 6.753 0 0 0 6.139-5.6.75.75 0 0 0-.585-.858 47.077 47.077 0 0 0-3.07-.543V2.62a.75.75 0 0 0-.658-.744 49.22 49.22 0 0 0-6.093-.377c-2.063 0-4.096.128-6.093.377a.75.75 0 0 0-.657.744Zm0 2.629c0 1.196.312 2.32.857 3.294A5.266 5.266 0 0 1 3.16 5.337a45.6 45.6 0 0 1 2.006-.343v.256Zm13.5 0v-.256c.674.1 1.343.214 2.006.343a5.265 5.265 0 0 1-2.863 3.207 6.72 6.72 0 0 0 .857-3.294Z" clip-rule="evenodd"/>',
       'shiftplan':'<path fill-rule="evenodd" d="M6.75 2.25A.75.75 0 0 1 7.5 3v1.5h9V3a.75.75 0 0 1 1.5 0v1.5h.75a3 3 0 0 1 3 3v11.25a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3V7.5a3 3 0 0 1 3-3H6V3a.75.75 0 0 1 .75-.75Zm13.5 9a1.5 1.5 0 0 0-1.5-1.5H5.25a1.5 1.5 0 0 0-1.5 1.5v7.5a1.5 1.5 0 0 0 1.5 1.5h13.5a1.5 1.5 0 0 0 1.5-1.5v-7.5Z" clip-rule="evenodd"/><path d="M8 14.25a.75.75 0 0 1 .75-.75h6.5a.75.75 0 0 1 0 1.5h-6.5a.75.75 0 0 1-.75-.75Z"/>',
+      'checkin':'<path fill-rule="evenodd" d="M2.25 12c0-5.385 4.365-9.75 9.75-9.75s9.75 4.365 9.75 9.75-4.365 9.75-9.75 9.75S2.25 17.385 2.25 12Zm13.36-1.814a.75.75 0 1 0-1.22-.872l-3.236 4.53L9.53 12.22a.75.75 0 0 0-1.06 1.06l2.25 2.25a.75.75 0 0 0 1.14-.094l3.75-5.25Z" clip-rule="evenodd"/>',
       'workforce':'<path d="M12.75 12.75a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM7.5 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM8.25 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM9.75 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM10.5 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM12 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM12.75 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM14.25 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM15 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM16.5 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM15 12.75a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM16.5 13.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Z"/> <path fill-rule="evenodd" d="M6.75 2.25A.75.75 0 0 1 7.5 3v1.5h9V3A.75.75 0 0 1 18 3v1.5h.75a3 3 0 0 1 3 3v11.25a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3V7.5a3 3 0 0 1 3-3H6V3a.75.75 0 0 1 .75-.75Zm13.5 9a1.5 1.5 0 0 0-1.5-1.5H5.25a1.5 1.5 0 0 0-1.5 1.5v7.5a1.5 1.5 0 0 0 1.5 1.5h13.5a1.5 1.5 0 0 0 1.5-1.5v-7.5Z" clip-rule="evenodd"/>',
       'employees':'<path d="M4.5 6.375a4.125 4.125 0 1 1 8.25 0 4.125 4.125 0 0 1-8.25 0ZM14.25 8.625a3.375 3.375 0 1 1 6.75 0 3.375 3.375 0 0 1-6.75 0ZM1.5 19.125a7.125 7.125 0 0 1 14.25 0v.003l-.001.119a.75.75 0 0 1-.363.63 13.067 13.067 0 0 1-6.761 1.873c-2.472 0-4.786-.684-6.76-1.873a.75.75 0 0 1-.364-.63l-.001-.122ZM17.25 19.128l-.001.144a2.25 2.25 0 0 1-.233.96 10.088 10.088 0 0 0 5.06-1.01.75.75 0 0 0 .42-.643 4.875 4.875 0 0 0-6.957-4.611 8.586 8.586 0 0 1 1.71 5.157v.003Z"/>',
       'feedback':'<path fill-rule="evenodd" d="M4.848 2.771A49.144 49.144 0 0 1 12 2.25c2.43 0 4.817.178 7.152.52 1.978.292 3.348 2.024 3.348 3.97v6.02c0 1.946-1.37 3.678-3.348 3.97a48.9 48.9 0 0 1-3.476.383.39.39 0 0 0-.297.17l-2.755 4.133a.75.75 0 0 1-1.248 0l-2.755-4.133a.39.39 0 0 0-.297-.17 48.9 48.9 0 0 1-3.476-.384c-1.978-.29-3.348-2.024-3.348-3.97V6.741c0-1.946 1.37-3.68 3.348-3.97Z" clip-rule="evenodd"/>',
@@ -31891,6 +32035,7 @@ function App(){
             <MeinPlanView employee={myEmployee} employees={employees} projects={projects}/>
           )}
           {view==='shiftplan'&&<SimpleShiftView employees={employees} projects={projects} showToast={showToast}/>}
+          {view==='checkin'&&<CheckinView employees={employees} projects={projects} team={team} showToast={showToast}/>}
           {view==='workforce'&&(<div>
           {modal&&typeof modal==='object'&&<EmpHoursWidget emp={modal}/>}
           <WorkforcePlanningView employees={employees} projects={projects} showToast={showToast}/>
