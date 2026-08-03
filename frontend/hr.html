@@ -7243,6 +7243,8 @@ function DailyTasksView({employees, projects, onNavigate, team}){
   const [ovOpen,setOvOpen] = useState(null);          // aufgeklappte Rolle in der Zusammenschau
   const [staff,setStaff]   = useState(null);          // {management,hr,finance} besetzt? null=lädt
   const [autoEv,setAutoEv] = useState({});            // Q4: auto_key -> {ev, occ, ov} (Projektion aus calendar_overrides)
+  const [clockTick,setClockTick] = useState(0);       // Zeitgeber: 1× zur vollen Stunde re-rendern (Mittags-Umschlag ohne Reload)
+  const [showDone,setShowDone] = useState(false);     // aufklappbarer „erledigt"-Bereich (Rückweg)
 
   const loadDone = async()=>{
     try{ const {data,error}=await sb.from('daily_tasks_done').select('task_key,done_by_name,done_at').eq('date',today);
@@ -7289,6 +7291,12 @@ function DailyTasksView({employees, projects, onNavigate, team}){
       }catch(e){ if(alive) setStaff({management:true,hr:true,finance:true}); } })(); // Fallback: keine falsche „nicht besetzt"-Anzeige
     }
     return ()=>{ alive=false; try{ sb.removeChannel(chan); }catch(e){} };
+  },[]);
+  // Zeitgeber: nur EINMAL zur nächsten vollen Stunde neu terminieren und dann re-armen. Kein Sekundentakt.
+  useEffect(()=>{
+    let t; const arm=()=>{ const n=new Date(); const ms=(60-n.getMinutes())*60000 - n.getSeconds()*1000 - n.getMilliseconds();
+      t=setTimeout(()=>{ setClockTick(v=>v+1); arm(); }, Math.max(1000,ms)); };
+    arm(); return ()=>clearTimeout(t);
   },[]);
 
   async function toggle(key){
@@ -7351,6 +7359,14 @@ function DailyTasksView({employees, projects, onNavigate, team}){
   const activeTasks=TASKS.filter(windowActive);
   const doneCount=activeTasks.filter(taskDone).length;
   const pct=activeTasks.length?Math.round(doneCount/activeTasks.length*100):0;
+  // Erledigte verschwinden aus der Liste (Fortschritt spürbar), zählen aber weiter in Statistik/Zusammenschau.
+  const doneTasks=TASKS.filter(taskDone);
+  const mainTasks=TASKS.filter(t=>!taskDone(t));
+
+  // Tageszeit-Farbe für OFFENE (aktive, nicht erledigte) Aufgaben: vormittags amber, ab 12 Uhr rot.
+  // clockTick sorgt dafür, dass der Umschlag zur vollen Stunde ohne Reload greift.
+  const afterNoon=React.useMemo(()=>new Date().getHours()>=12,[clockTick]);
+  const OPEN_COL=afterNoon?{fg:'#dc2626',bg:'#fef2f2',bd:'#fecaca'}:{fg:'#d97706',bg:'#fffbeb',bd:'#fde68a'};
 
   // Zusammenschau: je Rolle Zustand aus AKTIVEN Aufgaben + Besetzung. (teamlead bewusst raus — nur Check-in.)
   const OV_ROLES=[{key:'management',label:'Management',icon:'🎯'},{key:'hr',label:'HR',icon:'👥'},{key:'finance',label:'Finance',icon:'💶'}];
@@ -7388,7 +7404,7 @@ function DailyTasksView({employees, projects, onNavigate, team}){
           {TASKS.length===0&&<p className="welcome-sub" style={{margin:'0 0 14px'}}>Als Manager extern hast du keine eigene Liste. Hier der Stand aller Rollen für heute.</p>}
           <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(230px,1fr))',gap:16}}>
             {OV_ROLES.map(r=>{ const a=roleAgg(r.key);
-              const col=a.state==='done'?{fg:'#15803d',bg:'#f0fdf4',bd:'#bbf7d0'}:a.state==='open'?{fg:'#d97706',bg:'#fffbeb',bd:'#fde68a'}:{fg:'#94a3b8',bg:'#f8fafc',bd:'#e2e8f0'};
+              const col=a.state==='done'?{fg:'#15803d',bg:'#f0fdf4',bd:'#bbf7d0'}:a.state==='open'?OPEN_COL:{fg:'#94a3b8',bg:'#f8fafc',bd:'#e2e8f0'};
               const clickable=a.total>0; const R=30, C=2*Math.PI*R, frac=a.total?a.doneN/a.total:0;
               const center=a.staffed===null?'…':a.state==='done'?'✓':a.state==='open'?(a.doneN+'/'+a.total):'—';
               const statusTxt=a.staffed===null?'lädt …':a.state==='unstaffed'?'nicht besetzt':a.state==='none'?'keine Aufgaben':a.state==='done'?'alles erledigt':(a.doneN+' von '+a.total+' offen abzuhaken');
@@ -7442,8 +7458,8 @@ function DailyTasksView({employees, projects, onNavigate, team}){
           <div style={{fontSize:13,color:'#16a34a',marginTop:2}}>Super gemacht, morgen früh geht's wieder los.</div>
         </div>
       )}
-      {TASKS.map((t,i)=>{ const dm=taskMeta(t); const isDone=taskDone(t); const act=windowActive(t); const c=act?countFor(t.count):null; return (
-        <div key={t.key} className={"dt-card"+(isDone?" done":"")} style={{animationDelay:(i*60)+'ms',opacity:act?1:0.55}}>
+      {mainTasks.map((t,i)=>{ const dm=taskMeta(t); const isDone=taskDone(t); const act=windowActive(t); const c=act?countFor(t.count):null; return (
+        <div key={t.key} className={"dt-card"+(isDone?" done":"")} style={{animationDelay:(i*60)+'ms',opacity:act?1:0.55,...(act&&!isDone?{background:OPEN_COL.bg,borderLeft:'4px solid '+OPEN_COL.fg}:{})}}>
           <div className="dt-num">{i+1}</div>
           <div style={{flex:1,minWidth:0}}>
             <div className="dt-title">{t.title}{t.auto_key&&<span style={{fontSize:10,fontWeight:700,color:'#b45309',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:6,padding:'1px 6px',marginLeft:6}}>📆 Pflichttermin</span>}</div>
@@ -7463,6 +7479,25 @@ function DailyTasksView({employees, projects, onNavigate, team}){
             : <button className="dt-toggle" disabled style={{opacity:0.5,cursor:'not-allowed'}}>gesperrt</button>}
         </div>
       ); })}
+
+      {/* Rückweg: erledigte Aufgaben sind aus der Liste raus, hier aufklappbar + widerrufbar. */}
+      {doneTasks.length>0&&(
+        <div style={{marginTop:14}}>
+          <button onClick={()=>setShowDone(s=>!s)} style={{width:'100%',textAlign:'left',background:'#f0fdf4',border:'1px solid #bbf7d0',borderRadius:10,padding:'10px 14px',cursor:'pointer',fontSize:13,fontWeight:700,color:'#15803d',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+            <span>✓ {doneTasks.length} erledigt</span>
+            <span style={{fontSize:12,fontWeight:600}}>{showDone?'▾ ausblenden':'▸ anzeigen'}</span>
+          </button>
+          {showDone&&doneTasks.map(t=>{ const dm=taskMeta(t); return (
+            <div key={t.key} className="dt-card done" style={{marginTop:8,opacity:.9}}>
+              <div style={{flex:1,minWidth:0}}>
+                <div className="dt-title" style={{textDecoration:'line-through',color:'var(--muted)'}}>{t.title}{t.auto_key&&<span style={{fontSize:10,fontWeight:700,color:'#b45309',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:6,padding:'1px 6px',marginLeft:6}}>📆 Pflichttermin</span>}</div>
+                {dm&&<div className="dt-doneby">✓ erledigt von {dm.done_by_name||'jemandem'}{dm.done_at?', '+fmtTime(dm.done_at)+' Uhr':''}</div>}
+              </div>
+              <button className="dt-toggle" disabled={busy===t.key} onClick={()=>toggleTask(t)}>↩ Rückgängig</button>
+            </div>
+          ); })}
+        </div>
+      )}
       </>)}
 
       {TASKS.length===0&&!isManager&&(
