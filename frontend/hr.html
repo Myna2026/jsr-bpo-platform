@@ -7191,6 +7191,7 @@ const DAILY_TASKS = [
   {key:'schulung',      view:'training_plans',title:'Schulungsgruppen aktualisieren', desc:'Teilnehmer, Termine und Produktivstart der Schulungen aktuell halten: wer startet wann, wer ist fertig.'},
   {key:'kpi',           view:'performance',   title:'KPIs eintragen',             desc:'Die Leistungswerte der Mitarbeiter für den Zeitraum erfassen, damit Auswertungen und Boni auf echten Zahlen beruhen.'},
   {key:'abwesenheiten', view:'absences',      title:'Abwesenheiten pflegen',      desc:'Urlaub, Krankmeldungen und sonstige Abwesenheiten eintragen. Krankmeldungen (Anruf bis 8:30 Uhr) sollten hier landen.'},
+  {key:'checkin',       view:'checkin',       title:'Check-in: Anwesenheit bestätigen', desc:'Für die heute eingeteilten Mitarbeiter bestätigen, wer da ist. Ein Klick pro Person; Abweichungen (verspätet, früher, krank, kommt nicht mehr) im zweiten Schritt.'},
   {key:'feedback',      view:'feedback',      title:'Feedbackgespräche führen',   desc:'Die heutigen Kandidaten ziehen und die Gespräche führen: kurz nachfragen, wie es läuft, Noten und Rückmeldungen erfassen.'},
   {key:'vertraege',     view:'employees',     title:'Vertragsdaten prüfen',       desc:'Vertragsänderungen einpflegen und auf auslaufende Verträge achten, damit Verlängerungen rechtzeitig passieren.'},
 ];
@@ -7202,6 +7203,7 @@ function DailyTasksView({employees, projects, plans, onNavigate, team}){
   const [uid,setUid]   = useState(null);
   const [cvCount,setCvCount] = useState(null);
   const [fbOpenCount,setFbOpenCount] = useState(null);   // heute offene Feedbackgespräche
+  const [checkinOpen,setCheckinOpen] = useState(null);   // heute eingeteilt aber noch nicht bestätigt
   const [busy,setBusy] = useState('');
 
   const loadDone = async()=>{
@@ -7214,6 +7216,16 @@ function DailyTasksView({employees, projects, plans, onNavigate, team}){
     const chan=sb.channel('daily-tasks').on('postgres_changes',{event:'*',schema:'public',table:'daily_tasks_done'},()=>{ loadDone(); }).subscribe();
     (async()=>{ try{ const funnel=['cv_inbound','cv_accepted','cv_confirmed','invited','interview','selection1','selection2']; const {count}=await sb.from('cvs').select('id',{count:'exact',head:true}).in('status',funnel); if(alive) setCvCount(count||0); }catch(e){} })();
     (async()=>{ try{ const {count}=await sb.from('feedback_sessions').select('id',{count:'exact',head:true}).eq('scheduled_date',today).eq('status','scheduled'); if(alive) setFbOpenCount(count||0); }catch(e){} })();
+    // Offene Check-ins heute = eingeteilt (shift_assignments) minus bestätigt (shift_checkins). Scope wie die Check-in-View.
+    (async()=>{ try{
+      const rk=(team&&team.role_keys)||[]; const isAdmin=rk.some(r=>r==='management'||r==='hr');
+      const myEmp=(team&&team.employee_id)?(employees||[]).find(e=>e&&e.id===team.employee_id):null; const myProj=myEmp&&myEmp.project_id;
+      let pq=sb.from('shift_assignments').select('employee_id',{count:'exact',head:true}).eq('work_date',today);
+      if(!isAdmin&&myProj) pq=pq.eq('project_id',myProj);
+      const {count:planned}=await pq;
+      const {count:doneN}=await sb.from('shift_checkins').select('employee_id',{count:'exact',head:true}).eq('work_date',today);
+      if(alive) setCheckinOpen(Math.max(0,(planned||0)-(doneN||0)));
+    }catch(e){} })();
     return ()=>{ alive=false; try{ sb.removeChannel(chan); }catch(e){} };
   },[]);
 
@@ -7251,6 +7263,7 @@ function DailyTasksView({employees, projects, plans, onNavigate, team}){
     if(k==='schulung')   return counts.planInc>0?{n:counts.planInc,l:'Pläne unvollständig'}:null;
     if(k==='vertraege')  return counts.expiring>0?{n:counts.expiring,l:'laufen in 30 T. aus'}:null;
     if(k==='feedback')   return fbOpenCount>0?{n:fbOpenCount,l:'heute offen'}:null;
+    if(k==='checkin')    return checkinOpen>0?{n:checkinOpen,l:'offen heute'}:null;
     return null;
   };
   const fmtTime=iso=>{ try{ const d=new Date(iso); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); }catch(e){ return ''; } };
@@ -11171,6 +11184,7 @@ function SimpleShiftView({employees, projects, showToast}){
   const [weekStart,setWeekStart]=useState(()=>mondayOf(new Date()));
   const days=Array.from({length:7},(_,i)=>addDays(weekStart,i));
   const [cells,setCells]=useState({});
+  const [ckMap,setCkMap]=useState({});   // Check-in-Rückmeldung (read-only Indikator): 'empId|ds' -> {status,...}
   const [defShift,setDefShift]=useState({});
   const [pop,setPop]=useState(null); // {empId, ds}
   const [chartMode,setChartMode]=useState('table'); // table | week | day
@@ -11205,6 +11219,11 @@ function SimpleShiftView({employees, projects, showToast}){
     (async()=>{
       const c=await shiftLoadCells(projId,effSkill,isoD(days[0]),isoD(days[6]));
       if(alive) setCells(c);
+      // Check-in-Rückmeldung der Woche (read-only): nur zur Anzeige im Plan, nicht bedienbar.
+      try{ const {data:ck}=await sb.from('shift_checkins').select('employee_id,work_date,status,arrival,departure')
+             .eq('project_id',projId).gte('work_date',isoD(days[0])).lte('work_date',isoD(days[6]));
+        if(alive){ const m={}; (ck||[]).forEach(r=>{ m[r.employee_id+'|'+(''+r.work_date).slice(0,10)]=r; }); setCkMap(m); }
+      }catch(e){}
       const hist=await shiftLoadCells(projId,effSkill,isoD(addDays(weekStart,-28)),isoD(addDays(weekStart,-1)));
       if(!alive) return;
       const tally={}; Object.keys(hist).forEach(key=>{const emp=key.slice(0,key.indexOf('|'));const sv=hist[key]&&hist[key].shift;if(!sv)return;(tally[emp]=tally[emp]||{})[sv]=(tally[emp][sv]||0)+1;});
@@ -11364,8 +11383,12 @@ function SimpleShiftView({employees, projects, showToast}){
         const dayOk=shiftEmpDayOk(emp,ds);
         const open=pop&&pop.empId===emp.id&&pop.ds===ds;
         let cls='sp-cell'; if(cell)cls+=' filled'; else if(!dayOk)cls+=' off'; else cls+=' gap';
+        // Check-in-Rückmeldung (read-only): dünner Unterrand statt viertem Symbol, kollidiert nicht mit ⛔/☕.
+        const ck=ckMap[emp.id+'|'+ds];
+        const ckColor=ck?(ck.status==='present'?'#059669':(ck.status==='sick'||ck.status==='no_show')?'#dc2626':'#d97706'):null;
+        const ckTitle=ck?('Check-in: '+({present:'da',late:'verspätet',early:'früher da',sick:'krank',no_show:'kommt nicht mehr'}[ck.status]||ck.status)+(ck.arrival?(' '+String(ck.arrival).slice(0,5)):'')):undefined;
         return (
-          <td key={i} className={cls}>
+          <td key={i} className={cls} style={ckColor?{boxShadow:'inset 0 -3px 0 '+ckColor}:undefined} title={ckTitle}>
             <div className="sp-cell-in" onClick={()=>{ if(!dayOk&&!cell){ showToast&&showToast(shiftLockReason(emp,ds)||'Nicht verfügbar','info'); return; } setPop(open?null:{empId:emp.id,ds}); }}>
               {cell? <span className="sp-chip" style={cell.canceled?{background:'#fee2e2',color:'#dc2626',textDecoration:'line-through'}:undefined}
                        title={cell.canceled?('Abgebrochen: '+(ABORT_REASON_LBL[cell.cancel_reason]||cell.cancel_reason)+(cell.net?(' · '+cell.net+'h gezählt'):'')):(cell.pause_duration?('Pause '+cell.pause_duration+'h · Netto '+(cell.net!=null?cell.net:'')+'h'):'')}>
