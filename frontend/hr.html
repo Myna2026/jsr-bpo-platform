@@ -7195,8 +7195,8 @@ const ROLE_TASKS = [
   {key:'mgr_cv_funnel',    owner:'management', view:'kanban',      title:'CV-Funnel prüfen',              desc:'Den Bewerber-Funnel im Blick behalten: bleibt kein Kandidat in einer Phase liegen?',                       count:'cv_funnel'},
   {key:'mgr_kunden',       owner:'management', view:'calendar',    title:'Kundentelefonate & Wochen-Updates', desc:'Die fälligen Kundentermine und Wochen-Updates führen (Termine im Kalender).',                          count:'customer_due'},
   {key:'mgr_kpi',          owner:'management', view:'performance', title:'KPI-Pflege je Skill',           desc:'Sicherstellen, dass die KPIs je Skill/Projekt für den Zeitraum gepflegt sind.',                            count:'kpi_missing'},
-  {key:'mgr_rechnung',     owner:'management', view:null,          title:'Rechnungserstellung',           desc:'Rechnungen für den Vormonat erstellen (Buchhaltung tive-finance).',                                        window:[1], count:null},
-  {key:'mgr_lohn',         owner:'management', view:'payroll',     title:'Lohnlauf & Überweisung',        desc:'Lohnlauf durchführen und Überweisung veranlassen.',                                                        window:[1], count:'payroll_open'},
+  {key:'mgr_rechnung',     owner:'management', view:null,          title:'Rechnungserstellung',           desc:'Rechnungen für den Vormonat erstellen (Buchhaltung tive-finance).',                                        window:[1], count:null, auto_key:'invoice_create'},
+  {key:'mgr_lohn',         owner:'management', view:'payroll',     title:'Lohnlauf & Überweisung',        desc:'Lohnlauf durchführen und Überweisung veranlassen.',                                                        window:[1], count:'payroll_open', auto_key:'payroll'},
   // HR (owner 'hr')
   {key:'hr_cv_select',     owner:'hr',         view:'cvs',         title:'Eingehende CVs selektieren',    desc:'Neue Lebensläufe sichten und selektieren.',                                                                count:'cv_inbound'},
   {key:'hr_cv_phase',      owner:'hr',         view:'kanban',      title:'CVs in die richtige Phase',     desc:'Bewerber in die passende Funnel-Phase schieben, damit keiner liegen bleibt.',                              count:'cv_stuck'},
@@ -7212,7 +7212,7 @@ const ROLE_TASKS = [
   {key:'fin_re_in',        owner:'finance',    view:null,          title:'Rechnungseingang',              desc:'Eingehende Rechnungen erfassen (tive-finance).',                                                           count:null},
   {key:'fin_re_out',       owner:'finance',    view:null,          title:'Rechnungsausgang',              desc:'Ausgehende Rechnungen erfassen (tive-finance).',                                                           count:null},
   {key:'fin_buchungen',    owner:'finance',    view:null,          title:'Buchungen Buchhaltung',         desc:'Laufende Buchungen in der Buchhaltung (tive-finance).',                                                    count:null},
-  {key:'fin_lohn',         owner:'finance',    view:'payroll',     title:'Gehaltsabrechnung & Löhne',     desc:'Gehaltsabrechnung erstellen und Löhne vorbereiten.',                                                       window:[1], count:'payroll_open'},
+  {key:'fin_lohn',         owner:'finance',    view:'payroll',     title:'Gehaltsabrechnung & Löhne',     desc:'Gehaltsabrechnung erstellen und Löhne vorbereiten.',                                                       window:[1], count:'payroll_open', auto_key:'payroll'},
   {key:'fin_bwa',          owner:'finance',    view:null,          title:'Monatsabschluss BWA',           desc:'Monatsabschluss und BWA erstellen (tive-finance).',                                                        window:[1,2], count:null},
 ];
 function DailyTasksView({employees, projects, onNavigate, team}){
@@ -7242,15 +7242,29 @@ function DailyTasksView({employees, projects, onNavigate, team}){
   const isManager=roleKeys.includes('management'); // sieht die Zusammenschau (intern + extern)
   const [ovOpen,setOvOpen] = useState(null);          // aufgeklappte Rolle in der Zusammenschau
   const [staff,setStaff]   = useState(null);          // {management,hr,finance} besetzt? null=lädt
+  const [autoEv,setAutoEv] = useState({});            // Q4: auto_key -> {ev, occ, ov} (Projektion aus calendar_overrides)
 
   const loadDone = async()=>{
     try{ const {data,error}=await sb.from('daily_tasks_done').select('task_key,done_by_name,done_at').eq('date',today);
       if(error) return; const m={}; (data||[]).forEach(r=>{ m[r.task_key]={done_by_name:r.done_by_name,done_at:r.done_at}; }); setDone(m); }catch(e){}
   };
+  // Q4: Auto-Pflichttermine + aktuelles Monats-Vorkommen + Erledigt-Merker aus calendar_overrides laden.
+  const loadAuto = async()=>{
+    try{
+      const {data:evs}=await sb.from('calendar_events').select('*').eq('kind','auto');
+      const map={}; (evs||[]).forEach(ev=>{ if(ev.auto_key) map[ev.auto_key]={ev, occ:calAutoOccThisMonth(ev), ov:null}; });
+      const ids=Object.values(map).map(x=>x.ev.id);
+      if(ids.length){ const {data:ovr}=await sb.from('calendar_overrides').select('*').in('event_id',ids);
+        (ovr||[]).forEach(o=>{ const e=Object.values(map).find(x=>x.ev.id===o.event_id); if(e&&String(o.occurrence_date).slice(0,10)===e.occ) e.ov=o; }); }
+      setAutoEv(map);
+    }catch(e){}
+  };
   useEffect(()=>{
     let alive=true;
     (async()=>{ try{ const {data}=await sb.auth.getUser(); if(alive&&data&&data.user) setUid(data.user.id); }catch(e){} await loadDone(); })();
-    const chan=sb.channel('daily-tasks').on('postgres_changes',{event:'*',schema:'public',table:'daily_tasks_done'},()=>{ loadDone(); }).subscribe();
+    loadAuto();
+    const chan=sb.channel('daily-tasks').on('postgres_changes',{event:'*',schema:'public',table:'daily_tasks_done'},()=>{ loadDone(); })
+      .on('postgres_changes',{event:'*',schema:'public',table:'calendar_overrides'},()=>{ loadAuto(); }).subscribe();
     (async()=>{ try{ const funnel=['cv_inbound','cv_accepted','cv_confirmed','invited','interview','selection1','selection2']; const {count}=await sb.from('cvs').select('id',{count:'exact',head:true}).in('status',funnel); if(alive) setCvCount(count||0); }catch(e){} })();
     (async()=>{ try{ const {count}=await sb.from('cvs').select('id',{count:'exact',head:true}).eq('status','cv_inbound'); if(alive) setCvInbound(count||0); }catch(e){} })();
     (async()=>{ try{ const {count}=await sb.from('cvs').select('id',{count:'exact',head:true}).in('status',['invited','interview']); if(alive) setCvInterview(count||0); }catch(e){} })();
@@ -7292,6 +7306,22 @@ function DailyTasksView({employees, projects, onNavigate, team}){
     }
     setBusy('');
   }
+  // Q4-Projektion: Aufgaben mit auto_key lesen/schreiben den Erledigt-Merker im Kalender (calendar_overrides),
+  // NICHT in daily_tasks_done. Einmal abhaken -> in Tagesaufgaben UND Kalender erledigt.
+  const taskDone = t => t.auto_key ? !!(autoEv[t.auto_key]&&autoEv[t.auto_key].ov&&autoEv[t.auto_key].ov.done) : !!done[t.key];
+  const taskMeta = t => { if(t.auto_key){ const a=autoEv[t.auto_key]; return a&&a.ov&&a.ov.done?{done_by_name:a.ov.done_by_name,done_at:a.ov.done_at}:null; } return done[t.key]; };
+  async function toggleAuto(t){
+    if(busy) return; const a=autoEv[t.auto_key];
+    if(!a||!a.occ){ window.alert('Kein Kalendertermin für diese Pflicht gefunden.'); return; }
+    setBusy(t.key);
+    const cur=a.ov, nd=!(cur&&cur.done), name=(team&&(team.full_name||team.name))||'jemand';
+    const row={event_id:a.ev.id, occurrence_date:a.occ, done:nd, done_by:uid||null, done_by_name:nd?name:null, done_at:nd?new Date().toISOString():null, hidden:cur?cur.hidden:false, updated_at:new Date().toISOString()};
+    setAutoEv(p=>({...p,[t.auto_key]:{...a,ov:{...(a.ov||{}),...row}}}));
+    const {error}=await sb.from('calendar_overrides').upsert(row,{onConflict:'event_id,occurrence_date'});
+    if(error){ window.alert('Konnte nicht speichern: '+(error.message||'DB')); loadAuto(); }
+    setBusy('');
+  }
+  const toggleTask = t => t.auto_key ? toggleAuto(t) : toggle(t.key);
 
   const counts=React.useMemo(()=>{
     const emp=(employees||[]).filter(e=>e&&['active','training','contract','inactive'].includes(e.status));
@@ -7319,15 +7349,15 @@ function DailyTasksView({employees, projects, onNavigate, team}){
   };
   const fmtTime=iso=>{ try{ const d=new Date(iso); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); }catch(e){ return ''; } };
   const activeTasks=TASKS.filter(windowActive);
-  const doneCount=activeTasks.filter(t=>done[t.key]).length;
+  const doneCount=activeTasks.filter(taskDone).length;
   const pct=activeTasks.length?Math.round(doneCount/activeTasks.length*100):0;
 
   // Zusammenschau: je Rolle Zustand aus AKTIVEN Aufgaben + Besetzung. (teamlead bewusst raus — nur Check-in.)
   const OV_ROLES=[{key:'management',label:'Management',icon:'🎯'},{key:'hr',label:'HR',icon:'👥'},{key:'finance',label:'Finance',icon:'💶'}];
   const roleAgg=role=>{
     const ts=ROLE_TASKS.filter(t=>owners(t).includes(role)).filter(windowActive);
-    const doneN=ts.filter(t=>done[t.key]).length;
-    const doneBy=[...new Set(ts.filter(t=>done[t.key]).map(t=>(done[t.key]&&done[t.key].done_by_name)||'jemand'))];
+    const doneN=ts.filter(taskDone).length;
+    const doneBy=[...new Set(ts.filter(taskDone).map(t=>{ const m=taskMeta(t); return (m&&m.done_by_name)||'jemand'; }))];
     const staffed=staff==null?null:!!staff[role];
     const state=staffed===false?'unstaffed':ts.length===0?'none':doneN===ts.length?'done':'open';
     return {tasks:ts,doneN,total:ts.length,staffed,state,doneBy};
@@ -7351,11 +7381,11 @@ function DailyTasksView({employees, projects, onNavigate, team}){
           <div style={{fontSize:13,color:'#16a34a',marginTop:2}}>Super gemacht, morgen früh geht's wieder los.</div>
         </div>
       )}
-      {TASKS.map((t,i)=>{ const d=done[t.key]; const act=windowActive(t); const c=act?countFor(t.count):null; return (
-        <div key={t.key} className={"dt-card"+(d?" done":"")} style={{animationDelay:(i*60)+'ms',opacity:act?1:0.55}}>
+      {TASKS.map((t,i)=>{ const dm=taskMeta(t); const isDone=taskDone(t); const act=windowActive(t); const c=act?countFor(t.count):null; return (
+        <div key={t.key} className={"dt-card"+(isDone?" done":"")} style={{animationDelay:(i*60)+'ms',opacity:act?1:0.55}}>
           <div className="dt-num">{i+1}</div>
           <div style={{flex:1,minWidth:0}}>
-            <div className="dt-title">{t.title}</div>
+            <div className="dt-title">{t.title}{t.auto_key&&<span style={{fontSize:10,fontWeight:700,color:'#b45309',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:6,padding:'1px 6px',marginLeft:6}}>📆 Pflichttermin</span>}</div>
             <div className="dt-desc">{t.desc}</div>
             {act?(
               <div className="dt-actions">
@@ -7365,10 +7395,10 @@ function DailyTasksView({employees, projects, onNavigate, team}){
             ):(
               <div className="dt-actions"><span className="dt-pill" style={{background:'#f1f5f9',color:'#64748b'}}>🕒 {windowLabel(t)} · aktuell Woche {monthWeek}</span></div>
             )}
-            {d&&<div className="dt-doneby">✓ erledigt von {d.done_by_name||'jemandem'}{d.done_at?', '+fmtTime(d.done_at)+' Uhr':''}</div>}
+            {dm&&<div className="dt-doneby">✓ erledigt von {dm.done_by_name||'jemandem'}{dm.done_at?', '+fmtTime(dm.done_at)+' Uhr':''}</div>}
           </div>
           {act
-            ? <button className="dt-toggle" disabled={busy===t.key} onClick={()=>toggle(t.key)}>{d?'✓ Erledigt':'○ Erledigen'}</button>
+            ? <button className="dt-toggle" disabled={busy===t.key} onClick={()=>toggleTask(t)}>{isDone?'✓ Erledigt':'○ Erledigen'}</button>
             : <button className="dt-toggle" disabled style={{opacity:0.5,cursor:'not-allowed'}}>gesperrt</button>}
         </div>
       ); })}
@@ -7417,15 +7447,15 @@ function DailyTasksView({employees, projects, onNavigate, team}){
           {ovOpen&&(()=>{ const a=roleAgg(ovOpen); const meta=OV_ROLES.find(x=>x.key===ovOpen); return (
             <div style={{marginTop:12}}>
               <div style={{fontSize:12,fontWeight:700,color:'var(--muted)',margin:'0 0 8px'}}>{meta.icon} {meta.label} · Aufgaben heute — im Notfall hier übernehmen und abhaken</div>
-              {a.tasks.map(t=>{ const d=done[t.key]; const c=countFor(t.count); return (
-                <div key={t.key} className={"dt-card"+(d?" done":"")} style={{marginBottom:8}}>
+              {a.tasks.map(t=>{ const dm=taskMeta(t); const isDone=taskDone(t); const c=countFor(t.count); return (
+                <div key={t.key} className={"dt-card"+(isDone?" done":"")} style={{marginBottom:8}}>
                   <div style={{flex:1,minWidth:0}}>
-                    <div className="dt-title">{t.title}</div>
+                    <div className="dt-title">{t.title}{t.auto_key&&<span style={{fontSize:10,fontWeight:700,color:'#b45309',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:6,padding:'1px 6px',marginLeft:6}}>📆 Pflichttermin</span>}</div>
                     <div className="dt-desc">{t.desc}</div>
                     {c&&<div className="dt-actions"><span className="dt-pill">{c.n} {c.l}</span></div>}
-                    {d&&<div className="dt-doneby">✓ erledigt von {d.done_by_name||'jemandem'}{d.done_at?', '+fmtTime(d.done_at)+' Uhr':''}</div>}
+                    {dm&&<div className="dt-doneby">✓ erledigt von {dm.done_by_name||'jemandem'}{dm.done_at?', '+fmtTime(dm.done_at)+' Uhr':''}</div>}
                   </div>
-                  <button className="dt-toggle" disabled={busy===t.key} onClick={()=>toggle(t.key)}>{d?'✓ Erledigt':'○ Übernehmen'}</button>
+                  <button className="dt-toggle" disabled={busy===t.key} onClick={()=>toggleTask(t)}>{isDone?'✓ Erledigt':'○ Übernehmen'}</button>
                 </div>
               ); })}
             </div>
@@ -31303,6 +31333,287 @@ function DialogHost(){
     </div>
   );
 }
+// ═══ TERMINKALENDER (Schnitt 5) ═══════════════════════════════════════════════
+// calendar_events = Regel (none/weekly/biweekly/monthly, Anker start_date), calendar_overrides =
+// Ausnahmen je Vorkommen (hidden + der EINE Erledigt-Merker). Projektfarbe aus projects.color.
+const CAL_MONTHS=['Januar','Februar','März','April','Mai','Juni','Juli','August','September','Oktober','November','Dezember'];
+const CAL_DOW=['Mo','Di','Mi','Do','Fr','Sa','So'];
+const CAL_VIS_ROLES=['management','hr','finance','teamlead','projektleiter','trainer','qm','mitarbeiter'];
+const CAL_AUTO_COLOR='#64748b';
+// Regel → konkrete Vorkommen (isoLocal-Strings) im Fenster [from,to] (lokale Dates, tz-sicher).
+function calOccurrences(ev, from, to){
+  const out=[]; if(!ev||!ev.start_date) return out;
+  const parse=s=>{ const p=String(s).slice(0,10).split('-').map(Number); return new Date(p[0],p[1]-1,p[2]); };
+  const iso=d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+  const anchor=parse(ev.start_date);
+  const until=ev.until_date?parse(ev.until_date):null;
+  const end = (until&&until<to)?until:to;
+  if(anchor>end) return out;
+  const rec=ev.recurrence||'none';
+  if(rec==='none'){ if(anchor>=from&&anchor<=end) out.push(iso(anchor)); return out; }
+  if(rec==='weekly'||rec==='biweekly'){
+    const step=rec==='weekly'?7:14; let d=new Date(anchor);
+    if(d<from){ const k=Math.ceil((from-d)/86400000/step); d=new Date(anchor); d.setDate(d.getDate()+k*step); }
+    while(d<=end){ if(d>=from) out.push(iso(d)); d=new Date(d); d.setDate(d.getDate()+step); }
+    return out;
+  }
+  if(rec==='monthly'){
+    const day=anchor.getDate(); let cur=new Date(from.getFullYear(),from.getMonth(),1);
+    while(cur<=end){ const last=new Date(cur.getFullYear(),cur.getMonth()+1,0).getDate(); const occ=new Date(cur.getFullYear(),cur.getMonth(),Math.min(day,last));
+      if(occ>=from&&occ<=end&&occ>=anchor) out.push(iso(occ)); cur=new Date(cur.getFullYear(),cur.getMonth()+1,1); }
+    return out;
+  }
+  return out;
+}
+// Q4-Projektion: aktuelles Monats-Vorkommen eines monatlichen Auto-Events als iso-Datum.
+function calAutoOccThisMonth(ev){
+  if(!ev||ev.recurrence!=='monthly'||!ev.start_date) return null;
+  const p=String(ev.start_date).slice(0,10).split('-').map(Number);
+  const now=new Date(), y=now.getFullYear(), m=now.getMonth(), last=new Date(y,m+1,0).getDate();
+  return y+'-'+String(m+1).padStart(2,'0')+'-'+String(Math.min(p[2],last)).padStart(2,'0');
+}
+const calFmtTime=t=>{ if(!t) return ''; const s=String(t); return s.slice(0,5); };
+
+function CalendarView({team, projects, showToast}){
+  const [events,setEvents]=useState([]);
+  const [overrides,setOverrides]=useState({});   // `${event_id}|${date}` -> row
+  const [loading,setLoading]=useState(true);
+  const [mode,setMode]=useState('month');        // month|day
+  const [cursor,setCursor]=useState(()=>{ const n=new Date(); return new Date(n.getFullYear(),n.getMonth(),n.getDate()); });
+  const [detail,setDetail]=useState(null);        // {ev,date,ov}
+  const [editing,setEditing]=useState(null);      // event obj | 'new' | null
+  const [busy,setBusy]=useState(false);
+  const roleKeys=(team&&team.role_keys)||[];
+  const isAdmin=roleKeys.includes('management')||roleKeys.includes('hr');
+  const uid=team&&team.user_id, myName=(team&&(team.full_name||team.name))||'jemand';
+  const todayIso=isoLocal(new Date());
+
+  const load=async()=>{
+    try{
+      const ev=await sb.from('calendar_events').select('*');
+      const ov=await sb.from('calendar_overrides').select('*');
+      setEvents(ev.data||[]);
+      const m={}; (ov.data||[]).forEach(o=>{ m[o.event_id+'|'+String(o.occurrence_date).slice(0,10)]=o; }); setOverrides(m);
+    }catch(e){ console.error('[calendar] load',e); }
+    setLoading(false);
+  };
+  useEffect(()=>{ load();
+    const ch=sb.channel('calendar').on('postgres_changes',{event:'*',schema:'public',table:'calendar_events'},load)
+      .on('postgres_changes',{event:'*',schema:'public',table:'calendar_overrides'},load).subscribe();
+    return ()=>{ try{ sb.removeChannel(ch); }catch(e){} };
+  },[]);
+
+  const projColor=id=>{ const p=(projects||[]).find(x=>x&&x.id===id); return (p&&p.color)||CAL_AUTO_COLOR; };
+  const projName =id=>{ const p=(projects||[]).find(x=>x&&x.id===id); return p?p.name:''; };
+
+  // Sichtbares Fenster: Monatsraster (Mo-So, 6 Wochen) bzw. der eine Tag.
+  const gridStart=React.useMemo(()=>{ const f=new Date(cursor.getFullYear(),cursor.getMonth(),1); const dow=(f.getDay()+6)%7; return new Date(f.getFullYear(),f.getMonth(),1-dow); },[cursor]);
+  const winFrom = mode==='month'?gridStart:cursor;
+  const winTo   = mode==='month'?new Date(gridStart.getFullYear(),gridStart.getMonth(),gridStart.getDate()+41):cursor;
+  const occByDate=React.useMemo(()=>{
+    const map={};
+    (events||[]).forEach(ev=>{ calOccurrences(ev,winFrom,winTo).forEach(ds=>{ const ov=overrides[ev.id+'|'+ds]; if(ov&&ov.hidden) return; (map[ds]=map[ds]||[]).push({ev,date:ds,ov}); }); });
+    Object.values(map).forEach(a=>a.sort((x,y)=>String(x.ev.start_time||'99').localeCompare(String(y.ev.start_time||'99'))));
+    return map;
+  },[events,overrides,winFrom,winTo]);
+
+  async function toggleDone(ev,date,cur){
+    if(busy) return; setBusy(true);
+    const nd=!(cur&&cur.done);
+    const row={event_id:ev.id, occurrence_date:date, done:nd, done_by:uid||null, done_by_name:nd?myName:null, done_at:nd?new Date().toISOString():null, hidden:cur?cur.hidden:false, updated_at:new Date().toISOString()};
+    const {error}=await sb.from('calendar_overrides').upsert(row,{onConflict:'event_id,occurrence_date'});
+    if(error) showToast&&showToast('⚠ '+(error.message||'Speichern fehlgeschlagen'));
+    setBusy(false); setDetail(d=>d?{...d,ov:{...(d.ov||{}),...row}}:d);
+  }
+  async function hideOccurrence(ev,date,cur){
+    if(!(await uiConfirm({title:'Einzeltermin ausblenden', text:'Nur dieses eine Vorkommen wird ausgeblendet, die Terminreihe bleibt bestehen.', confirmLabel:'Ausblenden'}))) return;
+    const row={event_id:ev.id, occurrence_date:date, hidden:true, done:cur?cur.done:false, done_by:cur?cur.done_by:null, done_by_name:cur?cur.done_by_name:null, done_at:cur?cur.done_at:null, updated_at:new Date().toISOString()};
+    const {error}=await sb.from('calendar_overrides').upsert(row,{onConflict:'event_id,occurrence_date'});
+    if(error){ showToast&&showToast('⚠ '+(error.message||'Fehler')); return; }
+    setDetail(null);
+  }
+  async function deleteEvent(ev){
+    if(!(await uiConfirm({title:'Termin löschen', text:'Die gesamte Terminreihe wird gelöscht.', items:[ev.title], danger:true, confirmLabel:'Löschen'}))) return;
+    const {error}=await sb.from('calendar_events').delete().eq('id',ev.id);
+    if(error){ showToast&&showToast('⚠ '+(error.message||'Fehler')); return; }
+    setDetail(null); setEditing(null);
+  }
+
+  const step=(dir)=>{ setCursor(c=> mode==='month'?new Date(c.getFullYear(),c.getMonth()+dir,1):new Date(c.getFullYear(),c.getMonth(),c.getDate()+dir)); };
+  const goToday=()=>{ const n=new Date(); setCursor(new Date(n.getFullYear(),n.getMonth(),n.getDate())); };
+  const openDay=(dateIso)=>{ const p=dateIso.split('-').map(Number); setCursor(new Date(p[0],p[1]-1,p[2])); setMode('day'); };
+
+  const title = mode==='month' ? CAL_MONTHS[cursor.getMonth()]+' '+cursor.getFullYear()
+    : CAL_DOW[(cursor.getDay()+6)%7]+', '+cursor.getDate()+'. '+CAL_MONTHS[cursor.getMonth()]+' '+cursor.getFullYear();
+
+  return (
+    <div>
+      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,flexWrap:'wrap',marginBottom:14}}>
+        <div>
+          <div style={{fontSize:18,fontWeight:700}}>Terminkalender</div>
+          <div style={{fontSize:12,color:'var(--muted)',marginTop:2}}>Pflichttermine und Termine je Rolle. Abhaken hier zählt auch in den Tagesaufgaben.</div>
+        </div>
+        <div style={{display:'flex',alignItems:'center',gap:6}}>
+          <div style={{display:'flex',border:'1px solid var(--border)',borderRadius:8,overflow:'hidden'}}>
+            <button className="btn btn-sm" style={{border:'none',borderRadius:0,background:mode==='month'?'#0F5661':'transparent',color:mode==='month'?'#fff':'var(--text)'}} onClick={()=>setMode('month')}>Monat</button>
+            <button className="btn btn-sm" style={{border:'none',borderRadius:0,background:mode==='day'?'#0F5661':'transparent',color:mode==='day'?'#fff':'var(--text)'}} onClick={()=>setMode('day')}>Tag</button>
+          </div>
+          <button className="btn btn-sm" onClick={()=>step(-1)} title="zurück">‹</button>
+          <button className="btn btn-sm" onClick={goToday}>Heute</button>
+          <button className="btn btn-sm" onClick={()=>step(1)} title="vor">›</button>
+          {isAdmin&&<button className="btn btn-sm" style={{background:'#0F5661',color:'#fff'}} onClick={()=>setEditing('new')}>+ Termin</button>}
+        </div>
+      </div>
+      <div style={{fontSize:16,fontWeight:800,marginBottom:10}}>{title}</div>
+
+      {loading?<div style={{color:'var(--muted)',fontSize:13,padding:'24px 0'}}>Lädt…</div>: mode==='month'?(
+        <div>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:6,marginBottom:6}}>
+            {CAL_DOW.map(d=><div key={d} style={{fontSize:11,fontWeight:700,color:'var(--muted)',textAlign:'center'}}>{d}</div>)}
+          </div>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:6}}>
+            {Array.from({length:42},(_,i)=>{ const d=new Date(gridStart.getFullYear(),gridStart.getMonth(),gridStart.getDate()+i); const ds=isoLocal(d); const inMonth=d.getMonth()===cursor.getMonth(); const items=occByDate[ds]||[]; const isToday=ds===todayIso;
+              return (
+                <div key={ds} onClick={()=>openDay(ds)} style={{minHeight:88,border:'1px solid '+(isToday?'#0F5661':'var(--border)'),borderRadius:8,padding:'5px 6px',background:inMonth?'var(--card,#fff)':'#f8fafc',opacity:inMonth?1:0.6,cursor:'pointer',overflow:'hidden'}}>
+                  <div style={{fontSize:11,fontWeight:isToday?800:600,color:isToday?'#0F5661':'var(--muted)',marginBottom:3}}>{d.getDate()}</div>
+                  {items.slice(0,3).map((it,ix)=>{ const c=it.ev.project_id?projColor(it.ev.project_id):CAL_AUTO_COLOR; const dn=it.ov&&it.ov.done; return (
+                    <div key={ix} onClick={e=>{e.stopPropagation();setDetail(it);}} title={it.ev.title} style={{display:'flex',alignItems:'center',gap:4,fontSize:11,marginBottom:2,opacity:dn?0.55:1}}>
+                      <span style={{width:7,height:7,borderRadius:2,background:c,flexShrink:0}}/>
+                      <span style={{whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',textDecoration:dn?'line-through':'none'}}>{calFmtTime(it.ev.start_time)&&<b style={{fontWeight:600}}>{calFmtTime(it.ev.start_time)} </b>}{it.ev.title}</span>
+                    </div>
+                  ); })}
+                  {items.length>3&&<div style={{fontSize:10,color:'var(--muted)'}}>+{items.length-3} mehr</div>}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ):(
+        <div>
+          {(occByDate[isoLocal(cursor)]||[]).length===0?(
+            <div style={{color:'var(--muted)',fontSize:13,padding:'24px 0',textAlign:'center'}}>Keine Termine an diesem Tag.</div>
+          ):(occByDate[isoLocal(cursor)]||[]).map((it,ix)=>{ const c=it.ev.project_id?projColor(it.ev.project_id):CAL_AUTO_COLOR; const dn=it.ov&&it.ov.done; return (
+            <div key={ix} className="dt-card" style={{marginBottom:8,borderLeft:'4px solid '+c,opacity:dn?0.7:1}}>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{display:'flex',alignItems:'center',gap:8}}>
+                  <div style={{fontWeight:700,fontSize:14,textDecoration:dn?'line-through':'none'}}>{it.ev.title}</div>
+                  {it.ev.kind==='auto'&&<span style={{fontSize:10,fontWeight:700,color:'#b45309',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:6,padding:'1px 6px'}}>Pflicht</span>}
+                </div>
+                <div style={{fontSize:12,color:'var(--muted)',marginTop:2}}>
+                  {(calFmtTime(it.ev.start_time)||'ganztägig')}{it.ev.end_time?' – '+calFmtTime(it.ev.end_time):''}
+                  {it.ev.project_id?' · '+projName(it.ev.project_id):''}
+                </div>
+                {it.ev.description&&<div style={{fontSize:12,color:'var(--text)',marginTop:4}}>{it.ev.description}</div>}
+                {dn&&<div style={{fontSize:11,color:'#15803d',marginTop:4}}>✓ erledigt von {it.ov.done_by_name||'jemandem'}</div>}
+                <div style={{marginTop:8,display:'flex',gap:6,flexWrap:'wrap'}}>
+                  <button className="btn btn-sm" style={dn?{}:{background:'#0F5661',color:'#fff'}} disabled={busy} onClick={()=>toggleDone(it.ev,it.date,it.ov)}>{dn?'✓ Erledigt':'○ Erledigen'}</button>
+                  {isAdmin&&<button className="btn btn-sm" onClick={()=>setEditing(it.ev)}>Bearbeiten</button>}
+                  {isAdmin&&<button className="btn btn-sm" onClick={()=>hideOccurrence(it.ev,it.date,it.ov)}>Ausblenden</button>}
+                </div>
+              </div>
+            </div>
+          ); })}
+        </div>
+      )}
+
+      {detail&&(()=>{ const it=detail; const c=it.ev.project_id?projColor(it.ev.project_id):CAL_AUTO_COLOR; const dn=it.ov&&it.ov.done; return (
+        <div className="modal-overlay" onClick={()=>setDetail(null)} style={{position:'fixed',inset:0,background:'rgba(0,0,0,.4)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:1000,padding:16}}>
+          <div onClick={e=>e.stopPropagation()} style={{background:'#fff',borderRadius:12,maxWidth:440,width:'100%',padding:20,boxShadow:'0 10px 40px rgba(0,0,0,.2)'}}>
+            <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:6}}>
+              <span style={{width:12,height:12,borderRadius:3,background:c}}/>
+              <div style={{fontSize:17,fontWeight:800,flex:1}}>{it.ev.title}</div>
+              {it.ev.kind==='auto'&&<span style={{fontSize:10,fontWeight:700,color:'#b45309',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:6,padding:'1px 6px'}}>Pflicht</span>}
+            </div>
+            <div style={{fontSize:13,color:'var(--muted)',marginBottom:8}}>{new Date(it.date).toLocaleDateString('de-DE',{weekday:'long',day:'numeric',month:'long',year:'numeric'})}{calFmtTime(it.ev.start_time)?' · '+calFmtTime(it.ev.start_time)+(it.ev.end_time?' – '+calFmtTime(it.ev.end_time):''):''}</div>
+            {it.ev.project_id&&<div style={{fontSize:12,marginBottom:6}}>Projekt: <b>{projName(it.ev.project_id)}</b></div>}
+            {it.ev.description&&<div style={{fontSize:13,marginBottom:10}}>{it.ev.description}</div>}
+            {dn&&<div style={{fontSize:12,color:'#15803d',marginBottom:10}}>✓ erledigt von {it.ov.done_by_name||'jemandem'}</div>}
+            <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+              <button className="btn btn-sm" style={dn?{}:{background:'#0F5661',color:'#fff'}} disabled={busy} onClick={()=>toggleDone(it.ev,it.date,it.ov)}>{dn?'✓ Erledigt':'○ Erledigen'}</button>
+              {isAdmin&&<button className="btn btn-sm" onClick={()=>{setDetail(null);setEditing(it.ev);}}>Bearbeiten</button>}
+              {isAdmin&&<button className="btn btn-sm" onClick={()=>hideOccurrence(it.ev,it.date,it.ov)}>Einzeltermin ausblenden</button>}
+              <button className="btn btn-sm" onClick={()=>setDetail(null)} style={{marginLeft:'auto'}}>Schließen</button>
+            </div>
+          </div>
+        </div>
+      ); })()}
+
+      {editing&&<CalEventEditor ev={editing==='new'?null:editing} projects={projects} onClose={()=>setEditing(null)} onSaved={()=>{setEditing(null);load();}} onDelete={deleteEvent} myName={myName} uid={uid} showToast={showToast}/>}
+    </div>
+  );
+}
+
+function CalEventEditor({ev, projects, onClose, onSaved, onDelete, myName, uid, showToast}){
+  const isAuto=!!(ev&&ev.kind==='auto');
+  const [f,setF]=useState(()=>({
+    title: ev?ev.title:'', description: ev?(ev.description||''):'', project_id: ev?(ev.project_id||''):'',
+    start_date: ev?String(ev.start_date).slice(0,10):isoLocal(new Date()),
+    start_time: ev&&ev.start_time?String(ev.start_time).slice(0,5):'', end_time: ev&&ev.end_time?String(ev.end_time).slice(0,5):'',
+    recurrence: ev?ev.recurrence:'none', until_date: ev&&ev.until_date?String(ev.until_date).slice(0,10):'',
+    visible_roles: ev?(ev.visible_roles||[]):[]
+  }));
+  const [busy,setBusy]=useState(false);
+  const set=(k,v)=>setF(p=>({...p,[k]:v}));
+  const toggleRole=r=>setF(p=>({...p,visible_roles:p.visible_roles.includes(r)?p.visible_roles.filter(x=>x!==r):[...p.visible_roles,r]}));
+  async function save(){
+    if(!f.title.trim()){ showToast&&showToast('⚠ Titel fehlt'); return; }
+    setBusy(true);
+    const row={ title:f.title.trim(), description:f.description.trim()||null, project_id:f.project_id||null,
+      start_date:f.start_date, start_time:f.start_time||null, end_time:f.end_time||null,
+      recurrence:f.recurrence, until_date:f.until_date||null, visible_roles:f.visible_roles, updated_at:new Date().toISOString() };
+    let error;
+    if(ev){ ({error}=await sb.from('calendar_events').update(row).eq('id',ev.id)); }
+    else { row.created_by=uid||null; row.created_by_name=myName; ({error}=await sb.from('calendar_events').insert(row)); }
+    setBusy(false);
+    if(error){ showToast&&showToast('⚠ '+(error.message||'Speichern fehlgeschlagen')); return; }
+    onSaved&&onSaved();
+  }
+  const inp={padding:'8px 10px',borderRadius:8,border:'1px solid var(--border)',fontSize:13,width:'100%'};
+  return (
+    <div className="modal-overlay" onClick={onClose} style={{position:'fixed',inset:0,background:'rgba(0,0,0,.4)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:1001,padding:16}}>
+      <div onClick={e=>e.stopPropagation()} style={{background:'#fff',borderRadius:12,maxWidth:520,width:'100%',maxHeight:'90vh',overflowY:'auto',padding:20,boxShadow:'0 10px 40px rgba(0,0,0,.2)'}}>
+        <div style={{fontSize:17,fontWeight:800,marginBottom:14}}>{ev?'Termin bearbeiten':'Neuer Termin'}{isAuto&&<span style={{fontSize:11,fontWeight:700,color:'#b45309',marginLeft:8}}>Pflichttermin</span>}</div>
+        <div style={{display:'flex',flexDirection:'column',gap:10}}>
+          <div><label style={{fontSize:12,fontWeight:600}}>Titel</label><input style={inp} value={f.title} onChange={e=>set('title',e.target.value)}/></div>
+          <div><label style={{fontSize:12,fontWeight:600}}>Beschreibung</label><textarea style={{...inp,minHeight:56,resize:'vertical'}} value={f.description} onChange={e=>set('description',e.target.value)}/></div>
+          <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
+            <div style={{flex:'1 1 140px'}}><label style={{fontSize:12,fontWeight:600}}>Projekt</label>
+              <select style={inp} value={f.project_id} onChange={e=>set('project_id',e.target.value)}>
+                <option value="">— kein Projekt —</option>
+                {(projects||[]).map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            </div>
+            <div style={{flex:'1 1 140px'}}><label style={{fontSize:12,fontWeight:600}}>{f.recurrence==='monthly'?'Anker (Monatstag)':f.recurrence==='none'?'Datum':'Anker (Startdatum)'}</label><input type="date" style={inp} value={f.start_date} onChange={e=>set('start_date',e.target.value)}/></div>
+          </div>
+          <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
+            <div style={{flex:'1 1 100px'}}><label style={{fontSize:12,fontWeight:600}}>Von (Uhrzeit)</label><input type="time" style={inp} value={f.start_time} onChange={e=>set('start_time',e.target.value)}/></div>
+            <div style={{flex:'1 1 100px'}}><label style={{fontSize:12,fontWeight:600}}>Bis (optional)</label><input type="time" style={inp} value={f.end_time} onChange={e=>set('end_time',e.target.value)}/></div>
+          </div>
+          <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
+            <div style={{flex:'1 1 140px'}}><label style={{fontSize:12,fontWeight:600}}>Wiederholung</label>
+              <select style={inp} value={f.recurrence} onChange={e=>set('recurrence',e.target.value)}>
+                <option value="none">einmalig</option><option value="weekly">wöchentlich</option>
+                <option value="biweekly">zweiwöchentlich</option><option value="monthly">monatlich</option>
+              </select>
+            </div>
+            {f.recurrence!=='none'&&<div style={{flex:'1 1 140px'}}><label style={{fontSize:12,fontWeight:600}}>Ende (optional)</label><input type="date" style={inp} value={f.until_date} onChange={e=>set('until_date',e.target.value)}/></div>}
+          </div>
+          <div>
+            <label style={{fontSize:12,fontWeight:600}}>Sichtbar für (leer = alle)</label>
+            <div style={{display:'flex',flexWrap:'wrap',gap:6,marginTop:4}}>
+              {CAL_VIS_ROLES.map(r=><button key={r} type="button" onClick={()=>toggleRole(r)} className="btn btn-sm" style={f.visible_roles.includes(r)?{background:'#0F5661',color:'#fff'}:{}}>{ROLE_LABELS[r]||r}</button>)}
+            </div>
+          </div>
+        </div>
+        <div style={{display:'flex',gap:8,marginTop:16}}>
+          <button className="btn btn-sm" style={{background:'#0F5661',color:'#fff'}} disabled={busy} onClick={save}>{ev?'Speichern':'Anlegen'}</button>
+          {ev&&!isAuto&&<button className="btn btn-sm" style={{color:'#dc2626'}} onClick={()=>onDelete&&onDelete(ev)}>Löschen</button>}
+          <button className="btn btn-sm" style={{marginLeft:'auto'}} onClick={onClose}>Abbrechen</button>
+        </div>
+      </div>
+    </div>
+  );
+}
 // ── Check-in: IST-Ebene zum Schichtplan (Schnitt 2). Eigener Bereich, heutiger Tag,
 //    nach Projekt/Skill; Ein-Klick "Da", Abweichung als zweiter Schritt; Stand oben.
 //    Plan bleibt in der Zelle, Ist in shift_checkins. Schichtabbruch (cell.canceled) nur read-only.
@@ -31990,6 +32301,7 @@ function App(){
     {sec:'Übersicht', items:[
       {key:'start',label:'Start',icon:'👋'},
       {key:'daily_tasks',label:'Tagesaufgaben',icon:'✅'},
+      {key:'calendar',label:'Kalender',icon:'📆'},
       {key:'cockpit',label:'Cockpit',icon:'⊞'},
       {key:'datacheck',label:'Daten-Checks',icon:'🩺'},
       {key:'productivity',label:'Produktivität',icon:'📊'},
@@ -32068,6 +32380,7 @@ function App(){
       'performance':'<path fill-rule="evenodd" d="M5.166 2.621v.858c-1.035.148-2.059.33-3.071.543a.75.75 0 0 0-.584.859 6.753 6.753 0 0 0 6.138 5.6 6.73 6.73 0 0 0 2.743 1.346A6.707 6.707 0 0 1 9.279 15H8.54c-1.036 0-1.875.84-1.875 1.875V19.5h-.75a2.25 2.25 0 0 0-2.25 2.25c0 .414.336.75.75.75h15a.75.75 0 0 0 .75-.75 2.25 2.25 0 0 0-2.25-2.25h-.75v-2.625c0-1.036-.84-1.875-1.875-1.875h-.739a6.706 6.706 0 0 1-1.112-3.173 6.73 6.73 0 0 0 2.743-1.347 6.753 6.753 0 0 0 6.139-5.6.75.75 0 0 0-.585-.858 47.077 47.077 0 0 0-3.07-.543V2.62a.75.75 0 0 0-.658-.744 49.22 49.22 0 0 0-6.093-.377c-2.063 0-4.096.128-6.093.377a.75.75 0 0 0-.657.744Zm0 2.629c0 1.196.312 2.32.857 3.294A5.266 5.266 0 0 1 3.16 5.337a45.6 45.6 0 0 1 2.006-.343v.256Zm13.5 0v-.256c.674.1 1.343.214 2.006.343a5.265 5.265 0 0 1-2.863 3.207 6.72 6.72 0 0 0 .857-3.294Z" clip-rule="evenodd"/>',
       'shiftplan':'<path fill-rule="evenodd" d="M6.75 2.25A.75.75 0 0 1 7.5 3v1.5h9V3a.75.75 0 0 1 1.5 0v1.5h.75a3 3 0 0 1 3 3v11.25a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3V7.5a3 3 0 0 1 3-3H6V3a.75.75 0 0 1 .75-.75Zm13.5 9a1.5 1.5 0 0 0-1.5-1.5H5.25a1.5 1.5 0 0 0-1.5 1.5v7.5a1.5 1.5 0 0 0 1.5 1.5h13.5a1.5 1.5 0 0 0 1.5-1.5v-7.5Z" clip-rule="evenodd"/><path d="M8 14.25a.75.75 0 0 1 .75-.75h6.5a.75.75 0 0 1 0 1.5h-6.5a.75.75 0 0 1-.75-.75Z"/>',
       'checkin':'<path fill-rule="evenodd" d="M2.25 12c0-5.385 4.365-9.75 9.75-9.75s9.75 4.365 9.75 9.75-4.365 9.75-9.75 9.75S2.25 17.385 2.25 12Zm13.36-1.814a.75.75 0 1 0-1.22-.872l-3.236 4.53L9.53 12.22a.75.75 0 0 0-1.06 1.06l2.25 2.25a.75.75 0 0 0 1.14-.094l3.75-5.25Z" clip-rule="evenodd"/>',
+      'calendar':'<path fill-rule="evenodd" d="M6.75 2.25A.75.75 0 0 1 7.5 3v1.5h9V3a.75.75 0 0 1 1.5 0v1.5h.75a3 3 0 0 1 3 3v11.25a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3V7.5a3 3 0 0 1 3-3H6V3a.75.75 0 0 1 .75-.75Zm13.5 9a1.5 1.5 0 0 0-1.5-1.5H5.25a1.5 1.5 0 0 0-1.5 1.5v7.5a1.5 1.5 0 0 0 1.5 1.5h13.5a1.5 1.5 0 0 0 1.5-1.5v-7.5Z" clip-rule="evenodd"/>',
       'workforce':'<path d="M12.75 12.75a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM7.5 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM8.25 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM9.75 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM10.5 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM12 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM12.75 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM14.25 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM15 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM16.5 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM15 12.75a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM16.5 13.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Z"/> <path fill-rule="evenodd" d="M6.75 2.25A.75.75 0 0 1 7.5 3v1.5h9V3A.75.75 0 0 1 18 3v1.5h.75a3 3 0 0 1 3 3v11.25a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3V7.5a3 3 0 0 1 3-3H6V3a.75.75 0 0 1 .75-.75Zm13.5 9a1.5 1.5 0 0 0-1.5-1.5H5.25a1.5 1.5 0 0 0-1.5 1.5v7.5a1.5 1.5 0 0 0 1.5 1.5h13.5a1.5 1.5 0 0 0 1.5-1.5v-7.5Z" clip-rule="evenodd"/>',
       'employees':'<path d="M4.5 6.375a4.125 4.125 0 1 1 8.25 0 4.125 4.125 0 0 1-8.25 0ZM14.25 8.625a3.375 3.375 0 1 1 6.75 0 3.375 3.375 0 0 1-6.75 0ZM1.5 19.125a7.125 7.125 0 0 1 14.25 0v.003l-.001.119a.75.75 0 0 1-.363.63 13.067 13.067 0 0 1-6.761 1.873c-2.472 0-4.786-.684-6.76-1.873a.75.75 0 0 1-.364-.63l-.001-.122ZM17.25 19.128l-.001.144a2.25 2.25 0 0 1-.233.96 10.088 10.088 0 0 0 5.06-1.01.75.75 0 0 0 .42-.643 4.875 4.875 0 0 0-6.957-4.611 8.586 8.586 0 0 1 1.71 5.157v.003Z"/>',
       'feedback':'<path fill-rule="evenodd" d="M4.848 2.771A49.144 49.144 0 0 1 12 2.25c2.43 0 4.817.178 7.152.52 1.978.292 3.348 2.024 3.348 3.97v6.02c0 1.946-1.37 3.678-3.348 3.97a48.9 48.9 0 0 1-3.476.383.39.39 0 0 0-.297.17l-2.755 4.133a.75.75 0 0 1-1.248 0l-2.755-4.133a.39.39 0 0 0-.297-.17 48.9 48.9 0 0 1-3.476-.384c-1.978-.29-3.348-2.024-3.348-3.97V6.741c0-1.946 1.37-3.68 3.348-3.97Z" clip-rule="evenodd"/>',
@@ -32238,6 +32551,7 @@ function App(){
 
           {view==='start'&&<WelcomePage firstName={firstName}/>}
           {view==='daily_tasks'&&<DailyTasksView employees={employees} projects={projects} plans={plans} team={team} onNavigate={dqNavigate}/>}
+          {view==='calendar'&&<CalendarView team={team} projects={projects} showToast={showToast}/>}
           {view==='cockpit'&&<Cockpit employees={employees} projects={projects} team={team} plans={plans} forecast={forecast} onAbsence={e=>setAbsenceModal(e)} onNavigate={dqNavigate} isMobileW={isMobileW} setEmployees={setEmployees} showToast={showToast}/>}
           {view==='datacheck'&&<DataQualityPanel employees={employees} projects={projects} plans={plans} onNavigate={dqNavigate}/>}
           {view==='wissen_system'&&<SystemManualView hasAccess={hasAccess}/>}
