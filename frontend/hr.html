@@ -11347,7 +11347,7 @@ function ShiftPauseModal({emp, ds, cell, onSave, onClose}){
     </div>
   );
 }
-function SimpleShiftView({employees, projects, showToast}){
+function SimpleShiftView({employees, projects, team, showToast}){
   const isoD=d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
   const addDays=(d,n)=>{const x=new Date(d);x.setDate(x.getDate()+n);return x;};
   const mondayOf=d=>{const x=new Date(d);const dow=(x.getDay()+6)%7;x.setDate(x.getDate()-dow);x.setHours(0,0,0,0);return x;};
@@ -11366,6 +11366,13 @@ function SimpleShiftView({employees, projects, showToast}){
   const [ckMap,setCkMap]=useState({});   // Check-in-Rückmeldung (read-only Indikator): 'empId|ds' -> {status,...}
   const [defShift,setDefShift]=useState({});
   const [pop,setPop]=useState(null); // {empId, ds}
+  const [ckPop,setCkPop]=useState(null); // {empId, ds} — Check-in-Menü (nur heute)
+  // Check-in im Plan bedienbar (nur heutiger Tag). Gleicher shift_checkins-Eintrag wie die Check-in-Ansicht.
+  const ckToday=isoD(new Date());
+  const ckRoles=(team&&team.role_keys)||[];
+  const canCheckin=ckRoles.some(r=>r==='management'||r==='hr'||r==='teamlead'||r==='projektleiter');
+  const ckName=(team&&(team.full_name||team.name))||'HR';
+  const nowHM=()=>{const d=new Date();return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');};
   const [chartMode,setChartMode]=useState('table'); // table | week | day
   const [daySel,setDaySel]=useState('');            // ds für die Tagesansicht
   // Mobile-Tagesansicht: gewählter Wochentag-Index 0..6 (Mo..So). Default heute (in Mo-Start-Woche),
@@ -11398,7 +11405,7 @@ function SimpleShiftView({employees, projects, showToast}){
     (async()=>{
       const c=await shiftLoadCells(projId,effSkill,isoD(days[0]),isoD(days[6]));
       if(alive) setCells(c);
-      // Check-in-Rückmeldung der Woche (read-only): nur zur Anzeige im Plan, nicht bedienbar.
+      // Check-in-Rückmeldung der Woche: Anzeige als Unterrand; für HEUTE zusätzlich bedienbar (gleicher Eintrag).
       try{ const {data:ck}=await sb.from('shift_checkins').select('employee_id,work_date,status,arrival,departure')
              .eq('project_id',projId).gte('work_date',isoD(days[0])).lte('work_date',isoD(days[6]));
         if(alive){ const m={}; (ck||[]).forEach(r=>{ m[r.employee_id+'|'+(''+r.work_date).slice(0,10)]=r; }); setCkMap(m); }
@@ -11550,6 +11557,21 @@ function SimpleShiftView({employees, projects, showToast}){
     showToast&&showToast(todo.length+' Schichten aus Vorwoche übernommen','success');
   }
 
+  // Check-in aus dem Plan heraus (nur heute) — schreibt denselben shift_checkins-Eintrag wie die Check-in-Ansicht.
+  async function saveCheckin(emp,ds,patch){
+    const rec={ project_id:projId, skill:effSkill||'all', employee_id:emp.id, work_date:ds, source:'manual',
+      confirmed_by:uidRef.current||null, confirmed_by_name:ckName, confirmed_at:new Date().toISOString(), updated_at:new Date().toISOString(),
+      arrival:null, departure:null, reason:null, ...patch };
+    const {error}=await sb.from('shift_checkins').upsert(rec,{onConflict:'project_id,skill,employee_id,work_date,source'});
+    if(error){ showToast&&showToast('Check-in fehlgeschlagen: '+(error.message||''),'error'); return; }
+    setCkMap(m=>({...m,[emp.id+'|'+ds]:rec})); setCkPop(null);
+  }
+  async function clearCheckin(emp,ds){
+    const {error}=await sb.from('shift_checkins').delete().eq('project_id',projId).eq('skill',effSkill||'all').eq('employee_id',emp.id).eq('work_date',ds).eq('source','manual');
+    if(error){ showToast&&showToast('Fehler: '+(error.message||''),'error'); return; }
+    setCkMap(m=>{const n={...m};delete n[emp.id+'|'+ds];return n;}); setCkPop(null);
+  }
+
   // Schulungs-MA im Plan sichtbar absetzen (🎓), damit erkennbar ist, wer noch in Schulung ist.
   const trainingTag=emp=>emp&&emp.status==='training'?<span title="In Schulung" style={{marginLeft:6,fontSize:9,fontWeight:700,color:'var(--amber)',background:'var(--amber-bg)',border:'1px solid var(--amber)',borderRadius:4,padding:'0 4px',whiteSpace:'nowrap',verticalAlign:'1px'}}>🎓 Schulung</span>:null;
   const renderRow=emp=>(
@@ -11566,15 +11588,36 @@ function SimpleShiftView({employees, projects, showToast}){
         const ck=ckMap[emp.id+'|'+ds];
         const ckColor=ck?(ck.status==='present'?'#059669':(ck.status==='sick'||ck.status==='no_show')?'#dc2626':'#d97706'):null;
         const ckTitle=ck?('Check-in: '+({present:'da',late:'verspätet',early:'früher da',sick:'krank',no_show:'kommt nicht mehr'}[ck.status]||ck.status)+(ck.arrival?(' '+String(ck.arrival).slice(0,5)):'')):undefined;
+        const isTodayCol=ds===ckToday; const ckOpen=ckPop&&ckPop.empId===emp.id&&ckPop.ds===ds;
+        const canCkHere=isTodayCol&&cell&&!cell.canceled&&canCheckin;
         return (
-          <td key={i} className={cls} style={ckColor?{boxShadow:'inset 0 -3px 0 '+ckColor}:undefined} title={ckTitle}>
-            <div className="sp-cell-in" onClick={()=>{ if(!dayOk&&!cell){ showToast&&showToast(shiftLockReason(emp,ds)||'Nicht verfügbar','info'); return; } setPop(open?null:{empId:emp.id,ds}); }}>
+          <td key={i} className={cls} style={{position:'relative',...(ckColor?{boxShadow:'inset 0 -3px 0 '+ckColor}:{})}} title={ckTitle}>
+            <div className="sp-cell-in" onClick={()=>{ if(ckOpen)setCkPop(null); if(!dayOk&&!cell){ showToast&&showToast(shiftLockReason(emp,ds)||'Nicht verfügbar','info'); return; } setPop(open?null:{empId:emp.id,ds}); }}>
               {cell? <span className="sp-chip" style={cell.canceled?{background:'#fee2e2',color:'#dc2626',textDecoration:'line-through'}:undefined}
                        title={cell.canceled?('Abgebrochen: '+(ABORT_REASON_LBL[cell.cancel_reason]||cell.cancel_reason)+(cell.net?(' · '+cell.net+'h gezählt'):'')):(cell.pause_duration?('Pause '+cell.pause_duration+'h · Netto '+(cell.net!=null?cell.net:'')+'h'):'')}>
                        {cell.canceled?'⛔ ':''}{cell.label||cell.shift}{(cell.pause_duration&&!cell.canceled)?' ☕':''}</span>
                 : (!dayOk? <span className="sp-x" title={shiftLockReason(emp,ds)||'Nicht verfügbar'}>✕</span>
                          : <span className="sp-add">＋</span>)}
             </div>
+            {canCkHere&&(
+              <div onClick={e=>{e.stopPropagation(); setPop(null); setCkPop(ckOpen?null:{empId:emp.id,ds});}}
+                title={ck?ckTitle:'Check-in bestätigen'}
+                style={{position:'absolute',top:2,left:2,width:19,height:19,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',fontSize:11,fontWeight:800,cursor:'pointer',zIndex:3,
+                  background:ck?ckColor:'#fff',color:ck?'#fff':'#94a3b8',border:ck?'none':'1.5px dashed #cbd5e1'}}>
+                {ck?(ck.status==='present'?'✓':ck.status==='sick'?'🤒':ck.status==='no_show'?'✕':'⏱'):'✓'}
+              </div>
+            )}
+            {canCkHere&&ckOpen&&(
+              <div onClick={e=>e.stopPropagation()} style={{position:'absolute',top:24,left:2,zIndex:30,background:'#fff',border:'1px solid var(--border)',borderRadius:10,boxShadow:'0 8px 24px rgba(0,0,0,.16)',padding:8,minWidth:160,textAlign:'left'}}>
+                <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',marginBottom:6}}>Check-in · jetzt {nowHM()}</div>
+                <button className="btn btn-sm" style={{width:'100%',marginBottom:4,background:'#059669',color:'#fff',fontWeight:700}} onClick={()=>saveCheckin(emp,ds,{status:'present',arrival:nowHM()})}>✓ Da ({nowHM()})</button>
+                <button className="btn btn-sm" style={{width:'100%',marginBottom:4}} onClick={()=>saveCheckin(emp,ds,{status:'late',arrival:nowHM()})}>⏱ Verspätet ({nowHM()})</button>
+                <button className="btn btn-sm" style={{width:'100%',marginBottom:4}} onClick={()=>saveCheckin(emp,ds,{status:'sick'})}>🤒 Krank</button>
+                <button className="btn btn-sm" style={{width:'100%',marginBottom:4}} onClick={()=>saveCheckin(emp,ds,{status:'no_show'})}>✕ Kommt nicht mehr</button>
+                {ck&&<button className="btn btn-sm" style={{width:'100%',marginBottom:4,color:'#64748b'}} onClick={()=>clearCheckin(emp,ds)}>Zurücksetzen</button>}
+                <button className="btn btn-sm" style={{width:'100%'}} onClick={()=>setCkPop(null)}>Schließen</button>
+              </div>
+            )}
             {open&&<ShiftCellPopover options={optionsFor(emp,ds)} defVal={defShift[emp.id]} filled={!!cell} cell={cell}
                      openCtx={openDayCtx(projId,effSkill,ds)} onEditHours={()=>{setPop(null);setOpenHoursModal(true);}}
                      allowSplit={emp.work_split===true||emp.work_split==='yes'}
@@ -32629,7 +32672,7 @@ function App(){
           {view==='mein-plan'&&isEmpUser&&myEmployee&&(
             <MeinPlanView employee={myEmployee} employees={employees} projects={projects}/>
           )}
-          {view==='shiftplan'&&<SimpleShiftView employees={employees} projects={projects} showToast={showToast}/>}
+          {view==='shiftplan'&&<SimpleShiftView employees={employees} projects={projects} team={team} showToast={showToast}/>}
           {view==='checkin'&&<CheckinView employees={employees} projects={projects} team={team} showToast={showToast}/>}
           {view==='workforce'&&(<div>
           {modal&&typeof modal==='object'&&<EmpHoursWidget emp={modal}/>}
