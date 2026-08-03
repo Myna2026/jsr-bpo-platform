@@ -58,6 +58,7 @@ else
   run_check "macheck.js   (mitarbeiter.html)"  node    "$CHECKS/macheck.js"
   run_check "fieldcheck.py (Felder/Migration)" python3 "$CHECKS/fieldcheck.py"
   run_check "eslintcheck.js (hr.html no-undef)" node    "$CHECKS/eslintcheck.js"
+  run_check "sharedcheck.js (shared/jsr-calc.js)" node  "$CHECKS/sharedcheck.js"
   echo "  → alle Checks bestanden."
   echo ""
 fi
@@ -110,6 +111,10 @@ rsync -az --progress "$LOCAL_DIR/root-login.html" "$SERVER:$REMOTE_BASE/root/log
 echo "→ Stempeluhr..."
 rsync -az --progress "$LOCAL_DIR/stempel.html" "$SERVER:$REMOTE_BASE/hr/stempel.html"
 rsync -az --progress "$LOCAL_DIR/stempel.html" "$SERVER:$REMOTE_BASE/root/stempel.html"
+
+echo "→ Geteilte Rechenkerne (shared/jsr-calc.js → beide Portale)..."
+rsync -az --progress "$LOCAL_DIR/shared/" "$SERVER:$REMOTE_BASE/hr/shared/"
+rsync -az --progress "$LOCAL_DIR/shared/" "$SERVER:$REMOTE_BASE/mitarbeiter/shared/"
 
 echo "→ Assets (Logo/Favicon)..."
 rsync -az --progress "$LOCAL_DIR/assets/" "$SERVER:$REMOTE_BASE/hr/assets/"

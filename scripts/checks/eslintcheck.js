@@ -108,6 +108,7 @@ const config = {
       ...globals.browser,
       React: "readonly", ReactDOM: "readonly", XLSX: "readonly",
       supabase: "readonly", Babel: "readonly",
+      JSRCalc: "readonly",   // geteilte Rechenkerne aus shared/jsr-calc.js (externes Script)
     },
   },
   plugins: { react },

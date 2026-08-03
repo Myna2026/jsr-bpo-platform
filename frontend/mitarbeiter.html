@@ -543,6 +543,7 @@ td.muted{color:var(--muted);}
 </style>
 <!-- Supabase JS v2 (UMD → window.supabase.createClient) -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="shared/jsr-calc.js?v=__BUILD_ID__"></script>
 </head>
 <body>
 
@@ -1670,8 +1671,8 @@ function showCfgErrorBanner(){
     '</div>');
 }
 function hideCfgErrorBanner(){ var el=document.getElementById('cfgErrorBanner'); if(el&&el.parentNode) el.parentNode.removeChild(el); }
-// Feiertage: flache Liste der Datums-Strings aus der zentralen Config (app_config).
-function getAdminHolidays(){ try{ var r=APP_CFG.holidays; if(r) return Object.values(r).reduce(function(a,v){return a.concat(v);},[]).map(function(h){return h.date;}); }catch(e){} return []; }
+// Feiertage: flache Liste der Datums-Strings aus der zentralen Config (app_config) — geteilter Helfer.
+function getAdminHolidays(){ return JSRCalc.holidayDates(APP_CFG.holidays); }
 
 function getPlan(empId,yr,mo){
   // Schritt 2: Schichten kommen aus der DB (shift_assignments, self-read via RLS).
@@ -1696,31 +1697,12 @@ function getPlan(empId,yr,mo){
 // Urlaubsanspruch — DIESELBE Regel wie hr.html calcVacationEntitlement (1. Jahr anteilig ab Monat
 // nach Eintritt, Folgejahr voll, Austrittsjahr anteilig, contract.start→hire_date, halbe Tage).
 function vacQuotaFor(emp){
-  // ⚠ ZWEITE KOPIE dieser Regel in frontend/hr.html → calcVacationEntitlement (ca. Zeile 1685).
-  //   Bewusste Duplikation ueber Dateigrenzen (zwei getrennte Apps). Aenderungen an der Anspruchsregel
-  //   IMMER in BEIDEN Dateien vornehmen, sonst laufen HR- und MA-Portal auseinander.
+  // Anspruch aus der GETEILTEN Formel JSRCalc.vacationQuota (shared/jsr-calc.js) — dieselbe wie in hr.html.
+  // Config zentral aus app_config (APP_CFG.vacation, geladen in loadAppConfigForMA).
   try{
-    var startDate=(emp&&emp.contract&&emp.contract.start)||(emp&&emp.contract_start)||(emp&&emp.hire_date)||'';
-    if(!startDate) return 0;
-    var cfg=APP_CFG.vacation||{year1_days:18,year2_days:20,seniority:[]};   // zentrale Config (app_config), nicht mehr localStorage
-    var y1=Number(cfg.year1_days)||18, y2=Number(cfg.year2_days)||20;
-    var start=new Date(startDate), startYear=start.getFullYear(), startMonth=start.getMonth()+1;
-    var refYear=new Date().getFullYear();
-    var termStr=(emp.termination_date||emp.employment_end||emp.terminated_at||'');
-    var term=termStr?new Date(termStr):null, termYear=term?term.getFullYear():null, termMonth=term?term.getMonth()+1:12;
-    if(refYear<startYear) return 0;
-    if(termYear!=null && refYear>termYear) return 0;
-    var isFirstYear=(refYear===startYear);
-    var firstMonth=isFirstYear?(startMonth+1):1;
-    var lastMonth=(termYear===refYear)?termMonth:12;
-    var months=Math.max(0,lastMonth-firstMonth+1);
-    var baseDays=isFirstYear?y1:y2;
-    if(!isFirstYear){
-      var yos=refYear-startYear;
-      (cfg.seniority||[]).slice().sort(function(a,b){return b.years_from-a.years_from;}).some(function(s){ if(yos>=(Number(s.years_from)||0)){ baseDays+=(Number(s.extra_days)||0); return true; } return false; });
-    }
-    var prorate=(isFirstYear||termYear===refYear)?(months/12):1;
-    return Math.round(baseDays*prorate*2)/2;
+    var cfg=APP_CFG.vacation||{year1_days:18,year2_days:20,seniority:[]};
+    var term=(emp&&(emp.termination_date||emp.employment_end||emp.terminated_at))||'';
+    return JSRCalc.vacationQuota(emp, cfg, undefined, term).quota;
   }catch(e){ return 0; }
 }
 function calcVacation(){

@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"><!DOCTYPE html><html lang="de"><head><meta charset<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet"><link rel="icon" type="image/svg+xml" href="/assets/tive360-mark.svg"><title>TIVE 360°</title><script>window.TIVE_BUILD='__BUILD_ID__';try{console.info('%cTIVE build '+window.TIVE_BUILD,'color:#0F5661;font-weight:700');}catch(e){}</script><script src="https://unpkg.com/react@18/umd/react.development.js"></script><script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script><script src="https://unpkg.com/@babel/standalone/babel.min.js"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script><script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script><style>
+<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"><!DOCTYPE html><html lang="de"><head><meta charset<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet"><link rel="icon" type="image/svg+xml" href="/assets/tive360-mark.svg"><title>TIVE 360°</title><script>window.TIVE_BUILD='__BUILD_ID__';try{console.info('%cTIVE build '+window.TIVE_BUILD,'color:#0F5661;font-weight:700');}catch(e){}</script><script src="https://unpkg.com/react@18/umd/react.development.js"></script><script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script><script src="https://unpkg.com/@babel/standalone/babel.min.js"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script><script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script><script src="shared/jsr-calc.js?v=__BUILD_ID__"></script><style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
   --bg:#F5F6F8;--surface:#FFFFFF;--surface-2:#F1F3F5;--card:#ffffff;
@@ -1502,53 +1502,23 @@ const REFERRAL_CONFIG_DEFAULT = {
 // Calculates vacation days based on contract start, seniority, admin config
 // ══════════════════════════════════════════════════════════════════════════════
 function calcVacationEntitlement(emp, forMonth){
-  // ⚠ ZWEITE KOPIE dieser Regel in frontend/mitarbeiter.html → vacQuotaFor (ca. Zeile 1603).
-  //   Bewusste Duplikation ueber Dateigrenzen (zwei getrennte Apps). Aenderungen an der Anspruchsregel
-  //   IMMER in BEIDEN Dateien vornehmen, sonst laufen HR- und MA-Portal auseinander.
-  // EINE WAHRHEIT fuer den Urlaubsanspruch (Payslip, AbsenceModal, MA-Portal-Quota nutzen dieselbe Regel):
-  //   1. Jahr: year1_days anteilig AB DEM MONAT NACH EINTRITT (Eintritt Apr → Mai–Dez = 8/12).
-  //   Ab Folgejahr: year2_days voll (+ seniority). Austrittsjahr: anteilig bis EINSCHL. Austrittsmonat.
-  //   Datumsgrundlage: contract.start, Fallback hire_date. Rundung auf halbe Tage.
+  // Anspruch (quota) kommt aus der GETEILTEN Formel JSRCalc.vacationQuota (frontend/shared/jsr-calc.js),
+  // dieselbe wie im MA-Portal (vacQuotaFor) — keine Doppelpflege mehr. Verbrauch/Rest (used/remaining)
+  // bleibt hier lokal (Portale rechnen den Verbrauch unterschiedlich, eigener Fall).
+  // Config weiterhin aus localStorage (HR ist der Schreiber; saveConfigToDB spiegelt sie nach app_config,
+  // von wo das MA-Portal liest).
   const startDate = (emp&&emp.contract&&emp.contract.start) || (emp&&emp.contract_start) || (emp&&emp.hire_date) || '';
   if(!emp || !startDate) return {quota:0,used:0,remaining:0,note:'Kein Startdatum'};
 
   const cfg = JSON.parse(localStorage.getItem('jsr_vacation_cfg')||'null')||{year1_days:18,year2_days:20,seniority:[]};
-  const y1 = Number(cfg.year1_days)||18, y2 = Number(cfg.year2_days)||20;
-  const start = new Date(startDate);
-  const startYear = start.getFullYear(), startMonth = start.getMonth()+1; // 1..12
-  const refDate = forMonth ? new Date(forMonth+'-01') : new Date();
-  const refYear = refDate.getFullYear();
-
   const termStr = (emp.termination_date||emp.employment_end||emp.terminated_at||'');
-  const term = termStr ? new Date(termStr) : null;
-  const termYear = term ? term.getFullYear() : null;
-  const termMonth = term ? term.getMonth()+1 : 12;
+  const q = JSRCalc.vacationQuota(emp, cfg, forMonth, termStr);
 
-  if(refYear < startYear) return {quota:0,used:0,remaining:0,note:'Vor Eintritt'};
-  if(termYear!=null && refYear > termYear) return {quota:0,used:0,remaining:0,note:'Nach Austritt'};
-
-  const isFirstYear = (refYear===startYear);
-  const firstMonth = isFirstYear ? (startMonth+1) : 1;              // ab Monat NACH Eintritt
-  const lastMonth  = (termYear===refYear) ? termMonth : 12;         // bis einschl. Austrittsmonat
-  const months = Math.max(0, lastMonth - firstMonth + 1);
-
-  let baseDays = isFirstYear ? y1 : y2;
-  if(!isFirstYear){
-    const yos = refYear - startYear;
-    (cfg.seniority||[]).slice().sort((a,b)=>b.years_from-a.years_from).some(s=>{ if(yos>=(Number(s.years_from)||0)){ baseDays += (Number(s.extra_days)||0); return true; } return false; });
-  }
-
-  const prorate = (isFirstYear || termYear===refYear) ? (months/12) : 1;
-  const quota = Math.round(baseDays * prorate * 2)/2; // halbe Tage
-
+  const refYear = (forMonth ? new Date(forMonth+'-01') : new Date()).getFullYear();
   let used = 0;
   try{ used = (emp.absences||[]).filter(a=>a && a.type==='vacation').reduce((s,a)=>s+absDaysInYear(a, refYear), 0); }catch(e){}   // beide Formate (Einzeltag + Zeitraum)
-  const remaining = Math.max(0, Math.round((quota - used)*2)/2);
-
-  const note = isFirstYear ? ('1. Jahr: '+y1+' Tage anteilig '+months+'/12 = '+quota+' Tage')
-             : (termYear===refYear ? ('Austrittsjahr: anteilig '+months+'/12 = '+quota+' Tage')
-             : ('Ab Folgejahr: '+baseDays+' Tage'));
-  return {quota, used, remaining, baseDays, months, note};
+  const remaining = Math.max(0, Math.round((q.quota - used)*2)/2);
+  return {quota:q.quota, used, remaining, baseDays:q.baseDays, months:q.months, note:q.note};
 }
 </script><script type="text/babel">// ══════════════════════════════════════════════════════════════════════════════
 // PERFORMANCE ENGINE
