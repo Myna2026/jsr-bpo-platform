@@ -7240,6 +7240,9 @@ function DailyTasksView({employees, projects, onNavigate, team}){
   const [fbOpenCount,setFbOpenCount] = useState(null);// heute offene Feedbackgespräche
   const [checkinOpen,setCheckinOpen] = useState(null);// heute eingeteilt aber noch nicht bestätigt
   const [busy,setBusy] = useState('');
+  const isManager=roleKeys.includes('management'); // sieht die Zusammenschau (intern + extern)
+  const [ovOpen,setOvOpen] = useState(null);          // aufgeklappte Rolle in der Zusammenschau
+  const [staff,setStaff]   = useState(null);          // {management,hr,finance} besetzt? null=lädt
 
   const loadDone = async()=>{
     try{ const {data,error}=await sb.from('daily_tasks_done').select('task_key,done_by_name,done_at').eq('date',today);
@@ -7263,6 +7266,15 @@ function DailyTasksView({employees, projects, onNavigate, team}){
       const {count:doneN}=await sb.from('shift_checkins').select('employee_id',{count:'exact',head:true}).eq('work_date',today);
       if(alive) setCheckinOpen(Math.max(0,(planned||0)-(doneN||0)));
     }catch(e){} })();
+    // Rollen-Besetzung für die Zusammenschau: welche Rolle hat mind. einen aktiven app_user?
+    if(roleKeys.includes('management')){
+      (async()=>{ try{
+        const {data}=await sb.from('app_users').select('role_keys,active');
+        const s={management:false,hr:false,finance:false};
+        (data||[]).forEach(u=>{ if(u.active!==false)(u.role_keys||[]).forEach(r=>{ if(r in s) s[r]=true; }); });
+        if(alive) setStaff(s);
+      }catch(e){ if(alive) setStaff({management:true,hr:true,finance:true}); } })(); // Fallback: keine falsche „nicht besetzt"-Anzeige
+    }
     return ()=>{ alive=false; try{ sb.removeChannel(chan); }catch(e){} };
   },[]);
 
@@ -7311,6 +7323,16 @@ function DailyTasksView({employees, projects, onNavigate, team}){
   const doneCount=activeTasks.filter(t=>done[t.key]).length;
   const pct=activeTasks.length?Math.round(doneCount/activeTasks.length*100):0;
 
+  // Zusammenschau: je Rolle Zustand aus AKTIVEN Aufgaben + Besetzung. (teamlead bewusst raus — nur Check-in.)
+  const OV_ROLES=[{key:'management',label:'Management',icon:'🎯'},{key:'hr',label:'HR',icon:'👥'},{key:'finance',label:'Finance',icon:'💶'}];
+  const roleAgg=role=>{
+    const ts=ROLE_TASKS.filter(t=>owners(t).includes(role)).filter(windowActive);
+    const doneN=ts.filter(t=>done[t.key]).length;
+    const staffed=staff==null?null:!!staff[role];
+    const state=staffed===false?'unstaffed':ts.length===0?'none':doneN===ts.length?'done':'open';
+    return {tasks:ts,doneN,total:ts.length,staffed,state};
+  };
+
   return (
     <div className="dt-wrap">
       <div style={{textAlign:'center',marginBottom:8}}>
@@ -7319,13 +7341,7 @@ function DailyTasksView({employees, projects, onNavigate, team}){
         <div className="welcome-hero" style={{fontSize:32}}>Tagesaufgaben</div>
         <p className="welcome-sub" style={{margin:'12px auto 0'}}>Deine Aufgaben für deine Rolle. Wer eine Aufgabe erledigt, hakt sie ab, und das Team sieht es. Die Reihenfolge ist nur ein Vorschlag; du kannst dir Punkte in beliebiger Reihenfolge greifen.</p>
       </div>
-      {TASKS.length===0?(
-        <div className="dt-alldone" style={{background:'#f8fafc',borderColor:'#e2e8f0'}}>
-          <div style={{fontSize:28,lineHeight:1}}>👀</div>
-          <div style={{fontSize:16,fontWeight:800,color:'var(--text)',marginTop:6}}>{isExt?'Keine eigenen Aufgaben':'Für deine Rolle sind keine Tagesaufgaben hinterlegt'}</div>
-          <div style={{fontSize:13,color:'var(--muted)',marginTop:2}}>{isExt?'Als Manager extern siehst du keine eigene Liste. Die Zusammenschau aller Rollen folgt in Kürze.':'Sobald deine Rolle Aufgaben bekommt, erscheinen sie hier.'}</div>
-        </div>
-      ):(<>
+      {TASKS.length>0&&(<>
       <div style={{fontSize:13,fontWeight:700,color:'var(--text)',marginTop:10}}>{doneCount} von {activeTasks.length} erledigt</div>
       <div className="dt-progress-wrap"><div className="dt-progress-bar" style={{width:pct+'%'}}/></div>
       {activeTasks.length>0&&doneCount===activeTasks.length&&(
@@ -7357,6 +7373,64 @@ function DailyTasksView({employees, projects, onNavigate, team}){
         </div>
       ); })}
       </>)}
+
+      {TASKS.length===0&&!isManager&&(
+        <div className="dt-alldone" style={{background:'#f8fafc',borderColor:'#e2e8f0'}}>
+          <div style={{fontSize:28,lineHeight:1}}>👀</div>
+          <div style={{fontSize:16,fontWeight:800,color:'var(--text)',marginTop:6}}>Für deine Rolle sind keine Tagesaufgaben hinterlegt</div>
+          <div style={{fontSize:13,color:'var(--muted)',marginTop:2}}>Sobald deine Rolle Aufgaben bekommt, erscheinen sie hier.</div>
+        </div>
+      )}
+
+      {isManager&&(
+        <div style={{marginTop:TASKS.length>0?22:8}}>
+          {TASKS.length===0&&<p className="welcome-sub" style={{margin:'0 auto 10px',textAlign:'center'}}>Als Manager extern hast du keine eigene Liste. Hier der Stand aller Rollen für heute.</p>}
+          <div style={{display:'flex',alignItems:'baseline',justifyContent:'space-between',gap:8,marginBottom:10,flexWrap:'wrap'}}>
+            <div style={{fontSize:15,fontWeight:800,color:'var(--text)'}}>Zusammenschau aller Rollen</div>
+            <div style={{fontSize:11,color:'var(--muted)'}}>Grün = erledigt · Gelb = offen · Grau = keine Aufgaben oder nicht besetzt</div>
+          </div>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:10}}>
+            {OV_ROLES.map(r=>{ const a=roleAgg(r.key);
+              const col=a.state==='done'?{fg:'#15803d',bg:'#f0fdf4',bd:'#bbf7d0'}:a.state==='open'?{fg:'#b45309',bg:'#fffbeb',bd:'#fde68a'}:{fg:'#64748b',bg:'#f8fafc',bd:'#e2e8f0'};
+              const clickable=a.total>0;
+              return (
+                <button key={r.key} onClick={clickable?()=>setOvOpen(o=>o===r.key?null:r.key):undefined}
+                  style={{textAlign:'left',border:'1px solid '+col.bd,background:col.bg,borderRadius:12,padding:'12px 14px',cursor:clickable?'pointer':'default',outline:ovOpen===r.key?'2px solid '+col.fg:'none'}}>
+                  <div style={{display:'flex',alignItems:'center',gap:8}}>
+                    <span style={{fontSize:18}}>{r.icon}</span>
+                    <span style={{fontWeight:800,color:'var(--text)',fontSize:14}}>{r.label}</span>
+                  </div>
+                  <div style={{marginTop:8,fontSize:13,fontWeight:700,color:col.fg}}>
+                    {a.staffed===null?'lädt …':a.state==='unstaffed'?'nicht besetzt':a.state==='none'?'keine Aufgaben':a.state==='done'?'✓ alles erledigt':(a.doneN+' von '+a.total+' erledigt')}
+                  </div>
+                  {a.total>0&&a.staffed!==false&&(
+                    <div style={{marginTop:6,height:6,borderRadius:3,background:'#e5e7eb',overflow:'hidden'}}>
+                      <div style={{height:'100%',width:(a.total?Math.round(a.doneN/a.total*100):0)+'%',background:col.fg}}/>
+                    </div>
+                  )}
+                  {clickable&&<div style={{marginTop:6,fontSize:11,color:'var(--muted)'}}>{ovOpen===r.key?'▲ schließen':'▼ Aufgaben anzeigen'}</div>}
+                </button>
+              );
+            })}
+          </div>
+          {ovOpen&&(()=>{ const a=roleAgg(ovOpen); const meta=OV_ROLES.find(x=>x.key===ovOpen); return (
+            <div style={{marginTop:12}}>
+              <div style={{fontSize:12,fontWeight:700,color:'var(--muted)',margin:'0 0 8px'}}>{meta.icon} {meta.label} · Aufgaben heute — im Notfall hier übernehmen und abhaken</div>
+              {a.tasks.map(t=>{ const d=done[t.key]; const c=countFor(t.count); return (
+                <div key={t.key} className={"dt-card"+(d?" done":"")} style={{marginBottom:8}}>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div className="dt-title">{t.title}</div>
+                    <div className="dt-desc">{t.desc}</div>
+                    {c&&<div className="dt-actions"><span className="dt-pill">{c.n} {c.l}</span></div>}
+                    {d&&<div className="dt-doneby">✓ erledigt von {d.done_by_name||'jemandem'}{d.done_at?', '+fmtTime(d.done_at)+' Uhr':''}</div>}
+                  </div>
+                  <button className="dt-toggle" disabled={busy===t.key} onClick={()=>toggle(t.key)}>{d?'✓ Erledigt':'○ Übernehmen'}</button>
+                </div>
+              ); })}
+            </div>
+          ); })()}
+        </div>
+      )}
     </div>
   );
 }
