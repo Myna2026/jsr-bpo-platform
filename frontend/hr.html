@@ -7183,26 +7183,15 @@ function ForcePasswordChange({info, onDone, onCancel}){
 // ═══ TAGESAUFGABEN: gemeinsame tägliche Datenpflege-Checkliste (daily_tasks_done) ═══
 // Liste top-level, damit DailyTasksView UND das mobile Cockpit („offene Tagesaufgaben")
 // dieselbe Quelle nutzen (eine Wahrheit).
-const DAILY_TASKS = [
-  {key:'bewerber',      view:'kanban',        title:'Bewerber prüfen',            desc:'Neue Lebensläufe erfassen und jeden Bewerber in die richtige Phase schieben: Eingang → Einladung → Vorstellung → Auswahl → Vertrag. So bleibt kein Kandidat liegen.'},
-  {key:'stammdaten',    view:'employees',     title:'Mitarbeiterdaten pflegen',   desc:'Haben sich Stammdaten geändert? Kontakt, Bankverbindung und Adresse aktualisieren, damit Löhne und Kommunikation stimmen.'},
-  {key:'team',          view:'employees',     title:'Team-Zuordnung prüfen',      desc:'Arbeitet noch jeder auf dem richtigen Projekt und Skill? Wechsel eintragen, damit Planung und Auswertungen passen.'},
-  {key:'rollen',        view:'orgchart',      title:'Rollen & Overhead prüfen',   desc:'Hat sich an Positionen oder Verantwortlichkeiten etwas geändert? Beförderungen, neue Teamleiter oder Trainer im Organigramm nachziehen.'},
-  {key:'schulung',      view:'training_plans',title:'Schulungsgruppen aktualisieren', desc:'Teilnehmer, Termine und Produktivstart der Schulungen aktuell halten: wer startet wann, wer ist fertig.'},
-  {key:'kpi',           view:'performance',   title:'KPIs eintragen',             desc:'Die Leistungswerte der Mitarbeiter für den Zeitraum erfassen, damit Auswertungen und Boni auf echten Zahlen beruhen.'},
-  {key:'abwesenheiten', view:'absences',      title:'Abwesenheiten pflegen',      desc:'Urlaub, Krankmeldungen und sonstige Abwesenheiten eintragen. Krankmeldungen (Anruf bis 8:30 Uhr) sollten hier landen.'},
-  {key:'checkin',       view:'checkin',       title:'Check-in: Anwesenheit bestätigen', desc:'Für die heute eingeteilten Mitarbeiter bestätigen, wer da ist. Ein Klick pro Person; Abweichungen (verspätet, früher, krank, kommt nicht mehr) im zweiten Schritt.'},
-  {key:'feedback',      view:'feedback',      title:'Feedbackgespräche führen',   desc:'Die heutigen Kandidaten ziehen und die Gespräche führen: kurz nachfragen, wie es läuft, Noten und Rückmeldungen erfassen.'},
-  {key:'vertraege',     view:'employees',     title:'Vertragsdaten prüfen',       desc:'Vertragsänderungen einpflegen und auf auslaufende Verträge achten, damit Verlängerungen rechtzeitig passieren.'},
-];
 // ── ROLLENBEZOGENES Aufgaben-Datenmodell (Schnitt 1 Foundation) ───────────────────────────────
-// owner = Rolle (role_key). view = interne Zielansicht oder null (z. B. tive-finance extern → nur Häkchen).
+// owner = Rolle (role_key) ODER Array von Rollen (Aufgabe erscheint bei jeder). view = interne Zielansicht oder null.
 // window = Monatswochen, in denen die Aufgabe AKTIV ist (sonst gedämpft/gesperrt); fehlt = immer aktiv.
 // count = Ableitungs-Schlüssel für einen Zähler (Berechnung folgt in Schnitt 2; null = reines Häkchen).
 // Manager EXTERN hat keine eigenen Aufgaben (nur Zusammenschau) → keine 'management_extern'-Einträge;
 // das steuert das Kennzeichen team.mgmt_external, nicht die owner-Rolle.
 const ROLE_TASKS = [
-  // Manager intern (owner 'management')
+  // Manager intern (owner 'management') + Teamleiter (owner-Array): Check-in ist Führungs-, keine HR-Aufgabe.
+  {key:'mgr_checkin',      owner:['management','teamlead'], view:'checkin', title:'Check-in: Anwesenheit bestätigen', desc:'Für die heute eingeteilten Mitarbeiter bestätigen, wer da ist. Ein Klick pro Person; Abweichungen (verspätet, früher, krank, kommt nicht mehr) im zweiten Schritt. Wer es morgens nicht macht, dem fehlt der Ist-Stand für den Tag.', count:'checkin_open'},
   {key:'mgr_cv_abgleich',  owner:'management', view:'cvs',         title:'CV-Abgleich HR',                desc:'Mit HR abgleichen, dass eingegangene CVs erfasst und in der richtigen Phase sind.',                       count:null},
   {key:'mgr_cv_funnel',    owner:'management', view:'kanban',      title:'CV-Funnel prüfen',              desc:'Den Bewerber-Funnel im Blick behalten: bleibt kein Kandidat in einer Phase liegen?',                       count:'cv_funnel'},
   {key:'mgr_kunden',       owner:'management', view:'calendar',    title:'Kundentelefonate & Wochen-Updates', desc:'Die fälligen Kundentermine und Wochen-Updates führen (Termine im Kalender).',                          count:'customer_due'},
@@ -7227,15 +7216,29 @@ const ROLE_TASKS = [
   {key:'fin_lohn',         owner:'finance',    view:'payroll',     title:'Gehaltsabrechnung & Löhne',     desc:'Gehaltsabrechnung erstellen und Löhne vorbereiten.',                                                       window:[1], count:'payroll_open'},
   {key:'fin_bwa',          owner:'finance',    view:null,          title:'Monatsabschluss BWA',           desc:'Monatsabschluss und BWA erstellen (tive-finance).',                                                        window:[1,2], count:null},
 ];
-function DailyTasksView({employees, projects, plans, onNavigate, team}){
+function DailyTasksView({employees, projects, onNavigate, team}){
   const _iso = d => d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
   const today = _iso(new Date());
-  const TASKS = DAILY_TASKS;
+  // Rollen-Partition: jede Rolle sieht NUR ihre eigenen Aufgaben. Manager EXTERN (mgmt_external)
+  // hat keine eigene Liste — nur die Zusammenschau (Schnitt 3). Internes Management sieht seine Liste.
+  const roleKeys=(team&&team.role_keys)||[];
+  const isExt=!!(team&&team.mgmt_external);
+  // teamlead ist (noch) nur wegen Check-in dabei — voller Teamleiter-Aufgabensatz folgt in einem späteren Schnitt.
+  const myRoles=['management','hr','finance','teamlead'].filter(r=>roleKeys.includes(r)&&!(r==='management'&&isExt));
+  const owners=t=>Array.isArray(t.owner)?t.owner:[t.owner];
+  const TASKS=ROLE_TASKS.filter(t=>owners(t).some(o=>myRoles.includes(o)));
+  // Zeitfenster: aktuelle Monatswoche (1..5). Aufgaben mit `window` sind nur in ihren Wochen aktiv, sonst gedämpft + gesperrt.
+  const monthWeek=Math.ceil(new Date().getDate()/7);
+  const windowActive=t=>!t.window||t.window.includes(monthWeek);
+  const windowLabel=t=>!t.window?'':(t.window.length===1?('nur in der '+t.window[0]+'. Woche des Monats'):('nur in den Wochen '+t.window.join(' und ')+' des Monats'));
+
   const [done,setDone] = useState({});     // {task_key:{done_by_name,done_at}}
   const [uid,setUid]   = useState(null);
-  const [cvCount,setCvCount] = useState(null);
-  const [fbOpenCount,setFbOpenCount] = useState(null);   // heute offene Feedbackgespräche
-  const [checkinOpen,setCheckinOpen] = useState(null);   // heute eingeteilt aber noch nicht bestätigt
+  const [cvCount,setCvCount] = useState(null);        // gesamter CV-Funnel
+  const [cvInbound,setCvInbound] = useState(null);    // nur Posteingang (cv_inbound)
+  const [cvInterview,setCvInterview] = useState(null);// eingeladen + Gespräch
+  const [fbOpenCount,setFbOpenCount] = useState(null);// heute offene Feedbackgespräche
+  const [checkinOpen,setCheckinOpen] = useState(null);// heute eingeteilt aber noch nicht bestätigt
   const [busy,setBusy] = useState('');
 
   const loadDone = async()=>{
@@ -7247,10 +7250,12 @@ function DailyTasksView({employees, projects, plans, onNavigate, team}){
     (async()=>{ try{ const {data}=await sb.auth.getUser(); if(alive&&data&&data.user) setUid(data.user.id); }catch(e){} await loadDone(); })();
     const chan=sb.channel('daily-tasks').on('postgres_changes',{event:'*',schema:'public',table:'daily_tasks_done'},()=>{ loadDone(); }).subscribe();
     (async()=>{ try{ const funnel=['cv_inbound','cv_accepted','cv_confirmed','invited','interview','selection1','selection2']; const {count}=await sb.from('cvs').select('id',{count:'exact',head:true}).in('status',funnel); if(alive) setCvCount(count||0); }catch(e){} })();
+    (async()=>{ try{ const {count}=await sb.from('cvs').select('id',{count:'exact',head:true}).eq('status','cv_inbound'); if(alive) setCvInbound(count||0); }catch(e){} })();
+    (async()=>{ try{ const {count}=await sb.from('cvs').select('id',{count:'exact',head:true}).in('status',['invited','interview']); if(alive) setCvInterview(count||0); }catch(e){} })();
     (async()=>{ try{ const {count}=await sb.from('feedback_sessions').select('id',{count:'exact',head:true}).eq('scheduled_date',today).eq('status','scheduled'); if(alive) setFbOpenCount(count||0); }catch(e){} })();
     // Offene Check-ins heute = eingeteilt (shift_assignments) minus bestätigt (shift_checkins). Scope wie die Check-in-View.
     (async()=>{ try{
-      const rk=(team&&team.role_keys)||[]; const isAdmin=rk.some(r=>r==='management'||r==='hr');
+      const isAdmin=roleKeys.some(r=>r==='management'||r==='hr');
       const myEmp=(team&&team.employee_id)?(employees||[]).find(e=>e&&e.id===team.employee_id):null; const myProj=myEmp&&myEmp.project_id;
       let pq=sb.from('shift_assignments').select('employee_id',{count:'exact',head:true}).eq('work_date',today);
       if(!isAdmin&&myProj) pq=pq.eq('project_id',myProj);
@@ -7279,28 +7284,32 @@ function DailyTasksView({employees, projects, plans, onNavigate, team}){
 
   const counts=React.useMemo(()=>{
     const emp=(employees||[]).filter(e=>e&&['active','training','contract','inactive'].includes(e.status));
-    const AGENT=['Agent','Senior Agent','ASP','Supervisor'];
-    const hasProj=e=>((e.project_assignments||[]).some(a=>a&&!a.end_date&&a.project_id))||(e.project_id&&(e.project_skill||e.skill));
     const noIban=emp.filter(e=>!((e.bank&&e.bank.iban)||e.bank_account||e.bank_iban)).length;
-    const agentNoProj=emp.filter(e=>AGENT.includes(e.position)&&!hasProj(e)).length;
-    const planInc=(plans||[]).filter(p=>p&&(!p.project_id||!p.start_date||!(p.confirmed_ids&&p.confirmed_ids.length))).length;
     const nowT=Date.now(), in30=nowT+30*86400000;
     const expiring=emp.filter(e=>{ const end=(e.contract&&e.contract.end)||e.contract_end; if(!end) return false; const t=new Date(end).getTime(); return !isNaN(t)&&t>=nowT&&t<=in30; }).length;
-    return {noIban,agentNoProj,planInc,expiring};
-  },[employees,plans]);
+    const ym=today.slice(0,7);
+    const bonusMissing=emp.filter(e=>!(e.bonuses||[]).some(b=>b&&String(b.date||'').slice(0,7)===ym)).length;
+    const onboarding=(employees||[]).filter(e=>e&&['contract','training','training_planned'].includes(e.status)).length;
+    return {noIban,expiring,bonusMissing,onboarding};
+  },[employees]);
+  // Zähler je ROLE_TASKS-count-Schlüssel. Nur wo günstig ableitbar; der Rest (kpi_missing, payroll_open,
+  // customer_due [Kalender/Schnitt 5], cv_stuck, cv_comm, hw_missing) bleibt reines Häkchen (count→null).
   const countFor=k=>{
-    if(k==='bewerber')   return (cvCount!=null&&cvCount>0)?{n:cvCount,l:'offene Bewerber'}:null;
-    if(k==='stammdaten') return counts.noIban>0?{n:counts.noIban,l:'ohne IBAN'}:null;
-    if(k==='team')       return counts.agentNoProj>0?{n:counts.agentNoProj,l:'ohne Zuweisung'}:null;
-    if(k==='schulung')   return counts.planInc>0?{n:counts.planInc,l:'Pläne unvollständig'}:null;
-    if(k==='vertraege')  return counts.expiring>0?{n:counts.expiring,l:'laufen in 30 T. aus'}:null;
-    if(k==='feedback')   return fbOpenCount>0?{n:fbOpenCount,l:'heute offen'}:null;
-    if(k==='checkin')    return checkinOpen>0?{n:checkinOpen,l:'offen heute'}:null;
+    if(k==='cv_funnel')       return cvCount>0?{n:cvCount,l:'im Funnel'}:null;
+    if(k==='cv_inbound')      return cvInbound>0?{n:cvInbound,l:'im Posteingang'}:null;
+    if(k==='cv_interview')    return cvInterview>0?{n:cvInterview,l:'Gespräche anstehend'}:null;
+    if(k==='emp_no_iban')     return counts.noIban>0?{n:counts.noIban,l:'ohne IBAN'}:null;
+    if(k==='contract_gap')    return counts.expiring>0?{n:counts.expiring,l:'laufen in 30 T. aus'}:null;
+    if(k==='bonus_missing')   return counts.bonusMissing>0?{n:counts.bonusMissing,l:'ohne Bonus diesen Monat'}:null;
+    if(k==='onboarding_open') return counts.onboarding>0?{n:counts.onboarding,l:'im Onboarding'}:null;
+    if(k==='feedback_open')   return fbOpenCount>0?{n:fbOpenCount,l:'heute offen'}:null;
+    if(k==='checkin_open')    return checkinOpen>0?{n:checkinOpen,l:'offen heute'}:null;
     return null;
   };
   const fmtTime=iso=>{ try{ const d=new Date(iso); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); }catch(e){ return ''; } };
-  const doneCount=TASKS.filter(t=>done[t.key]).length;
-  const pct=Math.round(doneCount/TASKS.length*100);
+  const activeTasks=TASKS.filter(windowActive);
+  const doneCount=activeTasks.filter(t=>done[t.key]).length;
+  const pct=activeTasks.length?Math.round(doneCount/activeTasks.length*100):0;
 
   return (
     <div className="dt-wrap">
@@ -7308,32 +7317,46 @@ function DailyTasksView({employees, projects, plans, onNavigate, team}){
         <div style={{fontSize:32,lineHeight:1}}>✅</div>
         <div className="welcome-eyebrow" style={{marginTop:8}}>Jeden Morgen</div>
         <div className="welcome-hero" style={{fontSize:32}}>Tagesaufgaben</div>
-        <p className="welcome-sub" style={{margin:'12px auto 0'}}>Geh diese Liste einmal durch (ca. 30–60 Min). Es ist eine <b>gemeinsame Liste</b>, wer eine Aufgabe erledigt, hakt sie ab, und alle im Team sehen es. Die Reihenfolge ist nur ein Vorschlag; du kannst dir Punkte in beliebiger Reihenfolge greifen.</p>
+        <p className="welcome-sub" style={{margin:'12px auto 0'}}>Deine Aufgaben für deine Rolle. Wer eine Aufgabe erledigt, hakt sie ab, und das Team sieht es. Die Reihenfolge ist nur ein Vorschlag; du kannst dir Punkte in beliebiger Reihenfolge greifen.</p>
       </div>
-      <div style={{fontSize:13,fontWeight:700,color:'var(--text)',marginTop:10}}>{doneCount} von {TASKS.length} erledigt</div>
+      {TASKS.length===0?(
+        <div className="dt-alldone" style={{background:'#f8fafc',borderColor:'#e2e8f0'}}>
+          <div style={{fontSize:28,lineHeight:1}}>👀</div>
+          <div style={{fontSize:16,fontWeight:800,color:'var(--text)',marginTop:6}}>{isExt?'Keine eigenen Aufgaben':'Für deine Rolle sind keine Tagesaufgaben hinterlegt'}</div>
+          <div style={{fontSize:13,color:'var(--muted)',marginTop:2}}>{isExt?'Als Manager extern siehst du keine eigene Liste. Die Zusammenschau aller Rollen folgt in Kürze.':'Sobald deine Rolle Aufgaben bekommt, erscheinen sie hier.'}</div>
+        </div>
+      ):(<>
+      <div style={{fontSize:13,fontWeight:700,color:'var(--text)',marginTop:10}}>{doneCount} von {activeTasks.length} erledigt</div>
       <div className="dt-progress-wrap"><div className="dt-progress-bar" style={{width:pct+'%'}}/></div>
-      {doneCount===TASKS.length&&(
+      {activeTasks.length>0&&doneCount===activeTasks.length&&(
         <div className="dt-alldone">
           <div style={{fontSize:28,lineHeight:1}}>🎉</div>
           <div style={{fontSize:17,fontWeight:800,color:'#15803d',marginTop:6}}>Alles erledigt für heute!</div>
           <div style={{fontSize:13,color:'#16a34a',marginTop:2}}>Super gemacht, morgen früh geht's wieder los.</div>
         </div>
       )}
-      {TASKS.map((t,i)=>{ const d=done[t.key]; const c=countFor(t.key); return (
-        <div key={t.key} className={"dt-card"+(d?" done":"")} style={{animationDelay:(i*60)+'ms'}}>
+      {TASKS.map((t,i)=>{ const d=done[t.key]; const act=windowActive(t); const c=act?countFor(t.count):null; return (
+        <div key={t.key} className={"dt-card"+(d?" done":"")} style={{animationDelay:(i*60)+'ms',opacity:act?1:0.55}}>
           <div className="dt-num">{i+1}</div>
           <div style={{flex:1,minWidth:0}}>
             <div className="dt-title">{t.title}</div>
             <div className="dt-desc">{t.desc}</div>
-            <div className="dt-actions">
-              <button className="dt-link" onClick={()=>onNavigate&&onNavigate({kind:'view',view:t.view})}>→ Jetzt bearbeiten</button>
-              {c&&<span className="dt-pill">{c.n} {c.l}</span>}
-            </div>
+            {act?(
+              <div className="dt-actions">
+                {t.view&&<button className="dt-link" onClick={()=>onNavigate&&onNavigate({kind:'view',view:t.view})}>→ Jetzt bearbeiten</button>}
+                {c&&<span className="dt-pill">{c.n} {c.l}</span>}
+              </div>
+            ):(
+              <div className="dt-actions"><span className="dt-pill" style={{background:'#f1f5f9',color:'#64748b'}}>🕒 {windowLabel(t)} · aktuell Woche {monthWeek}</span></div>
+            )}
             {d&&<div className="dt-doneby">✓ erledigt von {d.done_by_name||'jemandem'}{d.done_at?', '+fmtTime(d.done_at)+' Uhr':''}</div>}
           </div>
-          <button className="dt-toggle" disabled={busy===t.key} onClick={()=>toggle(t.key)}>{d?'✓ Erledigt':'○ Erledigen'}</button>
+          {act
+            ? <button className="dt-toggle" disabled={busy===t.key} onClick={()=>toggle(t.key)}>{d?'✓ Erledigt':'○ Erledigen'}</button>
+            : <button className="dt-toggle" disabled style={{opacity:0.5,cursor:'not-allowed'}}>gesperrt</button>}
         </div>
       ); })}
+      </>)}
     </div>
   );
 }
