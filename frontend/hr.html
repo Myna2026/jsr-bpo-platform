@@ -6726,9 +6726,8 @@ function loadRoleCockpits(){
   localStorage.setItem('jsr_role_cockpits_v1', JSON.stringify(init));
   return init;
 }
-// Nach der per-User-Umstellung ungenutzt (Rollen-Cockpits werden nicht mehr geschrieben);
-// bleibt bis zum Retirement des Rollen-Fallbacks.
-// eslint-disable-next-line no-unused-vars
+// Rollen-Vorlagen: Startwert je Rolle (Fallback in resolveMyCockpit). Geschrieben vom Rollen-Vorlagen-
+// Editor in CockpitsView; obj = { [roleKey]: {widgets, updated_at} }.
 function saveRoleCockpits(obj){ localStorage.setItem('jsr_role_cockpits_v1', JSON.stringify(obj)); saveConfigToDB('jsr_role_cockpits_v1', obj); }
 function cockpitForRole(roleKey){ const all=loadRoleCockpits(); const e=all[roleKey]; return e?e.widgets:(ROLE_DEFAULTS[roleKey]||null); }
 // Per-USER-Cockpits (jsr_user_cockpits_v1 = { [user_id]: [widgetKey,…] }), app_config + localStorage.
@@ -8003,6 +8002,7 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
     return ()=>{ alive=false; try{ sb.removeChannel(chan); }catch(e){} };
   },[]);
   const [selfEdit,setSelfEdit]=useState(false);   // eigenes Cockpit anpassen (jsr_user_cockpits_v1[user_id])
+  const [cockpitVer,setCockpitVer]=useState(0);   // Re-Render nach Reset auf Rollen-Vorlage
   // Mobile: feste, kuratierte Reihenfolge statt der Desktop-Widget-Konfiguration (auf schmalem Screen
   // unbrauchbar). Gilt für ALLE mobilen Viewports; die Desktop-Konfig (jsr_user_cockpits_v1) bleibt unberührt.
   if(isMobileW) return <CockpitMobile employees={employees} projects={projects} plans={plans} team={team}
@@ -8072,13 +8072,20 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
     {val:inbox.length,label:'Posteingang',sub:'nicht gesichtet',color:'#6366f1',nav:'kanban'},
   ];
 
-  const myWidgets = resolveMyCockpit(team, employees);   // gewählte Widgets/Sektionen dieses Nutzers
+  const myWidgets = React.useMemo(()=>resolveMyCockpit(team, employees), [team, employees, cockpitVer]);   // gewählte Widgets/Sektionen dieses Nutzers
+  const hasOwnCockpit = (()=>{ const uid=team&&team.user_id; return !!(uid&&Array.isArray(loadUserCockpits()[uid])); })();
+  const resetToRoleTpl = async()=>{
+    const uid=team&&team.user_id; if(!uid) return;
+    if(!(await uiConfirm({title:'Auf Rollen-Vorlage zurücksetzen', text:'Dein eigener Cockpit-Zuschnitt wird entfernt. Du siehst dann wieder die Vorlage deiner Rolle.', confirmLabel:'Zurücksetzen'}))) return;
+    const st={...loadUserCockpits()}; delete st[uid]; saveUserCockpits(st); setCockpitVer(v=>v+1); showToast&&showToast('↩ Auf Rollen-Vorlage zurückgesetzt');
+  };
   const hasW = k => myWidgets.includes(k);
   return(
     <React.Fragment>
 
       {/* Selbst-Konfiguration: eigenes Cockpit zusammenstellen (Last-Write-Wins mit Admin-Matrix) */}
-      <div style={{display:'flex',justifyContent:'flex-end',marginBottom:10}}>
+      <div style={{display:'flex',justifyContent:'flex-end',gap:8,marginBottom:10}}>
+        {hasOwnCockpit&&<button className="btn btn-sm" style={{background:'transparent',color:'var(--muted)'}} onClick={resetToRoleTpl} title="Eigenen Zuschnitt entfernen und die Rollen-Vorlage übernehmen">↩ Auf Vorlage zurücksetzen</button>}
         <button className="btn btn-sm" onClick={()=>setSelfEdit(true)} title="Widgets deines Cockpits auswählen und ordnen">⚙ Cockpit anpassen</button>
       </div>
       {selfEdit && <CockpitEditor roleDef={{label:'dein Cockpit'}} current={resolveMyCockpit(team, employees)}
@@ -29833,20 +29840,25 @@ function CockpitEditor({roleDef, current, onSave, onClose}){
 // Cockpit-Konfiguration pro NUTZER (Admin-Matrix). Listet aktive App-User, je Nutzer sein
 // Cockpit einrichten -> jsr_user_cockpits_v1[user_id]. Last-Write-Wins mit dem Selbst-Editor:
 // Admin ist Startpunkt, spaetere Selbst-Aenderung des Nutzers gewinnt (gleicher Store-Eintrag).
+const ROLE_TPL_KEYS=['admin','management','hr','finance','teamlead'];
 function CockpitsView(){
   const [users,setUsers]=useState([]);
   const [cockpits,setCockpits]=useState({});
+  const [roleCockpits,setRoleCockpits]=useState({});   // jsr_role_cockpits_v1 = { [role]: {widgets, updated_at} }
   const [loading,setLoading]=useState(true);
   const [editorFor,setEditorFor]=useState(null);   // {user_id, label}
+  const [roleEditorFor,setRoleEditorFor]=useState(null); // roleKey
   const [q,setQ]=useState('');
   useEffect(()=>{
     let alive=true;
     (async()=>{
       try{
         const m=await loadConfigFromDB('jsr_user_cockpits_v1');
+        const rc=await loadConfigFromDB('jsr_role_cockpits_v1');
         const uRes=await sb.from('app_users').select('user_id, full_name, role_keys, active');
         if(!alive) return;
         setCockpits((m&&typeof m==='object'&&!Array.isArray(m))?m:{});
+        setRoleCockpits((rc&&typeof rc==='object'&&!Array.isArray(rc))?rc:loadRoleCockpits());
         setUsers((uRes.data||[]).filter(u=>u&&u.active&&u.user_id&&Array.isArray(u.role_keys)&&u.role_keys.length));
       }catch(e){ console.error('[cockpits] load', e); }
       if(alive) setLoading(false);
@@ -29858,15 +29870,48 @@ function CockpitsView(){
     setCockpits(prev=>{ const next={...prev, [uid]:widgets}; saveUserCockpits(next); return next; });
     setEditorFor(null);
   }
+  function handleSaveRole(widgets){
+    const rk=roleEditorFor, now=new Date().toISOString();
+    setRoleCockpits(prev=>{ const next={...prev, [rk]:{widgets, updated_at:now}}; saveRoleCockpits(next); return next; });
+    setRoleEditorFor(null);
+  }
+  async function handleReset(uid,label){
+    if(!(await uiConfirm({title:'Auf Rollen-Vorlage zurücksetzen', text:'Der eigene Cockpit-Zuschnitt wird entfernt. Der Nutzer sieht dann wieder die Vorlage seiner Rolle.', items:[label], confirmLabel:'Zurücksetzen'}))) return;
+    setCockpits(prev=>{ const next={...prev}; delete next[uid]; saveUserCockpits(next); return next; });
+  }
   const rows=(users||[])
     .filter(u=>{const n=(u.full_name||'').toLowerCase(); return !q.trim()||n.includes(q.trim().toLowerCase());})
     .sort((a,b)=>(a.full_name||'').localeCompare(b.full_name||'','de'));
   return (
     <div>
       <div style={{marginBottom:14}}>
-        <div style={{fontSize:18,fontWeight:700}}>Cockpit-Konfiguration pro Nutzer</div>
-        <div style={{fontSize:13,color:'var(--muted)',marginTop:2}}>Legt fest, welche Widgets ein Nutzer auf seinem Start-Cockpit sieht. Deine Einrichtung ist der Startpunkt, ändert der Nutzer sein Cockpit später selbst, gilt sein Stand. Kein eigener Eintrag → Rollen-Standard.</div>
+        <div style={{fontSize:18,fontWeight:700}}>Cockpit-Konfiguration</div>
+        <div style={{fontSize:13,color:'var(--muted)',marginTop:2}}>Zwei Ebenen: die <b>Rollen-Vorlage</b> ist der Startwert je Rolle, der <b>Nutzer-Zuschnitt</b> gewinnt darüber. Ohne eigenen Zuschnitt sieht ein Nutzer die Vorlage seiner Rolle.</div>
       </div>
+
+      <div style={{marginBottom:22}}>
+        <div style={{fontSize:15,fontWeight:700,marginBottom:2}}>Rollen-Vorlagen</div>
+        <div style={{fontSize:12,color:'var(--muted)',marginBottom:10}}>Startwert je Rolle. Nutzer ohne eigenen Zuschnitt sehen die Vorlage ihrer Rolle. Ändert ein Nutzer sein Cockpit selbst, gilt sein Stand, bis er auf die Vorlage zurücksetzt.</div>
+        {loading?<div style={{color:'var(--muted)',fontSize:13,padding:'12px 0'}}>Lädt…</div>:(
+        <div className="role-cards">
+          {ROLE_TPL_KEYS.map(rk=>{ const e=roleCockpits[rk]; const w=((e&&e.widgets)||ROLE_DEFAULTS[rk]||[]).filter(id=>WIDGETS[id]);
+            return (
+              <div key={rk} className="role-card">
+                <div className="role-card-head">{ROLE_LABELS[rk]||rk}</div>
+                <div className="role-card-body">
+                  <div style={{fontSize:22,fontWeight:800,color:'#0F5661'}}>{w.length}</div>
+                  <div style={{fontSize:11,color:'var(--muted)',marginBottom:10}}>Widgets in der Vorlage</div>
+                  <button className="btn btn-sm" style={{width:'100%'}} onClick={()=>setRoleEditorFor(rk)}>Vorlage bearbeiten</button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        )}
+      </div>
+
+      <div style={{fontSize:15,fontWeight:700,marginBottom:2}}>Nutzer-Zuschnitt</div>
+      <div style={{fontSize:12,color:'var(--muted)',marginBottom:10}}>Einzelne Nutzer abweichend von ihrer Rollen-Vorlage einstellen. „auf Vorlage zurücksetzen" entfernt den eigenen Zuschnitt wieder.</div>
       <div style={{marginBottom:14}}>
         <input placeholder="Name suchen…" value={q} onChange={e=>setQ(e.target.value)} style={{padding:'8px 10px',borderRadius:8,border:'1px solid var(--border)',fontSize:13,minWidth:200}}/>
       </div>
@@ -29881,8 +29926,9 @@ function CockpitsView(){
               <div className="role-card-body">
                 <div style={{fontSize:11,color:'var(--muted)',marginBottom:8,minHeight:28}}>{(u.role_keys||[]).map(k=>ROLE_LABELS[k]||k).join(', ')}</div>
                 <div style={{fontSize:22,fontWeight:800,color:count==null?'var(--muted)':'#0F5661'}}>{count==null?'—':count}</div>
-                <div style={{fontSize:11,color:'var(--muted)',marginBottom:10}}>{count==null?'Standard (Rolle)':'aktive Widgets'}</div>
+                <div style={{fontSize:11,color:'var(--muted)',marginBottom:10}}>{count==null?'Rollen-Vorlage':'eigener Zuschnitt'}</div>
                 <button className="btn btn-sm" style={{width:'100%'}} onClick={()=>setEditorFor({user_id:u.user_id, label:u.full_name||u.user_id.slice(0,8)})}>Bearbeiten</button>
+                {count!=null&&<button className="btn btn-sm" style={{width:'100%',marginTop:6,background:'transparent',color:'var(--muted)'}} onClick={()=>handleReset(u.user_id,u.full_name||u.user_id.slice(0,8))}>↩ auf Vorlage zurücksetzen</button>}
               </div>
             </div>
           );
@@ -29891,6 +29937,7 @@ function CockpitsView(){
       </div>
       )}
       {editorFor && <CockpitEditor roleDef={{label:editorFor.label}} current={Array.isArray(cockpits[editorFor.user_id])?cockpits[editorFor.user_id]:undefined} onSave={handleSave} onClose={()=>setEditorFor(null)}/>}
+      {roleEditorFor && <CockpitEditor roleDef={{label:'Vorlage: '+(ROLE_LABELS[roleEditorFor]||roleEditorFor)}} current={(roleCockpits[roleEditorFor]&&roleCockpits[roleEditorFor].widgets)||ROLE_DEFAULTS[roleEditorFor]||[]} onSave={handleSaveRole} onClose={()=>setRoleEditorFor(null)}/>}
     </div>
   );
 }
