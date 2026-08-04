@@ -1518,9 +1518,29 @@ function calcVacationEntitlement(emp, forMonth){
 
   const refYear = (forMonth ? new Date(forMonth+'-01') : new Date()).getFullYear();
   let used = 0;
-  try{ used = (emp.absences||[]).filter(a=>a && a.type==='vacation').reduce((s,a)=>s+absDaysInYear(a, refYear), 0); }catch(e){}   // beide Formate (Einzeltag + Zeitraum)
+  try{ used = JSRCalc.vacationConsumed(emp.absences||[], refYear); }catch(e){}   // geteilter Verbrauch (genommen + genehmigt geplant)
   const remaining = Math.max(0, Math.round((q.quota - used)*2)/2);
   return {quota:q.quota, used, remaining, baseDays:q.baseDays, months:q.months, note:q.note};
+}
+
+// Urlaubskonto (zwei Töpfe) — EINE Wahrheit, identisch zum MA-Portal (beide über JSRCalc.vacationAccount).
+// Topf A = Resturlaub Vorjahr aus vacation_accounts (Cache VAC_ACCOUNTS), Topf B = Jahresanspruch.
+let VAC_ACCOUNTS = {};   // `${employee_id}|${year}` -> {carry_in_days, carry_expires_on}
+async function loadVacationAccounts(){
+  try{ const {data}=await sb.from('vacation_accounts').select('*'); const m={};
+    (data||[]).forEach(r=>{ m[r.employee_id+'|'+r.year]=r; }); VAC_ACCOUNTS=m; }catch(e){}
+}
+function vacationAccountFor(emp, forYear){
+  const year = forYear || new Date().getFullYear();
+  const startDate = (emp&&emp.contract&&emp.contract.start) || (emp&&emp.contract_start) || (emp&&emp.hire_date) || '';
+  const cfg = JSON.parse(localStorage.getItem('jsr_vacation_cfg')||'null')||{year1_days:18,year2_days:20,seniority:[]};
+  const term = (emp&&(emp.termination_date||emp.employment_end||emp.terminated_at))||'';
+  const quota = startDate ? JSRCalc.vacationQuota(emp, cfg, year+'-06', term).quota : 0;
+  const row = (emp&&VAC_ACCOUNTS[emp.id+'|'+year]) || null;
+  const carryIn = row ? (Number(row.carry_in_days)||0) : 0;
+  const expiry = JSRCalc.carryExpiryDate(year, cfg, row);
+  const today = isoLocal(new Date());
+  return JSRCalc.vacationAccount({year, quota, carryIn, expiry, today, absences:(emp&&emp.absences)||[]});
 }
 </script><script type="text/babel">// ══════════════════════════════════════════════════════════════════════════════
 // PERFORMANCE ENGINE
@@ -10451,21 +10471,8 @@ function absCoversDay(a, ds){
   return ds>=f && ds<=t;
 }
 // Werktage (Mo-Fr) einer Abwesenheit im Kalenderjahr — fuer Verbrauchszaehlung (Urlaub/Krank).
-function absDaysInYear(a, year){
-  const from = a && a.from;
-  if(from==null||from==='') return 0;
-  const y = String(year);
-  const f0 = String(from).slice(0,10);
-  const toRaw = a.to;
-  const t0 = (toRaw==null||toRaw==='') ? f0 : String(toRaw).slice(0,10);
-  if(f0===t0){ const d=new Date(f0+'T12:00:00'); const dw=d.getDay(); return (f0.slice(0,4)===y && dw>0 && dw<6) ? (Number(a.days)||1) : 0; }
-  const start = f0 < y+'-01-01' ? y+'-01-01' : f0;
-  const end   = t0 > y+'-12-31' ? y+'-12-31' : t0;
-  if(start>end) return 0;
-  let c=0, d=new Date(start+'T12:00:00'); const e=new Date(end+'T12:00:00');
-  while(d<=e){ const dw=d.getDay(); if(dw>0&&dw<6)c++; d.setDate(d.getDate()+1); }
-  return c;
-}
+// EINE Zählung: delegiert an den geteilten Kern (shared/jsr-calc.js), identische Werktag-Logik.
+function absDaysInYear(a, year){ return JSRCalc.absDaysInYear(a, year); }
 // Werktage einer Abwesenheit im Kalendermonat ('YYYY-MM') — fuer Lohnabrechnung.
 function absDaysInMonth(a, ym){
   const from = a && a.from;
@@ -32220,6 +32227,8 @@ function App(){
       const dbEmps = await loadEmployeesFromDB();
       if(!alive) return;
       if(dbEmps===null){ setEmpLoadError(true); return; }   // echter Fehler: sichtbar machen
+      await loadVacationAccounts();                          // Urlaubskonto-Cache VOR dem ersten Render füllen
+      if(!alive) return;
       setEmpLoadError(false);
       setEmployees(dbEmps);                                  // Array (auch []) = wahre Datenlage
     })();

@@ -68,6 +68,82 @@
     return { quota: quota, baseDays: baseDays, months: months, isFirstYear: isFirstYear, isTermYear: isTermYear, note: note };
   }
 
+  /* ── Urlaubsverbrauch + Konto (zwei Töpfe) — EIN Motor für beide Portale ──────
+   * Ersetzt die früher divergenten Wege (hr: absDaysInYear; MA: vacation_taken_ytd
+   * + Anträge, andere Tagezählung). Reine Funktionen, keine DB. */
+
+  /* Werktage (Mo–Fr) einer Abwesenheit im Fenster [lo,hi] (inkl., 'YYYY-MM-DD').
+   * Einzeltag (from===to) nutzt a.days (halbe Tage); Zeitraum zählt je Werktag 1. */
+  function vacDaysInRange(a, lo, hi) {
+    if (!a) return 0;
+    var from = a.from; if (from == null || from === '') return 0;
+    var f0 = String(from).slice(0, 10);
+    var toRaw = a.to;
+    var t0 = (toRaw == null || toRaw === '') ? f0 : String(toRaw).slice(0, 10);
+    if (f0 === t0) {
+      if (f0 < lo || f0 > hi) return 0;
+      var d1 = new Date(f0 + 'T12:00:00'), w1 = d1.getDay();
+      return (w1 > 0 && w1 < 6) ? num(a.days, 1) : 0;
+    }
+    var start = f0 < lo ? lo : f0, end = t0 > hi ? hi : t0;
+    if (start > end) return 0;
+    var c = 0, d = new Date(start + 'T12:00:00'), e = new Date(end + 'T12:00:00');
+    while (d <= e) { var w = d.getDay(); if (w > 0 && w < 6) c++; d.setDate(d.getDate() + 1); }
+    return c;
+  }
+  /* Werktage einer Abwesenheit im Kalenderjahr — deckt Einzeltag UND Zeitraum ab.
+   * (hr.absDaysInYear delegiert hierher, damit es EINE Zählung gibt.) */
+  function absDaysInYear(a, year) {
+    var y = String(year);
+    return vacDaysInRange(a, y + '-01-01', y + '-12-31');
+  }
+  /* Verbrauch = genehmigter Urlaub (type 'vacation') im Jahr, werktaggenau.
+   * Zählt genommen UND genehmigt geplant (Datum entscheidet die Jahreszuordnung,
+   * nicht der Eintragungszeitpunkt). absences = employee.absences[]. */
+  function vacationConsumed(absences, year) {
+    var y = String(year), sum = 0;
+    (absences || []).forEach(function (a) { if (a && a.type === 'vacation') sum += vacDaysInRange(a, y + '-01-01', y + '-12-31'); });
+    return Math.round(sum * 2) / 2;
+  }
+  /* Verfallsdatum des Resturlaubs (Topf A): MA-Override (volles Datum) sonst
+   * systemweit MM-DD (cfg.carry_expire, Default '06-30') im jeweiligen Jahr. */
+  function carryExpiryDate(year, cfg, accountRow) {
+    if (accountRow && accountRow.carry_expires_on) return String(accountRow.carry_expires_on).slice(0, 10);
+    var md = (cfg && cfg.carry_expire) || '06-30';
+    return String(year) + '-' + md;
+  }
+  /* Zwei-Töpfe-Konto. Verbraucht wird ZUERST Topf A (Resturlaub Vorjahr), aber nur
+   * durch Urlaub mit Datum ≤ Verfall; danach Topf B (Anspruch). Verfallener Rest
+   * wird SICHTBAR ausgewiesen (carryExpired), nicht auf null gerechnet.
+   * opts = { year, quota, carryIn, expiry:'YYYY-MM-DD', today:'YYYY-MM-DD', absences } */
+  function vacationAccount(opts) {
+    opts = opts || {};
+    var year = opts.year, quota = num(opts.quota, 0), carryIn = num(opts.carryIn, 0);
+    var expiry = opts.expiry, today = opts.today, abs = opts.absences || [];
+    var yStart = String(year) + '-01-01', yEnd = String(year) + '-12-31';
+    var r = function (x) { return Math.round(x * 2) / 2; };
+    var sumRange = function (lo, hi) { var s = 0; abs.forEach(function (a) { if (a && a.type === 'vacation') s += vacDaysInRange(a, lo, hi); }); return s; };
+    var consumed = r(sumRange(yStart, yEnd));
+    var byExpiry = r(sumRange(yStart, expiry));           // Urlaub mit Datum ≤ Verfall (zieht Topf A)
+    var afterExpiry = r(consumed - byExpiry);
+    var taken = r(sumRange(yStart, today));               // genommen (bis heute)
+    var planned = r(consumed - taken);                    // genehmigt geplant (nach heute)
+    var carryUsed = Math.min(byExpiry, carryIn);
+    var quotaUsed = r((byExpiry - carryUsed) + afterExpiry);
+    var expiryPassed = today > expiry;
+    var carryAvail = expiryPassed ? 0 : r(carryIn - carryUsed);
+    var carryExpired = expiryPassed ? r(carryIn - carryUsed) : 0;
+    var quotaAvail = r(quota - quotaUsed);
+    var available = r(carryAvail + Math.max(0, quotaAvail));
+    var overused = quotaAvail < 0 ? r(-quotaAvail) : 0;
+    return {
+      year: year, quota: quota, carryIn: carryIn, total: r(quota + carryIn), expiry: expiry, expiryPassed: expiryPassed,
+      consumed: consumed, taken: taken, planned: planned,
+      carryUsed: r(carryUsed), quotaUsed: quotaUsed, carryAvail: carryAvail, carryExpired: carryExpired,
+      quotaAvail: Math.max(0, quotaAvail), available: available, overused: overused
+    };
+  }
+
   /* Feiertage → flache Liste der Datums-Strings. cfg = { <gruppe>: [{date, ...}] } */
   function holidayDates(cfg) {
     try {
@@ -79,5 +155,9 @@
     return [];
   }
 
-  global.JSRCalc = { vacationQuota: vacationQuota, holidayDates: holidayDates };
+  global.JSRCalc = {
+    vacationQuota: vacationQuota, holidayDates: holidayDates,
+    vacDaysInRange: vacDaysInRange, absDaysInYear: absDaysInYear,
+    vacationConsumed: vacationConsumed, carryExpiryDate: carryExpiryDate, vacationAccount: vacationAccount
+  };
 })(typeof window !== 'undefined' ? window : this);

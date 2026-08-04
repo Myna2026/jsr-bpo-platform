@@ -1068,6 +1068,14 @@ function subscribeMyShifts(employeeId, onChange){
 
 // Block 2: eigene Urlaubsanträge aus Supabase (RLS liefert nur eigene). Flach,
 // mit from/to/submitted-Aliassen für die bestehenden Renderer. jsr_vacation_requests_v1 tot.
+// Urlaubskonto: eigene vacation_accounts-Zeile (Topf A Resturlaub) — RLS: MA liest nur die eigene.
+var VAC_ACCOUNT_ME = null;
+function loadMyVacAccount(){
+  if(!ME||!ME.id) return Promise.resolve();
+  return sb.from('vacation_accounts').select('*').eq('employee_id', ME.id).eq('year', new Date().getFullYear()).maybeSingle()
+    .then(function(r){ if(!r.error) VAC_ACCOUNT_ME = r.data||null; })
+    .catch(function(e){ console.error('[urlaubskonto] load', e); });
+}
 var VACREQS_ME = [];
 function loadMyVacreqs(){
   return sb.from('vacation_requests').select('*').order('created_at',{ascending:false}).then(function(r){
@@ -1320,6 +1328,7 @@ function gateSession(session, event){
             boot();
             // Zentrale Config (Urlaub/Feiertage) aus app_config laden, dann Ansicht mit echten Werten neu rendern.
             loadAppConfigForMA().then(function(){ renderCurrentViewOnRealtime(); });
+            loadMyVacAccount().then(function(){ renderCurrentViewOnRealtime(); });   // Urlaubskonto (Topf A)
             dmInitChat();   // Team-Chat: DB laden + Realtime + localStorage-Altlasten entfernen
             showWelcomePopup(ME && ME.first_name);
             // 25h: Realtime auf eigene Row — HR-Aenderungen (absences, warnings, status) live
@@ -1706,42 +1715,31 @@ function vacQuotaFor(emp){
   }catch(e){ return 0; }
 }
 function calcVacation(){
+  // EIN Motor, identisch zu hr.html (JSRCalc.vacationAccount). Verbrauch = genehmigter Urlaub
+  // in ME.absences[] (HR spiegelt Freigaben dorthin, from_request-Marker inkl.) — werktaggenau.
+  // Topf A = Resturlaub Vorjahr aus vacation_accounts (VAC_ACCOUNT_ME), NICHT mehr aus dem
+  // toten Feld vacation_carryover_2025. taken/planned ergeben sich aus dem Datum.
+  var year=new Date().getFullYear();
   var quota=vacQuotaFor(ME);
-  var carryover=parseFloat(ME.vacation_carryover_2025||0);
-  var ytd=parseFloat(ME.vacation_taken_ytd||0);
-  var thisYr=new Date().getFullYear();
-  var planned=0,taken=ytd,absentDays=0;
-  // 1. Block 2: eigene Anträge aus Supabase (VACREQS_ME)
-  var myReqs=VACREQS_ME;
-  myReqs.forEach(function(r){
-    if(!r.from||!r.to)return;
-    var yr=parseInt(r.from.substring(0,4));
-    if(yr!==thisYr)return;
-    var days=r.days||calcVacReqDays(r.from,r.to);
-    // Saldo: NUR vacation zieht ab (taken/planned). special/unpaid sind bezahlt bzw.
-    // unbezahlt, aber kein Urlaubs-Saldo-Abzug.
-    if(r.status==='approved'&&r.type==='vacation')taken+=days;
-    else if(r.status==='pending'&&r.type==='vacation')planned+=days;
-    if(r.status==='approved'&&(r.type==='unpaid'||r.type==='special'))absentDays+=days;
+  var cfg=APP_CFG.vacation||{};
+  var row=VAC_ACCOUNT_ME;
+  var carryIn=row?(parseFloat(row.carry_in_days)||0):0;
+  var expiry=JSRCalc.carryExpiryDate(year, cfg, row);
+  var td=new Date();
+  var today=td.getFullYear()+'-'+String(td.getMonth()+1).padStart(2,'0')+'-'+String(td.getDate()).padStart(2,'0');
+  var acc=JSRCalc.vacationAccount({year:year, quota:quota, carryIn:carryIn, expiry:expiry, today:today, absences:(ME&&ME.absences)||[]});
+  // Beantragt (pending) — noch kein Verbrauch, aber Planungs-Sperre. Sonstige Abwesenheit nur Info.
+  var pending=0, absentDays=0;
+  (VACREQS_ME||[]).forEach(function(r){
+    if(!r.from||parseInt(String(r.from).substring(0,4))!==year) return;
+    var days=r.days||calcVacReqDays(r.from,r.to||r.from);
+    if(r.status==='pending'&&r.type==='vacation') pending+=days;
+    else if(r.status==='approved'&&(r.type==='unpaid'||r.type==='special')) absentDays+=days;
   });
-  // 2. Lies ME.absences[] — HR schreibt approved-Anträge dort (25h: kommt aus Supabase, Realtime aktualisiert)
-  var absences = ME.absences || [];
-  absences.forEach(function(a){
-    if(!a)return;
-    var from=a.from;
-    var to=a.to||a.from;
-    if(!from)return;
-    var yr=parseInt(from.substring(0,4));
-    if(yr!==thisYr)return;
-    if(a.type!=='vacation')return;
-    // Skip wenn schon über vacation_request gezählt (from_request gesetzt)
-    if(a.from_request)return;
-    var days=a.days||calcVacReqDays(from,to||from);
-    taken+=days;
-  });
-  var total=quota+carryover;
-  var remaining=Math.max(0,total-taken-planned);
-  return {quota:quota,carryover:carryover,total:total,taken:taken,planned:planned,remaining:remaining,absentDays:absentDays};
+  var remaining=Math.max(0, Math.round((acc.available-pending)*2)/2);   // planbar = verfügbar − beantragt
+  return {quota:quota, carryover:carryIn, total:acc.total, taken:acc.taken, planned:acc.planned, pending:pending,
+          available:acc.available, carryAvail:acc.carryAvail, quotaAvail:acc.quotaAvail, carryExpired:acc.carryExpired,
+          overused:acc.overused, expiry:expiry, expiryPassed:acc.expiryPassed, remaining:remaining, absentDays:absentDays};
 }
 
 function calcVacReqDays(from,to){
@@ -1945,7 +1943,7 @@ function renderHome(){
   html+='<div class="data-row"><span class="data-lbl">Jahresanspruch</span><span class="data-val">'+vac.quota+' Tage</span></div>';
   if(vac.carryover>0)html+='<div class="data-row"><span class="data-lbl">Übertrag Vorjahr</span><span class="data-val">+'+vac.carryover+' Tage</span></div>';
   html+='<div class="data-row"><span class="data-lbl">Genommen</span><span class="data-val">'+vac.taken+' Tage</span></div>';
-  if(vac.planned>0)html+='<div class="data-row"><span class="data-lbl">Geplant (offen)</span><span class="data-val">'+vac.planned+' Tage</span></div>';
+  if(vac.pending>0)html+='<div class="data-row"><span class="data-lbl">Beantragt (offen)</span><span class="data-val">'+vac.pending+' Tage</span></div>';
   html+='<div class="data-row"><span class="data-lbl"><strong>Verfügbar</strong></span><span class="data-val" style="color:var(--green);font-size:14px;">'+vac.remaining+' Tage</span></div>';
   html+='</div></div>';
 
@@ -2240,7 +2238,7 @@ function renderUrlaub(){
   html+='<div class="kpi-grid">';
   html+='<div class="kpi"><div class="kpi-label">Anspruch</div><div class="kpi-val">'+vac.total+'</div><div class="kpi-sub">'+vac.quota+' Std.'+(vac.carryover>0?' + '+vac.carryover+' Übertrag':'')+'</div></div>';
   html+='<div class="kpi"><div class="kpi-label">Genommen</div><div class="kpi-val">'+vac.taken+'</div><div class="kpi-sub">In '+new Date().getFullYear()+'</div></div>';
-  html+='<div class="kpi"><div class="kpi-label">In Planung</div><div class="kpi-val amber">'+vac.planned+'</div><div class="kpi-sub">Beantragt, offen</div></div>';
+  html+='<div class="kpi"><div class="kpi-label">In Planung</div><div class="kpi-val amber">'+vac.pending+'</div><div class="kpi-sub">Beantragt, offen</div></div>';
   html+='<div class="kpi"><div class="kpi-label">Verfügbar</div><div class="kpi-val green">'+vac.remaining+'</div><div class="kpi-sub">Noch frei</div></div>';
   html+='<div class="kpi"><div class="kpi-label">Abwesend dieses Jahr</div><div class="kpi-val">'+vac.absentDays+'</div><div class="kpi-sub">Unbezahlt + Sonderfrei</div></div>';
   html+='</div>';
