@@ -3397,10 +3397,6 @@ function ampelStyle(key, form, fpMap){
   if(!fieldAmpelEmpty(key, form)) return null;
   return {background:c.bg, borderColor:c.bd, borderWidth:2, borderStyle:'solid'};
 }
-// „Im laufenden Verfahren" = CV-Funnel AB cv_accepted (jemand hat den CV angesehen/angenommen).
-// cv_inbound = Posteingang (ungesichtet) wird NICHT als Pipeline gezählt, sondern separat ausgewiesen —
-// sonst bläht ein Import-Schwung die Pipeline-Zahl auf. Eine Wahrheit für alle KPI-Kacheln.
-const CV_PIPELINE_STATUSES = ['cv_accepted','cv_confirmed','invited','interview','selection1','selection2'];
 
 // ── Pflegestand je Mitarbeiter — AUS DER FELD-AMPEL abgeleitet (jsr_field_priority_v1), keine zweite
 //    Feldliste. Ein Bereich (=Ampel-Tab) gilt als gepflegt, wenn KEIN rot/gelb eingestuftes Feld dieses
@@ -7906,14 +7902,12 @@ function Widget_DailyReports({employees, projects, team}){
 function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence, cvsDb, payslipsDb, feedbackTodayDb, setEmployees, showToast}){
   const now=new Date();
   const todayStr=now.toISOString().slice(0,10);
-  const yesterday=new Date(Date.now()-864e5).toISOString().slice(0,10);
   const ym=todayStr.slice(0,7);
   const fmtDe=s=>{ if(!s) return ''; const p=String(s).slice(0,10).split('-'); return p.length===3?(p[2]+'.'+p[1]+'.'):s; };
   const nav=v=>onNavigate&&onNavigate({kind:'view',view:v});
 
   const active=employees.filter(e=>e&&e.status==='active');
   const inTraining=employees.filter(e=>e&&e.status==='training');
-  const pipeline=(cvsDb||[]).filter(c=>c&&CV_PIPELINE_STATUSES.includes(c.status));
   const inbox=(cvsDb||[]).filter(c=>c&&c.status==='cv_inbound');   // Posteingang: ungesichtet, Arbeitsliste
   const todaySick=employees.filter(e=>(e.absences||[]).some(a=>a.type==='sick'&&absCoversDay(a,todayStr)));
   const todayVac=employees.filter(e=>(e.absences||[]).some(a=>a.type==='vacation'&&absCoversDay(a,todayStr)));
@@ -7972,18 +7966,18 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
   });
   const _planRev=planRevenueByProject(employees, projects, ym);
   const tasks=computeCockpitTasks({employees,projects,cvsDb,payslipsDb,feedbackTodayDb});
-  const cvToday=(cvsDb||[]).filter(c=>c.cv_date===todayStr).length;
-  const cvYesterday=(cvsDb||[]).filter(c=>c.cv_date===yesterday).length;
-  const cv7from=new Date(Date.now()-6*864e5).toISOString().slice(0,10);   // 7 Tage rollierend inkl. heute
-  const cv7=(cvsDb||[]).filter(c=>c&&c.cv_date&&c.cv_date>=cv7from&&c.cv_date<=todayStr).length;
-  const cvMonth=(cvsDb||[]).filter(c=>c&&c.cv_date&&String(c.cv_date).slice(0,7)===ym).length;
+  // Eingangsdatum tolerant (cv_date kann Zeitstempel sein → auf Datum kürzen) + LOKALE Grenzen (kein UTC-Off-by-one).
+  const _cvd=c=>String((c&&c.cv_date)||'').slice(0,10);
+  const _cvT=isoLocal(new Date()), _cvYd=isoLocal(new Date(Date.now()-864e5)), _cv7f=isoLocal(new Date(Date.now()-6*864e5));
+  const cvToday=(cvsDb||[]).filter(c=>_cvd(c)===_cvT).length;
+  const cvYesterday=(cvsDb||[]).filter(c=>_cvd(c)===_cvYd).length;
+  const cv7=(cvsDb||[]).filter(c=>{const d=_cvd(c);return d&&d>=_cv7f&&d<=_cvT;}).length;
+  const cvMonth=(cvsDb||[]).filter(c=>{const d=_cvd(c);return d&&d.slice(0,7)===_cvT.slice(0,7);}).length;
   const shortName=e=>e.first_name+' '+String(e.last_name||'').charAt(0)+'.';
 
   const tiles=[
     {val:active.length,label:'Aktiv',sub:'Mitarbeiter',color:'#0F5661'},
-    {val:inTraining.length,label:'Schulung',sub:'Mitarbeiter',color:'#7c3aed'},
-    {val:pipeline.length,label:'Pipeline',sub:'im Verfahren',color:'#0d9488'},
-    {val:inbox.length,label:'Bewerbungen',sub:'nicht gesichtet',color:'#6366f1',nav:'kanban'},
+    {val:inTraining.length,label:'Schulung',sub:'Mitarbeiter',color:'#7c3aed'},    {val:inbox.length,label:'Bewerbungen',sub:'nicht gesichtet',color:'#6366f1',nav:'kanban'},
     {val:todayVac.length+todaySick.length,label:'Heute frei',sub:todayVac.length+' Urlaub · '+todaySick.length+' krank',color:'#d97706'},
   ];
 
@@ -8238,14 +8232,14 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
   const active=employees.filter(e=>e&&e.status==='active');
   const inTraining=employees.filter(e=>e&&e.status==='training');
   // 4a-4: Pipeline-Kandidaten aus cvs-DB (CV-Funnel-Phasen), nicht mehr aus employees mit Legacy-Status.
-  const pipeline=cvsDb.filter(c=>c&&CV_PIPELINE_STATUSES.includes(c.status));
   const inbox=cvsDb.filter(c=>c&&c.status==='cv_inbound');   // Posteingang: ungesichtet, Arbeitsliste
   // CV-Eingang nach Eingangsdatum (cv_date, aus dem Sheet beim Sync) — heute/gestern/7 Tage rollierend/laufender Monat.
-  const _cvY=new Date(Date.now()-864e5).toISOString().slice(0,10), _cv7=new Date(Date.now()-6*864e5).toISOString().slice(0,10);
-  const cvEinToday=cvsDb.filter(c=>c&&c.cv_date===todayStr).length;
-  const cvEinYest=cvsDb.filter(c=>c&&c.cv_date===_cvY).length;
-  const cvEin7=cvsDb.filter(c=>c&&c.cv_date&&c.cv_date>=_cv7&&c.cv_date<=todayStr).length;
-  const cvEinMonth=cvsDb.filter(c=>c&&c.cv_date&&String(c.cv_date).slice(0,7)===todayStr.slice(0,7)).length;
+  const _cvd=c=>String((c&&c.cv_date)||'').slice(0,10);
+  const _cvT=isoLocal(new Date()), _cvY=isoLocal(new Date(Date.now()-864e5)), _cv7=isoLocal(new Date(Date.now()-6*864e5));
+  const cvEinToday=cvsDb.filter(c=>_cvd(c)===_cvT).length;
+  const cvEinYest=cvsDb.filter(c=>_cvd(c)===_cvY).length;
+  const cvEin7=cvsDb.filter(c=>{const d=_cvd(c);return d&&d>=_cv7&&d<=_cvT;}).length;
+  const cvEinMonth=cvsDb.filter(c=>{const d=_cvd(c);return d&&d.slice(0,7)===_cvT.slice(0,7);}).length;
   const now=new Date();
   const todayStr=now.toISOString().slice(0,10);
   const year=now.getFullYear();
@@ -8300,9 +8294,7 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
 
   const kpis=[
     {val:active.length,label:'Aktiv',sub:'Mitarbeiter',color:'#0F5661'},
-    {val:inTraining.length,label:'Schulung',sub:'Mitarbeiter',color:'#7c3aed'},
-    {val:pipeline.length,label:'Pipeline',sub:'im Verfahren',color:'#0d9488'},
-    {val:inbox.length,label:'Bewerbungen',sub:'nicht gesichtet',color:'#6366f1',nav:'kanban'},
+    {val:inTraining.length,label:'Schulung',sub:'Mitarbeiter',color:'#7c3aed'},    {val:inbox.length,label:'Bewerbungen',sub:'nicht gesichtet',color:'#6366f1',nav:'kanban'},
   ];
 
   const myWidgets = React.useMemo(()=>resolveMyCockpit(team, employees), [team, employees, cockpitVer]);   // gewählte Widgets/Sektionen dieses Nutzers
