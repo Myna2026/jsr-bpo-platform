@@ -961,12 +961,12 @@ function getLocationNames(){ return getLocations().map(l=>l&&l.name).filter(Bool
 const SKILLS_ALL = ['Inbound Telefonie','Outbound Telefonie','Email Support','Chat Support','Beschwerdemanagement','Sales Outbound','Cross-Selling','CRM Systeme','Ticketing','Reisebuchung','Touristik Kenntnisse','Deutsch B2+','Englisch'];
 const STATUS_FLOW = [
   {key:'cv_inbound',    label:'Bewerbungen',         icon:'📥', color:'#94a3b8', kanban:true,  terminal:false},
-  {key:'cv_accepted',   label:'CV akzeptiert',       icon:'📄', color:'#64748b', kanban:true,  terminal:false},
-  {key:'cv_confirmed',  label:'CV angelegt ✓',       icon:'✅', color:'#0891b2', kanban:true,  terminal:false, needs_confirm:true},
+  {key:'cv_accepted',   label:'Geprüft',             icon:'📄', color:'#64748b', kanban:true,  terminal:false},
+  {key:'cv_confirmed',  label:'Vollständig',         icon:'✅', color:'#0891b2', kanban:true,  terminal:false, needs_confirm:true},
   {key:'invited',       label:'Einladung',           icon:'✉️', color:'#7c3aed', kanban:true,  terminal:false},
   {key:'interview',     label:'Vorstellung',         icon:'🤝', color:'#d97706', kanban:true,  terminal:false},
-  {key:'selection1',    label:'Selektion 1',         icon:'🔍', color:'#059669', kanban:true,  terminal:false},
-  {key:'selection2',    label:'Selektion 2',         icon:'🎯', color:'#16a34a', kanban:true,  terminal:false},
+  {key:'selection1',    label:'Vorauswahl',          icon:'🔍', color:'#059669', kanban:true,  terminal:false},
+  {key:'selection2',    label:'Endauswahl',          icon:'🎯', color:'#16a34a', kanban:true,  terminal:false},
   {key:'contract',      label:'Arbeitsvertrag',      icon:'📝', color:'#0F5661', kanban:true,  terminal:false},
   {key:'training_planned', label:'Schulung geplant', icon:'📅', color:'#7c3aed', kanban:true,  terminal:false},
   {key:'training',      label:'Schulung',            icon:'📚', color:'#7c3aed', kanban:true,  terminal:false},
@@ -32058,6 +32058,8 @@ function CalEventEditor({ev, projects, employees, onClose, onSaved, onDelete, my
 function ciPlanStartHM(str){ const m=/(\d{1,2}):(\d{2})/.exec(String(str||'')); return m?(String(parseInt(m[1],10)).padStart(2,'0')+':'+m[2]):null; }
 function ciHmToMin(hm){ const m=/(\d{1,2}):(\d{2})/.exec(String(hm||'')); return m?(parseInt(m[1],10)*60+parseInt(m[2],10)):null; }
 function ciLateMin(arrival, planStart){ const a=ciHmToMin(arrival), s=ciHmToMin(planStart); return (a!=null&&s!=null)?(a-s):null; }
+// Geplantes Schichtende in Minuten = größtes HH:MM im Schicht-Text (Split → letztes Ende). null = unbekannt.
+function ciPlanEndMin(str){ const re=/(\d{1,2}):(\d{2})/g; let m, best=null; while((m=re.exec(String(str||'')))){ const v=parseInt(m[1],10)*60+parseInt(m[2],10); if(best==null||v>best) best=v; } return best; }
 function CheckinView({employees, projects, team, showToast, isMobileW}){
   const today = isoLocal(new Date());
   const [plan, setPlan] = useState(null);
@@ -32116,7 +32118,15 @@ function CheckinView({employees, projects, team, showToast, isMobileW}){
 
   if(plan===null) return <div style={{padding:40,textAlign:'center',color:'var(--muted)'}}>Lädt…</div>;
 
-  const rows=(plan||[]).filter(r=>empById[r.employee_id]);
+  const allRows=(plan||[]).filter(r=>empById[r.employee_id]);
+  // Auto-Check-out (Anzeige): eingecheckt (da/verspätet/früher) UND geplantes Ende vorbei → gilt als ausgecheckt,
+  // Zeile fällt aus der Tagesansicht. Das Festschreiben von `departure` erledigt der tägliche DB-Job (pg_cron).
+  const _nowMin=new Date().getHours()*60+new Date().getMinutes();
+  const isGone=r=>{ const c=checkins[ckey(r)]; if(!c||!['present','late','early'].includes(c.status)) return false;
+    if(c.departure) return true; const cell=(r.shift&&typeof r.shift==='object')?r.shift:null;
+    const end=ciPlanEndMin(r.label||r.shift_value||(cell&&(cell.split_afternoon||cell.shift))||''); return end!=null && _nowMin>end; };
+  const rows=allRows.filter(r=>!isGone(r));
+  const goneCount=allRows.length-rows.length;
   const total=rows.length, confirmed=rows.filter(r=>checkins[ckey(r)]).length, open=total-confirmed;
   const present=rows.filter(r=>{const c=checkins[ckey(r)];return c&&c.status==='present';}).length;
   const pct=total?Math.round(confirmed/total*100):0;
@@ -32148,6 +32158,7 @@ function CheckinView({employees, projects, team, showToast, isMobileW}){
             <div style={{textAlign:'center'}}><div style={{fontSize:32,fontWeight:800,lineHeight:1}}>{present}</div><div style={{fontSize:11,opacity:.78,marginTop:3}}>da</div></div>
             <div style={{textAlign:'center'}}><div style={{fontSize:32,fontWeight:800,lineHeight:1,color:open?'#fde68a':'#fff'}}>{open}</div><div style={{fontSize:11,opacity:.78,marginTop:3}}>offen</div></div>
             <div style={{textAlign:'center'}}><div style={{fontSize:32,fontWeight:800,lineHeight:1}}>{total}</div><div style={{fontSize:11,opacity:.78,marginTop:3}}>geplant</div></div>
+            {goneCount>0&&<div style={{textAlign:'center'}}><div style={{fontSize:32,fontWeight:800,lineHeight:1,opacity:.7}}>{goneCount}</div><div style={{fontSize:11,opacity:.7,marginTop:3}}>ausgecheckt</div></div>}
           </div>
         </div>
         {total>0&&<div style={{marginTop:16,height:9,borderRadius:5,background:'rgba(255,255,255,.22)',overflow:'hidden'}}><div style={{height:'100%',width:pct+'%',background:'#fff',borderRadius:5,transition:'width .35s'}}/></div>}
