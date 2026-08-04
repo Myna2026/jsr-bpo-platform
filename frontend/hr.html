@@ -6889,6 +6889,8 @@ function Widget_ForecastUmsatz({employees, projects}){
 }
 function Widget_ForecastKosten({employees}){
   const ym=new Date().toISOString().slice(0,7);
+  // Fehlender EUR/LEK-Kurs → LEK-Kosten wären null→0 → Summe zu niedrig. NICHT als Ergebnis zeigen.
+  if(fxMissingFor(employees, ym)) return <div><div className="widget-metric-hero" style={{color:'#dc2626',fontSize:19}}>Kurs fehlt</div><div className="widget-sub" style={{color:'var(--red)'}}>📈 EUR/LEK-Kurs für {ym} pflegen, sonst Kosten unvollständig</div></div>;
   const cost=(employees||[]).filter(e=>e&&['active','training'].includes(e.status)).reduce((s,e)=>s+(empCostEurForMonth(e,ym)||0),0);
   return <div><div className="widget-metric-hero" style={{color:'#dc2626'}}>{eur(cost)}</div><div className="widget-sub">📈 Forecast-Personalkosten {ym} · geplant</div></div>;
 }
@@ -8024,6 +8026,7 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
       <div className="ckm-card">
         <div className="ckm-h">Projekte</div>
         {(()=>{ const mc=payrollCfgMissingCountries(employees); return mc.length>0?<div style={{margin:'0 10px 6px',padding:'7px 10px',borderRadius:8,background:'var(--red-bg)',border:'1px solid var(--red)',fontSize:11,color:'var(--red)',fontWeight:600}}>⚠ Lohn-Sätze für {mc.join(', ')} fehlen: AG-Kosten zu niedrig, Marge zu hoch. System → 💶 Pauschalen.</div>:null; })()}
+        {fxMissingFor(employees,ym)&&<div style={{margin:'0 10px 6px',padding:'7px 10px',borderRadius:8,background:'var(--red-bg)',border:'1px solid var(--red)',fontSize:11,color:'var(--red)',fontWeight:600}}>⚠ Kein EUR/LEK-Kurs für {ym}: LEK-Projekte zeigen keine belastbare Marge. System → 💱 Wechselkurse.</div>}
         <div className="ckm-projlist">
           {projects.map(p=>{
             const projActive=active.filter(e=>e.project_id===p.id);
@@ -8038,6 +8041,7 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
             const _wf=projectDbWaterfall(_ac, rev);
             const mg=_wf.mgIV;
             const mgc=mg==null?'var(--muted)':mg>=20?'#059669':mg>=10?'#d97706':'#dc2626';
+            const _lekFx=fxMissingFor(employees,ym)&&(employees||[]).some(e=>e&&['active','training'].includes(e.status)&&e.project_id===p.id&&salaryCurrency(e)==='ALL');
             return (
               <div key={p.id} className="ckm-projrow" style={{cursor:'pointer'}} onClick={()=>onNavigate&&onNavigate({kind:'view',view:'profitability',projSel:p.id})} title="Zur Wirtschaftlichkeit">
                 <div className="ckm-projrow-top">
@@ -8045,9 +8049,9 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
                     <div className="ckm-proj-name">{p.name} <span className="ckm-arrow">→</span></div>
                     <div><span className="ckm-proj-n">{n}</span> <span className="ckm-proj-sub">aktiv{t>0?' · +'+t+' Schulung':''}</span></div>
                   </div>
-                  <span className="ckm-marge" style={{background:mgc+'1f',color:mgc}}>{mg==null?'Marge —':'Marge '+mg+'%'}</span>
+                  {_lekFx?<span className="ckm-marge" style={{background:'var(--red-bg)',color:'var(--red)'}} title="EUR/LEK-Kurs fehlt">Marge — · Kurs fehlt</span>:<span className="ckm-marge" style={{background:mgc+'1f',color:mgc}}>{mg==null?'Marge —':'Marge '+mg+'%'}</span>}
                 </div>
-                {rev>0&&<div className="ckm-db">DB I {_wf.mgI}% · II {_wf.mgII}% · III {_wf.mgIII}% · IV <b>{_wf.mgIV}%</b></div>}
+                {rev>0&&!_lekFx&&<div className="ckm-db">DB I {_wf.mgI}% · II {_wf.mgII}% · III {_wf.mgIII}% · IV <b>{_wf.mgIV}%</b></div>}
                 {Object.keys(bySkill).length>0 && <div className="ckm-projrow-skills">
                   {Object.entries(bySkill).map(([k,c])=><span key={k} className="ckm-skill"><b>{c}</b> {skLabel(k)}</span>)}
                 </div>}
@@ -8251,6 +8255,8 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
   const _planRevMap = planRevenueByProject(employees, projects, _cockpitYm);   // für Projekte-Karte (Marge)
   // Kosten in EUR über empCostEur (Währungs-Umrechnung + Fixgehalt korrekt); kein 1400/900-Schätz-Fallback mehr.
   const _fxMissingCk = fxMissingFor(employees, _cockpitYm);
+  // Projekt mit LEK-Gehältern? Bei fehlendem Kurs ist dessen Marge unbrauchbar (Kosten fallen auf 0).
+  const _projLek = p => (employees||[]).some(e=>e&&['active','training'].includes(e.status)&&e.project_id===(p&&p.id)&&salaryCurrency(e)==='ALL');
 
   const todayAbsent=employees.filter(e=>(e.absences||[]).some(a=>a.type==='sick'&&absCoversDay(a,todayStr)));
   const todayVac=employees.filter(e=>(e.absences||[]).some(a=>a.type==='vacation'&&absCoversDay(a,todayStr)));
@@ -8473,8 +8479,10 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
                     <span style={{fontSize:30,fontWeight:800,color:'#0F5661',lineHeight:1,fontFamily:'var(--mono)'}}>{n}</span>
                     <span style={{fontSize:11,color:'var(--muted)'}}>aktiv{t>0?' · +'+t+' Schulung':''}</span>
                   </div>
-                  <span style={{alignSelf:'flex-start',fontSize:12,fontWeight:800,padding:'2px 10px',borderRadius:99,background:mgColor+'1f',color:mgColor}}>{mg==null?'Marge —':'Marge '+mg+'%'}</span>
-                  {rev>0&&<div style={{fontSize:10,color:'var(--muted)'}}>DB I {_wf.mgI}% · IV <b>{_wf.mgIV}%</b></div>}
+                  {(_fxMissingCk&&_projLek(p))
+                    ? <span style={{alignSelf:'flex-start',fontSize:12,fontWeight:800,padding:'2px 10px',borderRadius:99,background:'var(--red-bg)',color:'var(--red)'}} title="EUR/LEK-Kurs für den Monat fehlt">Marge — · Kurs fehlt</span>
+                    : <span style={{alignSelf:'flex-start',fontSize:12,fontWeight:800,padding:'2px 10px',borderRadius:99,background:mgColor+'1f',color:mgColor}}>{mg==null?'Marge —':'Marge '+mg+'%'}</span>}
+                  {rev>0&&!(_fxMissingCk&&_projLek(p))&&<div style={{fontSize:10,color:'var(--muted)'}}>DB I {_wf.mgI}% · IV <b>{_wf.mgIV}%</b></div>}
                 </div>
               );
             })}
