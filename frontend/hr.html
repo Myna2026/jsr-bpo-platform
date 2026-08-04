@@ -970,7 +970,7 @@ const STATUS_FLOW = [
   {key:'contract',      label:'Arbeitsvertrag',      icon:'📝', color:'#0F5661', kanban:true,  terminal:false},
   {key:'training_planned', label:'Schulung geplant', icon:'📅', color:'#7c3aed', kanban:true,  terminal:false},
   {key:'training',      label:'Schulung',            icon:'📚', color:'#7c3aed', kanban:true,  terminal:false},
-  {key:'parking',       label:'Parkplatz',           icon:'⏳', color:'#f59e0b', kanban:true,  terminal:false},
+  {key:'parking',       label:'Wiedervorlage',       icon:'⏳', color:'#f59e0b', kanban:true,  terminal:false},
   {key:'active',        label:'Aktiv',               icon:'⚡', color:'#059669', kanban:false, terminal:false},
   {key:'rejected_by_us',    label:'Absage durch uns',        icon:'✗', color:'#dc2626', kanban:false, terminal:true},
   {key:'rejected_by_employee', label:'Absage Mitarbeiter',  icon:'🚶', color:'#dc2626', kanban:false, terminal:true},
@@ -19259,6 +19259,84 @@ const LANGUAGE_TEST_QUESTIONS = [
 
 
 // ── Language Test Page (separate view) ───────────────────
+// ── Bewerber-Trichter (Auswertung) — kumulierte Reach je Stufe, Abgänge separat ──
+// Ehrlich: Momentaufnahme nach Eingangsdatum (cv_date / cv_received_at), KEINE Status-Historie
+// (die speichern wir nicht) → Abgänge sind nicht stufengenau zuordenbar, darum separat.
+function RecruitingFunnel({cvList, employees}){
+  const [range,setRange]=useState('month');
+  const cvs=cvList||[], emps=employees||[];
+  const today=isoLocal(new Date()), ym=today.slice(0,7);
+  const d30=(()=>{ const d=new Date(); d.setDate(d.getDate()-29); return isoLocal(d); })();
+  const inRange=ds=>{ const s=String(ds||'').slice(0,10); if(range==='all') return true; if(!s) return false; return range==='month'?(s.slice(0,7)===ym):(s>=d30&&s<=today); };
+  const ORDER=['cv_inbound','cv_accepted','cv_confirmed','invited','interview','selection1','selection2','contract'];
+  const lbl=k=>{ const s=STATUS_FLOW.find(x=>x.key===k); return s?s.label:k; };
+  const col=k=>{ const s=STATUS_FLOW.find(x=>x.key===k); return s?s.color:'#64748b'; };
+  const posOf=st=>{ if(st==='training_planned'||st==='training') return ORDER.length-1; return ORDER.indexOf(st); };
+  const REJ=['rejected_by_us','rejected_by_employee','rejected_by_client','blacklist'];
+
+  const cvIn=cvs.filter(c=>c&&inRange(c.cv_date));
+  const hired=emps.filter(e=>e&&e.source==='cv'&&inRange(e.cv_received_at));
+  const active=cvIn.filter(c=>posOf(c.status)>=0);
+  const rejected=cvIn.filter(c=>REJ.includes(c.status));
+  const parking=cvIn.filter(c=>c.status==='parking');
+  const hiredN=hired.length;
+  const total=cvIn.length+hiredN;
+  // Reach je Stufe = aktive CVs an Stufe i oder weiter + alle Eingestellten (die haben alle Stufen passiert).
+  const reach=ORDER.map((k,i)=> active.filter(c=>posOf(c.status)>=i).length + hiredN );
+  const stages=ORDER.map((k,i)=>({key:k, label:lbl(k), color:col(k), n:reach[i], conv: i===0?null:(reach[i-1]?Math.round(reach[i]/reach[i-1]*100):0)}));
+  stages.push({key:'_hired', label:'Eingestellt', color:'#059669', n:hiredN, conv:(reach[ORDER.length-1]?Math.round(hiredN/reach[ORDER.length-1]*100):0)});
+  const top=reach[0]||1;
+  const rejBy=k=>rejected.filter(c=>c.status===k).length;
+
+  return (
+    <div style={{maxWidth:820,margin:'0 auto'}}>
+      <div style={{display:'flex',alignItems:'flex-end',justifyContent:'space-between',gap:12,flexWrap:'wrap',marginBottom:14}}>
+        <div>
+          <div style={{fontSize:20,fontWeight:800}}>Bewerber-Trichter</div>
+          <div style={{fontSize:12,color:'var(--muted)',marginTop:2}}>Vom Eingang bis zur Einstellung. Zeitraum nach Eingangsdatum.</div>
+        </div>
+        <div style={{display:'flex',border:'1px solid var(--border)',borderRadius:10,overflow:'hidden'}}>
+          {[['month','Laufender Monat'],['30d','Letzte 30 Tage'],['all','Alles']].map(([k,l])=>(
+            <button key={k} className="btn btn-sm" style={{border:'none',borderRadius:0,background:range===k?'#0F5661':'transparent',color:range===k?'#fff':'var(--text)'}} onClick={()=>setRange(k)}>{l}</button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:14,padding:'16px 18px',marginBottom:14}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',marginBottom:14}}>
+          <div><span style={{fontSize:28,fontWeight:800,color:'#0F5661'}}>{total}</span> <span style={{fontSize:13,color:'var(--muted)',fontWeight:600}}>reingekommen</span></div>
+          <div style={{fontSize:12,color:'var(--muted)'}}>{active.length} im Verfahren · {hiredN} eingestellt · {rejected.length} abgelehnt · {parking.length} Wiedervorlage</div>
+        </div>
+        {stages.map((s,i)=>{ const w=Math.max(6,Math.round(s.n/top*100)); const drop=i>0&&s.conv!=null; return (
+          <div key={s.key} style={{marginBottom:8}}>
+            <div style={{display:'flex',alignItems:'center',gap:10}}>
+              <div style={{width:110,fontSize:12,fontWeight:700,color:'var(--text)',textAlign:'right',flexShrink:0}}>{s.label}</div>
+              <div style={{flex:1,display:'flex',justifyContent:'center'}}>
+                <div style={{width:w+'%',minWidth:44,background:s.color,color:'#fff',borderRadius:8,padding:'8px 10px',textAlign:'center',fontWeight:800,fontSize:15,boxShadow:'0 1px 3px rgba(0,0,0,.12)',transition:'width .3s'}}>{s.n}</div>
+              </div>
+              <div style={{width:74,fontSize:12,flexShrink:0,textAlign:'left',color:drop?(s.conv>=70?'#059669':s.conv>=40?'#d97706':'#dc2626'):'var(--muted)',fontWeight:700}}>{drop?('→ '+s.conv+'%'):''}</div>
+            </div>
+          </div>
+        ); })}
+      </div>
+
+      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))',gap:12}}>
+        <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:14,padding:'14px 16px'}}>
+          <div style={{fontSize:13,fontWeight:800,marginBottom:8}}>Abgänge ({rejected.length})</div>
+          {[['rejected_by_us','Absage durch uns'],['rejected_by_employee','Absage Mitarbeiter'],['rejected_by_client','Absage Kunde'],['blacklist','Blacklist']].map(([k,l])=>(
+            <div key={k} style={{display:'flex',justifyContent:'space-between',fontSize:12,padding:'3px 0'}}><span style={{color:'var(--muted)'}}>{l}</span><b>{rejBy(k)}</b></div>
+          ))}
+          <div style={{display:'flex',justifyContent:'space-between',fontSize:12,padding:'3px 0',borderTop:'1px solid var(--border)',marginTop:4}}><span style={{color:'#d97706',fontWeight:600}}>Wiedervorlage</span><b>{parking.length}</b></div>
+          <div style={{fontSize:11,color:'var(--muted)',marginTop:8,lineHeight:1.5}}>Abgänge lassen sich ohne Status-Historie nicht stufengenau zuordnen, daher separat.</div>
+        </div>
+        <div style={{background:'#f0fdf4',border:'1px solid #bbf7d0',borderRadius:14,padding:'14px 16px'}}>
+          <div style={{fontSize:13,fontWeight:800,color:'#15803d',marginBottom:6}}>Eingestellt: {hiredN}</div>
+          <div style={{fontSize:11,color:'#166534',lineHeight:1.5}}>⚠ Diese Stufe zählt nur Übernahmen <b>ab jetzt</b> (Markierung <code>source='cv'</code> seit 2026-08-04). Frühere Übernahmen fehlen hier, der Wert wird über die kommenden Wochen vollständig.</div>
+        </div>
+      </div>
+    </div>
+  );
+}
 </script><script type="text/babel">function RecruitingKanban({employees, setEmployees, cvList, setCvList, projects, onPromoteToEmployee, showToast}){
   const [dragging, setDragging] = useState(null);
   const [dragType, setDragType] = useState(null); // 'cv' | 'emp'
@@ -32825,6 +32903,7 @@ function App(){
     ]},
     {sec:'Recruiting', items:[
       {key:'kanban',label:'Recruiting',icon:'🔄'},
+      {key:'funnel',label:'Bewerber-Trichter',icon:'📊'},
       {key:'onboarding',label:'Onboarding',icon:'✅'},
       {key:'cvs',label:'CVs & Bewerber',icon:'📋'},
       {key:'showcase',label:'Showcases',icon:'🌟'},
@@ -33119,6 +33198,7 @@ function App(){
           {view==='kanban'&&<RecruitingKanban employees={employees} setEmployees={setEmployees} cvList={cvList} setCvList={setCvList} projects={projects} onPromoteToEmployee={promoteToEmployee} showToast={showToast}/>}
           {view==='onboarding'&&<OnboardingView employees={employees} setEmployees={setEmployees} showToast={showToast}/>}
           {view==='cvs'&&<CVsView cvList={cvList} setCvList={setCvList} projects={projects} onPromoteToEmployee={promoteToEmployee} testQuestions={testQuestions} showToast={showToast} navFilter={navFilter} onClearNavFilter={()=>setNavFilter(null)} isMobileW={isMobileW}/>}
+          {view==='funnel'&&<RecruitingFunnel cvList={cvList} employees={employees}/>}
           {view==='showcase'&&(
             <div>
               <CandidateShowcase cvList={cvList} setCvList={setCvList} projects={projects}/>
