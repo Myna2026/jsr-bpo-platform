@@ -4563,14 +4563,22 @@ function EmployeeModal({emp, projects, employees, onSave, onClose, initialTab, o
               </div>
               <div className="form-row">
                 <div className="form-group">
-                  <label className="form-label">Urlaubstage / Jahr</label>
-                  {(()=>{ const _v=calcVacationEntitlement(form); return(
-                    <div className="form-input" style={{background:'var(--surface-2)'}}>
-                      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
-                        <span style={{fontWeight:700}}>{_v.quota} Tage</span>
+                  <label className="form-label">Urlaubskonto {new Date().getFullYear()}</label>
+                  {(()=>{ const _a=vacationAccountFor(form); const cell={fontSize:12}; return(
+                    <div className="form-input" style={{background:'var(--surface-2)',display:'block'}}>
+                      <div style={{display:'flex',alignItems:'baseline',justifyContent:'space-between'}}>
+                        <span style={{fontWeight:800,fontSize:15,color:'#0F5661'}}>{_a.available} Tage verfügbar</span>
                         <span style={{fontSize:10,color:'var(--muted)'}}>berechnet</span>
                       </div>
-                      <div style={{fontSize:10,color:'var(--muted)',marginTop:2}}>{_v.note}</div>
+                      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'2px 12px',marginTop:6}}>
+                        <div style={cell}>Anspruch: <b>{_a.quota}</b></div>
+                        <div style={cell}>Resturlaub: <b>{_a.carryIn}</b></div>
+                        <div style={cell}>Genommen: <b>{_a.taken}</b></div>
+                        <div style={cell}>Geplant: <b>{_a.planned}</b></div>
+                      </div>
+                      {_a.carryExpired>0 && <div style={{fontSize:11,fontWeight:700,color:'#d97706',marginTop:6}}>⚠ Verfallen: {_a.carryExpired} Tage Resturlaub (Frist {_a.expiry})</div>}
+                      {_a.overused>0 && <div style={{fontSize:11,fontWeight:700,color:'#dc2626',marginTop:4}}>Überzogen: {_a.overused} Tage</div>}
+                      {_a.carryIn>0 && !_a.expiryPassed && <div style={{fontSize:10,color:'var(--muted)',marginTop:4}}>Resturlaub verfällt am {_a.expiry}, wird zuerst verbraucht.</div>}
                     </div>
                   );})()}
                 </div>
@@ -20915,16 +20923,16 @@ function ProjectProfitability({projects, employees, forecast, setForecast, onNav
   const displayEmps = showAll ? activeEmps : activeEmps.filter(hasAbsWin);
 
   function getYearStats(emp, year){
-    // Tage (nicht Eintraege) — deckt Einzeltag UND Zeitraum ab (absDaysInYear). Fixt den
-    // frueheren Einzeltag-only-Bug: Zeitraum-Absences aus Antraegen wurden nicht gezaehlt.
+    // Tage (nicht Eintraege) — deckt Einzeltag UND Zeitraum ab (absDaysInYear).
     const yd=(pred)=>(emp.absences||[]).filter(pred).reduce((s,a)=>s+absDaysInYear(a,year),0);
     const sick=yd(a=>a.type==='sick');
-    const vacation=yd(a=>a.type==='vacation');
     const paidAbs=yd(a=>!['sick','vacation','unpaid'].includes(a.type));
     const unpaid=yd(a=>a.type==='unpaid');
-    const quota=emp.vacation_days??emp.vacation_days_quota??20;
-    const vacLeft=Math.max(0,quota-vacation);
-    return {sick,vacation,paidAbs,unpaid,quota,vacLeft,total:sick+vacation+paidAbs+unpaid};
+    // EIN Motor (JSRCalc.vacationAccount): Anspruch aus Formel + Resturlaub, Verbrauch werktaggenau, Verfall.
+    const acc=vacationAccountFor(emp, year);
+    return {sick, vacation:acc.consumed, paidAbs, unpaid,
+            quota:acc.total, vacLeft:acc.available, anspruch:acc.quota, carryIn:acc.carryIn, carryExpired:acc.carryExpired,
+            total:sick+acc.consumed+paidAbs+unpaid};
   }
 
   return(
@@ -20996,18 +21004,19 @@ function ProjectProfitability({projects, employees, forecast, setForecast, onNav
                     {sickWarn&&<span style={{fontSize:9,marginLeft:4,color:'var(--red)',fontWeight:700}}>⚠</span>}
                   </td>
                   <td style={{fontFamily:'var(--mono)',fontWeight:500,color:'var(--amber)'}}>{st.vacation}</td>
-                  <td>
+                  <td title={'Anspruch '+st.anspruch+(st.carryIn>0?(' + Resturlaub '+st.carryIn):'')+' = '+st.quota+' Tage'}>
                     <div style={{display:'flex',alignItems:'center',gap:6}}>
                       <div style={{width:50,height:4,background:'var(--border)',borderRadius:2,overflow:'hidden'}}>
-                        <div style={{height:'100%',width:Math.min(st.vacation/st.quota*100,100)+'%',background:st.vacLeft<=3?'var(--red)':st.vacLeft<=7?'var(--amber)':'var(--green)',borderRadius:2}}/>
+                        <div style={{height:'100%',width:Math.min(st.quota?st.vacation/st.quota*100:0,100)+'%',background:st.vacLeft<=3?'var(--red)':st.vacLeft<=7?'var(--amber)':'var(--green)',borderRadius:2}}/>
                       </div>
-                      <span style={{fontSize:11,fontFamily:'var(--mono)',color:'var(--muted)'}}>{st.quota}d</span>
+                      <span style={{fontSize:11,fontFamily:'var(--mono)',color:'var(--muted)'}}>{st.quota}d{st.carryIn>0?<span style={{color:'#0F5661'}} title="davon Resturlaub Vorjahr"> (+{st.carryIn})</span>:''}</span>
                     </div>
                   </td>
                   <td>
                     <span style={{fontFamily:'var(--mono)',fontWeight:600,color:st.vacLeft<=3?'var(--red)':st.vacLeft<=7?'var(--amber)':'var(--green)'}}>
                       {st.vacLeft}d
                     </span>
+                    {st.carryExpired>0&&<div style={{fontSize:9,color:'#d97706',fontWeight:700}} title={'Resturlaub verfallen'}>{st.carryExpired}d verfallen</div>}
                   </td>
                   <td style={{fontFamily:'var(--mono)',color:'var(--blue)'}}>{st.paidAbs||'—'}</td>
                   <td style={{fontFamily:'var(--mono)',color:'var(--muted)'}}>{st.unpaid||'—'}</td>
