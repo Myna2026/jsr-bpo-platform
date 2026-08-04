@@ -3464,6 +3464,27 @@ function EmployeeModal({emp, projects, employees, onSave, onClose, initialTab, o
       setEmpPayslips(data||[]);
     })();
   },[emp&&emp.id]);
+  // Urlaubskonto-Einzeleingabe (vacation_accounts, laufendes Jahr): Resturlaub Vorjahr + Verfall-Override.
+  const [acctDraft,setAcctDraft]=useState({carry:'',expiry:''});
+  const [acctBusy,setAcctBusy]=useState(false);
+  const [acctSaved,setAcctSaved]=useState(false);
+  useEffect(()=>{
+    if(!emp||!emp.id){ setAcctDraft({carry:'',expiry:''}); return; }
+    const row=VAC_ACCOUNTS[emp.id+'|'+new Date().getFullYear()];
+    setAcctDraft({carry: row&&row.carry_in_days!=null?String(row.carry_in_days):'', expiry: row&&row.carry_expires_on?String(row.carry_expires_on).slice(0,10):''});
+    setAcctSaved(false);
+  },[emp&&emp.id]);
+  async function saveVacAccount(){
+    if(!emp||!emp.id) return;
+    setAcctBusy(true);
+    const year=new Date().getFullYear();
+    const row={employee_id:emp.id, year:year, carry_in_days:Number(acctDraft.carry)||0, carry_expires_on:acctDraft.expiry||null, note:'manuell', updated_at:new Date().toISOString()};
+    const {error}=await sb.from('vacation_accounts').upsert(row,{onConflict:'employee_id,year'});
+    setAcctBusy(false);
+    if(error){ window.alert('Konnte Urlaubskonto nicht speichern: '+(error.message||'DB')); return; }
+    VAC_ACCOUNTS[emp.id+'|'+year]=row;   // Cache aktualisieren → Konto-Card rechnet sofort neu
+    setAcctSaved(true);
+  }
   const [form, setForm] = useState(emp||{
     first_name:'',last_name:'',staff_number:'',email:'',email_internal:'',phone:'',
     city:'',location:'Tirana',position:'Agent',bank_currency:currencyForLocation('Tirana'),salary_currency:currencyForLocation('Tirana'),
@@ -4581,6 +4602,22 @@ function EmployeeModal({emp, projects, employees, onSave, onClose, initialTab, o
                       {_a.carryIn>0 && !_a.expiryPassed && <div style={{fontSize:10,color:'var(--muted)',marginTop:4}}>Resturlaub verfällt am {_a.expiry}, wird zuerst verbraucht.</div>}
                     </div>
                   );})()}
+                  {emp&&emp.id?(
+                    <div style={{marginTop:8,display:'flex',gap:8,flexWrap:'wrap',alignItems:'flex-end'}}>
+                      <div style={{flex:'1 1 130px'}}>
+                        <label className="form-label" style={{fontSize:11}}>Resturlaub Vorjahr (Tage)</label>
+                        <input type="number" step="0.5" min="0" className="form-input" value={acctDraft.carry} placeholder="0"
+                          onChange={e=>{const v=e.target.value;setAcctDraft(d=>({...d,carry:v}));setAcctSaved(false);}}/>
+                      </div>
+                      <div style={{flex:'1 1 140px'}}>
+                        <label className="form-label" style={{fontSize:11}}>Verfällt am (leer = Standard)</label>
+                        <input type="date" className="form-input" value={acctDraft.expiry}
+                          onChange={e=>{const v=e.target.value;setAcctDraft(d=>({...d,expiry:v}));setAcctSaved(false);}}/>
+                      </div>
+                      <button type="button" className="btn btn-sm btn-primary" disabled={acctBusy} onClick={saveVacAccount}>{acctBusy?'…':'Speichern'}</button>
+                      {acctSaved&&<span style={{fontSize:11,color:'var(--green)',fontWeight:700}}>✓ gespeichert</span>}
+                    </div>
+                  ):<div style={{fontSize:10,color:'var(--muted)',marginTop:6}}>Resturlaub Vorjahr lässt sich nach dem ersten Speichern des Mitarbeiters eintragen.</div>}
                 </div>
               </div>
               <div className="form-group">
@@ -24747,6 +24784,14 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
                     <label className="form-label">Urlaubstage Folgejahre</label>
                     <input type="number" min="0" max="50" className="form-input" value={vcfg.year2_days||20}
                       onChange={e=>{const v={...vcfg,year2_days:parseInt(e.target.value)||0};setVcfg(v);localStorage.setItem('jsr_vacation_cfg',JSON.stringify(v));}}/>
+                  </div>
+                </div>
+                <div className="form-row">
+                  <div className="form-group">
+                    <label className="form-label">Resturlaub verfällt jährlich am (Standard)</label>
+                    <input type="date" className="form-input" value={(new Date().getFullYear())+'-'+(vcfg.carry_expire||'06-30')}
+                      onChange={e=>{const md=(e.target.value||'').slice(5)||'06-30';const v={...vcfg,carry_expire:md};setVcfg(v);localStorage.setItem('jsr_vacation_cfg',JSON.stringify(v));}}/>
+                    <div style={{fontSize:10,color:'var(--muted)',marginTop:3}}>Nur Tag und Monat zählen. Je Mitarbeiter im Profil überschreibbar; leer dort = dieser Standard.</div>
                   </div>
                 </div>
                 <div style={{fontSize:11,color:'var(--muted)',padding:'8px 12px',background:'var(--surface-2)',borderRadius:'var(--r)',lineHeight:1.6}}>
