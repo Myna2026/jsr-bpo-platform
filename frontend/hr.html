@@ -7826,6 +7826,83 @@ function DataQualityPanel({employees, projects, plans, onNavigate, summary, onOp
 // Rendert unabhängig von der Desktop-Widget-Auswahl. Reihenfolge: KPI-Kacheln → offene
 // Urlaubsanträge (das Einzige, was man mobil TUT) → MA je Projekt → Projekte → Leistung je Skill
 // → CV-Eingang → Heute zu erledigen → offene Tagesaufgaben.
+// ── Tagesberichte im Cockpit (Schnitt 4): Abschnitt je aktiviertem Projekt, Gestern|Heute-Ampel ──
+function drFmtDeShort(ds){ try{ return new Date(String(ds).slice(0,10)+'T12:00:00').toLocaleDateString('de-DE',{weekday:'short',day:'numeric',month:'short'}); }catch(e){ return ds; } }
+function Widget_DailyReports({employees, projects, team}){
+  const roles=(team&&team.role_keys)||[];
+  const isMgr=roles.some(r=>r==='management'||r==='hr');
+  const cfg=React.useMemo(()=>{ try{ return JSON.parse(localStorage.getItem('jsr_daily_reports_cfg')||'{}')||{}; }catch(e){ return {}; } },[]);
+  const enabledProjects=(projects||[]).filter(p=>p&&p.id&&cfg[p.id]&&cfg[p.id].enabled);
+  const today=isoLocal(new Date());
+  const yDate=(()=>{ const d=new Date(); d.setDate(d.getDate()-1); return isoLocal(d); })();
+  const [reps,setReps]=useState(null);   // `${emp}|${date}` -> row
+  const [arch,setArch]=useState(null);   // {emp, rows|null}
+  const [expand,setExpand]=useState({}); // `${emp}|${date}` -> bool
+  const projIds=enabledProjects.map(p=>p.id).join(',');
+  useEffect(()=>{ let alive=true; if(!isMgr||!projIds){ setReps({}); return; }
+    const ids=projIds.split(',');
+    const load=async()=>{ const {data}=await sb.from('daily_reports').select('*').in('project_id',ids).in('report_date',[yDate,today]); if(!alive) return; const m={}; (data||[]).forEach(r=>{ m[r.employee_id+'|'+String(r.report_date).slice(0,10)]=r; }); setReps(m); };
+    load();
+    const ch=sb.channel('cockpit-reports').on('postgres_changes',{event:'*',schema:'public',table:'daily_reports'},load).subscribe();
+    return ()=>{ alive=false; try{ sb.removeChannel(ch); }catch(e){} };
+  },[isMgr, projIds, today, yDate]);
+  if(!isMgr || !enabledProjects.length) return null;
+
+  const openArchive=async(emp)=>{ setArch({emp, rows:null}); const {data}=await sb.from('daily_reports').select('*').eq('employee_id',emp.id).order('report_date',{ascending:false}).limit(40); setArch({emp, rows:data||[]}); };
+  const dowOf=ds=>{ const p=ds.split('-').map(Number); return new Date(p[0],p[1]-1,p[2]).getDay(); };
+  const cell=(emp,dateIso,expandable)=>{
+    const r=reps&&reps[emp.id+'|'+dateIso];
+    const dow=dowOf(dateIso); const req=(cfg[emp.project_id]&&(cfg[emp.project_id].weekdays||[1,2,3,4,5]).includes(dow));
+    let col,lbl; if(r){ col=r.late?'#d97706':'#059669'; lbl=r.late?'⏱ zu spät':'✓ abgegeben'; } else if(!req){ col='#94a3b8'; lbl='—'; } else { col='#dc2626'; lbl='fehlt'; }
+    const ek=emp.id+'|'+dateIso, op=!!expand[ek];
+    return (
+      <div style={{borderTop:'1px solid var(--border)',padding:'7px 10px'}}>
+        <div style={{display:'flex',alignItems:'center',gap:8}}>
+          <span style={{width:10,height:10,borderRadius:'50%',background:col,flexShrink:0}}/>
+          <span onClick={()=>openArchive(emp)} title="Archiv öffnen" style={{fontSize:13,fontWeight:600,cursor:'pointer',flex:1,minWidth:0,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{emp.first_name} {emp.last_name}</span>
+          {r&&expandable?<button className="btn btn-sm" onClick={()=>setExpand(x=>({...x,[ek]:!op}))}>{op?'▲':'▼ lesen'}</button>:<span style={{fontSize:11,fontWeight:700,color:col}}>{lbl}</span>}
+        </div>
+        {r&&expandable&&op&&<div style={{fontSize:12,color:'var(--text)',whiteSpace:'pre-wrap',marginTop:6,paddingLeft:18}}>{r.body}</div>}
+      </div>
+    );
+  };
+  const column=(emps,dateIso,title)=>{ const req=emps.length&&(cfg[emps[0].project_id]&&(cfg[emps[0].project_id].weekdays||[1,2,3,4,5]).includes(dowOf(dateIso)));
+    return (
+      <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--r-lg)',overflow:'hidden'}}>
+        <div style={{padding:'8px 10px',fontWeight:700,fontSize:12,borderBottom:'1px solid var(--border)',display:'flex',justifyContent:'space-between'}}><span>{title}</span>{!req&&<span style={{color:'var(--muted)',fontWeight:600}}>kein Pflichttag</span>}</div>
+        {req?emps.map(e=><React.Fragment key={e.id}>{cell(e,dateIso,true)}</React.Fragment>):<div style={{padding:'12px 10px',fontSize:12,color:'var(--muted)'}}>An diesem Tag ist kein Bericht fällig.</div>}
+      </div>
+    );
+  };
+  return (
+    <div style={{marginBottom:12}}>
+      {enabledProjects.map(p=>{ const emps=(employees||[]).filter(e=>e&&e.project_id===p.id&&['active','training'].includes(e.status)).slice().sort((a,b)=>((a.first_name||'')+a.last_name).localeCompare((b.first_name||'')+b.last_name,'de'));
+        return (
+          <div key={p.id} style={{marginBottom:12}}>
+            <div style={{fontSize:14,fontWeight:800,margin:'0 0 8px 2px'}}>📝 Tagesberichte · {p.name}</div>
+            {emps.length===0?<div style={{fontSize:12,color:'var(--muted)'}}>Keine aktiven Mitarbeiter.</div>:
+            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(240px,1fr))',gap:10}}>
+              {column(emps,yDate,'Gestern · '+drFmtDeShort(yDate))}
+              {column(emps,today,'Heute · '+drFmtDeShort(today))}
+            </div>}
+          </div>
+        );
+      })}
+      {arch&&<div className="modal-overlay" onClick={()=>setArch(null)} style={{position:'fixed',inset:0,background:'rgba(0,0,0,.4)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:1000,padding:16}}>
+        <div onClick={e=>e.stopPropagation()} style={{background:'#fff',borderRadius:12,maxWidth:520,width:'100%',maxHeight:'90vh',overflowY:'auto',padding:18,boxShadow:'0 10px 40px rgba(0,0,0,.2)'}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}><div style={{fontSize:16,fontWeight:800}}>Berichte · {arch.emp.first_name} {arch.emp.last_name}</div><button className="btn btn-sm" onClick={()=>setArch(null)}>Schließen</button></div>
+          {arch.rows===null?<div style={{color:'var(--muted)',fontSize:13}}>Lädt…</div>:arch.rows.length===0?<div style={{color:'var(--muted)',fontSize:13}}>Noch keine Berichte.</div>:
+            arch.rows.map(r=>{ const ds=String(r.report_date).slice(0,10); return (
+              <div key={r.id} style={{borderTop:'1px solid var(--border)',padding:'8px 0'}}>
+                <div style={{display:'flex',justifyContent:'space-between',fontSize:12,fontWeight:700}}><span>{drFmtDeShort(ds)}</span><span style={{color:r.late?'#d97706':'#059669'}}>{r.late?'verspätet':'pünktlich'}</span></div>
+                <div style={{fontSize:13,whiteSpace:'pre-wrap',marginTop:4}}>{r.body}</div>
+              </div>
+            ); })}
+        </div>
+      </div>}
+    </div>
+  );
+}
 function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence, cvsDb, payslipsDb, feedbackTodayDb, setEmployees, showToast}){
   const now=new Date();
   const todayStr=now.toISOString().slice(0,10);
@@ -7919,6 +7996,9 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
           </div>
         ))}
       </div>
+
+      {/* Tagesberichte (Reporting-Projekte, nur Management/HR) */}
+      <Widget_DailyReports employees={employees} projects={projects} team={team}/>
 
       {/* Offene Urlaubsanträge — inline genehmigen/ablehnen mit Bestätigung (Wirkung sichtbar) */}
       {pending.length>0 && (
@@ -8291,6 +8371,9 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
           </details>
         );
       })()}
+
+      {/* Tagesberichte (Reporting-Projekte, nur Management/HR) — eigener Abschnitt, Gestern|Heute */}
+      <Widget_DailyReports employees={employees} projects={projects} team={team}/>
 
       {/* 4) HEUTE ZU ERLEDIGEN */}
       {hasW('heute_todo') && (()=>{
