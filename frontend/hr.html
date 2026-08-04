@@ -6802,7 +6802,7 @@ function loadUserCockpits(){ try{ const v=JSON.parse(localStorage.getItem('jsr_u
 function saveUserCockpits(obj){ const o=obj||{}; localStorage.setItem('jsr_user_cockpits_v1', JSON.stringify(o)); saveConfigToDB('jsr_user_cockpits_v1', o); }
 // Mobile-Navigation: Standard reduziert auf diese Bereiche (Management-Handy). Ausnahme pro Nutzer
 // über jsr_mobile_full_v1 = { [user_id]: true } (analog Tab-Sperren) -> voller mobiler Zugriff.
-const MOBILE_NAV_KEYS = ['start','cockpit','employees','shiftplan','absences'];
+const MOBILE_NAV_KEYS = ['start','cockpit','daily_tasks','calendar','cvs','checkin','employees','shiftplan','absences'];
 // Gelesen wird der Flag frisch aus der DB (loadConfigFromDB) beim Login + in der Matrix; hier nur Schreiben.
 function saveMobileFull(obj){ const o=obj||{}; localStorage.setItem('jsr_mobile_full_v1', JSON.stringify(o)); saveConfigToDB('jsr_mobile_full_v1', o); }
 // MA-Import-Berechtigung pro Nutzer über jsr_ma_import_v1 = { [user_id]: true } (analog Tab-Sperren).
@@ -7280,7 +7280,7 @@ const ROLE_TASKS = [
   {key:'fin_lohn',         owner:'finance',    view:'payroll',     title:'Gehaltsabrechnung & Löhne',     desc:'Gehaltsabrechnung erstellen und Löhne vorbereiten.',                                                       window:[1], count:'payroll_open', auto_key:'payroll'},
   {key:'fin_bwa',          owner:'finance',    view:null,          title:'Monatsabschluss BWA',           desc:'Monatsabschluss und BWA erstellen (tive-finance).',                                                        window:[1,2], count:null},
 ];
-function DailyTasksView({employees, projects, onNavigate, team}){
+function DailyTasksView({employees, projects, onNavigate, team, isMobileW}){
   const _iso = d => d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
   const today = _iso(new Date());
   // Rollen-Partition: jede Rolle sieht NUR ihre eigenen Aufgaben. Manager EXTERN (mgmt_external)
@@ -7467,7 +7467,7 @@ function DailyTasksView({employees, projects, onNavigate, team}){
             </div>
           </div>
           {TASKS.length===0&&<p className="welcome-sub" style={{margin:'0 0 14px'}}>Als Manager extern hast du keine eigene Liste. Hier der Stand aller Rollen für heute.</p>}
-          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(230px,1fr))',gap:16}}>
+          <div style={{display:'grid',gridTemplateColumns:isMobileW?'1fr':'repeat(auto-fit,minmax(230px,1fr))',gap:16}}>
             {OV_ROLES.map(r=>{ const a=roleAgg(r.key);
               const col=a.state==='done'?{fg:'#15803d',bg:'#f0fdf4',bd:'#bbf7d0'}:a.state==='open'?OPEN_COL:{fg:'#94a3b8',bg:'#f8fafc',bd:'#e2e8f0'};
               const clickable=a.total>0; const R=30, C=2*Math.PI*R, frac=a.total?a.doneN/a.total:0;
@@ -18044,13 +18044,13 @@ function CVResultsModal({cv, onClose, onPromote}){
 // ── CV List View ──────────────────────────────────────────
 
 
-function CVsView({cvList, setCvList, projects, onPromoteToEmployee, team, showToast, navFilter, onClearNavFilter}){
+function CVsView({cvList, setCvList, projects, onPromoteToEmployee, team, showToast, navFilter, onClearNavFilter, isMobileW}){
   const [modal, setModal] = useState(null);
   const [testView, setTestView] = useState(null);
   const [savedFeedback, setSavedFeedback] = useState(null);
   const [quickView, setQuickView] = useState(null); // token
   const [resultsModal, setResultsModal] = useState(null);
-  const [filter, setFilter] = useState('all');
+  const [filter, setFilter] = useState(isMobileW?'cv_inbound':'all');   // mobil auf den Posteingang starten
 
   async function saveCv(form){
     if(form.id){
@@ -18183,6 +18183,38 @@ function CVsView({cvList, setCvList, projects, onPromoteToEmployee, team, showTo
 
       {/* CV Table */}
       <div className="card">
+        {isMobileW ? (
+          <div>
+            {filtered.length===0&&<div style={{textAlign:'center',padding:24,color:'var(--muted)',fontSize:13}}>Keine Bewerber in diesem Filter.</div>}
+            {filtered.map(cv=>{
+              const st=STATUS_FLOW.find(x=>x.key===normStatus(cv.status));
+              const PIPE=['cv_inbound','cv_accepted','cv_confirmed','invited','interview','selection1','selection2','contract','training_planned','training','active'];
+              const REQ={'cv_accepted':['first_name','last_name','email','phone'],'cv_confirmed':['first_name','last_name','email','phone','language_level','audio_url'],'invited':['first_name','last_name','email','phone','language_level'],'selection1':['first_name','last_name','email','phone','language_level','target_project'],'selection2':['first_name','last_name','email','phone','language_level','target_project','primary_skill']};
+              const cur=PIPE.indexOf(normStatus(cv.status)); const next=PIPE[cur+1]; const nextS=next?STATUS_FLOW.find(s=>s.key===next):null;
+              const readyMissing=(next&&cur>=0)?(REQ[next]||[]).filter(f=>f==='audio_url'?!cvAudioUrl(cv):(!cv[f]||String(cv[f]).trim()==='')):[];
+              return (
+                <div key={cv.id} onClick={()=>setModal(cv)} style={{background:'#fff',border:'1px solid var(--border)',borderRadius:12,padding:'12px 14px',marginBottom:10,cursor:'pointer',boxShadow:'0 1px 3px rgba(0,0,0,.04)'}}>
+                  <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:8}}>
+                    <div style={{minWidth:0}}>
+                      <div style={{fontWeight:700,fontSize:15}}>{cv.first_name} {cv.last_name}</div>
+                      <div style={{fontSize:12,color:'var(--muted)',marginTop:2}}>{cv.city||''}{cv.cv_date?(cv.city?' · ':'')+new Date(cv.cv_date).toLocaleDateString('de-DE'):''}</div>
+                    </div>
+                    {st&&<span style={{padding:'3px 8px',borderRadius:20,fontSize:11,fontWeight:700,background:st.color+'18',color:st.color,border:'1px solid '+st.color+'33',whiteSpace:'nowrap',flexShrink:0}}>{st.icon} {st.label}</span>}
+                  </div>
+                  <div style={{display:'flex',alignItems:'center',gap:14,marginTop:10,flexWrap:'wrap'}}>
+                    {cv.phone&&<a href={'tel:'+String(cv.phone).replace(/[^\d+]/g,'')} onClick={e=>e.stopPropagation()} style={{fontSize:14,fontWeight:700,color:'#0F5661',textDecoration:'none'}}>📞 {cv.phone}</a>}
+                    <span style={{fontSize:12,color:'var(--muted)'}}>Deutsch: <b style={{color:'var(--blue)'}}>{cv.language_level||'—'}</b>{cv.writing_level?' · Schrift '+cv.writing_level:''}</span>
+                  </div>
+                  {next&&cur>=0&&<div style={{marginTop:10}} onClick={e=>e.stopPropagation()}>
+                    {readyMissing.length===0
+                      ? <button className="btn btn-sm" style={{background:'#059669',color:'#fff',fontWeight:700,width:'100%'}} onClick={()=>saveCv({...cv,status:next})}>→ {nextS?nextS.label:'nächste Phase'}</button>
+                      : <button className="btn btn-sm" style={{width:'100%',color:'var(--amber)'}} onClick={()=>setModal(cv)}>⚠ {readyMissing.length} Feld{readyMissing.length>1?'er':''} fehlen · öffnen</button>}
+                  </div>}
+                </div>
+              );
+            })}
+          </div>
+        ) : (
         <div className="table-responsive"><table>
           <thead><tr>
             <th>Name</th>
@@ -18257,6 +18289,7 @@ function CVsView({cvList, setCvList, projects, onPromoteToEmployee, team, showTo
             })}
           </tbody>
         </table></div>
+        )}
       </div>
     </div>
   );
@@ -31532,15 +31565,17 @@ function calAutoOccThisMonth(ev){
 }
 const calFmtTime=t=>{ if(!t) return ''; const s=String(t); return s.slice(0,5); };
 
-function CalendarView({team, projects, showToast}){
+function CalendarView({team, projects, showToast, isMobileW}){
   const [events,setEvents]=useState([]);
   const [overrides,setOverrides]=useState({});   // `${event_id}|${date}` -> row
   const [loading,setLoading]=useState(true);
-  const [mode,setMode]=useState('month');        // month|day
+  const [mode,setMode]=useState(isMobileW?'day':'month');   // mobil Tag-zuerst (Monat als Sprung-Overlay)
   const [cursor,setCursor]=useState(()=>{ const n=new Date(); return new Date(n.getFullYear(),n.getMonth(),n.getDate()); });
   const [detail,setDetail]=useState(null);        // {ev,date,ov}
   const [editing,setEditing]=useState(null);      // event obj | 'new' | null
+  const [monthJump,setMonthJump]=useState(false); // mobiles Monat-Sprung-Overlay
   const [busy,setBusy]=useState(false);
+  const touchRef=React.useRef(null);              // Wisch zwischen Tagen (mobil)
   const roleKeys=(team&&team.role_keys)||[];
   const isAdmin=roleKeys.includes('management')||roleKeys.includes('hr');
   const uid=team&&team.user_id, myName=(team&&(team.full_name||team.name))||'jemand';
@@ -31569,10 +31604,11 @@ function CalendarView({team, projects, showToast}){
   const colorFor=ev=> isSeries(ev)?calSeriesColor(ev.id):(ev.project_id?projColor(ev.project_id):CAL_AUTO_COLOR);
   const seriesChip=ev=> isSeries(ev)?<span style={{fontSize:10,fontWeight:700,color:colorFor(ev),background:calTint(colorFor(ev),0.85),borderRadius:6,padding:'1px 7px'}}>↻ {RECUR_TXT[ev.recurrence]}</span>:null;
 
-  // Sichtbares Fenster: Monatsraster (Mo-So, 6 Wochen) bzw. der eine Tag.
+  // Sichtbares Fenster: IMMER das Monatsraster des Cursors (Mo-So, 6 Wochen) — die Tagesansicht
+  // greift nur einen Tag daraus, das Monat-Sprung-Overlay (mobil) nutzt dieselben Vorkommen.
   const gridStart=React.useMemo(()=>{ const f=new Date(cursor.getFullYear(),cursor.getMonth(),1); const dow=(f.getDay()+6)%7; return new Date(f.getFullYear(),f.getMonth(),1-dow); },[cursor]);
-  const winFrom = mode==='month'?gridStart:cursor;
-  const winTo   = mode==='month'?new Date(gridStart.getFullYear(),gridStart.getMonth(),gridStart.getDate()+41):cursor;
+  const winFrom = gridStart;
+  const winTo   = new Date(gridStart.getFullYear(),gridStart.getMonth(),gridStart.getDate()+41);
   const occByDate=React.useMemo(()=>{
     const map={};
     (events||[]).forEach(ev=>{ calOccurrences(ev,winFrom,winTo).forEach(ds=>{ const ov=overrides[ev.id+'|'+ds]; if(ov&&ov.hidden) return; (map[ds]=map[ds]||[]).push({ev,date:ds,ov}); }); });
@@ -31603,8 +31639,12 @@ function CalendarView({team, projects, showToast}){
   }
 
   const step=(dir)=>{ setCursor(c=> mode==='month'?new Date(c.getFullYear(),c.getMonth()+dir,1):new Date(c.getFullYear(),c.getMonth(),c.getDate()+dir)); };
+  const stepMonth=(dir)=>setCursor(c=>new Date(c.getFullYear(),c.getMonth()+dir,1));   // Overlay-Navigation (monatweise)
   const goToday=()=>{ const n=new Date(); setCursor(new Date(n.getFullYear(),n.getMonth(),n.getDate())); };
-  const openDay=(dateIso)=>{ const p=dateIso.split('-').map(Number); setCursor(new Date(p[0],p[1]-1,p[2])); setMode('day'); };
+  const openDay=(dateIso)=>{ const p=dateIso.split('-').map(Number); setCursor(new Date(p[0],p[1]-1,p[2])); setMode('day'); setMonthJump(false); };
+  // Wisch zwischen Tagen (mobil, Tagesansicht).
+  const onDayTouchStart=e=>{ touchRef.current=e.touches[0].clientX; };
+  const onDayTouchEnd=e=>{ const x0=touchRef.current; touchRef.current=null; if(x0==null) return; const dx=e.changedTouches[0].clientX-x0; if(Math.abs(dx)>50) step(dx<0?1:-1); };
 
   const title = mode==='month' ? CAL_MONTHS[cursor.getMonth()]+' '+cursor.getFullYear()
     : CAL_DOW[(cursor.getDay()+6)%7]+', '+cursor.getDate()+'. '+CAL_MONTHS[cursor.getMonth()]+' '+cursor.getFullYear();
@@ -31618,10 +31658,12 @@ function CalendarView({team, projects, showToast}){
           <div style={{fontSize:12,color:'var(--muted)',marginTop:2}}>Pflichttermine und Termine je Rolle. Abhaken hier zählt auch in den Tagesaufgaben.</div>
         </div>
         <div style={{display:'flex',alignItems:'center',gap:8}}>
-          <div style={{display:'flex',border:'1px solid var(--border)',borderRadius:10,overflow:'hidden'}}>
-            <button className="btn btn-sm" style={{border:'none',borderRadius:0,background:mode==='month'?'#0F5661':'transparent',color:mode==='month'?'#fff':'var(--text)'}} onClick={()=>setMode('month')}>Monat</button>
-            <button className="btn btn-sm" style={{border:'none',borderRadius:0,background:mode==='day'?'#0F5661':'transparent',color:mode==='day'?'#fff':'var(--text)'}} onClick={()=>setMode('day')}>Tag</button>
-          </div>
+          {isMobileW
+            ? <button className="btn btn-sm" onClick={()=>setMonthJump(true)}>📅 Monat</button>
+            : <div style={{display:'flex',border:'1px solid var(--border)',borderRadius:10,overflow:'hidden'}}>
+                <button className="btn btn-sm" style={{border:'none',borderRadius:0,background:mode==='month'?'#0F5661':'transparent',color:mode==='month'?'#fff':'var(--text)'}} onClick={()=>setMode('month')}>Monat</button>
+                <button className="btn btn-sm" style={{border:'none',borderRadius:0,background:mode==='day'?'#0F5661':'transparent',color:mode==='day'?'#fff':'var(--text)'}} onClick={()=>setMode('day')}>Tag</button>
+              </div>}
           {isAdmin&&<button className="btn btn-sm" style={{background:'#0F5661',color:'#fff'}} onClick={()=>setEditing('new')}>+ Termin</button>}
         </div>
       </div>
@@ -31664,7 +31706,8 @@ function CalendarView({team, projects, showToast}){
           </div>
         </div>
       ):(
-        <div>
+        <div onTouchStart={onDayTouchStart} onTouchEnd={onDayTouchEnd}>
+          {isMobileW&&<div style={{fontSize:11,color:'var(--muted)',textAlign:'center',marginBottom:8}}>← wischen, um den Tag zu wechseln →</div>}
           {(occByDate[isoLocal(cursor)]||[]).length===0?(
             <div style={{color:'var(--muted)',fontSize:13,padding:'24px 0',textAlign:'center'}}>Keine Termine an diesem Tag.</div>
           ):(occByDate[isoLocal(cursor)]||[]).map((it,ix)=>{ const c=colorFor(it.ev); const dn=it.ov&&it.ov.done; return (
@@ -31689,6 +31732,32 @@ function CalendarView({team, projects, showToast}){
               </div>
             </div>
           ); })}
+        </div>
+      )}
+
+      {monthJump&&(
+        <div className="modal-overlay" onClick={()=>setMonthJump(false)} style={{position:'fixed',inset:0,background:'rgba(0,0,0,.4)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:1000,padding:16}}>
+          <div onClick={e=>e.stopPropagation()} style={{background:'#fff',borderRadius:14,maxWidth:440,width:'100%',maxHeight:'90vh',overflowY:'auto',padding:16,boxShadow:'0 10px 40px rgba(0,0,0,.2)'}}>
+            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,marginBottom:12}}>
+              <button aria-label="Monat zurück" onClick={()=>stepMonth(-1)} style={navArrow}>‹</button>
+              <div style={{fontSize:17,fontWeight:800}}>{CAL_MONTHS[cursor.getMonth()]+' '+cursor.getFullYear()}</div>
+              <button aria-label="Monat vor" onClick={()=>stepMonth(1)} style={navArrow}>›</button>
+            </div>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:3,marginBottom:4}}>
+              {CAL_DOW.map(d=><div key={d} style={{fontSize:10,fontWeight:700,color:'var(--muted)',textAlign:'center'}}>{d}</div>)}
+            </div>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:3}}>
+              {Array.from({length:42},(_,i)=>{ const d=new Date(gridStart.getFullYear(),gridStart.getMonth(),gridStart.getDate()+i); const ds=isoLocal(d); const inMonth=d.getMonth()===cursor.getMonth(); const has=(occByDate[ds]||[]).length>0; const isToday=ds===todayIso;
+                return (
+                  <button key={ds} onClick={()=>openDay(ds)} style={{minHeight:42,border:'1px solid '+(isToday?'#0F5661':'var(--border)'),borderRadius:8,background:inMonth?'#fff':'#f8fafc',opacity:inMonth?1:0.5,cursor:'pointer',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:3,padding:'4px 0'}}>
+                    <span style={{fontSize:13,fontWeight:isToday?800:600,color:isToday?'#0F5661':'var(--text)'}}>{d.getDate()}</span>
+                    <span style={{width:5,height:5,borderRadius:'50%',background:has?'#0F5661':'transparent'}}/>
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{textAlign:'right',marginTop:12}}><button className="btn btn-sm" onClick={()=>setMonthJump(false)}>Schließen</button></div>
+          </div>
         </div>
       )}
 
@@ -31800,7 +31869,7 @@ function CalEventEditor({ev, projects, onClose, onSaved, onDelete, myName, uid, 
 function ciPlanStartHM(str){ const m=/(\d{1,2}):(\d{2})/.exec(String(str||'')); return m?(String(parseInt(m[1],10)).padStart(2,'0')+':'+m[2]):null; }
 function ciHmToMin(hm){ const m=/(\d{1,2}):(\d{2})/.exec(String(hm||'')); return m?(parseInt(m[1],10)*60+parseInt(m[2],10)):null; }
 function ciLateMin(arrival, planStart){ const a=ciHmToMin(arrival), s=ciHmToMin(planStart); return (a!=null&&s!=null)?(a-s):null; }
-function CheckinView({employees, projects, team, showToast}){
+function CheckinView({employees, projects, team, showToast, isMobileW}){
   const today = isoLocal(new Date());
   const [plan, setPlan] = useState(null);
   const [checkins, setCheckins] = useState({});
@@ -31945,8 +32014,8 @@ function CheckinView({employees, projects, team, showToast}){
                           </span>
                         ) : (
                           <span style={{display:'inline-flex',gap:8}}>
-                            <button className="btn btn-sm" style={{background:'#059669',color:'#fff',fontWeight:700}} disabled={busy} onClick={()=>save(r,{status:'present',arrival:nowHM()})}>✓ Da</button>
-                            <button className="btn btn-sm" onClick={()=>setExpand({key:ckey(r),status:'',reason:''})}>Abweichung</button>
+                            <button className="btn btn-sm" style={{background:'#059669',color:'#fff',fontWeight:700,...(isMobileW?{padding:'9px 18px',fontSize:15}:{})}} disabled={busy} onClick={()=>save(r,{status:'present',arrival:nowHM()})}>✓ Da</button>
+                            <button className="btn btn-sm" style={isMobileW?{padding:'9px 14px',fontSize:14}:undefined} onClick={()=>setExpand({key:ckey(r),status:'',reason:''})}>Abweichung</button>
                           </span>
                         )}
                       </div>
@@ -32777,8 +32846,8 @@ function App(){
           {modal==='add'&&<EmployeeModal emp={null} projects={projects} employees={employees} onSave={saveEmployee} onClose={()=>setModal(null)} onTerminate={null}/>}
 
           {view==='start'&&<WelcomePage firstName={firstName}/>}
-          {view==='daily_tasks'&&<DailyTasksView employees={employees} projects={projects} plans={plans} team={team} onNavigate={dqNavigate}/>}
-          {view==='calendar'&&<CalendarView team={team} projects={projects} showToast={showToast}/>}
+          {view==='daily_tasks'&&<DailyTasksView employees={employees} projects={projects} plans={plans} team={team} onNavigate={dqNavigate} isMobileW={isMobileW}/>}
+          {view==='calendar'&&<CalendarView team={team} projects={projects} showToast={showToast} isMobileW={isMobileW}/>}
           {view==='cockpit'&&<Cockpit employees={employees} projects={projects} team={team} plans={plans} forecast={forecast} onAbsence={e=>setAbsenceModal(e)} onNavigate={dqNavigate} isMobileW={isMobileW} setEmployees={setEmployees} showToast={showToast}/>}
           {view==='datacheck'&&<DataQualityPanel employees={employees} projects={projects} plans={plans} onNavigate={dqNavigate}/>}
           {view==='wissen_system'&&<SystemManualView hasAccess={hasAccess}/>}
@@ -32789,7 +32858,7 @@ function App(){
             <MeinPlanView employee={myEmployee} employees={employees} projects={projects}/>
           )}
           {view==='shiftplan'&&<SimpleShiftView employees={employees} projects={projects} team={team} showToast={showToast}/>}
-          {view==='checkin'&&<CheckinView employees={employees} projects={projects} team={team} showToast={showToast}/>}
+          {view==='checkin'&&<CheckinView employees={employees} projects={projects} team={team} showToast={showToast} isMobileW={isMobileW}/>}
           {view==='workforce'&&(<div>
           {modal&&typeof modal==='object'&&<EmpHoursWidget emp={modal}/>}
           <WorkforcePlanningView employees={employees} projects={projects} showToast={showToast}/>
@@ -32845,7 +32914,7 @@ function App(){
           {view==='skillmatrix'&&<SkillMatrix employees={employees} projects={projects}/>}
           {view==='kanban'&&<RecruitingKanban employees={employees} setEmployees={setEmployees} cvList={cvList} setCvList={setCvList} projects={projects} onPromoteToEmployee={promoteToEmployee} showToast={showToast}/>}
           {view==='onboarding'&&<OnboardingView employees={employees} setEmployees={setEmployees} showToast={showToast}/>}
-          {view==='cvs'&&<CVsView cvList={cvList} setCvList={setCvList} projects={projects} onPromoteToEmployee={promoteToEmployee} testQuestions={testQuestions} showToast={showToast} navFilter={navFilter} onClearNavFilter={()=>setNavFilter(null)}/>}
+          {view==='cvs'&&<CVsView cvList={cvList} setCvList={setCvList} projects={projects} onPromoteToEmployee={promoteToEmployee} testQuestions={testQuestions} showToast={showToast} navFilter={navFilter} onClearNavFilter={()=>setNavFilter(null)} isMobileW={isMobileW}/>}
           {view==='showcase'&&(
             <div>
               <CandidateShowcase cvList={cvList} setCvList={setCvList} projects={projects}/>
