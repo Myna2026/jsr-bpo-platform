@@ -6700,7 +6700,7 @@ function PayslipArchiveView({payslips, employees, projects, fmtMonth, eur, onOpe
 
   return(
     <div>
-      {fxMissingFor(employees,_pmonth)&&<div style={{padding:'8px 14px',marginBottom:12,borderRadius:8,background:'var(--red-bg)',border:'1px solid var(--red)',fontSize:12,color:'var(--red)',fontWeight:600}}>⚠ Kein EUR/LEK-Kurs für {_pmonth}: LEK-Personalkosten fehlen (auf 0 gesetzt) → Personalkosten und Deckungsbeitrag zu gut. System → 💱 Wechselkurse.</div>}
+      <FxNoteBanner employees={employees} month={_pmonth}/>
       <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:12,marginBottom:14}}>
         {[
           {label:(()=>{const ex=[];if(missingCount>0)ex.push('⚠'+missingCount+' ohne Satz');if(overheadCount>0)ex.push('👔'+overheadCount+' Overhead');return ex.length?('Monatsumsatz · '+ex.join(' · ')):'Monatsumsatz (produktiv)';})(),val:`${Math.round(totalRev).toLocaleString('de-DE')} €`,color:'var(--green)',icon:'💶'},
@@ -6924,10 +6924,12 @@ function Widget_ForecastUmsatz({employees, projects}){
 }
 function Widget_ForecastKosten({employees}){
   const ym=new Date().toISOString().slice(0,7);
-  // Fehlender EUR/LEK-Kurs → LEK-Kosten wären null→0 → Summe zu niedrig. NICHT als Ergebnis zeigen.
-  if(fxMissingFor(employees, ym)) return <div><div className="widget-metric-hero" style={{color:'#dc2626',fontSize:19}}>Kurs fehlt</div><div className="widget-sub" style={{color:'var(--red)'}}>📈 EUR/LEK-Kurs für {ym} pflegen, sonst Kosten unvollständig</div></div>;
+  const fi=fxInfoFor(employees, ym);
+  // Gar kein Kurs → nicht rechenbar, „Kurs fehlt". Veralteter Kurs → rechnen, aber deutlich markieren.
+  if(fi.mode==='missing') return <div><div className="widget-metric-hero" style={{color:'#dc2626',fontSize:19}}>Kurs fehlt</div><div className="widget-sub" style={{color:'var(--red)'}}>📈 EUR/LEK-Kurs für {ym} pflegen, sonst Kosten unvollständig</div></div>;
   const cost=(employees||[]).filter(e=>e&&['active','training'].includes(e.status)).reduce((s,e)=>s+(empCostEurForMonth(e,ym)||0),0);
-  return <div><div className="widget-metric-hero" style={{color:'#dc2626'}}>{eur(cost)}</div><div className="widget-sub">📈 Forecast-Personalkosten {ym} · geplant</div></div>;
+  const stale=fi.mode==='stale';
+  return <div><div className="widget-metric-hero" style={{color:stale?'#b45309':'#dc2626'}}>{eur(cost)}{stale&&<span style={{fontSize:13,marginLeft:4}}>⚠</span>}</div><div className="widget-sub" style={stale?{color:'#b45309',fontWeight:700}:{}}>{stale?fi.note:('📈 Forecast-Personalkosten '+ym+' · geplant')}</div></div>;
 }
 function Widget_KrankheitMonth({employees}){
   const now=new Date(), ym=now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0');
@@ -7941,6 +7943,7 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
   const now=new Date();
   const todayStr=now.toISOString().slice(0,10);
   const ym=todayStr.slice(0,7);
+  const _fxInfoMob=fxInfoFor(employees, ym);   // {mode:'ok'|'stale'|'missing', note}
   const fmtDe=s=>{ if(!s) return ''; const p=String(s).slice(0,10).split('-'); return p.length===3?(p[2]+'.'+p[1]+'.'):s; };
   const nav=v=>onNavigate&&onNavigate({kind:'view',view:v});
 
@@ -8095,7 +8098,7 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
       <div className="ckm-card">
         <div className="ckm-h">Projekte</div>
         {(()=>{ const mc=payrollCfgMissingCountries(employees); return mc.length>0?<div style={{margin:'0 10px 6px',padding:'7px 10px',borderRadius:8,background:'var(--red-bg)',border:'1px solid var(--red)',fontSize:11,color:'var(--red)',fontWeight:600}}>⚠ Lohn-Sätze für {mc.join(', ')} fehlen: AG-Kosten zu niedrig, Marge zu hoch. System → 💶 Pauschalen.</div>:null; })()}
-        {fxMissingFor(employees,ym)&&<div style={{margin:'0 10px 6px',padding:'7px 10px',borderRadius:8,background:'var(--red-bg)',border:'1px solid var(--red)',fontSize:11,color:'var(--red)',fontWeight:600}}>⚠ Kein EUR/LEK-Kurs für {ym}: LEK-Projekte zeigen keine belastbare Marge. System → 💱 Wechselkurse.</div>}
+        {_fxInfoMob.mode!=='ok'&&<div style={{margin:'0 10px 6px',padding:'7px 10px',borderRadius:8,fontSize:11,fontWeight:600,color:_fxInfoMob.mode==='stale'?'#b45309':'var(--red)',background:_fxInfoMob.mode==='stale'?'#fffbeb':'var(--red-bg)',border:'1px solid '+(_fxInfoMob.mode==='stale'?'#f59e0b':'var(--red)')}}>{_fxInfoMob.note} System → 💱 Wechselkurse.</div>}
         <div className="ckm-projlist">
           {projects.map(p=>{
             const projActive=active.filter(e=>e.project_id===p.id);
@@ -8110,7 +8113,8 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
             const _wf=projectDbWaterfall(_ac, rev);
             const mg=_wf.mgIV;
             const mgc=mg==null?'var(--muted)':mg>=20?'#059669':mg>=10?'#d97706':'#dc2626';
-            const _lekFx=fxMissingFor(employees,ym)&&(employees||[]).some(e=>e&&['active','training'].includes(e.status)&&e.project_id===p.id&&salaryCurrency(e)==='ALL');
+            const _lekP=(employees||[]).some(e=>e&&['active','training'].includes(e.status)&&e.project_id===p.id&&salaryCurrency(e)==='ALL');
+            const _lekMiss=_lekP&&_fxInfoMob.mode==='missing'; const _lekStale=_lekP&&_fxInfoMob.mode==='stale';
             return (
               <div key={p.id} className="ckm-projrow" style={{cursor:'pointer'}} onClick={()=>onNavigate&&onNavigate({kind:'view',view:'profitability',projSel:p.id})} title="Zur Wirtschaftlichkeit">
                 <div className="ckm-projrow-top">
@@ -8118,9 +8122,11 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
                     <div className="ckm-proj-name">{p.name} <span className="ckm-arrow">→</span></div>
                     <div><span className="ckm-proj-n">{n}</span> <span className="ckm-proj-sub">aktiv{t>0?' · +'+t+' Schulung':''}</span></div>
                   </div>
-                  {isFullFin&&(_lekFx?<span className="ckm-marge" style={{background:'var(--red-bg)',color:'var(--red)'}} title="EUR/LEK-Kurs fehlt">Marge — · Kurs fehlt</span>:<span className="ckm-marge" style={{background:mgc+'1f',color:mgc}}>{mg==null?'Marge —':'Marge '+mg+'%'}</span>)}
+                  {isFullFin&&(_lekMiss
+                    ? <span className="ckm-marge" style={{background:'var(--red-bg)',color:'var(--red)'}} title="EUR/LEK-Kurs fehlt">Marge — · Kurs fehlt</span>
+                    : <span className="ckm-marge" style={{background:_lekStale?'#fffbeb':mgc+'1f',color:_lekStale?'#b45309':mgc}} title={_lekStale?_fxInfoMob.note:undefined}>{mg==null?'Marge —':'Marge '+mg+'%'}{_lekStale&&' ⚠'}</span>)}
                 </div>
-                {isFullFin&&rev>0&&!_lekFx&&<div className="ckm-db">DB I {_wf.mgI}% · II {_wf.mgII}% · III {_wf.mgIII}% · IV <b>{_wf.mgIV}%</b></div>}
+                {isFullFin&&rev>0&&!_lekMiss&&<div className="ckm-db">DB I {_wf.mgI}% · II {_wf.mgII}% · III {_wf.mgIII}% · IV <b>{_wf.mgIV}%</b>{_lekStale&&' · Kurs '+(_fxInfoMob.from?fxMonthLabel(_fxInfoMob.from):'Standard')}</div>}
                 {Object.keys(bySkill).length>0 && <div className="ckm-projrow-skills">
                   {Object.entries(bySkill).map(([k,c])=><span key={k} className="ckm-skill"><b>{c}</b> {skLabel(k)}</span>)}
                 </div>}
@@ -8294,8 +8300,8 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
   const _cockpitYm = year+'-'+String(todayM+1).padStart(2,'0');
   const _planRevMap = planRevenueByProject(employees, projects, _cockpitYm);   // für Projekte-Karte (Marge)
   // Kosten in EUR über empCostEur (Währungs-Umrechnung + Fixgehalt korrekt); kein 1400/900-Schätz-Fallback mehr.
-  const _fxMissingCk = fxMissingFor(employees, _cockpitYm);
-  // Projekt mit LEK-Gehältern? Bei fehlendem Kurs ist dessen Marge unbrauchbar (Kosten fallen auf 0).
+  const _fxInfoCk = fxInfoFor(employees, _cockpitYm);   // {mode:'ok'|'stale'|'missing', note}
+  // Projekt mit LEK-Gehältern? Nur dort wirkt der Kurs auf die Marge.
   const _projLek = p => (employees||[]).some(e=>e&&['active','training'].includes(e.status)&&e.project_id===(p&&p.id)&&salaryCurrency(e)==='ALL');
 
   const todayAbsent=employees.filter(e=>(e.absences||[]).some(a=>a.type==='sick'&&absCoversDay(a,todayStr)));
@@ -8499,7 +8505,7 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
       {(hasW('projekte_karte')||hasW('heute_abwesend')) && <div className="cockpit-bottom-grid">
         {hasW('projekte_karte') && <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--r-lg)',overflow:'hidden'}}>
           <div style={{padding:'10px 14px',borderBottom:'1px solid var(--border)',fontSize:12,fontWeight:600}}>Projekte</div>
-          {_fxMissingCk&&<div style={{padding:'8px 14px',borderBottom:'1px solid var(--border)',fontSize:11,color:'var(--red)',fontWeight:600,background:'var(--red-bg)'}}>⚠ Kein Wechselkurs für {_cockpitYm}: LEK-Gehälter fehlen in den Kosten (kein 1:1). Unter System → 💱 Wechselkurse pflegen.</div>}
+          {_fxInfoCk.mode!=='ok'&&<div style={{padding:'8px 14px',borderBottom:'1px solid var(--border)',fontSize:11,fontWeight:600,color:_fxInfoCk.mode==='stale'?'#b45309':'var(--red)',background:_fxInfoCk.mode==='stale'?'#fffbeb':'var(--red-bg)'}}>{_fxInfoCk.note} System → 💱 Wechselkurse.</div>}
           {(()=>{ const mc=payrollCfgMissingCountries(employees); return mc.length>0?<div style={{padding:'8px 14px',borderBottom:'1px solid var(--border)',fontSize:11,color:'var(--red)',fontWeight:600,background:'var(--red-bg)'}}>⚠ Lohn-Sätze für {mc.join(', ')} fehlen: Arbeitgeberkosten (AG-Sozial) mit Platzhaltern, Marge zu hoch. System → 💶 Pauschalen & Steuer.</div>:null; })()}
           {/* Redesign: große Kacheln, auf einen Blick — Besetzung groß, Marge als Ampel; keine Roh-€ */}
           <div style={{padding:12,display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(150px,1fr))',gap:10}}>
@@ -8519,10 +8525,12 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
                     <span style={{fontSize:30,fontWeight:800,color:'#0F5661',lineHeight:1,fontFamily:'var(--mono)'}}>{n}</span>
                     <span style={{fontSize:11,color:'var(--muted)'}}>aktiv{t>0?' · +'+t+' Schulung':''}</span>
                   </div>
-                  {isFullFin&&((_fxMissingCk&&_projLek(p))
-                    ? <span style={{alignSelf:'flex-start',fontSize:12,fontWeight:800,padding:'2px 10px',borderRadius:99,background:'var(--red-bg)',color:'var(--red)'}} title="EUR/LEK-Kurs für den Monat fehlt">Marge — · Kurs fehlt</span>
-                    : <span style={{alignSelf:'flex-start',fontSize:12,fontWeight:800,padding:'2px 10px',borderRadius:99,background:mgColor+'1f',color:mgColor}}>{mg==null?'Marge —':'Marge '+mg+'%'}</span>)}
-                  {isFullFin&&rev>0&&!(_fxMissingCk&&_projLek(p))&&<div style={{fontSize:10,color:'var(--muted)'}}>DB I {_wf.mgI}% · IV <b>{_wf.mgIV}%</b></div>}
+                  {isFullFin&&(()=>{ const lek=_projLek(p); const miss=lek&&_fxInfoCk.mode==='missing'; const stale=lek&&_fxInfoCk.mode==='stale';
+                    if(miss) return <span style={{alignSelf:'flex-start',fontSize:12,fontWeight:800,padding:'2px 10px',borderRadius:99,background:'var(--red-bg)',color:'var(--red)'}} title="EUR/LEK-Kurs für den Monat fehlt">Marge — · Kurs fehlt</span>;
+                    // stale: Marge rechnen, aber amber + ⚠ (nicht wie eine gepflegte Zahl)
+                    return <span style={{alignSelf:'flex-start',fontSize:12,fontWeight:800,padding:'2px 10px',borderRadius:99,background:stale?'#fffbeb':mgColor+'1f',color:stale?'#b45309':mgColor}} title={stale?_fxInfoCk.note:undefined}>{mg==null?'Marge —':'Marge '+mg+'%'}{stale&&' ⚠'}</span>;
+                  })()}
+                  {isFullFin&&rev>0&&!(_projLek(p)&&_fxInfoCk.mode==='missing')&&<div style={{fontSize:10,color:_projLek(p)&&_fxInfoCk.mode==='stale'?'#b45309':'var(--muted)'}}>DB I {_wf.mgI}% · IV <b>{_wf.mgIV}%</b>{_projLek(p)&&_fxInfoCk.mode==='stale'&&' · Kurs '+(_fxInfoCk.from?fxMonthLabel(_fxInfoCk.from):'Standard')}</div>}
                 </div>
               );
             })}
@@ -10907,15 +10915,26 @@ function salaryCurrency(emp){
   return /prishtin|kosov/i.test(String((emp&&emp.location)||''))?'EUR':'ALL';
 }
 function loadFxRates(){ try{ const r=JSON.parse(localStorage.getItem('jsr_fx_rates_v1')||'{}'); return (r&&typeof r==='object'&&!Array.isArray(r))?r:{}; }catch(e){ return {}; } }
-// Kurs = ALL pro 1 EUR für den Monat. {rate, source:'month'|'default'|null}. KEIN stilles 1:1.
+// Kurs = ALL pro 1 EUR für den Monat. {rate, source, from}.
+//   source 'month'  = eigener Monatskurs (aktuell).
+//   source 'stale'  = kein Monatskurs → letzter bekannter Monatskurs (from = Herkunftsmonat 'YYYY-MM').
+//   source 'default'= nur der Standardkurs gepflegt (kein monatsspezifischer).
+//   source null     = gar kein Kurs jemals → nicht rechenbar.
+// KEIN stilles 1:1. Veralteter Kurs ist besser als keine Rechnung, MUSS aber sichtbar markiert werden.
 function fxRateForMonth(ym){
   const r=loadFxRates();
-  if(ym && Number(r[ym])>0) return {rate:Number(r[ym]), source:'month'};
-  if(Number(r.default)>0) return {rate:Number(r.default), source:'default'};
-  return {rate:null, source:null};
+  if(ym && Number(r[ym])>0) return {rate:Number(r[ym]), source:'month', from:ym};
+  // Kein Monatskurs: letzten bekannten Monatskurs nehmen — bevorzugt <= ym, sonst den jüngsten überhaupt.
+  const months=Object.keys(r).filter(k=>/^\d{4}-\d{2}$/.test(k) && Number(r[k])>0).sort();
+  if(months.length){
+    let best=null; for(const m of months){ if(!ym || m<=ym) best=m; }
+    if(!best) best=months[months.length-1];
+    return {rate:Number(r[best]), source:'stale', from:best};
+  }
+  if(Number(r.default)>0) return {rate:Number(r.default), source:'default', from:null};
+  return {rate:null, source:null, from:null};
 }
-// Arbeitgeber-Kosten in EUR für die Aggregation. EUR-Gehalt unverändert; ALL-Gehalt / Monatskurs.
-// Fehlender Kurs → null (NICHT 1:1). Aufrufer summieren null als 0 UND zeigen Banner via fxMissingFor().
+// Arbeitgeber-Kosten in EUR. EUR-Gehalt unverändert; ALL-Gehalt / Kurs (auch veraltet). Gar kein Kurs → null.
 function empCostEur(emp, month){
   const native=empMonthlyCost(emp);
   if(native<=0) return 0;
@@ -10924,10 +10943,34 @@ function empCostEur(emp, month){
   if(!fx.rate) return null;
   return Math.round(native/fx.rate);
 }
-// Fehlt für den Monat ein Kurs, OBWOHL ALL-Gehälter vorkommen? → sichtbarer Banner in der Kalkulation.
-function fxMissingFor(employees, month){
-  if(fxRateForMonth(month).rate) return false;
-  return (employees||[]).some(e=>e && salaryCurrency(e)==='ALL' && empMonthlyCost(e)>0);
+// Monatslabel 'YYYY-MM' → 'Juli 2026' (für Kurs-Hinweise).
+const FX_MONTHS=['Januar','Februar','März','April','Mai','Juni','Juli','August','September','Oktober','November','Dezember'];
+function fxMonthLabel(ym){ if(!ym) return ''; const p=String(ym).split('-'); const m=parseInt(p[1],10); return (FX_MONTHS[m-1]||p[1])+' '+p[0]; }
+// Kurs-Status für eine Mitarbeitermenge im Monat: {mode:'ok'|'stale'|'missing', from, note}.
+//   ok      = keine LEK-Gehälter ODER aktueller Monatskurs.
+//   stale   = umgerechnet mit veraltetem/Standard-Kurs → deutlicher Hinweis, Zahl als „nicht aktuell" markieren.
+//   missing = gar kein Kurs → nicht rechenbar.
+function fxInfoFor(employees, month){
+  const anyLek=(employees||[]).some(e=>e && salaryCurrency(e)==='ALL' && empMonthlyCost(e)>0);
+  if(!anyLek) return {mode:'ok', from:null, note:''};
+  const fx=fxRateForMonth(month);
+  if(fx.source==='month') return {mode:'ok', from:month, note:''};
+  if(fx.source==='stale')  return {mode:'stale', from:fx.from, note:'⚠ Wechselkurs vom '+fxMonthLabel(fx.from)+' verwendet, bitte aktualisieren'};
+  if(fx.source==='default')return {mode:'stale', from:null, note:'⚠ Standard-Wechselkurs verwendet, bitte Monatskurs pflegen'};
+  return {mode:'missing', from:null, note:'⚠ Kein Wechselkurs, LEK-Kosten fehlen'};
+}
+// EIN Hinweis-Banner für Kurs-Status: amber (veralteter Kurs, wird trotzdem gerechnet) / rot (gar kein Kurs).
+function FxNoteBanner({employees, month}){
+  const fi=fxInfoFor(employees, month);
+  if(fi.mode==='ok') return null;
+  const stale=fi.mode==='stale';
+  return (
+    <div style={{padding:'8px 14px',marginBottom:12,borderRadius:8,
+      background:stale?'#fffbeb':'var(--red-bg)',border:'1px solid '+(stale?'#f59e0b':'var(--red)'),
+      fontSize:12,color:stale?'#b45309':'var(--red)',fontWeight:600}}>
+      {fi.note} System → 💱 Wechselkurse.
+    </div>
+  );
 }
 // FX-Kurs-Reminder für das Cockpit: ab dem 15. erinnern, den Kurs für den FOLGEMONAT zu pflegen;
 // ab dem 20. dringlich (bleibt dann stehen, bis er steht). Verschwindet, sobald der Folgemonats-Kurs
@@ -20811,7 +20854,6 @@ function ProjectProfitability({projects, employees, forecast, setForecast, onNav
   const projBaseSel   = projBase(selProj);
   const _curMat       = materialPoolForMonth(_curYm);
   const compAllocSel  = companyAllocForMonth(selProj,_curYm);
-  const _fxMissingCur = fxMissingFor(employees, _curYm);                        // Banner: ALL-Gehälter ohne Kurs im Monat
   // Unpaid-Abzug dieses Projekts im aktuellen Monat (für sichtbaren Hinweis): full − unpaid-bereinigt, anteilig.
   const _unpaidCut = _actives.concat(_trainings).filter(e=>!isCompanyEmp(e)).reduce((s,e)=>{ const f=empCostEur(e,_curYm), r=empCostEurForMonth(e,_curYm); return (f==null||r==null)?s:s+Math.max(0,f-r)*empProjShare(e,selProj); },0);
   const matAllocSel   = materialAllocForMonth(selProj, _curYm);
@@ -21047,11 +21089,7 @@ function ProjectProfitability({projects, employees, forecast, setForecast, onNav
               ⚠ Lohn-Sätze für {missingCfg.join(', ')} noch nicht hinterlegt: die Arbeitgeberkosten (AG-Sozialabgaben) rechnen mit Platzhaltern und sind ZU NIEDRIG. Unter System → 💶 Pauschalen & Steuer pflegen. Das Ergebnis passt sich automatisch an, sobald die Sätze stehen.
             </div>
           )}
-          {_fxMissingCur&&(
-            <div style={{padding:'8px 12px',marginBottom:10,borderRadius:8,background:'var(--red-bg)',border:'1px solid var(--red)',fontSize:12,color:'var(--red)',fontWeight:600}}>
-              ⚠ Kein Wechselkurs für {_curYm} hinterlegt: LEK-Gehälter werden NICHT umgerechnet und fehlen in den Kosten. Kurs unter System → 💱 Wechselkurse pflegen. (Kein stilles 1:1.)
-            </div>
-          )}
+          <FxNoteBanner employees={employees} month={_curYm}/>
           {_unpaidCut>0&&(
             <div style={{padding:'8px 12px',marginBottom:10,borderRadius:8,background:'var(--surface-2)',border:'1px dashed var(--border)',fontSize:12,color:'var(--muted)'}}>
               ℹ Unbezahlte Abwesenheit reduziert die Personalkosten dieses Projekts im {_curYm} um <b>{Math.round(_unpaidCut).toLocaleString('de-DE')} €</b> (anteilig nach Werktagen, nur genehmigte Tage).
@@ -21837,7 +21875,7 @@ function LocationsView({employees}){
 
   return(
     <div>
-      {fxMissingFor(employees,selMonth)&&<div style={{padding:'8px 14px',marginBottom:12,borderRadius:8,background:'var(--red-bg)',border:'1px solid var(--red)',fontSize:12,color:'var(--red)',fontWeight:600}}>⚠ Kein EUR/LEK-Kurs für {selMonth}: Personal-Overhead der LEK-Standorte fehlt (auf 0 gesetzt) → Standortkosten zu niedrig. System → 💱 Wechselkurse.</div>}
+      <FxNoteBanner employees={employees} month={selMonth}/>
 
       {/* Edit/Add Modal */}
       {(editLoc||showAdd)&&(
