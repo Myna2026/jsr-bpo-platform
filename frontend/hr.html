@@ -1626,11 +1626,25 @@ function evalKpi(kpi, value){
   return kpi.thresholds[kpi.thresholds.length-1]; // fallback to last
 }
 
-// KPI-Wert formatieren: Minuten (unit 'min') als Dezimalminuten mit 2 Nachkommastellen + Komma
-// (4,50 = viereinhalb Minuten); sonst Wert + Einheit direkt.
+// Minuten intern DEZIMAL (4.3), Anzeige/Eingabe als mm:ss (4:18). Nur Darstellung.
+function decToMmss(dec){
+  const v=parseFloat(dec); if(isNaN(v)) return String(dec);
+  const neg=v<0; let a=Math.abs(v); let m=Math.floor(a); let s=Math.round((a-m)*60);
+  if(s===60){ m+=1; s=0; }
+  return (neg?'-':'')+m+':'+String(s).padStart(2,'0');
+}
+function mmssToDec(str){
+  if(str===null||str===undefined) return NaN;
+  const s=String(str).trim(); if(s==='') return NaN;
+  if(s.indexOf(':')<0){ const n=parseFloat(s.replace(',','.')); return isNaN(n)?NaN:n; }   // ohne ":" = ganze/dezimale Minuten
+  const p=s.split(':'); let mm=parseInt(p[0],10), ss=parseInt(p[1],10);
+  if(isNaN(mm)) mm=0; if(isNaN(ss)) ss=0;
+  return mm + ss/60;
+}
+// KPI-Wert formatieren: Minuten (unit 'min') als mm:ss (4:18); sonst Wert + Einheit direkt.
 function kpiFmt(value, unit){
   if(value===null||value===undefined||value==='') return '';
-  if(unit==='min'){ const v=parseFloat(value); return (isNaN(v)?String(value):v.toFixed(2).replace('.',','))+' min'; }
+  if(unit==='min'){ const v=parseFloat(value); return isNaN(v)?String(value):decToMmss(v); }
   return String(value)+(unit||'');
 }
 
@@ -1893,8 +1907,10 @@ function PerformanceView({employees, projects}){
   function openEdit(emp){
     const data = getPerfData();
     const existing = (data[emp.id]||[]).filter(e=>e.kw===selKw&&e.year===selYear);
+    const kpiById={}; getEmpKpis(emp).forEach(k=>{ kpiById[k.id]=k; });
     const vals = {};
-    existing.forEach(e=>{ vals[e.kpi_id]=e.value; });
+    // Minuten-KPIs: DB-Dezimal → mm:ss-String für die Eingabe (intern bleibt dezimal).
+    existing.forEach(e=>{ const k=kpiById[e.kpi_id]; vals[e.kpi_id]=(k&&k.unit==='min')?decToMmss(e.value):e.value; });
     setEditEmp({emp, vals});
   }
 
@@ -1910,7 +1926,8 @@ function PerformanceView({employees, projects}){
     empKpis.forEach(kpi=>{
       const v = vals[kpi.id];
       if(v!==undefined&&v!==''){
-        data[emp.id].push({kpi_id:kpi.id, value:parseFloat(v), kw:selKw, year:selYear, ts:Date.now(), entered_by:(typeof CURRENT_USER!=='undefined'&&CURRENT_USER)?(CURRENT_USER.name||CURRENT_USER.id):null});
+        const dec = kpi.unit==='min' ? mmssToDec(v) : parseFloat(v);   // Minuten: mm:ss → Dezimal
+        if(!isNaN(dec)) data[emp.id].push({kpi_id:kpi.id, value:dec, kw:selKw, year:selYear, ts:Date.now(), entered_by:(typeof CURRENT_USER!=='undefined'&&CURRENT_USER)?(CURRENT_USER.name||CURRENT_USER.id):null});
       }
     });
     savePerfData(data);
@@ -2070,7 +2087,8 @@ function PerformanceView({employees, projects}){
               )}
               {getEmpKpis(editEmp.emp).map(kpi=>{
                 const val = editEmp.vals[kpi.id]??'';
-                const t = evalKpi(kpi, val);
+                const isMin = kpi.unit==='min';
+                const t = evalKpi(kpi, isMin?mmssToDec(val):val);   // Minuten: mm:ss → Dezimal für die Ampel
                 return(
                   <div key={kpi.id} style={{marginBottom:16}}>
                     <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:6}}>
@@ -2078,22 +2096,22 @@ function PerformanceView({employees, projects}){
                       {t&&<span style={{padding:'2px 10px',borderRadius:20,background:t.bg,color:t.color,fontWeight:700,fontSize:12}}>{t.icon} {t.label}</span>}
                     </div>
                     <div style={{display:'flex',alignItems:'center',gap:8}}>
-                      <input type="number" step="0.01" value={val}
+                      <input type={isMin?'text':'number'} step={isMin?undefined:'0.01'} value={val} inputMode={isMin?'numeric':undefined}
                         onChange={e=>setEditEmp(prev=>({...prev,vals:{...prev.vals,[kpi.id]:e.target.value}}))}
                         className="form-input"
                         style={{flex:1,fontSize:18,fontWeight:700,textAlign:'center',
                           borderColor:t?t.color:'var(--border)',color:t?t.color:'var(--text)'}}
-                        placeholder={kpi.unit==='%'?'z.B. 55':kpi.unit==='min'?'z.B. 4,50':'z.B. 14.5'}
+                        placeholder={kpi.unit==='%'?'z.B. 55':isMin?'mm:ss z.B. 4:18':'z.B. 14.5'}
                       />
-                      <span style={{color:'var(--muted)',fontSize:13,minWidth:30}}>{kpi.unit||''}</span>
+                      <span style={{color:'var(--muted)',fontSize:13,minWidth:30}}>{isMin?'min':(kpi.unit||'')}</span>
                     </div>
                     {kpi.unit==='min'&&<div style={{fontSize:10,color:'#0d9488',fontWeight:700,marginTop:4}}>↓ niedriger ist besser</div>}
                     <div style={{display:'flex',gap:4,marginTop:6,flexWrap:'wrap'}}>
-                      {kpi.thresholds.map((t,i)=>{ const um=kpi.unit==='%'?'%':''; const fm=x=>kpi.unit==='min'?String(x).replace('.',','):(''+x);
+                      {kpi.thresholds.map((t,i)=>{ const um=kpi.unit==='%'?'%':''; const fm=x=>kpi.unit==='min'?decToMmss(x):(''+x);
                         return (
                         <span key={i} style={{fontSize:10,padding:'1px 6px',borderRadius:20,
                           background:t.bg,color:t.color,fontWeight:600}}>
-                          {t.icon} {t.label}: {fm(t.min)}{um}{t.max<999?'–'+fm(t.max)+um:'+'}{kpi.unit==='min'?' min':''}{' '}
+                          {t.icon} {t.label}: {fm(t.min)}{um}{t.max<999?'–'+fm(t.max)+um:'+'}{' '}
                         </span>); })}
                     </div>
                   </div>
@@ -25192,12 +25210,17 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
                           + Stufe
                         </button>
                       </div>
-                      {(kpi.thresholds||[]).map((t,ti)=>(
+                      {(kpi.thresholds||[]).map((t,ti)=>{ const isMin=kpi.unit==='min';
+                        // Minuten-Schwellen als mm:ss (uncontrolled + onBlur → kein Zurückspringen beim Tippen); intern dezimal.
+                        const setBound=(field,dec)=>{const u=kpis.map((k,j)=>j===i?{...k,thresholds:k.thresholds.map((tt,tj)=>tj===ti?{...tt,[field]:dec}:tt)}:k);saveKpi(u);};
+                        return (
                         <div key={ti} style={{display:'grid',gridTemplateColumns:'70px 70px 1fr 60px 40px auto',gap:6,marginBottom:4,alignItems:'center'}}>
-                          <input className="form-input" type="number" style={{fontSize:11}} value={t.min} placeholder="Min"
-                            onChange={e=>{const u=kpis.map((k,j)=>j===i?{...k,thresholds:k.thresholds.map((tt,tj)=>tj===ti?{...tt,min:parseFloat(e.target.value)||0}:tt)}:k);saveKpi(u);}}/>
-                          <input className="form-input" type="number" style={{fontSize:11}} value={t.max} placeholder="Max"
-                            onChange={e=>{const u=kpis.map((k,j)=>j===i?{...k,thresholds:k.thresholds.map((tt,tj)=>tj===ti?{...tt,max:parseFloat(e.target.value)||0}:tt)}:k);saveKpi(u);}}/>
+                          {isMin
+                            ? <input className="form-input" type="text" style={{fontSize:11}} key={'mn'+ti+'_'+t.min} defaultValue={decToMmss(t.min)} placeholder="mm:ss" onBlur={e=>{const d=mmssToDec(e.target.value);setBound('min',isNaN(d)?0:d);}}/>
+                            : <input className="form-input" type="number" style={{fontSize:11}} value={t.min} placeholder="Min" onChange={e=>setBound('min',parseFloat(e.target.value)||0)}/>}
+                          {isMin
+                            ? <input className="form-input" type="text" style={{fontSize:11}} key={'mx'+ti+'_'+t.max} defaultValue={decToMmss(t.max)} placeholder="mm:ss" onBlur={e=>{const d=mmssToDec(e.target.value);setBound('max',isNaN(d)?0:d);}}/>
+                            : <input className="form-input" type="number" style={{fontSize:11}} value={t.max} placeholder="Max" onChange={e=>setBound('max',parseFloat(e.target.value)||0)}/>}
                           <input className="form-input" style={{fontSize:11}} value={t.label} placeholder="Label z.B. Sehr gut"
                             onChange={e=>{const u=kpis.map((k,j)=>j===i?{...k,thresholds:k.thresholds.map((tt,tj)=>tj===ti?{...tt,label:e.target.value}:tt)}:k);saveKpi(u);}}/>
                           <select className="form-select" style={{fontSize:11}} value={t.icon||''}
@@ -25210,7 +25233,7 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
                           <button className="btn btn-sm" style={{color:'var(--red)',fontSize:11}}
                             onClick={()=>{const u=kpis.map((k,j)=>j===i?{...k,thresholds:k.thresholds.filter((_,tj)=>tj!==ti)}:k);saveKpi(u);}}>×</button>
                         </div>
-                      ))}
+                      ); })}
                     </div>
                     {(!kpi.project_id||!kpi.skill)&&(
                       <div style={{marginTop:6,fontSize:11,color:'var(--red)',fontWeight:600}}>
