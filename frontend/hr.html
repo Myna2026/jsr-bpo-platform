@@ -32465,9 +32465,19 @@ function App(){
     try{
       const {data:au, error} = await sb.from('app_users')
         .select('role_keys, full_name, staff_number, active, must_change_pw, mgmt_external').eq('user_id', session.user.id).single();
-      if(error || !au){ gatingRef.current=false; setPortalDenied(false); setAuthMsg('Kein Benutzerprofil gefunden. Bitte an HR/Management wenden.'); return; }
+      if(error || !au){ console.error('[gate] app_users-Abfrage fehlgeschlagen (Rechte-/Ladeproblem):', {uid:session.user.id, error, au}); gatingRef.current=false; setPortalDenied(false); setAuthMsg('Profil konnte nicht geladen werden (Rechte- oder Verbindungsproblem). Bitte die Seite neu laden. Besteht es weiter, an Management wenden.'); return; }
       if(!au.active){ gatingRef.current=false; setPortalDenied(false); setAuthMsg('Dieser Account ist deaktiviert.'); return; }
-      if(!au.role_keys || !au.role_keys.length){ gatingRef.current=false; setPortalDenied(false); setAuthMsg('Noch keine Rolle zugewiesen. Bitte an HR/Management wenden.'); return; }
+      if(!au.role_keys || !au.role_keys.length){
+        // Punkt 3: leeres role_keys, obwohl die Zeile sonst gefüllt ist (Name/Nr/aktiv), ist verdächtig
+        // (Lade-/Rechteproblem, nicht wirklich rollenlos). Nicht als Normalzustand ausgeben.
+        console.error('[gate] role_keys LEER trotz geladenem Profil:', {uid:session.user.id, au});
+        const looksLoaded = !!(au.full_name || au.staff_number || au.mgmt_external!==undefined);
+        gatingRef.current=false; setPortalDenied(false);
+        setAuthMsg(looksLoaded
+          ? 'Dein Profil wurde geladen, aber ohne Rollen (wahrscheinlich ein Rechte- oder Ladeproblem, nicht wirklich rollenlos). Bitte die Seite neu laden. Besteht es weiter, an Management wenden.'
+          : 'Noch keine Rolle zugewiesen. Bitte an HR/Management wenden.');
+        return;
+      }
       // Identitaet fuer das Aktivitaets-Protokoll cachen (auch bei Session-Restore).
       CURRENT_USER = { id: session.user.id, name: au.full_name || session.user.email };
       recordKnownAppUser({email:session.user.email, name:au.full_name, roles:au.role_keys, staff_number:au.staff_number});
