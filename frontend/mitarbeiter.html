@@ -1019,6 +1019,21 @@ function loadTeammatesFromDB(projectId, meId){
   });
 }
 
+// Universal-Kontakte (internes Management + HR) projektuebergreifend, spaltenreduziert.
+// Quelle: security-definer-View chat_universal_contacts (nur Name/Rolle/Foto, keine Gehaelter/
+// Personaldaten). Externe Manager (mgmt_external) sind in der View bereits ausgeschlossen.
+function loadUniversalContacts(meId){
+  return sb.from('chat_universal_contacts').select('*').neq('id', meId||'').then(function(r){
+    if(r.error){ console.error('[chat] loadUniversalContacts', r.error); return []; }
+    return (r.data||[]).map(function(row){
+      return { id:row.id, first_name:row.first_name, last_name:row.last_name,
+        position:row.position, role_keys:row.role_keys, project_id:null, status:'active',
+        photo_url:row.photo_url, photo_color:row.photo_color,
+        function:null, project_skill:null, primary_skill:null, universal:true };
+    });
+  });
+}
+
 function getEmpById(id){
   if(!id) return null;
   if(ME && id === ME.id) return ME;
@@ -1438,15 +1453,20 @@ function gateSession(session, event){
               Object.assign(ME, updated);
               renderCurrentViewOnRealtime();
             });
-            // 25i: Team-View — Kollegen laden + Realtime-Sub auf Projekt
-            if(ME.project_id){
-              loadTeammatesFromDB(ME.project_id, ME.id)
-                .then(function(rows){ TEAM = rows; renderCurrentViewOnRealtime(); })
-                .catch(function(err){ console.error('[25i] Team-Load fehlgeschlagen', err); });
-              // Kein Team-Realtime (Sicherheit): das Projekt-Abo auf employees lieferte volle
-              // Kollegen-Zeilen inkl. Gehalt/Bank. Team wird beim Öffnen geladen (employees_team_view),
-              // Aktualisierung per Reload — ein MA-Portal braucht keine Sekunden-Aktualisierung der Kollegenliste.
-            }
+            // 25i: Team-View — Projektkollegen + projektübergreifende Universal-Kontakte
+            // (internes Management + HR). Beide zusammen ergeben, wen ein MA anschreiben kann.
+            // Universal-Kontakte werden IMMER geladen, auch für MA ohne Projekt.
+            Promise.all([
+              ME.project_id ? loadTeammatesFromDB(ME.project_id, ME.id) : Promise.resolve([]),
+              loadUniversalContacts(ME.id)
+            ]).then(function(res){
+              var seen={}, merged=[];
+              (res[0]||[]).concat(res[1]||[]).forEach(function(e){ if(e&&e.id&&!seen[e.id]){ seen[e.id]=true; merged.push(e); } });
+              TEAM = merged; renderCurrentViewOnRealtime();
+            }).catch(function(err){ console.error('[25i] Team-/Universal-Load fehlgeschlagen', err); });
+            // Kein Team-Realtime (Sicherheit): das Projekt-Abo auf employees lieferte volle
+            // Kollegen-Zeilen inkl. Gehalt/Bank. Team wird beim Öffnen geladen (Views),
+            // Aktualisierung per Reload — ein MA-Portal braucht keine Sekunden-Aktualisierung der Kollegenliste.
             // 27d: MA-Portal Payslips — eigene Slips laden + Realtime auf employee_id
             loadMyPayslipsFromDB(ME.id)
               .then(function(rows){ PAYSLIPS_ME = rows; renderCurrentViewOnRealtime(); })
@@ -1632,8 +1652,14 @@ function showForcePwDialog(session){
     btn.disabled=true; btn.textContent='Speichere…';
     sb.auth.updateUser({password:p1}).then(function(r){
       if(r.error){ errEl.textContent=r.error.message||'Fehler beim Setzen des Passworts.'; btn.disabled=false; btn.textContent='Passwort festlegen & weiter →'; return; }
-      sb.from('app_users').update({must_change_pw:false}).eq('user_id', session.user.id).then(function(r2){
-        if(r2.error){ errEl.textContent='Passwort gesetzt, Kennzeichen-Update fehlgeschlagen: '+(r2.error.message||'DB'); btn.disabled=false; btn.textContent='Passwort festlegen & weiter →'; return; }
+      // Kennzeichen ueber SECURITY-DEFINER-RPC loeschen (ein Mitarbeiter darf seine
+      // app_users-Zeile nicht direkt schreiben → direktes UPDATE traefe 0 Zeilen OHNE
+      // Fehler = stille Schleife). RPC gibt true zurueck, wenn die eigene Zeile getroffen wurde.
+      sb.rpc('clear_must_change_pw').then(function(r2){
+        if(r2.error || r2.data!==true){
+          errEl.textContent='Passwort gesetzt, aber das Kennzeichen konnte nicht zurueckgesetzt werden'+(r2.error?(': '+(r2.error.message||'DB')):' (0 Zeilen)')+'. Bitte an HR/Management wenden.';
+          btn.disabled=false; btn.textContent='Passwort festlegen & weiter →'; return;
+        }
         try{ wrap.remove(); }catch(e){}
         AUTH_GATING=false; gateSession(session);
       });
