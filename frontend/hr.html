@@ -8623,12 +8623,31 @@ function OrgChart({projects, employees, orgCharts, setOrgCharts}){
   const [showAddNode, setShowAddNode] = useState(null);
   const [newNodeForm, setNewNodeForm] = useState({title:'',skill:'',role:''});
 
-  const proj = (projects||[]).find(p=>p.id===selProj);
-  const projEmployees = (employees||[]).filter(e=>['active','training'].includes(e.status)&&empAssignments(e).some(a=>a.project_id===selProj));
+  const IS_COMPANY = selProj==='__company__';
+  const proj = IS_COMPANY ? null : (projects||[]).find(p=>p.id===selProj);
+  // Unternehmensleitung: projektlose Firmenfunktionen (CEO/HR/Rezeption…) über isCompanyEmp — dieselbe
+  // gepflegte Wahrheit wie Badge/Warnung, keine dritte Positionsliste.
+  const companyMembers = (employees||[]).filter(e=>e&&['active','training'].includes(e.status)&&isCompanyEmp(e));
+  const projEmployees = IS_COMPANY ? companyMembers
+    : (employees||[]).filter(e=>['active','training'].includes(e.status)&&empAssignments(e).some(a=>a.project_id===selProj));
 
   const NODE_PALETTE = ['#0F5661','#7c3aed','#059669','#d97706','#dc2626','#0d9488','#db2777'];
 
+  // Flacher Auto-Build für die Unternehmensleitung: EIN Wurzelknoten mit allen Firmenfunktionen.
+  // Bewusst keine geratene Hierarchie/Tier-Liste — die Ebenen ordnet HR einmalig per Drag&Drop
+  // (Edit-Modus → Unterbereiche anlegen, Personen ziehen). Später ggf. Tier in der bestehenden
+  // Firmenfunktions-Konfiguration nachrüsten, NICHT als neue Liste.
+  function companyAutoBuild(){
+    const rootId='root___company__';
+    const nodes=[{ id:rootId, title:'Unternehmensleitung', subtitle:'Firmenfunktionen',
+      color:'#0F5661', employees:companyMembers.map(e=>e.id), children:[] }];
+    const built={id:'__company__',nodes,rootId,auto_built:isoLocal(new Date()),
+      signature:orgSignature(companyMembers,'__company__'), manually_edited:false};
+    setOrgCharts(prev=>({...prev,__company__:built}));
+    saveOrgChartToDB('__company__', built);
+  }
   function autoBuild(){
+    if(IS_COMPANY){ companyAutoBuild(); return; }
     if(!proj) return;
     const skills = proj.skills||[];
 
@@ -8693,7 +8712,7 @@ function OrgChart({projects, employees, orgCharts, setOrgCharts}){
   const rootId = chart?.rootId||null;
 
   // Hybrid-Aktualität: aktuelle Bau-Signatur vs. gespeicherte. Charts ohne signature (Altbestand) → kein Check.
-  const curSig = proj ? orgSignature(projEmployees, selProj) : {};
+  const curSig = IS_COMPANY ? orgSignature(companyMembers,'__company__') : (proj ? orgSignature(projEmployees, selProj) : {});
   const stale = !!(chart && chart.signature && orgSigChanged(chart.signature, curSig));
   const staleDiff = stale ? orgSigDiff(chart.signature, curSig) : null;
   const staleSummary = staleDiff ? [
@@ -8901,6 +8920,7 @@ function OrgChart({projects, employees, orgCharts, setOrgCharts}){
       {/* Toolbar */}
       <div style={{display:'flex',gap:10,alignItems:'center',marginBottom:16,flexWrap:'wrap'}}>
         <select className="form-select" style={{width:200}} value={selProj} onChange={e=>setSelProj(e.target.value)}>
+          <option value="__company__">🏢 Unternehmensleitung</option>
           {(projects||[]).map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
         </select>
         <button className="btn btn-primary btn-sm" onClick={rebuildChart}>⚡ Auto-Build</button>
@@ -8935,10 +8955,12 @@ function OrgChart({projects, employees, orgCharts, setOrgCharts}){
           background:'var(--card)',borderRadius:'var(--r)',border:'2px dashed var(--border)'}}>
           <div style={{fontSize:40,marginBottom:12}}>🏗</div>
           <div style={{fontWeight:700,fontSize:15,marginBottom:6,color:'var(--text)'}}>
-            Kein Organigramm für {proj?.name||'dieses Projekt'}
+            Kein Organigramm für {IS_COMPANY?'die Unternehmensleitung':(proj?.name||'dieses Projekt')}
           </div>
           <div style={{fontSize:13,marginBottom:16}}>
-            Automatisch aus Projekt-Skills ({(proj?.skills||[]).map(s=>s.label).join(', ')||'—'}) und Mitarbeiter-Rollen generieren
+            {IS_COMPANY
+              ? 'Legt einen Startblock mit allen '+companyMembers.length+' Firmenfunktionen an. Ebenen ordnest du danach per Bearbeiten und Ziehen.'
+              : 'Automatisch aus Projekt-Skills ('+((proj?.skills||[]).map(s=>s.label).join(', ')||'—')+') und Mitarbeiter-Rollen generieren'}
           </div>
           <button className="btn btn-primary" onClick={autoBuild}>⚡ Jetzt Auto-Build</button>
         </div>
@@ -28221,7 +28243,8 @@ async function loadOrgChartsFromDB(){
     const rows = data||[];
     if(!rows.length) return null;
     const byProj = {};
-    rows.forEach(r=>{ (byProj[r.project_id]=byProj[r.project_id]||[]).push(r); });
+    // project_id NULL = Unternehmensleitung (projektlose Firmenfunktionen) → Frontend-Key '__company__'.
+    rows.forEach(r=>{ const key=(r.project_id==null)?'__company__':r.project_id; (byProj[key]=byProj[key]||[]).push(r); });
     const out = {};
     Object.keys(byProj).forEach(pid=>{
       const pr = byProj[pid].slice().sort((a,b)=>(a.seq||0)-(b.seq||0));
@@ -28247,6 +28270,8 @@ async function loadOrgChartsFromDB(){
 // seq = Reihenfolge. employees bleibt jsonb-Array.
 async function saveOrgChartToDB(projectId, chart){
   if(!projectId) return false;
+  // '__company__' (Unternehmensleitung) wird als project_id NULL abgelegt (FK erlaubt NULL).
+  const dbPid = (projectId==='__company__') ? null : projectId;
   const nodes = (chart && Array.isArray(chart.nodes)) ? chart.nodes : [];
   const uuidRx=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const newId=()=>(window.crypto&&crypto.randomUUID)?crypto.randomUUID():null;
@@ -28254,14 +28279,16 @@ async function saveOrgChartToDB(projectId, chart){
   const parentOf={}; nodes.forEach(n=>{ (n.children||[]).forEach(cid=>{ parentOf[cid]=n.id; }); });
   const rows = nodes.map((n,i)=>({
     id: idMap[n.id],
-    project_id: projectId,
+    project_id: dbPid,
     parent_id: (parentOf[n.id] && idMap[parentOf[n.id]]) ? idMap[parentOf[n.id]] : null,
     title: n.title??null, subtitle: n.subtitle??null, color: n.color??null, skill: n.skill??null,
     employees: Array.isArray(n.employees)?n.employees:[],
     seq: i,
     auto_built: (chart && chart.auto_built) || null,
   }));
-  const del = await sb.from('org_nodes').delete().eq('project_id', projectId);
+  const del = (dbPid==null)
+    ? await sb.from('org_nodes').delete().is('project_id', null)
+    : await sb.from('org_nodes').delete().eq('project_id', dbPid);
   if(del.error){ console.error('[org] saveOrgChartToDB delete', del.error); return false; }
   if(rows.length){
     const ins = await sb.from('org_nodes').insert(rows);
