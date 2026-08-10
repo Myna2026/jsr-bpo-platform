@@ -6977,14 +6977,13 @@ function Widget_UrlaubBottleneck(){
   ))}</div>;
 }
 // Kranken-/Urlaubsquote je Projekt·Skill, Vorwoche vs. laufende Woche (nur vergangene Tage).
-// BASIS: ZEIT gegen ZEIT (Variante b). Der Nenner kommt NICHT aus dem Schichtplan (kaum gepflegt →
-// entstünde eine Quote nur aus Abwesenheitstagen, Zähler=Nenner=100 %), sondern aus der KAPAZITÄT:
-//   Nenner  = Summe der (anteiligen) Wochenarbeitszeit aller dem Projekt/Skill zugewiesenen aktiven MA
-//             = Σ Tagesarbeitszeit über die regulären Arbeitstage der Woche (Sa/So/Feiertag je MA-Flags).
-//   Zähler  = ausgefallene Zeit durch Krankheit bzw. Urlaub = Abwesenheitstage × individuelle
-//             Tagesarbeitszeit (Halbtag 0,5). Es geht um die Quote der Woche als Ganzes, nicht um die
-//             (rückwirkend ohnehin nicht rekonstruierbare) Tagesverteilung.
-// Kein Schichtplan-Load nötig → synchron. Tagesarbeitszeit = work_hours (Fallback 8 h).
+// BASIS: ZEIT gegen ZEIT, GEMISCHT pro (Mitarbeiter, Tag) — „Plan schlägt Kapazität, Kapazität fängt die Lücke":
+//   Tag hat eine geplante Schicht  → Basis = geplante Netto-Stunden (cell.net; genauer, deckt Teiltage).
+//   Tag ohne Schicht, aber Arbeitstag → Basis = Kapazität (Tagesarbeitszeit work_hours, Fallback 8 h).
+//   Abwesenheit am Tag → Ausfallzeit = dieselbe Basis × Anteil (Halbtag 0,5).
+// So bleibt der Urlaub sichtbar (Urlauber stehen nicht im Plan → über Kapazität), und je gepflegter der
+// Plan, desto mehr wandert der Nenner Richtung Plan-Stunden — ohne dass jemand etwas umstellt.
+// VERLÄSSLICHKEIT je Zeile über den Plan-Anteil am Nenner: >=80% „Plan", <20% „Kapazität", sonst „gemischt".
 function Widget_KrankUrlaubQuote({employees, projects}){
   const isoD=isoLocal;
   const addDays=(d,n)=>{ const x=new Date(d.getFullYear(),d.getMonth(),d.getDate()); x.setDate(x.getDate()+n); return x; };
@@ -6992,30 +6991,50 @@ function Widget_KrankUrlaubQuote({employees, projects}){
   const DOWk=['Mo','Di','Mi','Do','Fr','Sa','So'];
   const today=new Date();
   const thisMon=mondayOf(today), prevMon=addDays(thisMon,-7);
+  const rangeStart=isoD(prevMon), rangeEnd=isoD(today);
   const daysBetween=(a,b)=>{ const out=[]; let d=new Date(a.getFullYear(),a.getMonth(),a.getDate()); const e=new Date(b.getFullYear(),b.getMonth(),b.getDate()); while(d<=e){ out.push({ds:isoD(d),dow:d.getDay()}); d=addDays(d,1); } return out; };
   const prevDays=daysBetween(prevMon, addDays(thisMon,-1));   // Vorwoche Mo–So (vollständig)
   const curDays=daysBetween(thisMon, today);                  // laufend Mo–heute (nur vergangene Tage)
   const curIdx=(today.getDay()+6)%7;                          // 0=Mo
   const curLabel=curIdx===0?'Mo':('Mo–'+DOWk[curIdx]);
 
+  // Geplante Netto-Stunden je (MA, Tag) aus shift_assignments — Ableitung wie im Weg-A-Code (cell.net
+  // bzw. shiftHours(value).net), keine zweite Logik.
+  const [cellNet,setCellNet]=useState(null);
+  useEffect(()=>{ let alive=true; (async()=>{
+    try{ const {data}=await sb.from('shift_assignments').select('employee_id,work_date,shift,shift_value,net_hours').gte('work_date',rangeStart).lte('work_date',rangeEnd);
+      const m={}; (data||[]).forEach(r=>{ const ds=String(r.work_date||'').slice(0,10); if(!ds) return;
+        const cell=(r.shift&&typeof r.shift==='object')?r.shift:(r.shift_value?{value:r.shift_value,net:r.net_hours}:null); if(!cell) return;
+        const value=cell.value||cell.shift; const net=(cell.net!=null?Number(cell.net):shiftHours(value).net)||0;
+        if(net>0){ const k=r.employee_id+'|'+ds; m[k]=(m[k]||0)+net; } });
+      if(alive) setCellNet(m);
+    }catch(e){ if(alive) setCellNet({}); }
+  })(); return ()=>{alive=false;}; },[rangeStart,rangeEnd]);
+
+  if(cellNet===null) return <div className="w-empty">Lädt…</div>;
+
   const emps=(employees||[]).filter(e=>e&&['active','training'].includes(e.status)&&e.project_id);
-  const dayHours=e=>{ const h=Number(e.work_hours); return h>0?h:8; };   // gekapselte Zeit-Einheit
+  const dayHours=e=>{ const h=Number(e.work_hours); return h>0?h:8; };   // gekapselte Zeit-Einheit (Kapazität)
   const absFrac=(e,ds)=>{ const fr=absPartialFraction(e,ds); return fr==null?1:fr; };
 
-  // Kapazität + Ausfallzeit je (Projekt|Skill) für eine Wochentagsliste.
+  // Nenner (denom) + Plan-Anteil (planH) + Ausfallzeit je (Projekt|Skill), gemischt pro (MA, Tag).
   function tally(days){
     const t={};
     emps.forEach(e=>{
       const key=e.project_id+'|'+(e.project_skill||'all');
       const dh=dayHours(e); const holSet=holidayDatesForLocation(e.location||e.city);
       days.forEach(({ds,dow})=>{
-        let ok = !(dow===6 && !canWorkSat(e)) && !(dow===0 && !canWorkSun(e));   // reguläre Arbeitstage
-        if(ok && !canWorkHoliday(e) && holSet.has(ds)) ok=false;
-        if(!ok) return;
-        const r=t[key]||(t[key]={cap:0,sick:0,vac:0});
-        r.cap+=dh;                                       // verfügbare Zeit (Kapazität)
+        const planNet=cellNet[e.id+'|'+ds]||0;
+        let base=0, fromPlan=false;
+        if(planNet>0){ base=planNet; fromPlan=true; }                 // Plan schlägt Kapazität
+        else { let ok = !(dow===6 && !canWorkSat(e)) && !(dow===0 && !canWorkSun(e));
+          if(ok && !canWorkHoliday(e) && holSet.has(ds)) ok=false;
+          if(ok) base=dh; }                                           // Kapazität fängt die Lücke
+        if(base<=0) return;
+        const r=t[key]||(t[key]={denom:0,planH:0,sick:0,vac:0});
+        r.denom+=base; if(fromPlan) r.planH+=base;
         const abs=(e.absences||[]).find(a=>absCoversDay(a,ds));
-        if(abs){ const h=dh*absFrac(e,ds); if(abs.type==='sick') r.sick+=h; else if(abs.type==='vacation') r.vac+=h; }
+        if(abs){ const lost=base*absFrac(e,ds); if(abs.type==='sick') r.sick+=lost; else if(abs.type==='vacation') r.vac+=lost; }
       });
     });
     return t;
@@ -7027,8 +7046,12 @@ function Widget_KrankUrlaubQuote({employees, projects}){
 
   const projById={}; (projects||[]).forEach(p=>{ if(p) projById[p.id]=p; });
   const skillLabel=(pid,sk)=>{ const p=projById[pid]; if(!p||!Array.isArray(p.skills)) return (sk&&sk!=='all')?sk:''; const hit=p.skills.find(s=>String(s.key).toLowerCase()===String(sk).toLowerCase()); return hit?hit.label:((sk&&sk!=='all')?sk:''); };
-  const has=w=> !!(w && w.cap>0);          // echter Nenner = vorhandene Kapazität
-  const rate=(w,k)=> has(w)? (w[k]/w.cap) : null;
+  const has=w=> !!(w && w.denom>0);
+  const rate=(w,k)=> has(w)? (w[k]/w.denom) : null;
+  const relTag=w=>{ const share=w.denom>0?w.planH/w.denom:0;
+    if(share>=0.8) return {label:'Plan',color:'#15803d',bg:'#f0fdf4',bd:'#bbf7d0'};
+    if(share<0.2)  return {label:'Kapazität',color:'var(--muted)',bg:'transparent',bd:'var(--border)'};
+    return {label:'gemischt',color:'#b45309',bg:'var(--amber-bg)',bd:'var(--amber)'}; };
 
   // Massgebliche Woche je Zeile: bevorzugt die vollständige Vorwoche, sonst die laufende.
   const rows=keys.map(k=>{ const i=k.indexOf('|'); const pid=k.slice(0,i), sk=k.slice(i+1);
@@ -7037,12 +7060,10 @@ function Widget_KrankUrlaubQuote({employees, projects}){
       return { name:(projById[pid]&&projById[pid].name)||pid, color:(projById[pid]&&projById[pid].color)||'#0F5661', skill:skillLabel(pid,sk), feat }; })
     .filter(r=>r.feat)
     .sort((a,b)=>a.name.localeCompare(b.name,'de')||String(a.skill).localeCompare(String(b.skill),'de'));
-  if(!rows.length) return <div className="w-empty">Noch keine Kapazität in beiden Wochen.</div>;
+  if(!rows.length) return <div className="w-empty">Noch keine Kapazität/Planung in beiden Wochen.</div>;
 
-  // Relative Hervorhebung: höchste Kranken-/Urlaubsquote über die massgeblichen Wochen.
   const maxSick=Math.max(0,...rows.map(r=>rate(r.feat.w,'sick'))), maxVac=Math.max(0,...rows.map(r=>rate(r.feat.w,'vac')));
-  const EPS=1e-9, TREND=0.03;   // Trend-Schwelle: 3 Prozentpunkte, sonst „unverändert"
-  const pct=x=>Math.round(x*100);
+  const EPS=1e-9, TREND=0.03; const pct=x=>Math.round(x*100);
 
   function metric(feat, kind, icon, label, maxV){
     const main=rate(feat.w,kind), hi=maxV>0 && main>=maxV-EPS;
@@ -7054,25 +7075,26 @@ function Widget_KrankUrlaubQuote({employees, projects}){
         <span style={{width:78,fontSize:11,color:'var(--muted)'}}>{icon} {label}</span>
         <span style={{fontSize:15,fontWeight:800,minWidth:46,textAlign:'right',padding:'0 5px',borderRadius:6,background:hi?'var(--amber-bg)':'transparent',color:hi?'var(--amber)':'var(--text)'}}>{pct(main)}%</span>
         {arrow?<span style={{fontWeight:800,color:acol,width:12,textAlign:'center'}}>{arrow}</span>:<span style={{width:12}}/>}
-        <span style={{fontSize:10,color:'var(--muted)'}}>{feat.tag}</span>
       </div>
     );
   }
 
   return <div>
-    {rows.map((r,i)=>(
+    {rows.map((r,i)=>{ const rel=relTag(r.feat.w); return (
       <div key={i} style={{padding:'8px 0',borderTop:i?'1px solid var(--border)':'none'}}>
         <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:4}}>
           <span style={{width:8,height:8,borderRadius:3,background:r.color,flexShrink:0}}/>
-          <span style={{fontSize:12.5,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}><span style={{fontWeight:700}}>{r.name}</span>{r.skill?<span style={{color:'var(--muted)'}}> · {r.skill}</span>:null}</span>
+          <span style={{flex:1,minWidth:0,fontSize:12.5,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}><span style={{fontWeight:700}}>{r.name}</span>{r.skill?<span style={{color:'var(--muted)'}}> · {r.skill}</span>:null}</span>
+          <span style={{fontSize:10,color:'var(--muted)',flexShrink:0}}>{r.feat.tag}</span>
+          <span title={'Grundlage: '+rel.label+' (Plan-Anteil am Nenner)'} style={{fontSize:9.5,fontWeight:700,color:rel.color,background:rel.bg,border:'1px solid '+rel.bd,borderRadius:5,padding:'1px 5px',flexShrink:0}}>{rel.label}</span>
         </div>
         <div style={{display:'flex',flexDirection:'column',gap:3,paddingLeft:14}}>
           {metric(r.feat,'sick','🤒','Kranken',maxSick)}
           {metric(r.feat,'vac','🌴','Urlaub',maxVac)}
         </div>
       </div>
-    ))}
-    <div style={{fontSize:10,color:'var(--muted)',marginTop:8,lineHeight:1.5}}>Ausfallzeit / verfügbare Wochenarbeitszeit (Kapazität). Wert der Vorwoche; ↑↓ = Trend der laufenden Woche (bis {curLabel}). Höchste Werte hervorgehoben.</div>
+    ); })}
+    <div style={{fontSize:10,color:'var(--muted)',marginTop:8,lineHeight:1.5}}>Ausfallzeit / Arbeitszeit; je Tag geplante Stunden, sonst Kapazität. Tag zeigt die Grundlage (Plan/gemischt/Kapazität). Wert der Vorwoche; ↑↓ = Trend der laufenden Woche (bis {curLabel}). Höchste Werte hervorgehoben.</div>
   </div>;
 }
 // Widget_Personalkosten entfernt (2026-07-27, Personalkosten komplett raus lt. Cockpit-Überarbeitung).
