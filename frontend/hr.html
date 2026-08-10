@@ -6979,6 +6979,93 @@ function Widget_UrlaubBottleneck(){
     </div>
   ))}</div>;
 }
+// Kranken-/Urlaubsquote je Projekt·Skill, Vorwoche vs. laufende Woche (nur vergangene Tage).
+// BASIS: Tage gegen Tage (D2). Nenner "Soll-Tage" = jeder (MA,Tag), an dem eine Schicht GEPLANT ist
+// ODER eine Abwesenheit vorliegt — so leert im Voraus geplanter Urlaub (ohne Schicht-Zelle) den Nenner nicht.
+// EINHEIT gekapselt in dayWeightSoll/absWeight (= Tage). Späterer Stunden-Umstieg (b): nur diese zwei
+// Gewichte auf cell.net bzw. Tagesstunden umstellen — Aggregation/Anzeige bleiben unverändert.
+function Widget_KrankUrlaubQuote({employees, projects}){
+  const isoD=isoLocal;
+  const addDays=(d,n)=>{ const x=new Date(d.getFullYear(),d.getMonth(),d.getDate()); x.setDate(x.getDate()+n); return x; };
+  const mondayOf=d=>{ const x=new Date(d.getFullYear(),d.getMonth(),d.getDate()); x.setDate(x.getDate()-((x.getDay()+6)%7)); return x; };
+  const DOWk=['Mo','Di','Mi','Do','Fr','Sa','So'];
+  const today=new Date();
+  const thisMon=mondayOf(today), prevMon=addDays(thisMon,-7);
+  const rangeStart=isoD(prevMon), rangeEnd=isoD(today);
+  const daysBetween=(a,b)=>{ const out=[]; let d=new Date(a.getFullYear(),a.getMonth(),a.getDate()); const e=new Date(b.getFullYear(),b.getMonth(),b.getDate()); while(d<=e){ out.push(isoD(d)); d=addDays(d,1); } return out; };
+  const prevDays=daysBetween(prevMon, addDays(thisMon,-1));   // Vorwoche Mo–So (vollständig)
+  const curDays=daysBetween(thisMon, today);                  // laufend Mo–heute (nur vergangene Tage)
+  const curIdx=(today.getDay()+6)%7;                          // 0=Mo
+  const curLabel=curIdx===0?'Mo':('Mo–'+DOWk[curIdx]);
+
+  const [cells,setCells]=useState(null);
+  useEffect(()=>{ let alive=true; (async()=>{
+    try{ const {data}=await sb.from('shift_assignments').select('project_id,skill,employee_id,work_date').gte('work_date',rangeStart).lte('work_date',rangeEnd);
+      if(alive) setCells(data||[]); }catch(e){ if(alive) setCells([]); }
+  })(); return ()=>{alive=false;}; },[rangeStart,rangeEnd]);
+
+  if(cells===null) return <div className="w-empty">Lädt…</div>;
+
+  const cellBy={}; (cells||[]).forEach(c=>{ cellBy[c.employee_id+'|'+String(c.work_date).slice(0,10)]={pid:c.project_id,skill:c.skill||'all'}; });
+  const emps=(employees||[]).filter(e=>e&&['active','training'].includes(e.status));
+  const absWeight=(e,ds)=>{ const fr=absPartialFraction(e,ds); return fr==null?1:fr; };   // Halbtag 0,5, sonst 1
+
+  function tally(days){
+    const t={};
+    emps.forEach(e=>{ days.forEach(ds=>{
+      const cell=cellBy[e.id+'|'+ds];
+      const abs=(e.absences||[]).find(a=>absCoversDay(a,ds));
+      if(!cell && !abs) return;                      // weder geplant noch abwesend → kein Soll-Tag
+      const pid=cell?cell.pid:(e.project_id||null);
+      if(!pid) return;                               // Abwesenheit ohne Projektbezug → nicht zuordenbar
+      const skill=cell?cell.skill:(e.project_skill||'all');
+      const r=t[pid+'|'+(skill||'all')]||(t[pid+'|'+(skill||'all')]={soll:0,sick:0,vac:0});
+      r.soll+=1;                                     // dayWeightSoll = 1 Tag  (Stunden-Umstieg: += cell.net)
+      if(abs){ const w=absWeight(e,ds); if(abs.type==='sick') r.sick+=w; else if(abs.type==='vacation') r.vac+=w; }
+    }); });
+    return t;
+  }
+  const prev=tally(prevDays), cur=tally(curDays);
+
+  const keys=[...new Set([...Object.keys(prev),...Object.keys(cur)])];
+  if(!keys.length) return <div className="w-empty">Keine geplanten Schichten oder Abwesenheiten in beiden Wochen.</div>;
+
+  const projById={}; (projects||[]).forEach(p=>{ if(p) projById[p.id]=p; });
+  const skillLabel=(pid,sk)=>{ const p=projById[pid]; if(!p||!Array.isArray(p.skills)) return (sk&&sk!=='all')?sk:''; const hit=p.skills.find(s=>String(s.key).toLowerCase()===String(sk).toLowerCase()); return hit?hit.label:((sk&&sk!=='all')?sk:''); };
+  const rows=keys.map(k=>{ const i=k.indexOf('|'); const pid=k.slice(0,i), sk=k.slice(i+1);
+      return { pid, name:(projById[pid]&&projById[pid].name)||pid, color:(projById[pid]&&projById[pid].color)||'#0F5661', skill:skillLabel(pid,sk), prev:prev[k]||null, cur:cur[k]||null }; })
+    .sort((a,b)=>a.name.localeCompare(b.name,'de')||String(a.skill).localeCompare(String(b.skill),'de'));
+
+  // Relative Hervorhebung: die HÖCHSTEN Werte je Kennzahl (noch keine festen Schwellen bekannt).
+  const ratios=[]; rows.forEach(r=>[r.prev,r.cur].forEach(w=>{ if(w&&w.soll>0) ratios.push({s:w.sick/w.soll,v:w.vac/w.soll}); }));
+  const maxSick=Math.max(0,...ratios.map(x=>x.s)), maxVac=Math.max(0,...ratios.map(x=>x.v)); const EPS=1e-9;
+
+  function cellView(w,isCur){
+    if(!w || w.soll<=0) return <span style={{fontSize:11,color:'var(--muted)',fontStyle:'italic'}}>{isCur?'noch keine':'keine Schichten'}</span>;
+    const sp=w.sick/w.soll, vp=w.vac/w.soll, hiS=maxSick>0&&sp>=maxSick-EPS, hiV=maxVac>0&&vp>=maxVac-EPS;
+    const pill=(pct,hi,icon)=>(<span title={hi?'höchster Wert':undefined} style={{display:'inline-flex',alignItems:'center',gap:2,padding:'1px 5px',borderRadius:6,fontSize:12,fontWeight:hi?800:600,background:hi?'var(--amber-bg)':'transparent',color:hi?'var(--amber)':'var(--text)',border:'1px solid '+(hi?'var(--amber)':'transparent')}}>{icon}{Math.round(pct*100)}%</span>);
+    return <span style={{display:'inline-flex',gap:5,justifyContent:'center'}}>{pill(sp,hiS,'🤒')}{pill(vp,hiV,'🌴')}</span>;
+  }
+
+  return <div>
+    <div style={{display:'flex',fontSize:10,color:'var(--muted)',fontWeight:700,textTransform:'uppercase',letterSpacing:'.04em',paddingBottom:4}}>
+      <span style={{flex:1}}></span>
+      <span style={{width:104,textAlign:'center'}}>Vorwoche</span>
+      <span style={{width:104,textAlign:'center'}}>laufend · {curLabel}</span>
+    </div>
+    {rows.map((r,i)=>(
+      <div key={i} style={{display:'flex',alignItems:'center',padding:'4px 0',borderTop:i?'1px solid var(--border)':'none'}}>
+        <span style={{flex:1,minWidth:0,display:'flex',alignItems:'center',gap:6,fontSize:12}}>
+          <span style={{width:8,height:8,borderRadius:3,background:r.color,flexShrink:0}}/>
+          <span style={{whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}><span style={{fontWeight:700}}>{r.name}</span>{r.skill?<span style={{color:'var(--muted)'}}> · {r.skill}</span>:null}</span>
+        </span>
+        <span style={{width:104,textAlign:'center'}}>{cellView(r.prev,false)}</span>
+        <span style={{width:104,textAlign:'center'}}>{cellView(r.cur,true)}</span>
+      </div>
+    ))}
+    <div style={{fontSize:10,color:'var(--muted)',marginTop:6,lineHeight:1.5}}>🤒 Kranken- · 🌴 Urlaubsquote (Tage/Soll-Tage, Soll = geplant + abwesend). Höchste Werte hervorgehoben. Laufende Woche nur bis heute.</div>
+  </div>;
+}
 // Widget_Personalkosten entfernt (2026-07-27, Personalkosten komplett raus lt. Cockpit-Überarbeitung).
 // empScores/Widget_MaTop/Widget_MaKritisch entfernt (2026-07-26): mittelten % mit Zaehlwerten
 // zu einer bedeutungslosen Zahl, projektuebergreifende Rangliste vergleicht ungleiche KPI-Saetze.
@@ -7144,6 +7231,7 @@ function WidgetCard({id, employees, projects, plans, forecast, onNavigate}){
     ma_per_project:()=><Widget_MaPerProject employees={employees} projects={projects}/>,
     training_status:()=><Widget_TrainingStatus plans={plans}/>,
     krankheit_month:()=><Widget_KrankheitMonth employees={employees}/>,
+    quote_woche:()=><Widget_KrankUrlaubQuote employees={employees} projects={projects}/>,
     urlaub_bottleneck:()=><Widget_UrlaubBottleneck/>,
     fluktuation:()=><Widget_Fluktuation employees={employees}/>,
     auslastung:()=><Widget_Auslastung employees={employees} projects={projects} forecast={forecast} onNavigate={onNavigate}/>,
@@ -30377,6 +30465,7 @@ const WIDGETS = {
   ma_per_project:      { id:'ma_per_project',      label:'MA pro Projekt & Skill',            icon:'users',                category:'personal' },
   training_status:     { id:'training_status',     label:'Schulungen: Status & Teilnehmer',   icon:'academic-cap',         category:'schulung' },
   krankheit_month:     { id:'krankheit_month',     label:'Krankheitstage laufender Monat',    icon:'heart',                category:'zeit' },
+  quote_woche:         { id:'quote_woche',         label:'Kranken- & Urlaubsquote (Woche)',   icon:'chart-pie',            category:'zeit' },
   urlaub_bottleneck:   { id:'urlaub_bottleneck',   label:'Urlaubs-Bottleneck 6 Monate',       icon:'calendar',             category:'zeit' },
   fluktuation:         { id:'fluktuation',         label:'Fluktuation 30/90/365 Tage',        icon:'arrow-trending-down',  category:'people' },
   auslastung:          { id:'auslastung',          label:'Auslastung Ist/Soll',               icon:'chart-pie',            category:'personal' },
