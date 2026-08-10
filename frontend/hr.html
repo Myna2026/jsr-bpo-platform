@@ -7997,6 +7997,51 @@ function DataQualityPanel({employees, projects, plans, onNavigate, summary, onOp
 // Rendert unabhängig von der Desktop-Widget-Auswahl. Reihenfolge: KPI-Kacheln → offene
 // Urlaubsanträge (das Einzige, was man mobil TUT) → MA je Projekt → Projekte → Leistung je Skill
 // → CV-Eingang → Heute zu erledigen → offene Tagesaufgaben.
+// ── Termine des heutigen Tages im Cockpit (Desktop + mobil), für ALLE HR-Portal-Nutzer ──
+// Sichtbarkeit = KEINE zweite Umsetzung: `calendar_events` per RLS (cal_ev_select: is_admin() ODER
+// created_by=ich ODER ich in participants ODER visible_roles leer/Überschneidung) liefert serverseitig
+// genau die für mich sichtbaren Termine — dieselbe Regel wie der Kalender. Wiederholungen über den
+// geteilten Helfer `calOccurrences`. `hidden`-Overrides für heute werden übersprungen. Wichtige ⭐.
+function CockpitTodayEvents({mobile}){
+  const [rows,setRows]=useState(null);
+  useEffect(()=>{ let alive=true;
+    const load=async()=>{
+      try{
+        const today=isoLocal(new Date());
+        const d=new Date(); const from=new Date(d.getFullYear(),d.getMonth(),d.getDate());
+        const ev=await sb.from('calendar_events').select('*');
+        const ov=await sb.from('calendar_overrides').select('event_id,occurrence_date,hidden').eq('occurrence_date',today);
+        if(!alive) return;
+        const hidden={}; (ov.data||[]).forEach(o=>{ if(o.hidden) hidden[o.event_id]=true; });
+        const list=[];
+        (ev.data||[]).forEach(e=>{ if(hidden[e.id]) return; if(calOccurrences(e, from, from).length) list.push(e); });
+        list.sort((a,b)=>String(a.start_time||'99').localeCompare(String(b.start_time||'99')));
+        if(alive) setRows(list);
+      }catch(err){ if(alive) setRows([]); }
+    };
+    load();
+    const ch=sb.channel('cockpit-today-events')
+      .on('postgres_changes',{event:'*',schema:'public',table:'calendar_events'},load)
+      .on('postgres_changes',{event:'*',schema:'public',table:'calendar_overrides'},load).subscribe();
+    return ()=>{ alive=false; try{ sb.removeChannel(ch); }catch(e){} };
+  },[]);
+  if(rows===null) return null;   // bis geladen nichts (kein Flackern)
+  const fmtT=t=>t?String(t).slice(0,5):'ganztägig';
+  const head=<div style={{fontSize:mobile?undefined:14,fontWeight:800,marginBottom:8,color:mobile?'#0F5661':undefined}} className={mobile?'ckm-h':undefined}>📅 Heute</div>;
+  const body = rows.length===0
+    ? <div style={{background:'#f0fdf4',border:'1px solid #bbf7d0',borderRadius:10,padding:'10px 12px',fontSize:13,color:'#15803d',fontWeight:600}}>✓ Heute keine Termine</div>
+    : <div style={{display:'flex',flexDirection:'column',gap:6}}>
+        {rows.map((e,i)=>(
+          <div key={e.id+'|'+i} style={{display:'flex',alignItems:'center',gap:10,padding:'6px 8px',background:e.important?'#fffbeb':'var(--surface)',border:'1px solid '+(e.important?'#f59e0b55':'var(--border)'),borderRadius:8}}>
+            <span style={{fontFamily:'var(--mono)',fontSize:13,fontWeight:700,color:'#0F5661',minWidth:52,flexShrink:0}}>{fmtT(e.start_time)}</span>
+            <span style={{fontSize:13,fontWeight:e.important?800:600,flex:1,minWidth:0}}>{e.important&&<span style={{marginRight:3}}>⭐</span>}{e.title}</span>
+          </div>
+        ))}
+      </div>;
+  return mobile
+    ? <div className="ckm-card" style={{borderLeft:'4px solid #0F5661'}}>{head}{body}</div>
+    : <div className="card" style={{marginBottom:12,borderLeft:'4px solid #0F5661'}}><div style={{padding:'12px 14px'}}>{head}{body}</div></div>;
+}
 // ── Tagesberichte im Cockpit (Schnitt 4): Abschnitt je aktiviertem Projekt, Gestern|Heute-Ampel ──
 function drFmtDeShort(ds){ try{ return new Date(String(ds).slice(0,10)+'T12:00:00').toLocaleDateString('de-DE',{weekday:'short',day:'numeric',month:'short'}); }catch(e){ return ds; } }
 function Widget_DailyReports({employees, projects, team}){
@@ -8164,6 +8209,9 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
 
   return (
     <div className="ckm">
+      {/* Termine heute — ganz oben, noch vor den Kennzahlen. Was heute ansteht, sieht man zuerst. */}
+      <CockpitTodayEvents mobile={true}/>
+
       {/* 1) KPI-Kacheln */}
       <div className="ckm-tiles">
         {tiles.map((k,i)=>(
@@ -8507,6 +8555,9 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
   const hasW = k => myWidgets.includes(k);
   return(
     <React.Fragment>
+
+      {/* Termine heute — ganz oben, noch vor den Kennzahlen. Für alle HR-Portal-Nutzer, Sichtbarkeit über RLS. */}
+      <CockpitTodayEvents mobile={false}/>
 
       {/* Selbst-Konfiguration: eigenes Cockpit zusammenstellen (Last-Write-Wins mit Admin-Matrix) */}
       <div style={{display:'flex',justifyContent:'flex-end',gap:8,marginBottom:10}}>
