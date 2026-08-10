@@ -6977,10 +6977,14 @@ function Widget_UrlaubBottleneck(){
   ))}</div>;
 }
 // Kranken-/Urlaubsquote je Projekt·Skill, Vorwoche vs. laufende Woche (nur vergangene Tage).
-// BASIS: Tage gegen Tage (D2). Nenner "Soll-Tage" = jeder (MA,Tag), an dem eine Schicht GEPLANT ist
-// ODER eine Abwesenheit vorliegt — so leert im Voraus geplanter Urlaub (ohne Schicht-Zelle) den Nenner nicht.
-// EINHEIT gekapselt in dayWeightSoll/absWeight (= Tage). Späterer Stunden-Umstieg (b): nur diese zwei
-// Gewichte auf cell.net bzw. Tagesstunden umstellen — Aggregation/Anzeige bleiben unverändert.
+// BASIS: ZEIT gegen ZEIT (Variante b). Der Nenner kommt NICHT aus dem Schichtplan (kaum gepflegt →
+// entstünde eine Quote nur aus Abwesenheitstagen, Zähler=Nenner=100 %), sondern aus der KAPAZITÄT:
+//   Nenner  = Summe der (anteiligen) Wochenarbeitszeit aller dem Projekt/Skill zugewiesenen aktiven MA
+//             = Σ Tagesarbeitszeit über die regulären Arbeitstage der Woche (Sa/So/Feiertag je MA-Flags).
+//   Zähler  = ausgefallene Zeit durch Krankheit bzw. Urlaub = Abwesenheitstage × individuelle
+//             Tagesarbeitszeit (Halbtag 0,5). Es geht um die Quote der Woche als Ganzes, nicht um die
+//             (rückwirkend ohnehin nicht rekonstruierbare) Tagesverteilung.
+// Kein Schichtplan-Load nötig → synchron. Tagesarbeitszeit = work_hours (Fallback 8 h).
 function Widget_KrankUrlaubQuote({employees, projects}){
   const isoD=isoLocal;
   const addDays=(d,n)=>{ const x=new Date(d.getFullYear(),d.getMonth(),d.getDate()); x.setDate(x.getDate()+n); return x; };
@@ -6988,79 +6992,87 @@ function Widget_KrankUrlaubQuote({employees, projects}){
   const DOWk=['Mo','Di','Mi','Do','Fr','Sa','So'];
   const today=new Date();
   const thisMon=mondayOf(today), prevMon=addDays(thisMon,-7);
-  const rangeStart=isoD(prevMon), rangeEnd=isoD(today);
-  const daysBetween=(a,b)=>{ const out=[]; let d=new Date(a.getFullYear(),a.getMonth(),a.getDate()); const e=new Date(b.getFullYear(),b.getMonth(),b.getDate()); while(d<=e){ out.push(isoD(d)); d=addDays(d,1); } return out; };
+  const daysBetween=(a,b)=>{ const out=[]; let d=new Date(a.getFullYear(),a.getMonth(),a.getDate()); const e=new Date(b.getFullYear(),b.getMonth(),b.getDate()); while(d<=e){ out.push({ds:isoD(d),dow:d.getDay()}); d=addDays(d,1); } return out; };
   const prevDays=daysBetween(prevMon, addDays(thisMon,-1));   // Vorwoche Mo–So (vollständig)
   const curDays=daysBetween(thisMon, today);                  // laufend Mo–heute (nur vergangene Tage)
   const curIdx=(today.getDay()+6)%7;                          // 0=Mo
   const curLabel=curIdx===0?'Mo':('Mo–'+DOWk[curIdx]);
 
-  const [cells,setCells]=useState(null);
-  useEffect(()=>{ let alive=true; (async()=>{
-    try{ const {data}=await sb.from('shift_assignments').select('project_id,skill,employee_id,work_date').gte('work_date',rangeStart).lte('work_date',rangeEnd);
-      if(alive) setCells(data||[]); }catch(e){ if(alive) setCells([]); }
-  })(); return ()=>{alive=false;}; },[rangeStart,rangeEnd]);
+  const emps=(employees||[]).filter(e=>e&&['active','training'].includes(e.status)&&e.project_id);
+  const dayHours=e=>{ const h=Number(e.work_hours); return h>0?h:8; };   // gekapselte Zeit-Einheit
+  const absFrac=(e,ds)=>{ const fr=absPartialFraction(e,ds); return fr==null?1:fr; };
 
-  if(cells===null) return <div className="w-empty">Lädt…</div>;
-
-  const cellBy={}; (cells||[]).forEach(c=>{ cellBy[c.employee_id+'|'+String(c.work_date).slice(0,10)]={pid:c.project_id,skill:c.skill||'all'}; });
-  const emps=(employees||[]).filter(e=>e&&['active','training'].includes(e.status));
-  const absWeight=(e,ds)=>{ const fr=absPartialFraction(e,ds); return fr==null?1:fr; };   // Halbtag 0,5, sonst 1
-
+  // Kapazität + Ausfallzeit je (Projekt|Skill) für eine Wochentagsliste.
   function tally(days){
     const t={};
-    emps.forEach(e=>{ days.forEach(ds=>{
-      const cell=cellBy[e.id+'|'+ds];
-      const abs=(e.absences||[]).find(a=>absCoversDay(a,ds));
-      if(!cell && !abs) return;                      // weder geplant noch abwesend → kein Soll-Tag
-      const pid=cell?cell.pid:(e.project_id||null);
-      if(!pid) return;                               // Abwesenheit ohne Projektbezug → nicht zuordenbar
-      const skill=cell?cell.skill:(e.project_skill||'all');
-      const r=t[pid+'|'+(skill||'all')]||(t[pid+'|'+(skill||'all')]={soll:0,sick:0,vac:0});
-      r.soll+=1;                                     // dayWeightSoll = 1 Tag  (Stunden-Umstieg: += cell.net)
-      if(abs){ const w=absWeight(e,ds); if(abs.type==='sick') r.sick+=w; else if(abs.type==='vacation') r.vac+=w; }
-    }); });
+    emps.forEach(e=>{
+      const key=e.project_id+'|'+(e.project_skill||'all');
+      const dh=dayHours(e); const holSet=holidayDatesForLocation(e.location||e.city);
+      days.forEach(({ds,dow})=>{
+        let ok = !(dow===6 && !canWorkSat(e)) && !(dow===0 && !canWorkSun(e));   // reguläre Arbeitstage
+        if(ok && !canWorkHoliday(e) && holSet.has(ds)) ok=false;
+        if(!ok) return;
+        const r=t[key]||(t[key]={cap:0,sick:0,vac:0});
+        r.cap+=dh;                                       // verfügbare Zeit (Kapazität)
+        const abs=(e.absences||[]).find(a=>absCoversDay(a,ds));
+        if(abs){ const h=dh*absFrac(e,ds); if(abs.type==='sick') r.sick+=h; else if(abs.type==='vacation') r.vac+=h; }
+      });
+    });
     return t;
   }
   const prev=tally(prevDays), cur=tally(curDays);
 
   const keys=[...new Set([...Object.keys(prev),...Object.keys(cur)])];
-  if(!keys.length) return <div className="w-empty">Keine geplanten Schichten oder Abwesenheiten in beiden Wochen.</div>;
+  if(!keys.length) return <div className="w-empty">Keine dem Projekt/Skill zugewiesenen aktiven Mitarbeiter.</div>;
 
   const projById={}; (projects||[]).forEach(p=>{ if(p) projById[p.id]=p; });
   const skillLabel=(pid,sk)=>{ const p=projById[pid]; if(!p||!Array.isArray(p.skills)) return (sk&&sk!=='all')?sk:''; const hit=p.skills.find(s=>String(s.key).toLowerCase()===String(sk).toLowerCase()); return hit?hit.label:((sk&&sk!=='all')?sk:''); };
+  const has=w=> !!(w && w.cap>0);          // echter Nenner = vorhandene Kapazität
+  const rate=(w,k)=> has(w)? (w[k]/w.cap) : null;
+
+  // Massgebliche Woche je Zeile: bevorzugt die vollständige Vorwoche, sonst die laufende.
   const rows=keys.map(k=>{ const i=k.indexOf('|'); const pid=k.slice(0,i), sk=k.slice(i+1);
-      return { pid, name:(projById[pid]&&projById[pid].name)||pid, color:(projById[pid]&&projById[pid].color)||'#0F5661', skill:skillLabel(pid,sk), prev:prev[k]||null, cur:cur[k]||null }; })
+      const p=prev[k]||null, c=cur[k]||null;
+      const feat = has(p) ? {w:p,tag:'Vorwoche',other:has(c)?c:null} : has(c) ? {w:c,tag:curLabel,other:null} : null;
+      return { name:(projById[pid]&&projById[pid].name)||pid, color:(projById[pid]&&projById[pid].color)||'#0F5661', skill:skillLabel(pid,sk), feat }; })
+    .filter(r=>r.feat)
     .sort((a,b)=>a.name.localeCompare(b.name,'de')||String(a.skill).localeCompare(String(b.skill),'de'));
+  if(!rows.length) return <div className="w-empty">Noch keine Kapazität in beiden Wochen.</div>;
 
-  // Relative Hervorhebung: die HÖCHSTEN Werte je Kennzahl (noch keine festen Schwellen bekannt).
-  const ratios=[]; rows.forEach(r=>[r.prev,r.cur].forEach(w=>{ if(w&&w.soll>0) ratios.push({s:w.sick/w.soll,v:w.vac/w.soll}); }));
-  const maxSick=Math.max(0,...ratios.map(x=>x.s)), maxVac=Math.max(0,...ratios.map(x=>x.v)); const EPS=1e-9;
+  // Relative Hervorhebung: höchste Kranken-/Urlaubsquote über die massgeblichen Wochen.
+  const maxSick=Math.max(0,...rows.map(r=>rate(r.feat.w,'sick'))), maxVac=Math.max(0,...rows.map(r=>rate(r.feat.w,'vac')));
+  const EPS=1e-9, TREND=0.03;   // Trend-Schwelle: 3 Prozentpunkte, sonst „unverändert"
+  const pct=x=>Math.round(x*100);
 
-  function cellView(w,isCur){
-    if(!w || w.soll<=0) return <span style={{fontSize:11,color:'var(--muted)',fontStyle:'italic'}}>{isCur?'noch keine':'keine Schichten'}</span>;
-    const sp=w.sick/w.soll, vp=w.vac/w.soll, hiS=maxSick>0&&sp>=maxSick-EPS, hiV=maxVac>0&&vp>=maxVac-EPS;
-    const pill=(pct,hi,icon)=>(<span title={hi?'höchster Wert':undefined} style={{display:'inline-flex',alignItems:'center',gap:2,padding:'1px 5px',borderRadius:6,fontSize:12,fontWeight:hi?800:600,background:hi?'var(--amber-bg)':'transparent',color:hi?'var(--amber)':'var(--text)',border:'1px solid '+(hi?'var(--amber)':'transparent')}}>{icon}{Math.round(pct*100)}%</span>);
-    return <span style={{display:'inline-flex',gap:5,justifyContent:'center'}}>{pill(sp,hiS,'🤒')}{pill(vp,hiV,'🌴')}</span>;
+  function metric(feat, kind, icon, label, maxV){
+    const main=rate(feat.w,kind), hi=maxV>0 && main>=maxV-EPS;
+    let arrow=null, acol='var(--muted)', atitle='';
+    if(feat.other){ const o=rate(feat.other,kind); const d=o-main; arrow=d>TREND?'↑':d<-TREND?'↓':'→';
+      acol=arrow==='↑'?'var(--amber)':arrow==='↓'?'var(--green)':'var(--muted)'; atitle=' · laufend '+pct(o)+'%'; }
+    return (
+      <div style={{display:'flex',alignItems:'center',gap:8}} title={feat.tag+' '+pct(main)+'%'+atitle}>
+        <span style={{width:78,fontSize:11,color:'var(--muted)'}}>{icon} {label}</span>
+        <span style={{fontSize:15,fontWeight:800,minWidth:46,textAlign:'right',padding:'0 5px',borderRadius:6,background:hi?'var(--amber-bg)':'transparent',color:hi?'var(--amber)':'var(--text)'}}>{pct(main)}%</span>
+        {arrow?<span style={{fontWeight:800,color:acol,width:12,textAlign:'center'}}>{arrow}</span>:<span style={{width:12}}/>}
+        <span style={{fontSize:10,color:'var(--muted)'}}>{feat.tag}</span>
+      </div>
+    );
   }
 
   return <div>
-    <div style={{display:'flex',fontSize:10,color:'var(--muted)',fontWeight:700,textTransform:'uppercase',letterSpacing:'.04em',paddingBottom:4}}>
-      <span style={{flex:1}}></span>
-      <span style={{width:104,textAlign:'center'}}>Vorwoche</span>
-      <span style={{width:104,textAlign:'center'}}>laufend · {curLabel}</span>
-    </div>
     {rows.map((r,i)=>(
-      <div key={i} style={{display:'flex',alignItems:'center',padding:'4px 0',borderTop:i?'1px solid var(--border)':'none'}}>
-        <span style={{flex:1,minWidth:0,display:'flex',alignItems:'center',gap:6,fontSize:12}}>
+      <div key={i} style={{padding:'8px 0',borderTop:i?'1px solid var(--border)':'none'}}>
+        <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:4}}>
           <span style={{width:8,height:8,borderRadius:3,background:r.color,flexShrink:0}}/>
-          <span style={{whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}><span style={{fontWeight:700}}>{r.name}</span>{r.skill?<span style={{color:'var(--muted)'}}> · {r.skill}</span>:null}</span>
-        </span>
-        <span style={{width:104,textAlign:'center'}}>{cellView(r.prev,false)}</span>
-        <span style={{width:104,textAlign:'center'}}>{cellView(r.cur,true)}</span>
+          <span style={{fontSize:12.5,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}><span style={{fontWeight:700}}>{r.name}</span>{r.skill?<span style={{color:'var(--muted)'}}> · {r.skill}</span>:null}</span>
+        </div>
+        <div style={{display:'flex',flexDirection:'column',gap:3,paddingLeft:14}}>
+          {metric(r.feat,'sick','🤒','Kranken',maxSick)}
+          {metric(r.feat,'vac','🌴','Urlaub',maxVac)}
+        </div>
       </div>
     ))}
-    <div style={{fontSize:10,color:'var(--muted)',marginTop:6,lineHeight:1.5}}>🤒 Kranken- · 🌴 Urlaubsquote (Tage/Soll-Tage, Soll = geplant + abwesend). Höchste Werte hervorgehoben. Laufende Woche nur bis heute.</div>
+    <div style={{fontSize:10,color:'var(--muted)',marginTop:8,lineHeight:1.5}}>Ausfallzeit / verfügbare Wochenarbeitszeit (Kapazität). Wert der Vorwoche; ↑↓ = Trend der laufenden Woche (bis {curLabel}). Höchste Werte hervorgehoben.</div>
   </div>;
 }
 // Widget_Personalkosten entfernt (2026-07-27, Personalkosten komplett raus lt. Cockpit-Überarbeitung).
