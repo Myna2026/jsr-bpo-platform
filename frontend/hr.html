@@ -8160,6 +8160,74 @@ function CockpitTodayEvents({mobile}){
     ? <div className="ckm-card" style={{borderLeft:'4px solid #0F5661'}}>{head}{body}</div>
     : <div className="card" style={{marginBottom:12,borderLeft:'4px solid #0F5661'}}><div style={{padding:'12px 14px'}}>{head}{body}</div></div>;
 }
+// ── KPIs je Projekt·Skill im Cockpit (Desktop + mobil), automatisch für Management/HR ──
+// Sichtbar, sobald KPIs konfiguriert sind (wie die Tagesberichte). Geteilte Definitionen (kpi_config),
+// Werte aus kpi_project_entries (manueller Kundenwert, NICHT abgeleitet). Laufende Woche + Vorwoche,
+// Schwellenfarbe über evalKpi, Format über kpiFmt (inkl. mm:ss). Konfig aus der DB (nicht Mount-localStorage).
+function CockpitProjectKpis({projects, team, mobile}){
+  const roles=(team&&team.role_keys)||[];
+  const isMgr=roles.some(r=>r==='management'||r==='hr');
+  const [cfg,setCfg]=useState(null);
+  const [emap,setEmap]=useState({});
+  const now=new Date(); const cw=getISOWeek(now);
+  const pd=new Date(now.getFullYear(),now.getMonth(),now.getDate()-7); const pw=getISOWeek(pd);
+  useEffect(()=>{ if(!isMgr){ setCfg([]); return; } let alive=true;
+    const load=async()=>{
+      try{
+        const c=await sb.from('kpi_config').select('*');
+        const e=await sb.from('kpi_project_entries').select('*').or(`and(year.eq.${cw.year},kw.eq.${cw.kw}),and(year.eq.${pw.year},kw.eq.${pw.kw})`);
+        if(!alive) return;
+        setCfg(c.data||[]);
+        const m={}; (e.data||[]).forEach(r=>{ const k=r.project_id+'|'+(r.skill||'')+'|'+r.kpi_id; const w=(r.year===cw.year&&r.kw===cw.kw)?'cur':'prev'; (m[k]=m[k]||{})[w]=Number(r.value); }); setEmap(m);
+      }catch(err){ if(alive) setCfg([]); }
+    };
+    load();
+    const ch=sb.channel('cockpit-proj-kpis').on('postgres_changes',{event:'*',schema:'public',table:'kpi_project_entries'},load).subscribe();
+    return ()=>{ alive=false; try{ sb.removeChannel(ch); }catch(e){} };
+  },[isMgr]);
+  if(!isMgr || cfg===null) return null;
+  const comboKpis=(pid,skill)=> cfg.filter(k=> (!k.project_id||k.project_id===pid) && (!k.skill || (skill && k.skill===skill)) );
+  const seen={}, combos=[];
+  cfg.forEach(k=>{ if(!k.project_id) return; const skill=k.skill||''; const key=k.project_id+'|'+skill; if(seen[key]) return; seen[key]=1; combos.push({pid:k.project_id, skill}); });
+  if(!combos.length) return null;
+  const projName=id=>{ const p=(projects||[]).find(x=>x&&x.id===id); return p?p.name:id; };
+  const projColor=id=>{ const p=(projects||[]).find(x=>x&&x.id===id); return (p&&p.color)||'#0F5661'; };
+  combos.sort((a,b)=>projName(a.pid).localeCompare(projName(b.pid),'de')||a.skill.localeCompare(b.skill,'de'));
+
+  const kpiRow=(kpi, rec)=>{
+    const cur=(rec&&rec.cur!=null)?rec.cur:null, prev=(rec&&rec.prev!=null)?rec.prev:null;
+    const t=cur!=null?evalKpi(kpi,cur):null;
+    const arrow=(cur!=null&&prev!=null)?(cur>prev?'↑':cur<prev?'↓':'→'):null;
+    return (
+      <div key={kpi.id} style={{display:'flex',alignItems:'center',gap:8,padding:'3px 0',flexWrap:'wrap'}}>
+        <span style={{width:118,fontSize:11,color:'var(--muted)',flexShrink:0}}>{kpi.name}</span>
+        <span style={{fontSize:14,fontWeight:800,minWidth:52,textAlign:'right',color:t?t.color:'var(--text)'}}>{cur!=null?kpiFmt(cur,kpi.unit):'—'}</span>
+        {t&&<span style={{fontSize:11}}>{t.icon}</span>}
+        {arrow&&<span style={{fontWeight:800,color:'var(--muted)',width:12,textAlign:'center'}}>{arrow}</span>}
+        <span style={{fontSize:10,color:'var(--muted)'}}>Vorw. {prev!=null?kpiFmt(prev,kpi.unit):'—'}</span>
+      </div>
+    );
+  };
+  const inner=(
+    <div>
+      {combos.map(c=>{ const kpis=comboKpis(c.pid,c.skill); if(!kpis.length) return null;
+        return (
+          <div key={c.pid+'|'+c.skill} style={{padding:'6px 0',borderTop:'1px solid var(--border)'}}>
+            <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:2}}>
+              <span style={{width:8,height:8,borderRadius:3,background:projColor(c.pid),flexShrink:0}}/>
+              <span style={{fontSize:12.5,fontWeight:700}}>{projName(c.pid)}{c.skill?<span style={{color:'var(--muted)',fontWeight:600}}> · {c.skill}</span>:null}</span>
+            </div>
+            <div style={{paddingLeft:14}}>{kpis.map(kpi=>kpiRow(kpi, emap[c.pid+'|'+c.skill+'|'+kpi.id]))}</div>
+          </div>
+        );
+      })}
+      <div style={{fontSize:10,color:'var(--muted)',marginTop:6,lineHeight:1.5}}>Kundenwert je KPI, laufende Woche (KW {cw.kw}); „Vorw." = Vorwoche. Schwellenfarbe wie in der Performance-Ansicht.</div>
+    </div>
+  );
+  return mobile
+    ? <div className="ckm-card" style={{borderLeft:'4px solid #0d9488'}}><div className="ckm-h" style={{color:'#0d9488'}}>📊 KPIs je Projekt·Skill</div>{inner}</div>
+    : <div className="card" style={{marginBottom:12}}><div style={{padding:'12px 14px'}}><div style={{fontSize:14,fontWeight:800,marginBottom:6}}>📊 KPIs je Projekt·Skill</div>{inner}</div></div>;
+}
 // ── Tagesberichte im Cockpit (Schnitt 4): Abschnitt je aktiviertem Projekt, Gestern|Heute-Ampel ──
 function drFmtDeShort(ds){ try{ return new Date(String(ds).slice(0,10)+'T12:00:00').toLocaleDateString('de-DE',{weekday:'short',day:'numeric',month:'short'}); }catch(e){ return ds; } }
 function Widget_DailyReports({employees, projects, team}){
@@ -8373,6 +8441,10 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
           ))}
         </div>
       )}
+
+      {/* KPIs je Projekt·Skill — bei den projektbezogenen Blöcken, direkt unter „Leistung je Skill".
+          Automatisch für Management/HR, sobald KPIs konfiguriert sind (sonst null). */}
+      <CockpitProjectKpis projects={projects} team={team} mobile={true}/>
 
       {/* Kranken- & Urlaubsquote je Projekt·Skill (Vorwoche vs. laufend). Eigene Karten-Optik, da das
           mobile Cockpit kein Widget-Grid nutzt; das Widget kapselt Lade-/Leerzustand selbst. */}
@@ -8754,6 +8826,9 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
           <div><div style={{fontSize:24,fontWeight:800}}>{cvEinMonth}</div><div style={{fontSize:11,color:'var(--muted)'}}>Monat</div></div>
         </div>
       </div>
+
+      {/* KPIs je Projekt·Skill — fester Abschnitt für Management/HR, automatisch bei konfigurierten KPIs */}
+      <CockpitProjectKpis projects={projects} team={team} mobile={false}/>
 
       {/* Tagesberichte (Reporting-Projekte, nur Management/HR) — eigener Abschnitt, Gestern|Heute */}
       <Widget_DailyReports employees={employees} projects={projects} team={team}/>
