@@ -1878,6 +1878,11 @@ function PerformanceView({employees, projects}){
   const [editCombo, setEditCombo] = useState(null);   // {pid, skill, projName, skillLabel, vals}
   const [projEntries, setProjEntries] = useState({}); // 'pid|skill' -> { kpi_id: value(dec) }
   const [projErr, setProjErr] = useState('');
+  const [projPeriod, setProjPeriod] = useState('kw');   // 'kw' | 'month' — Kundenwerte je Woche oder Monat
+  const [projMonth, setProjMonth]   = useState(()=>{ const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); });
+  const pIsMonth = projPeriod==='month';
+  const pYear = pIsMonth ? parseInt(projMonth.slice(0,4)) : selYear;
+  const pNo   = pIsMonth ? parseInt(projMonth.slice(5,7)) : selKw;   // Monat 1..12 oder KW
 
   const activeEmps = employees.filter(e=>e&&e.status==='active');
   const kpiCfg = getKpiCfg();
@@ -1902,12 +1907,13 @@ function PerformanceView({employees, projects}){
     return ()=>{ alive=false; };
   },[selKw, selYear, selProj]);
 
-  // Projekt/Skill-Kundenwerte der gewählten Woche laden (kpi_project_entries).
+  // Projekt/Skill-Kundenwerte des gewählten Zeitraums (Woche ODER Monat) laden (kpi_project_entries).
   useEffect(()=>{ let alive=true; (async()=>{
-    try{ const {data}=await sb.from('kpi_project_entries').select('*').eq('year',selYear).eq('kw',selKw);
+    try{ let q=sb.from('kpi_project_entries').select('*').eq('year',pYear); q = pIsMonth ? q.eq('month',pNo) : q.eq('kw',pNo);
+      const {data}=await q;
       if(!alive) return; const m={}; (data||[]).forEach(r=>{ const k=r.project_id+'|'+(r.skill||''); (m[k]=m[k]||{})[r.kpi_id]=Number(r.value); }); setProjEntries(m);
     }catch(e){ if(alive) setProjEntries({}); }
-  })(); return ()=>{alive=false;}; },[selKw, selYear]);
+  })(); return ()=>{alive=false;}; },[pIsMonth, pYear, pNo]);
 
 
   // Get KW options (current + last 12 weeks)
@@ -1993,22 +1999,33 @@ function PerformanceView({employees, projects}){
     const cur=projEntries[pid+'|'+(skill||'')]||{}; const vals={};
     // Minuten-KPIs: DB-Dezimal → mm:ss für die Eingabe (wie im MA-Modal).
     comboKpis(pid,skill).forEach(k=>{ const v=cur[k.id]; if(v!==undefined&&v!==null) vals[k.id]=(k.unit==='min')?decToMmss(v):v; });
-    setProjErr(''); setEditCombo({pid, skill:skill||'', projName, skillLabel:skillLabel||skill, vals});
+    // Periode beim Öffnen einfrieren (Woche/Monat), damit Speichern konsistent bleibt.
+    setProjErr(''); setEditCombo({pid, skill:skill||'', projName, skillLabel:skillLabel||skill, vals, isMonth:pIsMonth, year:pYear, no:pNo});
   }
   async function reloadProjEntries(){
-    const {data}=await sb.from('kpi_project_entries').select('*').eq('year',selYear).eq('kw',selKw);
+    let q=sb.from('kpi_project_entries').select('*').eq('year',pYear); q = pIsMonth ? q.eq('month',pNo) : q.eq('kw',pNo);
+    const {data}=await q;
     const m={}; (data||[]).forEach(r=>{ const k=r.project_id+'|'+(r.skill||''); (m[k]=m[k]||{})[r.kpi_id]=Number(r.value); }); setProjEntries(m);
   }
   async function saveCombo(){
-    if(!editCombo) return; const {pid, skill, vals}=editCombo; setProjErr('');
-    const ups=[], dels=[];
+    if(!editCombo) return; const {pid, skill, vals, isMonth, year, no}=editCombo; setProjErr('');
+    const by=(typeof CURRENT_USER!=='undefined'&&CURRENT_USER)?(CURRENT_USER.name||CURRENT_USER.id):null;
+    const rows=[], dels=[];
     comboKpis(pid,skill).forEach(kpi=>{ const raw=vals[kpi.id];
       if(raw!==undefined && String(raw).trim()!==''){ const dec=kpi.unit==='min'?mmssToDec(raw):parseFloat(raw);
-        if(!isNaN(dec)) ups.push({project_id:pid, skill:skill||'', kw:selKw, year:selYear, kpi_id:kpi.id, value:dec, entered_by:(typeof CURRENT_USER!=='undefined'&&CURRENT_USER)?(CURRENT_USER.name||CURRENT_USER.id):null, ts:new Date().toISOString()});
+        if(!isNaN(dec)){ const row={project_id:pid, skill:skill||'', year, kpi_id:kpi.id, value:dec, entered_by:by, ts:new Date().toISOString()}; if(isMonth) row.month=no; else row.kw=no; rows.push(row); }
       } else { dels.push(kpi.id); }   // geleertes Feld → Eintrag entfernen
     });
-    if(ups.length){ const {error}=await sb.from('kpi_project_entries').upsert(ups,{onConflict:'project_id,skill,kw,year,kpi_id'}); if(error){ setProjErr('Speichern fehlgeschlagen: '+(error.message||'DB')); return; } }
-    if(dels.length){ const {error:de}=await sb.from('kpi_project_entries').delete().eq('project_id',pid).eq('skill',skill||'').eq('kw',selKw).eq('year',selYear).in('kpi_id',dels); if(de){ setProjErr('Löschen fehlgeschlagen: '+(de.message||'DB')); return; } }
+    if(isMonth){
+      // Monats-Werte: delete-then-insert (partieller Monats-Index, kein PostgREST-onConflict).
+      const allIds=comboKpis(pid,skill).map(k=>k.id);
+      const {error:de}=await sb.from('kpi_project_entries').delete().eq('project_id',pid).eq('skill',skill||'').eq('year',year).eq('month',no).in('kpi_id',allIds);
+      if(de){ setProjErr('Speichern fehlgeschlagen: '+(de.message||'DB')); return; }
+      if(rows.length){ const {error}=await sb.from('kpi_project_entries').insert(rows); if(error){ setProjErr('Speichern fehlgeschlagen: '+(error.message||'DB')); return; } }
+    } else {
+      if(rows.length){ const {error}=await sb.from('kpi_project_entries').upsert(rows,{onConflict:'project_id,skill,kw,year,kpi_id'}); if(error){ setProjErr('Speichern fehlgeschlagen: '+(error.message||'DB')); return; } }
+      if(dels.length){ const {error:de}=await sb.from('kpi_project_entries').delete().eq('project_id',pid).eq('skill',skill||'').eq('kw',no).eq('year',year).in('kpi_id',dels); if(de){ setProjErr('Löschen fehlgeschlagen: '+(de.message||'DB')); return; } }
+    }
     await reloadProjEntries(); setEditCombo(null); setSaved(true); setTimeout(()=>setSaved(false),2000);
   }
   // Regel 2: nur MA mit project_id UND project_skill, nur Kombis mit KPIs. Projekte -> Skill-Gruppen (sortiert, Ø ohne exempt).
@@ -2106,7 +2123,7 @@ function PerformanceView({employees, projects}){
           <div className="modal" style={{width:560,maxWidth:'95vw'}}>
             <div className="modal-header">
               <div>
-                <div className="modal-title">KW {selKw}/{selYear}: {editCombo.projName}{editCombo.skillLabel?(' · '+editCombo.skillLabel):''}</div>
+                <div className="modal-title">{editCombo.isMonth?('Monat '+String(editCombo.no).padStart(2,'0')+'/'+editCombo.year):('KW '+editCombo.no+'/'+editCombo.year)}: {editCombo.projName}{editCombo.skillLabel?(' · '+editCombo.skillLabel):''}</div>
                 <div style={{fontSize:12,color:'var(--muted)',marginTop:2}}>Vom Kunden genannter Mittelwert je Kennzahl — manuell, nicht aus Mitarbeiterwerten abgeleitet.</div>
               </div>
               <button className="btn" onClick={()=>setEditCombo(null)}>×</button>
@@ -2150,12 +2167,25 @@ function PerformanceView({employees, projects}){
       {eligibleProjects.length>0 && (
         <div className="card" style={{marginBottom:14}}>
           <div className="card-header" style={{cursor:'pointer'}} onClick={()=>setShowProj(v=>!v)}>
-            <span className="card-title">🏢 Projekt/Skill-Werte (Kundenangabe) · KW {selKw}/{selYear}</span>
+            <span className="card-title">🏢 Projekt/Skill-Werte (Kundenangabe) · {pIsMonth?('Monat '+String(pNo).padStart(2,'0')+'/'+pYear):('KW '+selKw+'/'+selYear)}</span>
             <span style={{marginLeft:'auto',color:'var(--muted)',fontWeight:700}}>{showProj?'▾':'▸'}</span>
           </div>
           {showProj && (
             <div style={{padding:'2px 0 8px'}}>
-              <div style={{fontSize:11,color:'var(--muted)',padding:'6px 16px'}}>Vom Kunden genannter Mittelwert je Kennzahl — manuell, nicht aus den Mitarbeiterwerten abgeleitet.</div>
+              {/* Zeitraum: Woche (KW aus dem Header) ODER Monat (eigener Wähler) — manche Kunden nennen Wochen-, manche Monatszahlen. */}
+              <div style={{display:'flex',gap:8,alignItems:'center',padding:'6px 16px',flexWrap:'wrap'}}>
+                <div style={{display:'flex',border:'1px solid var(--border)',borderRadius:8,overflow:'hidden'}}>
+                  {[['kw','Woche'],['month','Monat']].map(([k,l])=>(
+                    <button key={k} className="btn btn-sm" style={{border:'none',borderRadius:0,background:projPeriod===k?'#0F5661':'transparent',color:projPeriod===k?'#fff':'var(--text)',fontWeight:700}} onClick={()=>setProjPeriod(k)}>{l}</button>
+                  ))}
+                </div>
+                {pIsMonth
+                  ? <select className="form-select" style={{width:'auto'}} value={projMonth} onChange={e=>setProjMonth(e.target.value)}>
+                      {(()=>{ const n=new Date(); const opts=[]; for(let i=0;i<12;i++){ const d=new Date(n.getFullYear(),n.getMonth()-i,1); const ym=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); opts.push(<option key={ym} value={ym}>{d.toLocaleString('de-DE',{month:'long',year:'numeric'})}</option>); } return opts; })()}
+                    </select>
+                  : <span style={{fontSize:12,color:'var(--muted)'}}>KW {selKw}/{selYear} — oben im Kopf wählbar</span>}
+              </div>
+              <div style={{fontSize:11,color:'var(--muted)',padding:'2px 16px 6px'}}>Vom Kunden genannter Mittelwert je Kennzahl — manuell, nicht aus den Mitarbeiterwerten abgeleitet.</div>
               {eligibleProjects.map(p=>(
                 <div key={p.pid} style={{padding:'4px 16px'}}>
                   <div style={{fontWeight:700,fontSize:13,marginBottom:2}}>{p.projName}</div>
