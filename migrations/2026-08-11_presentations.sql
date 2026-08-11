@@ -52,11 +52,13 @@ create table if not exists public.presentation_templates (
 grant select, insert, update, delete on public.presentation_templates to authenticated;
 
 alter table public.presentation_templates enable row level security;
+-- Intern NUR Management (is_management, NICHT HR) — Kennzahlen/Berichte sind Steuerung, keine Personalarbeit.
 drop policy if exists presentation_templates_admin_all on public.presentation_templates;
-create policy presentation_templates_admin_all on public.presentation_templates
+drop policy if exists presentation_templates_mgmt_all  on public.presentation_templates;
+create policy presentation_templates_mgmt_all on public.presentation_templates
   for all to authenticated
-  using      (public.is_admin())     -- management/hr; bei Bedarf später auf is_management() verengbar
-  with check (public.is_admin());
+  using      (public.is_management())
+  with check (public.is_management());
 
 
 -- ── C) Erzeugte Berichte (SNAPSHOT: Kennzahlen eingefroren + Freitext + Token) ──
@@ -84,10 +86,11 @@ grant select, insert, update, delete on public.presentations to authenticated;
 alter table public.presentations enable row level security;
 -- Intern: management/hr voller Zugriff. KEINE anon-Policy → öffentlicher Zugriff NUR über die RPC unten.
 drop policy if exists presentations_admin_all on public.presentations;
-create policy presentations_admin_all on public.presentations
+drop policy if exists presentations_mgmt_all  on public.presentations;
+create policy presentations_mgmt_all on public.presentations
   for all to authenticated
-  using      (public.is_admin())
-  with check (public.is_admin());
+  using      (public.is_management())
+  with check (public.is_management());
 
 
 -- ── D) Logo-Bucket (öffentlich lesbar — Logos auf der Login-freien Berichtseite) ──
@@ -101,10 +104,11 @@ on conflict (id) do update
 
 -- Lesen: öffentlich (Bucket public=true). Schreiben/Ändern/Löschen: nur management/hr.
 drop policy if exists "presentation_assets admin write" on storage.objects;
-create policy "presentation_assets admin write" on storage.objects
+drop policy if exists "presentation_assets mgmt write"  on storage.objects;
+create policy "presentation_assets mgmt write" on storage.objects
   for all to authenticated
-  using      (bucket_id = 'presentation-assets' and public.is_admin())
-  with check (bucket_id = 'presentation-assets' and public.is_admin());
+  using      (bucket_id = 'presentation-assets' and public.is_management())
+  with check (bucket_id = 'presentation-assets' and public.is_management());
 
 
 -- ── E) Öffentliche Auflösung per Token (SECURITY DEFINER; anon darf NUR das) ──
