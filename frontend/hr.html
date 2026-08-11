@@ -8150,7 +8150,7 @@ function DataQualityPanel({employees, projects, plans, onNavigate, summary, onOp
 // created_by=ich ODER ich in participants ODER visible_roles leer/Überschneidung) liefert serverseitig
 // genau die für mich sichtbaren Termine — dieselbe Regel wie der Kalender. Wiederholungen über den
 // geteilten Helfer `calOccurrences`. `hidden`-Overrides für heute werden übersprungen. Wichtige ⭐.
-function CockpitTodayEvents({mobile}){
+function CockpitTodayEvents({mobile, onNavigate}){
   const [rows,setRows]=useState(null);
   useEffect(()=>{ let alive=true;
     const load=async()=>{
@@ -8174,15 +8174,19 @@ function CockpitTodayEvents({mobile}){
     return ()=>{ alive=false; try{ sb.removeChannel(ch); }catch(e){} };
   },[]);
   if(rows===null) return null;   // bis geladen nichts (kein Flackern)
+  const today=isoLocal(new Date());
   const fmtT=t=>t?String(t).slice(0,5):'ganztägig';
+  const goEvent=e=>onNavigate&&onNavigate({kind:'view',view:'calendar',calTarget:{date:today,eventId:e.id}});
   const head=<div style={{fontSize:mobile?undefined:14,fontWeight:800,marginBottom:8,color:mobile?'#0F5661':undefined}} className={mobile?'ckm-h':undefined}>📅 Heute</div>;
   const body = rows.length===0
     ? <div style={{background:'#f0fdf4',border:'1px solid #bbf7d0',borderRadius:10,padding:'10px 12px',fontSize:13,color:'#15803d',fontWeight:600}}>✓ Heute keine Termine</div>
     : <div style={{display:'flex',flexDirection:'column',gap:6}}>
         {rows.map((e,i)=>(
-          <div key={e.id+'|'+i} style={{display:'flex',alignItems:'center',gap:10,padding:'6px 8px',background:e.important?'#fffbeb':'var(--surface)',border:'1px solid '+(e.important?'#f59e0b55':'var(--border)'),borderRadius:8}}>
+          <div key={e.id+'|'+i} onClick={()=>goEvent(e)} title="Im Kalender öffnen"
+            style={{display:'flex',alignItems:'center',gap:10,padding:'6px 8px',background:e.important?'#fffbeb':'var(--surface)',border:'1px solid '+(e.important?'#f59e0b55':'var(--border)'),borderRadius:8,cursor:onNavigate?'pointer':'default'}}>
             <span style={{fontFamily:'var(--mono)',fontSize:13,fontWeight:700,color:'#0F5661',minWidth:52,flexShrink:0}}>{fmtT(e.start_time)}</span>
             <span style={{fontSize:13,fontWeight:e.important?800:600,flex:1,minWidth:0}}>{e.important&&<span style={{marginRight:3}}>⭐</span>}{e.title}</span>
+            {onNavigate&&<span style={{color:'var(--muted)',fontSize:12,flexShrink:0}}>→</span>}
           </div>
         ))}
       </div>;
@@ -8431,7 +8435,7 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
   return (
     <div className="ckm">
       {/* Termine heute — ganz oben, noch vor den Kennzahlen. Was heute ansteht, sieht man zuerst. */}
-      <CockpitTodayEvents mobile={true}/>
+      <CockpitTodayEvents mobile={true} onNavigate={onNavigate}/>
 
       {/* 1) KPI-Kacheln */}
       <div className="ckm-tiles">
@@ -8782,7 +8786,7 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
     <React.Fragment>
 
       {/* Termine heute — ganz oben, noch vor den Kennzahlen. Für alle HR-Portal-Nutzer, Sichtbarkeit über RLS. */}
-      <CockpitTodayEvents mobile={false}/>
+      <CockpitTodayEvents mobile={false} onNavigate={onNavigate}/>
 
       {/* Selbst-Konfiguration: eigenes Cockpit zusammenstellen (Last-Write-Wins mit Admin-Matrix) */}
       <div style={{display:'flex',justifyContent:'flex-end',gap:8,marginBottom:10}}>
@@ -32408,7 +32412,7 @@ function calAutoOccThisMonth(ev){
 }
 const calFmtTime=t=>{ if(!t) return ''; const s=String(t); return s.slice(0,5); };
 
-function CalendarView({team, projects, employees, showToast, isMobileW}){
+function CalendarView({team, projects, employees, showToast, isMobileW, jumpTo, onJumpConsumed}){
   const [events,setEvents]=useState([]);
   const [overrides,setOverrides]=useState({});   // `${event_id}|${date}` -> row
   const [loading,setLoading]=useState(true);
@@ -32438,6 +32442,20 @@ function CalendarView({team, projects, employees, showToast, isMobileW}){
       .on('postgres_changes',{event:'*',schema:'public',table:'calendar_overrides'},load).subscribe();
     return ()=>{ try{ sb.removeChannel(ch); }catch(e){} };
   },[]);
+
+  // Sprung aus dem Cockpit-Termin: gewünschten Tag öffnen und den Termin anzeigen (nicht nur den Kalender).
+  // Wartet auf geladene Events, bevor das Detail geöffnet und der Sprung „verbraucht" wird.
+  useEffect(()=>{
+    if(!jumpTo || !jumpTo.date) return;
+    const ds=String(jumpTo.date).slice(0,10); const p=ds.split('-').map(Number);
+    setCursor(new Date(p[0],p[1]-1,p[2])); setMode('day');
+    if(jumpTo.eventId){
+      if(loading || !(events||[]).length) return;   // erst wenn Events da sind (Effekt läuft dann erneut)
+      const ev=(events||[]).find(e=>e&&e.id===jumpTo.eventId);
+      if(ev) setDetail({ev, date:ds, ov:overrides[ev.id+'|'+ds]});
+    }
+    onJumpConsumed&&onJumpConsumed();
+  },[jumpTo, events, loading]);
 
   const projColor=id=>{ const p=(projects||[]).find(x=>x&&x.id===id); return (p&&p.color)||CAL_AUTO_COLOR; };
   const projName =id=>{ const p=(projects||[]).find(x=>x&&x.id===id); return p?p.name:''; };
@@ -33124,6 +33142,7 @@ function App(){
   const [navFilter, setNavFilter] = useState(null); // „Heute zu erledigen"-Sprung → Zielansicht vorfiltern {type,label,view}
   const [profitProj, setProfitProj] = useState(null); // Cockpit-Projektkarte → Wirtschaftlichkeit mit vorgewähltem Projekt
   const [feedbackNav, setFeedbackNav] = useState(null); // Cockpit → Feedback: {session:id} | {draw:true}
+  const [calNav, setCalNav] = useState(null); // Cockpit-Termin → Kalender: {date, eventId} (Sprung trägt den Termin mit)
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const isMobile = () => window.innerWidth < 768;
   const [showToast, toastEl] = useToast();
@@ -33709,7 +33728,8 @@ function App(){
       if(nav.view==='employees'&&nav.query) setEmpSeed(nav.query);
       setNavFilter(nav.navFilter?{...nav.navFilter, view:nav.view}:null);   // Sprung-Filter für die Zielansicht (oder aufheben)
       if(nav.view==='profitability') setProfitProj(nav.projSel||null);      // Projektkarte → Wirtschaftlichkeit mit vorgewähltem Projekt
-      if(nav.view==='feedback') setFeedbackNav(nav.feedbackSession?{session:nav.feedbackSession}:(nav.feedbackDraw?{draw:true}:null)); }
+      if(nav.view==='feedback') setFeedbackNav(nav.feedbackSession?{session:nav.feedbackSession}:(nav.feedbackDraw?{draw:true}:null));
+      if(nav.view==='calendar') setCalNav(nav.calTarget?{...nav.calTarget}:null); }   // Termin-Sprung: Tag + Termin
   };
   // Stale-Schutz: Sprung-Filter verfällt, sobald man die zugehörige Ansicht verlässt (z.B. übers Menü).
   useEffect(()=>{ setNavFilter(nf=> (nf && nf.view!==view) ? null : nf); },[view]);
@@ -33843,7 +33863,7 @@ function App(){
 
           {view==='start'&&<WelcomePage firstName={firstName}/>}
           {view==='daily_tasks'&&<DailyTasksView employees={employees} projects={projects} plans={plans} team={team} onNavigate={dqNavigate} isMobileW={isMobileW}/>}
-          {view==='calendar'&&<CalendarView team={team} projects={projects} employees={employees} showToast={showToast} isMobileW={isMobileW}/>}
+          {view==='calendar'&&<CalendarView team={team} projects={projects} employees={employees} showToast={showToast} isMobileW={isMobileW} jumpTo={calNav} onJumpConsumed={()=>setCalNav(null)}/>}
           {view==='cockpit'&&<Cockpit employees={employees} projects={projects} team={team} plans={plans} forecast={forecast} onAbsence={e=>setAbsenceModal(e)} onNavigate={dqNavigate} isMobileW={isMobileW} setEmployees={setEmployees} showToast={showToast}/>}
           {view==='datacheck'&&<DataQualityPanel employees={employees} projects={projects} plans={plans} onNavigate={dqNavigate}/>}
           {view==='wissen_system'&&<SystemManualView hasAccess={hasAccess}/>}
