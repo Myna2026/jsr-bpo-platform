@@ -1647,6 +1647,16 @@ function mmssToDec(str){
   if(isNaN(mm)) mm=0; if(isNaN(ss)) ss=0;
   return mm + ss/60;
 }
+// ── Präsentations-Helfer: EINE Zahl-/Rechenlogik (verhindert die Alt-Fehler: #DIV/0!, Komma/Punkt,
+//    doppeltes Vorzeichen). Rechenwerte werden gerechnet, nie getippt. ──
+function fmtNum(v, dec){ dec=dec||0; if(v===''||v==null||isNaN(Number(v))) return '—';
+  return Number(v).toLocaleString('de-DE',{minimumFractionDigits:dec,maximumFractionDigits:dec}); }
+function numOr(v, d){ const n=Number(String(v).replace(',','.')); return isNaN(n)?(d==null?0:d):n; }
+// Prozent-Differenz mit Nenner-Guard (0 → null → Anzeige „—", NIE #DIV/0!).
+function pctDiff(part, base){ const b=numOr(base,NaN); if(!b||isNaN(b)) return null; return (numOr(part,NaN)-b)/b*100; }
+// Gewichteter Zeit-Durchschnitt (mm:ss), Gewicht = Anzahl (z.B. Answered). Leer → „—".
+function wavgTime(rows, timeKey, weightKey){ let ts=0, ws=0; (rows||[]).forEach(r=>{ const t=mmssToDec(r&&r[timeKey]); const w=numOr(r&&r[weightKey],0); if(!isNaN(t)&&w>0){ ts+=t*w; ws+=w; } }); return ws?decToMmss(ts/ws):'—'; }
+function sumCol(rows, key){ let s=0; (rows||[]).forEach(r=>{ s+=numOr(r&&r[key],0); }); return s; }
 // KPI-Wert formatieren: Minuten (unit 'min') als mm:ss (4:18); sonst Wert + Einheit direkt.
 function kpiFmt(value, unit){
   if(value===null||value===undefined||value==='') return '';
@@ -33037,6 +33047,235 @@ function CheckinView({employees, projects, team, showToast, isMobileW}){
     </div>
   );
 }
+// ═══ Kundenpräsentation HolidayCheck (Management-only) ═══
+// Eingabe- und Darstellungs-Sektion GETRENNT. Alles manuell gepflegt (Kundenzahlen), ABER:
+// Rechenwerte werden GERECHNET (fmtNum/pctDiff/wavgTime, Nenner-Guards) und Namen kommen AUS DEM SYSTEM
+// (employees des HolidayCheck-Projekts je Skill) — das verhindert die Alt-Fehler (#DIV/0!, Vorzeichen,
+// Komma/Punkt, Namensabweichungen, falsche Team-Überschrift). Reines SVG/CSS. Snapshot in presentations.data.
+const HC_CALL_COLS = {
+  sales:   [{k:'no_answer',l:'No Answer',t:'count'},{k:'answered',l:'Answered',t:'count'},{k:'outbound',l:'Outbound',t:'count'},{k:'avg_talk',l:'Avg Talk',t:'time'},{k:'avg_acw',l:'Avg ACW',t:'time'},{k:'avg_handle',l:'Avg Handle',t:'time'},{k:'avg_hold',l:'Avg Hold',t:'time'}],
+  support: [{k:'answered',l:'Answered',t:'count'},{k:'outbound',l:'Outbound',t:'count'},{k:'tel_hours',l:'Std. Telefonie',t:'num'},{k:'aht',l:'AHT',t:'time'},{k:'att',l:'ATT',t:'time'},{k:'hold',l:'HOLD',t:'time'},{k:'acw',l:'ACW',t:'time'}]
+};
+function hcEmptyRow(){ return {kw:'',plan:'',rueck:'',geliefert:'',erkl:''}; }
+function hcEmptyTeam(){ return {fte:'',members:[],stunden:[hcEmptyRow(),hcEmptyRow(),hcEmptyRow(),hcEmptyRow(),hcEmptyRow()],calls:{vorwoche:{},monat:{}},massnahmen:''}; }
+function hcEmptyDeck(){ return {titel:{untertitel:'',datum:'',ansprech:''},teams:{sales:hcEmptyTeam(),support:hcEmptyTeam()}}; }
+
+function PresentationsView({projects, employees, team, showToast}){
+  const hcProj=(projects||[]).find(p=>p&&/holiday.?check/i.test(p.name||''))||null;
+  const accent=(hcProj&&hcProj.color)||'#2563eb';
+  const now=new Date(); const cw=getISOWeek(now);
+  const [pYear,setPYear]=useState(cw.year);
+  const [pNo,setPNo]=useState(cw.kw);
+  const [mode,setMode]=useState('edit');        // edit | show
+  const [tab,setTab]=useState('sales');          // sales | support (Eingabe)
+  const [deck,setDeck]=useState(hcEmptyDeck());
+  const [rowId,setRowId]=useState(null);
+  const [busy,setBusy]=useState(false);
+  const [saved,setSaved]=useState(false);
+  const [loading,setLoading]=useState(true);
+
+  const membersFor=skill=>(employees||[]).filter(e=>e&&hcProj&&e.project_id===hcProj.id&&['active','training'].includes(e.status)&&String(e.project_skill||'').toLowerCase()===skill)
+    .slice().sort((a,b)=>((a.first_name||'')+a.last_name).localeCompare((b.first_name||'')+b.last_name,'de'));
+  const empName=e=>((e.first_name||'')+' '+(e.last_name||'')).trim();
+
+  const kwOptions=[]; for(let i=0;i<16;i++){ let kw=cw.kw-i,yr=cw.year; if(kw<=0){kw+=52;yr--;} kwOptions.push({kw,yr}); }
+
+  async function loadDeck(no,yr){ setLoading(true);
+    try{ const {data}=await sb.from('presentations').select('*').eq('project_id',hcProj?hcProj.id:'').eq('period_type','kw').eq('period_year',yr).eq('period_no',no).order('created_at',{ascending:false}).limit(1);
+      const row=data&&data[0];
+      if(row){ setRowId(row.id); setDeck({...hcEmptyDeck(), ...(row.data||{}), teams:{sales:{...hcEmptyTeam(),...((row.data||{}).teams||{}).sales},support:{...hcEmptyTeam(),...((row.data||{}).teams||{}).support}}}); }
+      else { setRowId(null); setDeck(hcEmptyDeck()); }
+    }catch(e){ setRowId(null); setDeck(hcEmptyDeck()); }
+    setLoading(false);
+  }
+  useEffect(()=>{ if(hcProj) loadDeck(pNo,pYear); else setLoading(false); },[pNo,pYear,hcProj&&hcProj.id]);
+
+  async function save(){ if(!hcProj) return; setBusy(true);
+    const by=(typeof CURRENT_USER!=='undefined'&&CURRENT_USER)?(CURRENT_USER.name||CURRENT_USER.id):null;
+    const title='HolidayCheck · KW '+pNo+'/'+pYear;
+    try{
+      if(rowId){ const {error}=await sb.from('presentations').update({data:deck,title}).eq('id',rowId); if(error) throw error; }
+      else { const {data,error}=await sb.from('presentations').insert({project_id:hcProj.id,period_type:'kw',period_year:pYear,period_no:pNo,title,data:deck,created_by:by}).select('id').single(); if(error) throw error; setRowId(data.id); }
+      setSaved(true); setTimeout(()=>setSaved(false),2000);
+    }catch(e){ showToast&&showToast('Speichern fehlgeschlagen: '+(e.message||''),'error'); }
+    setBusy(false);
+  }
+  // Immutable-Update (deep-clone reicht: reine Daten).
+  const upd=fn=>setDeck(d=>{ const n=JSON.parse(JSON.stringify(d)); fn(n); return n; });
+
+  if(!hcProj) return <div style={{padding:40,textAlign:'center',color:'var(--muted)'}}>Kein Projekt „HolidayCheck" gefunden.</div>;
+
+  // ── Eingabe-Bausteine ──
+  const inp=(val,on,ph,w)=><input value={val==null?'':val} onChange={e=>on(e.target.value)} placeholder={ph||''} style={{width:w||'100%',boxSizing:'border-box',padding:'5px 7px',border:'1px solid var(--border)',borderRadius:6,fontSize:12,fontFamily:'var(--mono)',textAlign:'right'}}/>;
+
+  function StundenEdit({t}){ const rows=deck.teams[t].stunden;
+    return (<div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:12,minWidth:720}}>
+      <thead><tr style={{color:'var(--muted)',textAlign:'right'}}>
+        {['KW','Geplant FC','Rückmeldung','Diff R−P','Geliefert','Diff G−R','% (auf Rückm.)','Erklärung'].map((h,i)=><th key={i} style={{padding:'4px 6px',fontWeight:700,textAlign:i===7?'left':'right'}}>{h}</th>)}
+      </tr></thead>
+      <tbody>{rows.map((r,i)=>{ const dRP=numOr(r.rueck,0)-numOr(r.plan,0); const dGR=numOr(r.geliefert,0)-numOr(r.rueck,0); const pc=pctDiff(r.geliefert,r.rueck);
+        return (<tr key={i} style={{borderTop:'1px solid var(--border)'}}>
+          <td style={{padding:'3px 6px',width:70}}>{inp(r.kw,v=>upd(n=>{n.teams[t].stunden[i].kw=v;}),'KW')}</td>
+          <td style={{padding:'3px 6px',width:100}}>{inp(r.plan,v=>upd(n=>{n.teams[t].stunden[i].plan=v;}))}</td>
+          <td style={{padding:'3px 6px',width:100}}>{inp(r.rueck,v=>upd(n=>{n.teams[t].stunden[i].rueck=v;}))}</td>
+          <td style={{padding:'3px 6px',width:80,textAlign:'right',fontFamily:'var(--mono)',color:dRP<0?'#dc2626':'#059669'}}>{fmtNum(dRP)}</td>
+          <td style={{padding:'3px 6px',width:100}}>{inp(r.geliefert,v=>upd(n=>{n.teams[t].stunden[i].geliefert=v;}))}</td>
+          <td style={{padding:'3px 6px',width:80,textAlign:'right',fontFamily:'var(--mono)',color:dGR<0?'#dc2626':'#059669'}}>{fmtNum(dGR)}</td>
+          <td style={{padding:'3px 6px',width:90,textAlign:'right',fontFamily:'var(--mono)',color:pc==null?'var(--muted)':pc<0?'#dc2626':'#059669'}}>{pc==null?'—':fmtNum(pc,1)+' %'}</td>
+          <td style={{padding:'3px 6px'}}><input value={r.erkl||''} onChange={e=>upd(n=>{n.teams[t].stunden[i].erkl=e.target.value;})} placeholder="z.B. Ardita 4 Tage krank" style={{width:'100%',boxSizing:'border-box',padding:'5px 7px',border:'1px solid var(--border)',borderRadius:6,fontSize:12}}/></td>
+        </tr>); })}</tbody>
+    </table><div style={{fontSize:11,color:'var(--muted)',marginTop:4}}>Diff R−P, Diff G−R und % werden gerechnet (nie getippt). Prozent bezogen auf die Rückmeldung.</div></div>);
+  }
+
+  function CallsEdit({t,period}){ const cols=HC_CALL_COLS[t]; const members=membersFor(t); const cur=deck.teams[t].calls[period]||{};
+    const rows=members.map(e=>({...(cur[e.id]||{}), _id:e.id, answered:(cur[e.id]||{}).answered}));
+    return (<div style={{overflowX:'auto',marginTop:6}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:12,minWidth:640}}>
+      <thead><tr style={{color:'var(--muted)'}}>
+        <th style={{padding:'4px 6px',textAlign:'left',fontWeight:700}}>Mitarbeiter</th>
+        {cols.map(c=><th key={c.k} style={{padding:'4px 6px',textAlign:'right',fontWeight:700}}>{c.l}</th>)}
+      </tr></thead>
+      <tbody>
+        {members.length===0&&<tr><td colSpan={cols.length+1} style={{padding:10,color:'var(--muted)'}}>Keine {t==='sales'?'Sales':'Support'}-Mitarbeiter im System.</td></tr>}
+        {members.map(e=>{ const c=cur[e.id]||{}; return (<tr key={e.id} style={{borderTop:'1px solid var(--border)'}}>
+          <td style={{padding:'3px 6px',whiteSpace:'nowrap'}}>{empName(e)}</td>
+          {cols.map(col=><td key={col.k} style={{padding:'3px 6px',width:col.t==='time'?78:70}}>{inp(c[col.k],v=>upd(n=>{ (n.teams[t].calls[period][e.id]=n.teams[t].calls[period][e.id]||{})[col.k]=v; }),col.t==='time'?'mm:ss':'')}</td>)}
+        </tr>); })}
+        {members.length>0&&<tr style={{borderTop:'2px solid '+accent,fontWeight:800}}>
+          <td style={{padding:'5px 6px'}}>Gesamt</td>
+          {cols.map(col=><td key={col.k} style={{padding:'5px 6px',textAlign:'right',fontFamily:'var(--mono)'}}>{col.t==='time'?wavgTime(rows,col.k,'answered'):(col.t==='num'?fmtNum(sumCol(rows,col.k),1):fmtNum(sumCol(rows,col.k)))}</td>)}
+        </tr>}
+      </tbody>
+    </table><div style={{fontSize:11,color:'var(--muted)',marginTop:4}}>Namen aus dem System. Gesamt: Summe bei Anzahlen, gewichteter Ø (nach Answered) bei Zeiten (mm:ss).</div></div>);
+  }
+
+  const Section=({title,children})=><div style={{marginBottom:18}}><div style={{fontSize:13,fontWeight:800,marginBottom:6,color:accent}}>{title}</div>{children}</div>;
+
+  function TeamEdit({t}){ const td=deck.teams[t];
+    return (<div>
+      <Section title="Besetzung (FTE) & Namensliste">
+        <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',marginBottom:8}}>
+          <label style={{fontSize:12,color:'var(--muted)'}}>FTE</label>
+          <div style={{width:90}}>{inp(td.fte,v=>upd(n=>{n.teams[t].fte=v;}),'z.B. 8,5')}</div>
+          <span style={{fontSize:12,color:'var(--muted)'}}>{membersFor(t).length} MA im System · {(td.members||[]).length} gewählt</span>
+        </div>
+        <div style={{display:'flex',flexWrap:'wrap',gap:6}}>
+          {membersFor(t).map(e=>{ const on=(td.members||[]).includes(e.id);
+            return <button key={e.id} className="btn btn-sm" onClick={()=>upd(n=>{ const m=new Set(n.teams[t].members||[]); m.has(e.id)?m.delete(e.id):m.add(e.id); n.teams[t].members=[...m]; })}
+              style={{background:on?accent:'transparent',color:on?'#fff':'var(--text)',border:'1px solid '+(on?accent:'var(--border)')}}>{on?'✓ ':''}{empName(e)}</button>; })}
+        </div>
+      </Section>
+      <Section title="Gelieferte Stunden (5 Wochen)"><StundenEdit t={t}/></Section>
+      <Section title="Call-Kennzahlen — Vorwoche"><CallsEdit t={t} period="vorwoche"/></Section>
+      <Section title="Call-Kennzahlen — Monat"><CallsEdit t={t} period="monat"/></Section>
+      <Section title="Maßnahmen">
+        <textarea value={td.massnahmen||''} onChange={e=>upd(n=>{n.teams[t].massnahmen=e.target.value;})} placeholder="Maßnahmen als Freitext…" style={{width:'100%',boxSizing:'border-box',minHeight:70,padding:'8px 10px',border:'1px solid var(--border)',borderRadius:8,fontSize:13,fontFamily:'inherit'}}/>
+      </Section>
+    </div>);
+  }
+
+  // ── Darstellung: 3 Muster-Folien (SVG/CSS) ──
+  const Slide=({children,label})=><div style={{position:'relative',aspectRatio:'16 / 9',background:'#fff',border:'1px solid var(--border)',borderRadius:14,boxShadow:'0 6px 24px rgba(15,23,42,.08)',overflow:'hidden',marginBottom:20}}>
+    <div style={{position:'absolute',top:0,left:0,width:6,height:'100%',background:accent}}/>
+    {label&&<div style={{position:'absolute',top:14,right:18,fontSize:11,fontWeight:700,letterSpacing:'.12em',textTransform:'uppercase',color:'var(--muted)'}}>{label}</div>}
+    <div style={{position:'absolute',inset:0,padding:'clamp(20px,4vw,52px)',display:'flex',flexDirection:'column'}}>{children}</div>
+  </div>;
+
+  function SlideTitle(){ return (<Slide label="HolidayCheck">
+    <div style={{flex:1,display:'flex',flexDirection:'column',justifyContent:'center'}}>
+      <div style={{width:64,height:8,background:accent,borderRadius:4,marginBottom:'clamp(14px,3vh,34px)'}}/>
+      <div style={{fontSize:'clamp(28px,5.5vw,68px)',fontWeight:800,lineHeight:1.05,color:'#0f172a',letterSpacing:'-.02em'}}>Weekly Performance Review</div>
+      <div style={{fontSize:'clamp(16px,2.6vw,30px)',fontWeight:600,color:accent,marginTop:'clamp(6px,1.5vh,16px)'}}>HolidayCheck{deck.titel.untertitel?(' · '+deck.titel.untertitel):''}</div>
+      <div style={{marginTop:'auto',display:'flex',gap:'clamp(18px,4vw,48px)',flexWrap:'wrap',fontSize:'clamp(11px,1.5vw,15px)',color:'var(--muted)',fontWeight:600}}>
+        <span>KW {pNo} / {pYear}</span>{deck.titel.datum&&<span>{deck.titel.datum}</span>}{deck.titel.ansprech&&<span>{deck.titel.ansprech}</span>}
+      </div>
+    </div>
+  </Slide>); }
+
+  function SlideStunden({t}){ const rows=deck.teams[t].stunden.filter(r=>r.kw!==''||r.plan!==''||r.geliefert!=='');
+    const vals=rows.flatMap(r=>[numOr(r.plan,0),numOr(r.rueck,0),numOr(r.geliefert,0)]); const mx=Math.max(1,...vals);
+    const W=760,H=230,pad=30,bw=rows.length?(W-pad*2)/rows.length:0; const bar3=[{k:'plan',c:'#cbd5e1',l:'Plan'},{k:'rueck',c:accent+'99',l:'Rückm.'},{k:'geliefert',c:accent,l:'Geliefert'}];
+    return (<Slide label={(t==='sales'?'Sales':'Support')+' · Stunden'}>
+      <div style={{fontSize:'clamp(18px,3vw,34px)',fontWeight:800,color:'#0f172a'}}>Gelieferte Stunden <span style={{color:accent}}>· {t==='sales'?'Sales':'Support'}</span></div>
+      <div style={{fontSize:'clamp(11px,1.4vw,14px)',color:'var(--muted)',marginBottom:'clamp(8px,2vh,18px)'}}>Plan / Rückmeldung / Geliefert über {rows.length||5} Wochen</div>
+      <div style={{flex:1,minHeight:0}}>
+        <svg viewBox={'0 0 '+W+' '+(H+26)} style={{width:'100%',height:'100%'}} preserveAspectRatio="xMidYMid meet">
+          {rows.map((r,i)=>{ const x0=pad+i*bw; return (<g key={i}>
+            {bar3.map((b,bi)=>{ const v=numOr(r[b.k],0); const h=Math.max(1,v/mx*H); const w=(bw-14)/3; const x=x0+7+bi*w; return <rect key={bi} x={x} y={H-h} width={w-3} height={h} rx="2" fill={b.c}/>; })}
+            <text x={x0+bw/2} y={H+16} textAnchor="middle" fontSize="12" fill="#64748b">KW {r.kw||'—'}</text>
+          </g>); })}
+        </svg>
+      </div>
+      <div style={{display:'flex',gap:'clamp(10px,2vw,26px)',flexWrap:'wrap',marginTop:'clamp(8px,2vh,16px)'}}>
+        {rows.map((r,i)=>{ const pc=pctDiff(r.geliefert,r.rueck); return (<div key={i} style={{fontSize:'clamp(10px,1.3vw,13px)'}}>
+          <span style={{color:'var(--muted)',fontWeight:700}}>KW {r.kw||'—'}: </span>
+          <b style={{color:pc==null?'#64748b':pc<0?'#dc2626':'#059669'}}>{pc==null?'—':(pc>0?'+':'')+fmtNum(pc,1)+' %'}</b>
+          {r.erkl?<span style={{color:'#64748b'}}> · {r.erkl}</span>:null}
+        </div>); })}
+      </div>
+      <div style={{display:'flex',gap:14,marginTop:10,fontSize:11,color:'var(--muted)'}}>{bar3.map(b=><span key={b.k} style={{display:'inline-flex',alignItems:'center',gap:5}}><span style={{width:11,height:11,borderRadius:2,background:b.c}}/>{b.l}</span>)}</div>
+    </Slide>);
+  }
+
+  function SlideCalls({t}){ const cols=HC_CALL_COLS[t]; const members=membersFor(t).filter(e=>((deck.teams[t].members||[]).length===0)||deck.teams[t].members.includes(e.id));
+    const cur=deck.teams[t].calls.vorwoche||{}; const ans=members.map(e=>({emp:e,n:numOr((cur[e.id]||{}).answered,0)})).sort((a,b)=>b.n-a.n);
+    const mx=Math.max(1,...ans.map(a=>a.n)); const rows=members.map(e=>({...(cur[e.id]||{}),answered:(cur[e.id]||{}).answered}));
+    return (<Slide label={(t==='sales'?'Sales':'Support')+' · Calls'}>
+      <div style={{fontSize:'clamp(18px,3vw,34px)',fontWeight:800,color:'#0f172a'}}>Call-Kennzahlen <span style={{color:accent}}>· {t==='sales'?'Sales':'Support'}</span> <span style={{fontSize:'.5em',color:'var(--muted)',fontWeight:600}}>Vorwoche</span></div>
+      <div style={{display:'flex',gap:'clamp(16px,4vw,48px)',margin:'clamp(8px,2vh,18px)0 clamp(10px,2vh,20px)',flexWrap:'wrap'}}>
+        <div><div style={{fontSize:'clamp(26px,5vw,56px)',fontWeight:800,color:accent,lineHeight:1}}>{fmtNum(sumCol(rows,'answered'))}</div><div style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>Answered gesamt</div></div>
+        <div><div style={{fontSize:'clamp(26px,5vw,56px)',fontWeight:800,color:'#0f172a',lineHeight:1}}>{wavgTime(rows,cols.find(c=>/handle|aht/i.test(c.k))?cols.find(c=>/handle|aht/i.test(c.k)).k:'avg_handle','answered')}</div><div style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>Ø Handle (gew.)</div></div>
+      </div>
+      <div style={{flex:1,minHeight:0,overflow:'hidden',display:'flex',flexDirection:'column',gap:'clamp(4px,1vh,9px)'}}>
+        {ans.slice(0,10).map(({emp,n})=>(<div key={emp.id} style={{display:'flex',alignItems:'center',gap:10}}>
+          <span style={{width:'clamp(90px,14vw,150px)',fontSize:'clamp(10px,1.3vw,13px)',fontWeight:600,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{empName(emp)}</span>
+          <div style={{flex:1,height:'clamp(12px,2vh,18px)',background:'#f1f5f9',borderRadius:4,overflow:'hidden'}}><div style={{width:(n/mx*100)+'%',height:'100%',background:accent,borderRadius:4}}/></div>
+          <span style={{width:44,textAlign:'right',fontFamily:'var(--mono)',fontWeight:700,fontSize:'clamp(10px,1.3vw,13px)'}}>{fmtNum(n)}</span>
+        </div>))}
+        {ans.length===0&&<div style={{color:'var(--muted)'}}>Keine Mitarbeiter ausgewählt.</div>}
+      </div>
+    </Slide>);
+  }
+
+  return (<div style={{maxWidth:1040,margin:'0 auto'}}>
+    <div style={{display:'flex',alignItems:'center',gap:12,flexWrap:'wrap',marginBottom:16}}>
+      <div style={{fontSize:20,fontWeight:800}}>📊 Präsentation · HolidayCheck</div>
+      <div style={{flex:1}}/>
+      {saved&&<span style={{color:'var(--green)',fontWeight:700,fontSize:13}}>✓ Gespeichert</span>}
+      <select className="form-select" style={{width:'auto'}} value={pNo+'-'+pYear} onChange={e=>{const [k,y]=e.target.value.split('-');setPNo(parseInt(k));setPYear(parseInt(y));}}>
+        {kwOptions.map(({kw,yr})=><option key={kw+'-'+yr} value={kw+'-'+yr}>KW {kw}/{yr}</option>)}
+      </select>
+      <div style={{display:'flex',border:'1px solid var(--border)',borderRadius:10,overflow:'hidden'}}>
+        {[['edit','✎ Eingabe'],['show','▦ Darstellung']].map(([k,l])=><button key={k} className="btn btn-sm" style={{border:'none',borderRadius:0,background:mode===k?accent:'transparent',color:mode===k?'#fff':'var(--text)',fontWeight:700}} onClick={()=>setMode(k)}>{l}</button>)}
+      </div>
+      <button className="btn btn-primary btn-sm" disabled={busy} onClick={save}>💾 Speichern</button>
+    </div>
+
+    {loading ? <div style={{padding:40,textAlign:'center',color:'var(--muted)'}}>Lädt…</div> : mode==='edit' ? (
+      <div>
+        <div className="card" style={{padding:'14px 16px',marginBottom:16}}>
+          <div style={{fontSize:13,fontWeight:800,marginBottom:8,color:accent}}>Titel & Kopf</div>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))',gap:10}}>
+            <label style={{fontSize:12}}>Untertitel<input value={deck.titel.untertitel||''} onChange={e=>upd(n=>{n.titel.untertitel=e.target.value;})} className="form-input" style={{width:'100%',marginTop:2}}/></label>
+            <label style={{fontSize:12}}>Datum<input value={deck.titel.datum||''} onChange={e=>upd(n=>{n.titel.datum=e.target.value;})} className="form-input" style={{width:'100%',marginTop:2}} placeholder="z.B. 12.08.2026"/></label>
+            <label style={{fontSize:12}}>Ansprechpartner<input value={deck.titel.ansprech||''} onChange={e=>upd(n=>{n.titel.ansprech=e.target.value;})} className="form-input" style={{width:'100%',marginTop:2}}/></label>
+          </div>
+        </div>
+        <div style={{display:'flex',gap:6,marginBottom:12}}>
+          {[['sales','Sales'],['support','Support']].map(([k,l])=><button key={k} className="btn btn-sm" onClick={()=>setTab(k)} style={{background:tab===k?accent:'transparent',color:tab===k?'#fff':'var(--text)',border:'1px solid '+(tab===k?accent:'var(--border)'),fontWeight:700}}>{l}</button>)}
+        </div>
+        <div className="card" style={{padding:'16px 18px'}}><TeamEdit t={tab}/></div>
+        <div style={{fontSize:11,color:'var(--muted)',marginTop:10,lineHeight:1.6}}>Noch offen (nächster Schritt, gleiche Bauart): CSAT (Note 1–5 + Anzahl, je MA über 5 Wochen), Mail-Kennzahlen (STD Task / Mails pro Stunde, je MA), 12-Monats-Kapazitätsmodell (Formeln folgen von dir). Die Darstellung zeigt die 3 Muster-Folien zur Gestaltungs-Abnahme.</div>
+      </div>
+    ) : (
+      <div>
+        <SlideTitle/>
+        <SlideStunden t="sales"/>
+        <SlideCalls t="sales"/>
+        <div style={{fontSize:11,color:'var(--muted)',lineHeight:1.6}}>3 Muster-Folien zur Abnahme der Gestaltung (Titel · Gelieferte Stunden Sales · Calls je MA Sales). Nach deinem OK: restliche Folientypen im selben Stil, beide Teams, Agenda, Kapazität, CSAT, Mail, Maßnahmen.</div>
+      </div>
+    )}
+  </div>);
+}
 function App(){
   migrateProjectData();
   const [loggedIn, setLoggedIn] = useState(false);
@@ -33636,6 +33875,7 @@ function App(){
       {key:'projects',label:'Projekte',icon:'📁'},
       {key:'forecast',label:'Forecast',icon:'📈'},
       {key:'profitability',label:'Wirtschaftlichkeit',icon:'💹'},
+      ...((team&&(team.role_keys||[]).some(r=>r==='management')) ? [{key:'praesentation',label:'Präsentationen',icon:'📊'}] : []),   // Management-only
     ]},
     {sec:'System', items:[
       {key:'superadmin',label:'System / Konfiguration',icon:'⚙️'},
@@ -33741,6 +33981,9 @@ function App(){
   // Kostenbereiche sind Management/Finance-Sache: landet HR per Sprung dort, zurück aufs Cockpit.
   useEffect(()=>{ const ff=(team&&(team.role_keys||[]).some(r=>r==='management'||r==='finance'));
     if(!ff && ['profitability','productivity','locations','payroll'].includes(view)) setView('cockpit'); },[view]);
+  // Präsentationen sind Management-only (nicht HR): Direktaufruf abfangen.
+  useEffect(()=>{ const mgmt=(team&&(team.role_keys||[]).some(r=>r==='management'));
+    if(!mgmt && view==='praesentation') setView('cockpit'); },[view]);
   const allNavSections = isEmpUser
     ? [{sec:'Mein Bereich', items:[{key:'mein-plan',label:'Mein Schichtplan',icon:'📋'}]}, ...navSections]
     : navSections;
@@ -33932,6 +34175,7 @@ function App(){
             </div>
           )}
           {view==='orgchart'&&<OrgChart projects={projects} employees={employees} orgCharts={orgCharts} setOrgCharts={setOrgCharts}/>}
+          {view==='praesentation'&&<PresentationsView projects={projects} employees={employees} team={team} showToast={showToast}/>}
           {view==='skillmatrix'&&<SkillMatrix employees={employees} projects={projects}/>}
           {view==='kanban'&&<RecruitingKanban employees={employees} setEmployees={setEmployees} cvList={cvList} setCvList={setCvList} projects={projects} onPromoteToEmployee={promoteToEmployee} showToast={showToast}/>}
           {view==='onboarding'&&<OnboardingView employees={employees} setEmployees={setEmployees} showToast={showToast}/>}
