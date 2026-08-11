@@ -974,10 +974,11 @@ const STATUS_FLOW = [
   {key:'training',      label:'Schulung',            icon:'📚', color:'#7c3aed', kanban:true,  terminal:false},
   {key:'parking',       label:'Wiedervorlage',       icon:'⏳', color:'#f59e0b', kanban:true,  terminal:false},
   {key:'active',        label:'Aktiv',               icon:'⚡', color:'#059669', kanban:false, terminal:false},
-  {key:'rejected_by_us',    label:'Absage durch uns',        icon:'✗', color:'#dc2626', kanban:false, terminal:true},
-  {key:'rejected_by_employee', label:'Absage Mitarbeiter',  icon:'🚶', color:'#dc2626', kanban:false, terminal:true},
-  {key:'rejected_by_client', label:'Absage Kunde',   icon:'🏢', color:'#dc2626', kanban:false, terminal:true},
-  {key:'blacklist',     label:'Blacklist',           icon:'⛔', color:'#7f1d1d', kanban:false, terminal:true},
+  {key:'rejected_by_us',    label:'Absage durch uns',        icon:'✗', color:'#dc2626', kanban:false, terminal:true, reject:true},
+  {key:'rejected_by_employee', label:'Absage Mitarbeiter',  icon:'🚶', color:'#dc2626', kanban:false, terminal:true, reject:true},
+  {key:'rejected_by_client', label:'Absage Kunde',   icon:'🏢', color:'#dc2626', kanban:false, terminal:true, reject:true},
+  {key:'no_contact',    label:'Kein Kontakt möglich', icon:'📵', color:'#a16207', kanban:false, terminal:true, reject:true},
+  {key:'blacklist',     label:'Blacklist',           icon:'⛔', color:'#7f1d1d', kanban:false, terminal:true, reject:true},
   {key:'selected',      label:'Selektiert',          icon:'✅', color:'#059669', kanban:false, terminal:false},
   {key:'terminated',    label:'Gekündigt',           icon:'🚫', color:'#dc2626', kanban:false, terminal:true},
   {key:'inactive',      label:'Inaktiv',             icon:'⏸', color:'#6b7280', kanban:false, terminal:false},
@@ -1102,6 +1103,9 @@ function calcAge(bday){
 function statusColor(s){return STATUS_FLOW.find(x=>x.key===s)?.color||'var(--muted)'}
 function statusLabel(s){return STATUS_FLOW.find(x=>x.key===s)?.label||s}
 function statusIcon(s){return STATUS_FLOW.find(x=>x.key===s)?.icon||'?'}
+// Absage-/Abgangs-Status des Bewerber-Funnels — EINE Wahrheit (STATUS_FLOW reject:true).
+// Funnel, Kanban „Beendet", Cockpit-Zähler leiten davon ab; nie erneut hartcodieren.
+const REJECT_STATUS_KEYS = STATUS_FLOW.filter(s=>s.reject).map(s=>s.key);
 function daysUntil(d){if(!d)return null;return Math.round((new Date(d)-new Date())/(1000*60*60*24))}
 function trainingProgress(plan){
   if(!plan.start_date||!plan.end_date)return 0;
@@ -8589,7 +8593,7 @@ const COCKPIT_FILTERS = {
   emp_contract_expiring: e=>{ const ce=e&&((e.contract&&e.contract.end)||e.contract_end); if(!ce||e.status==='terminated'||e.status==='inactive') return false; const cM=parseInt(localStorage.getItem('jsr_contract_reminder_months')||'1'); const cut=new Date(); cut.setMonth(cut.getMonth()+cM); const end=new Date(ce); return end>=new Date()&&end<=cut; },
   emp_no_salary: e=>!!e&&e.status==='active'&&!parseFloat(e.hourly_rate||0),
   cv_new: c=>{ const wk=new Date(Date.now()-7*864e5).toISOString().slice(0,10); return !!c&&c.cv_date>=wk&&c.status==='cv_inbound'; },
-  cv_stuck: c=>{ if(!c) return false; if(['active','rejected_by_us','blacklist','rejected_by_applicant','rejected_by_client'].includes(c.status)) return false; const last=c.last_status_change||c.cv_date; if(!last) return false; return Math.round((new Date()-new Date(last))/(864e5))>7; },
+  cv_stuck: c=>{ if(!c) return false; if(['active',...REJECT_STATUS_KEYS].includes(c.status)) return false; const last=c.last_status_change||c.cv_date; if(!last) return false; return Math.round((new Date()-new Date(last))/(864e5))>7; },
   cv_inbox: c=>{ if(!c) return false; const s=c.status; return s==='cv_inbound'||s==='new'||s==='test_sent'; },   // Posteingang (Tagesaufgaben-Sprung „CVs selektieren")
 };
 // Sichtbare Jahre für Jahres-Dropdowns — datengetrieben statt fester Liste. Tote Vergangenheitsjahre
@@ -17876,7 +17880,7 @@ Levels: A2, B1, B2, C1, C2. Für Kundenservice ist B2 das Minimum.`;
   const STATUS_ORDER = ['cv_inbound','cv_accepted','cv_confirmed','invited','interview','selection1','selection2','contract','training_planned','training','parking','active'];
   const statusIdx = STATUS_ORDER.indexOf(form.status);
   const atLeast = (s) => statusIdx >= STATUS_ORDER.indexOf(s);
-  const isTerminal = ['rejected_by_us','rejected_by_applicant','rejected_by_client','blacklist','terminated','inactive'].includes(form.status);
+  const isTerminal = [...REJECT_STATUS_KEYS,'terminated','inactive'].includes(form.status);   // Absage-Teil aus einer Wahrheit; Mitarbeiter-Terminals separat
   const showAll = atLeast('training_planned') || isTerminal;
 
   const TABS = [
@@ -19833,7 +19837,7 @@ function RecruitingFunnel({cvList, employees, isMobileW}){
   const lbl=k=>{ const s=STATUS_FLOW.find(x=>x.key===k); return s?s.label:k; };
   const col=k=>{ const s=STATUS_FLOW.find(x=>x.key===k); return s?s.color:'#64748b'; };
   const posOf=st=>{ if(st==='training_planned'||st==='training') return ORDER.length-1; return ORDER.indexOf(st); };
-  const REJ=['rejected_by_us','rejected_by_employee','rejected_by_client','blacklist'];
+  const REJ=REJECT_STATUS_KEYS;   // eine Wahrheit aus STATUS_FLOW (reject:true)
 
   const cvIn=cvs.filter(c=>c&&inRange(c.cv_date));
   const hired=emps.filter(e=>e&&e.source==='cv'&&inRange(e.cv_received_at));
@@ -19884,8 +19888,8 @@ function RecruitingFunnel({cvList, employees, isMobileW}){
       <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))',gap:12}}>
         <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:14,padding:'14px 16px'}}>
           <div style={{fontSize:13,fontWeight:800,marginBottom:8}}>Abgänge ({rejected.length})</div>
-          {[['rejected_by_us','Absage durch uns'],['rejected_by_employee','Absage Mitarbeiter'],['rejected_by_client','Absage Kunde'],['blacklist','Blacklist']].map(([k,l])=>(
-            <div key={k} style={{display:'flex',justifyContent:'space-between',fontSize:12,padding:'3px 0'}}><span style={{color:'var(--muted)'}}>{l}</span><b>{rejBy(k)}</b></div>
+          {STATUS_FLOW.filter(s=>s.reject).map(s=>(
+            <div key={s.key} style={{display:'flex',justifyContent:'space-between',fontSize:12,padding:'3px 0'}}><span style={{color:'var(--muted)'}}>{s.icon} {s.label}</span><b>{rejBy(s.key)}</b></div>
           ))}
           <div style={{display:'flex',justifyContent:'space-between',fontSize:12,padding:'3px 0',borderTop:'1px solid var(--border)',marginTop:4}}><span style={{color:'#d97706',fontWeight:600}}>Wiedervorlage</span><b>{parking.length}</b></div>
           <div style={{fontSize:11,color:'var(--muted)',marginTop:8,lineHeight:1.5}}>Abgänge lassen sich ohne Status-Historie nicht stufengenau zuordnen, daher separat.</div>
@@ -19916,7 +19920,7 @@ function RecruitingFunnel({cvList, employees, isMobileW}){
     {key:'auswahl',    label:'Auswahl',    icon:'🗣', color:'#d97706', statuses:['invited','interview','selection1','selection2']},
     {key:'onboarding', label:'Onboarding', icon:'📝', color:'#0F5661', statuses:['contract','training_planned','training']},
     {key:'ruhend',     label:'Ruhend',     icon:'⏳', color:'#f59e0b', statuses:['parking'], collapsible:true},
-    {key:'beendet',    label:'Beendet',    icon:'⛔', color:'#dc2626', statuses:['rejected_by_us','rejected_by_employee','rejected_by_client','blacklist'], collapsible:true},
+    {key:'beendet',    label:'Beendet',    icon:'⛔', color:'#dc2626', statuses:REJECT_STATUS_KEYS, collapsible:true},
   ];
   const toggleCol=k=>setCollapsed(c=>({...c,[k]:!c[k]}));
 
