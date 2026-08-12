@@ -106,7 +106,9 @@
   function skillLabel(ctx, key){ var s=(ctx.skills||[]).filter(function(x){return x.key===key;})[0]; if(s) return s.label||s.key; return key==='sales'?'Sales':key==='support'?'Support':key; }
 
   function deckSlides(ctx){ var out=[Title(ctx)]; (ctx.skills||[]).forEach(function(s){ out.push(Stunden(ctx,s.key)); out.push(Calls(ctx,s.key)); }); return out; }
+  // Folien-Identität (für Kommentar-Anker) — dieselbe Reihenfolge wie deckSlides.
+  function deckSlideKeys(ctx){ var out=[{key:'title',label:'Titel'}]; (ctx.skills||[]).forEach(function(s){ out.push({key:s.key+':stunden',label:skillLabel(ctx,s.key)+' · Stunden'}); out.push({key:s.key+':calls',label:skillLabel(ctx,s.key)+' · Calls'}); }); return out; }
 
-  window.PRES = { deckSlides:deckSlides, Title:Title, Stunden:Stunden, Calls:Calls, callCols:callCols,
+  window.PRES = { deckSlides:deckSlides, deckSlideKeys:deckSlideKeys, Title:Title, Stunden:Stunden, Calls:Calls, callCols:callCols,
     fmtNum:fmtNum, numOr:numOr, pctDiff:pctDiff, wavgTime:wavgTime, sumCol:sumCol, decToMmss:decToMmss, mmssToDec:mmssToDec };
 })();

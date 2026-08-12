@@ -41,7 +41,48 @@
     Object.keys((t.calls&&t.calls.vorwoche)||{}).forEach(function(id){ids[id]=1;});
     Object.keys((t.calls&&t.calls.monat)||{}).forEach(function(id){ids[id]=1;});
     return Object.keys(ids).map(function(id){ return {id:id, name:(d._names&&d._names[id])||id}; }); }; }
-  function render(res){
+  function h(){ return React.createElement.apply(React, arguments); }
+  var SEV={ red:{l:'kritisch',c:'#dc2626',bg:'#fef2f2'}, green:{l:'lobend',c:'#059669',bg:'#f0fdf4'}, amber:{l:'neutral',c:'#d97706',bg:'#fffbeb'}, black:{l:'Hinweis',c:'#334155',bg:'#f1f5f9'} };
+
+  // Deck mit Kommentaren je Folie (Folie+Anker). Kommentieren nur wenn eingeloggt (canComment) — Einweg.
+  function Deck(props){
+    var ctx=props.ctx, presId=props.presId, projectId=props.projectId, uid=props.uid, authorName=props.authorName, canComment=props.canComment;
+    var cS=React.useState([]), comments=cS[0], setComments=cS[1];
+    var oS=React.useState(null), openKey=oS[0], setOpenKey=oS[1];
+    var dS=React.useState({severity:'black',body:'',anchor:''}), draft=dS[0], setDraft=dS[1];
+    React.useEffect(function(){ if(!presId) return; var alive=true;
+      function load(){ sb.from('presentation_comments').select('*').eq('presentation_id',presId).order('created_at',{ascending:true}).then(function(r){ if(alive&&!r.error) setComments(r.data||[]); }); }
+      load();
+      var ch=sb.channel('pc-'+presId).on('postgres_changes',{event:'*',schema:'public',table:'presentation_comments',filter:'presentation_id=eq.'+presId},load).subscribe();
+      return function(){ alive=false; try{ sb.removeChannel(ch); }catch(e){} };
+    },[presId]);
+    function submit(k){ if(!draft.body.trim()) return;
+      sb.from('presentation_comments').insert({presentation_id:presId,project_id:projectId,slide:k,anchor:draft.anchor||null,severity:draft.severity,body:draft.body.trim(),author_name:authorName,created_by:uid}).then(function(r){ if(r.error){ alert('Kommentar konnte nicht gespeichert werden: '+(r.error.message||'')); return; } setOpenKey(null); setDraft({severity:'black',body:'',anchor:''}); });
+    }
+    function formEl(k){ return h('div',{key:'form',style:{marginTop:6,padding:'10px 12px',background:'#f8fafc',border:'1px solid #e5e7eb',borderRadius:10}},[
+      h('div',{key:'sev',style:{display:'flex',gap:6,marginBottom:8,flexWrap:'wrap'}}, ['red','green','amber','black'].map(function(sv){ var s=SEV[sv]; return h('button',{key:sv,onClick:function(){ setDraft(Object.assign({},draft,{severity:sv})); },style:{border:'1px solid '+(draft.severity===sv?s.c:'#cbd5e1'),background:draft.severity===sv?s.bg:'#fff',color:s.c,fontWeight:700,fontSize:12,padding:'5px 10px',borderRadius:8,cursor:'pointer'}}, s.l); })),
+      h('input',{key:'anchor',value:draft.anchor,onChange:function(e){ setDraft(Object.assign({},draft,{anchor:e.target.value})); },placeholder:'Stelle (optional), z.B. „KW 31 Abweichung"',style:{width:'100%',boxSizing:'border-box',padding:'7px 9px',border:'1px solid #cbd5e1',borderRadius:8,fontSize:13,marginBottom:6}}),
+      h('textarea',{key:'body',value:draft.body,onChange:function(e){ setDraft(Object.assign({},draft,{body:e.target.value})); },placeholder:'Ihr Kommentar…',style:{width:'100%',boxSizing:'border-box',minHeight:56,padding:'7px 9px',border:'1px solid #cbd5e1',borderRadius:8,fontSize:13}}),
+      h('div',{key:'act',style:{display:'flex',gap:8,justifyContent:'flex-end',marginTop:6}},[ h('button',{key:'c',className:'btn',style:{fontSize:12,padding:'6px 12px'},onClick:function(){ setOpenKey(null); }},'Abbrechen'), h('button',{key:'s',className:'btn pri',style:{fontSize:12,padding:'6px 12px'},onClick:function(){ submit(k); }},'Senden') ])
+    ]); }
+    function section(k,lbl,cs){
+      if(!cs.length && !canComment) return null;
+      var items=cs.map(function(c){ var s=SEV[c.severity]||SEV.black; return h('div',{key:c.id,style:{display:'flex',gap:8,alignItems:'flex-start',padding:'6px 0'}},[
+        h('span',{key:'d',style:{width:10,height:10,borderRadius:'50%',background:s.c,marginTop:4,flexShrink:0}}),
+        h('div',{key:'b',style:{flex:1}},[ h('div',{key:'t',style:{fontSize:13,color:'#0f172a'}}, (c.anchor?('['+c.anchor+'] '):'')+c.body), h('div',{key:'m',style:{fontSize:11,color:'#94a3b8'}}, (c.author_name||'Kunde')+(c.read_at?' · gelesen':'')) ])
+      ]); });
+      return h('div',{style:{maxWidth:1120,margin:'-10px auto 10px',padding:'0 4px'}}, [
+        cs.length?h('div',{key:'l',style:{fontSize:11,fontWeight:700,color:'#94a3b8',textTransform:'uppercase',letterSpacing:'.06em',marginBottom:2}}, 'Kommentare · '+lbl):null,
+        items.length?h('div',{key:'i'},items):null,
+        canComment?(openKey===k?formEl(k):h('button',{key:'add',className:'btn',style:{fontSize:12,padding:'6px 12px',marginTop:cs.length?6:0},onClick:function(){ setOpenKey(k); }},'💬 Kommentar hinzufügen')):null
+      ]);
+    }
+    var keys=window.PRES.deckSlideKeys(ctx); var slides=window.PRES.deckSlides(ctx);
+    return h('div',{className:'deck'}, slides.map(function(el,i){ var kd=keys[i]||{key:'s'+i,label:'Folie '+(i+1)}; var cs=comments.filter(function(c){return c.slide===kd.key;});
+      return h('div',{key:kd.key,style:{marginBottom:20}}, [ el, section(kd.key,kd.label,cs) ]); }));
+  }
+
+  function render(res, sess){
     if(!window.PRES){ show('Anzeige-Komponente nicht geladen.'); return; }
     var d=res.data||{}; var th=d._theme||{};
     var ctx={ deck:d, accent:th.accent||'#2563eb', font:th.font||"'Inter',sans-serif",
@@ -50,17 +91,19 @@
       membersOf:membersOfFactory(d) };
     setPage(res.orientation);
     document.title=(th.projName||'Bericht')+' · KW '+res.period_no+'/'+res.period_year;
-    var slides=window.PRES.deckSlides(ctx);
     var root=ReactDOM.createRoot(document.getElementById('root'));
-    root.render(React.createElement('div',{className:'deck'}, slides.map(function(el,i){ return React.createElement(React.Fragment,{key:i}, el); })));
-    // Direkt-PDF: ?print=1 → nach Layout/Fonts automatisch den Druckdialog öffnen.
+    root.render(h(Deck,{ ctx:ctx, presId:res.id, projectId:res.project_id, uid:sess?sess.user.id:null, authorName:(sess&&sess._name)||(sess&&sess.user&&sess.user.email)||'Kunde', canComment:!!sess }));
     if(new URLSearchParams(location.search).get('print')==='1'){ setTimeout(function(){ try{ window.print(); }catch(e){} }, 700); }
   }
   (async function(){
     if(!token){ show('Kein Bericht angegeben.'); return; }
+    var sess=null;
+    try{ var sr=await sb.auth.getSession(); sess=sr&&sr.data&&sr.data.session||null;
+      if(sess){ try{ var nr=await sb.from('app_users').select('full_name').eq('user_id',sess.user.id).single(); if(nr&&nr.data&&nr.data.full_name) sess._name=nr.data.full_name; }catch(e){} }
+    }catch(e){}
     try{ var r=await sb.rpc('get_public_presentation',{p_token:token});
       if(r.error || !r.data){ show('Dieser Bericht ist nicht (mehr) verfügbar.'); return; }
-      render(r.data);
+      render(r.data, sess);
     }catch(e){ show('Bericht konnte nicht geladen werden.'); }
   })();
 </script>
