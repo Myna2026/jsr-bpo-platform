@@ -3743,6 +3743,7 @@ function EmployeeModal({emp, projects, employees, onSave, onClose, initialTab, o
     {id:'projekt',    label:'Projekt',   icon:'🎯'},
   ];
   if(emp) TABS.push({id:'feedback', label:'Zufriedenheit', icon:'💬'});   // nur bei bestehendem MA (Feedbackgespräche = Sicht des MA)
+  if(emp&&emp.id) TABS.push({id:'callqa', label:'Call-Qualität', icon:'📞'});   // QM-Bewertung durch HR (Call-Stichproben)
   if(emp&&emp.id) TABS.push({id:'dokumente', label:'Dokumente', icon:'📎'});   // Ablage: Arbeitsvertrag + Kündigungsoriginal (nur bei bestehendem MA)
 
 
@@ -3818,6 +3819,7 @@ function EmployeeModal({emp, projects, employees, onSave, onClose, initialTab, o
             )}
 
           {tab==='feedback'&&<FeedbackEmployeeTab emp={form}/>}
+          {tab==='callqa'&&<CallQaEmployeeTab emp={form}/>}
           {tab==='dokumente'&&<EmployeeDocsPanel emp={emp}/>}
           {/* ── TAB: HR & VERWALTUNG ── */}
           {tab==='profil'&&(
@@ -5144,6 +5146,12 @@ function EmployeeList({employees, setEmployees, projects, seedSearch, navFilter,
   const _fpMap = loadFieldPriority();
   const [contractDocs, setContractDocs] = useState(null);
   useEffect(()=>{ (async()=>{ try{ const {data}=await sb.from('employee_documents').select('employee_id').eq('doc_type','contract'); setContractDocs(new Set((data||[]).map(r=>r.employee_id))); }catch(e){ setContractDocs(new Set()); } })(); },[]);
+  // Call-Qualität-Marker: welche MA hatten in den letzten 4 Wochen eine Stichprobe (emp_id → letztes Datum).
+  const [qaTested, setQaTested] = useState({});
+  useEffect(()=>{ (async()=>{ try{ const from=isoLocal(new Date(Date.now()-27*864e5));
+    const {data}=await sb.from('call_samples').select('employee_id,sampled_date').eq('status','done').gte('sampled_date',from);
+    const m={}; (data||[]).forEach(x=>{ if(!m[x.employee_id]||String(x.sampled_date)>String(m[x.employee_id])) m[x.employee_id]=x.sampled_date; }); setQaTested(m);
+  }catch(e){ setQaTested({}); } })(); },[]);
 
   function toggleSort(col){
     if(sortCol === col) setSortDir(d => d==='asc'?'desc':'asc');
@@ -5487,7 +5495,7 @@ function EmployeeList({employees, setEmployees, projects, seedSearch, navFilter,
                 <tr key={e.id} style={{cursor:'pointer',opacity:isTerminated?0.6:1}}
                   onClick={()=>onEdit(e)}>
                   <td>
-                    <div style={{fontWeight:500}}>{e.first_name} {e.last_name}{e.staff_number&&<span style={{marginLeft:6,fontSize:10,fontFamily:'var(--mono)',color:'var(--blue)',fontWeight:700}}>#{e.staff_number}</span>}</div>
+                    <div style={{fontWeight:500}}>{e.first_name} {e.last_name}{e.staff_number&&<span style={{marginLeft:6,fontSize:10,fontFamily:'var(--mono)',color:'var(--blue)',fontWeight:700}}>#{e.staff_number}</span>}{qaTested[e.id]&&<span title={'Call-Stichprobe am '+fmtDate(qaTested[e.id])} style={{marginLeft:6,fontSize:9,fontWeight:700,padding:'1px 6px',borderRadius:10,background:'#ecfdf5',color:'#059669',whiteSpace:'nowrap'}}>📞 getestet</span>}</div>
                     {(()=>{const ce=e.contract?.end||e.contract_end;if(!ce)return null;const d=Math.round((new Date(ce)-new Date())/(86400000));if(d<=30&&d>=0)return <div style={{fontSize:10,color:'var(--amber)',fontWeight:600}}>⚠ Vertrag in {d}T</div>;if(d<0)return <div style={{fontSize:10,color:'var(--red)',fontWeight:600}}>🚨 Vertrag abgelaufen</div>;return null;})()}
                     {warnings.filter(w=>w.level==='red').map((w,i)=>(
                       <div key={i} style={{fontSize:10,color:'var(--red)'}}>{w.msg}</div>
@@ -5558,7 +5566,7 @@ function EmployeeList({employees, setEmployees, projects, seedSearch, navFilter,
               <div key={e.id} className="ma-card" onClick={()=>onEdit(e)} style={{opacity:isTerminated?0.6:1}}>
                 <div className="ma-card-top">
                   <div style={{minWidth:0}}>
-                    <div className="ma-card-name">{e.first_name} {e.last_name}{e.staff_number?<span style={{marginLeft:6,fontSize:10,fontFamily:'var(--mono)',color:'var(--blue)',fontWeight:700}}>#{e.staff_number}</span>:''}</div>
+                    <div className="ma-card-name">{e.first_name} {e.last_name}{e.staff_number?<span style={{marginLeft:6,fontSize:10,fontFamily:'var(--mono)',color:'var(--blue)',fontWeight:700}}>#{e.staff_number}</span>:''}{qaTested[e.id]?<span title={'Call-Stichprobe am '+fmtDate(qaTested[e.id])} style={{marginLeft:6,fontSize:9,fontWeight:700,padding:'1px 6px',borderRadius:10,background:'#ecfdf5',color:'#059669',whiteSpace:'nowrap'}}>📞 getestet</span>:''}</div>
                     <div style={{fontSize:11,color:'var(--muted)',marginTop:2}}>{e.position||'—'}{e.location?' · '+e.location:''}</div>
                   </div>
                   <span className="badge" style={{background:'transparent',color:statusColor(e.status),border:'1px solid '+statusColor(e.status)+'33',fontSize:10,flexShrink:0}}>{statusIcon(e.status)} {statusLabel(e.status)}</span>
@@ -32103,6 +32111,769 @@ function FeedbackView({employees, projects, team, showToast, nav, onNavConsumed}
     </div>
   );
 }
+
+// ══ Call-Qualität (Schnitt 2: Bewertungsbogen-Editor) ══
+// Bewertungsbogen je Projekt UND Skill (wie KPI-Konfig). Standard-Bogen (Projekt/Skill = leer) greift als
+// Rückfall, wenn für eine Kombination nichts gepflegt ist. Ändern ist unkritisch: alte Stichproben tragen
+// je Kriterium einen eigenen Snapshot → bleiben lesbar. Löschen = Archivieren (active=false).
+const CQ_TYPES=[['points','Punkte'],['yesno','Ja/Nein'],['tristate','Dreistufig (ja/teilw./nein)'],['grade','Note 1–5']];
+function cqTypeLabel(t){ const x=CQ_TYPES.find(([k])=>k===t); return x?x[1]:t; }
+function cqTypeMax(t,max){ return t==='yesno'?1:(t==='grade'?5:(Number(max)||1)); }
+
+function CallQaCatalog({projects, showToast}){
+  const nf=n=>Number(n||0).toLocaleString('de-DE');
+  const projList=(projects||[]).filter(p=>p&&p.id&&p.status!=='inactive').slice().sort((a,b)=>String(a.name).localeCompare(String(b.name),'de'));
+  const [selProjId,setSelProjId]=useState('__global__');   // '__global__' = Standard-Bogen
+  const selProj=projList.find(p=>p.id===selProjId)||null;
+  const projSkills=(selProj&&Array.isArray(selProj.skills)&&selProj.skills.length)
+    ? selProj.skills.map(s=>({key:String((s&&s.key)||s).toLowerCase(),label:(s&&s.label)||(s&&s.key)||s})) : [];
+  const [selSkill,setSelSkill]=useState('__all__');        // '__all__' = alle Skills (Projekt-Standard)
+  useEffect(()=>{ setSelSkill('__all__'); },[selProjId]);
+  const projId = selProjId==='__global__'?null:selProjId;
+  const skill  = (selProjId==='__global__'||selSkill==='__all__')?null:selSkill;
+
+  const [rows,setRows]=useState(null);
+  const [edit,setEdit]=useState(null);   // 'new' | criterion | null
+  const [showArchived,setShowArchived]=useState(false);
+  const blank={category:'',prompt:'',type:'points',max_points:1,weight:1,allow_na:true,hint:'',agent_hint:'',lh_yes:'',lh_partial:'',lh_no:''};
+  const [form,setForm]=useState(blank);
+  const set=(k,v)=>setForm(f=>({...f,[k]:v}));
+
+  // Bogen-Einstellungen je Projekt/Skill (Ampel-Einheit + Schwellen + Rückmeldungstexte) — call_score_config.
+  const [cfgRow,setCfgRow]=useState(undefined);   // undefined=laden, null=noch keine Zeile, obj=vorhanden
+  const [cfg,setCfg]=useState({threshold_unit:'percent',green_min:90,yellow_min:75,feedback_green:'',feedback_amber:'',feedback_red:''});
+  const [showSettings,setShowSettings]=useState(false);
+  const setC=(k,v)=>setCfg(f=>({...f,[k]:v}));
+
+  async function load(){
+    let q=sb.from('call_criteria').select('*');
+    q = projId==null ? q.is('project_id',null) : q.eq('project_id',projId);
+    q = skill==null  ? q.is('skill',null)      : q.eq('skill',skill);
+    const {data,error}=await q.order('order_index',{ascending:true});
+    if(error){ showToast&&showToast('⚠ Bogen laden fehlgeschlagen: '+(error.message||''),'error'); setRows([]); return; }
+    setRows(data||[]);
+  }
+  async function loadCfg(){
+    let q=sb.from('call_score_config').select('*');
+    q = projId==null ? q.is('project_id',null) : q.eq('project_id',projId);
+    q = skill==null  ? q.is('skill',null)      : q.eq('skill',skill);
+    const {data}=await q.limit(1); const row=(data&&data[0])||null; setCfgRow(row);
+    setCfg(row?{threshold_unit:row.threshold_unit||'percent',green_min:row.green_min,yellow_min:row.yellow_min,feedback_green:row.feedback_green||'',feedback_amber:row.feedback_amber||'',feedback_red:row.feedback_red||''}
+      :{threshold_unit:'percent',green_min:90,yellow_min:75,feedback_green:'',feedback_amber:'',feedback_red:''});
+  }
+  useEffect(()=>{ setRows(null); setCfgRow(undefined); load(); loadCfg(); },[selProjId,selSkill]);
+  async function saveCfg(){
+    const payload={ project_id:projId, skill:skill, threshold_unit:cfg.threshold_unit, green_min:Number(cfg.green_min), yellow_min:Number(cfg.yellow_min),
+      feedback_green:cfg.feedback_green.trim()||null, feedback_amber:cfg.feedback_amber.trim()||null, feedback_red:cfg.feedback_red.trim()||null, updated_at:new Date().toISOString() };
+    let error;
+    if(cfgRow&&cfgRow.id){ ({error}=await sb.from('call_score_config').update(payload).eq('id',cfgRow.id)); }
+    else { ({error}=await sb.from('call_score_config').insert(payload)); }
+    if(error){ showToast&&showToast('⚠ Einstellungen nicht gespeichert: '+(error.message||''),'error'); return; }
+    await loadCfg(); showToast&&showToast('✓ Einstellungen gespeichert');
+  }
+
+  const visible=(rows||[]).filter(c=>showArchived?true:c.active);
+  const cats=[...new Set((rows||[]).map(c=>c.category).filter(Boolean))];
+  const totalWeight=(rows||[]).filter(c=>c.active).reduce((s,c)=>s+(Number(c.weight)||0),0);
+  function openNew(){ setForm(blank); setEdit('new'); }
+  function openEdit(c){ const lh=c.level_hints||{}; setForm({category:c.category||'',prompt:c.prompt||'',type:c.type||'points',max_points:c.max_points==null?1:c.max_points,weight:c.weight==null?1:c.weight,allow_na:c.allow_na!==false,hint:c.hint||'',agent_hint:c.agent_hint||'',lh_yes:lh.yes||'',lh_partial:lh.partial||'',lh_no:lh.no||''}); setEdit(c); }
+  async function save(){
+    if(!form.prompt.trim()){ showToast&&showToast('Kriterium ist Pflicht','info'); return; }
+    const lh = form.type==='tristate' ? {yes:form.lh_yes.trim()||null, partial:form.lh_partial.trim()||null, no:form.lh_no.trim()||null} : null;
+    const anyLh = lh && (lh.yes||lh.partial||lh.no);
+    const payload={ project_id:projId, skill:skill, category:form.category.trim()||null, prompt:form.prompt.trim(),
+      type:form.type, max_points:cqTypeMax(form.type,form.max_points), weight:Number(form.weight)||1,
+      allow_na:!!form.allow_na, hint:form.hint.trim()||null, agent_hint:form.agent_hint.trim()||null, level_hints: anyLh?lh:null,
+      updated_at:new Date().toISOString() };
+    let error;
+    if(edit==='new'){ const maxOrd=Math.max(0,...(rows||[]).map(c=>c.order_index||0));
+      ({error}=await sb.from('call_criteria').insert({...payload,order_index:maxOrd+10,active:true})); }
+    else { ({error}=await sb.from('call_criteria').update(payload).eq('id',edit.id)); }
+    if(error){ showToast&&showToast('⚠ Nicht gespeichert: '+(error.message||''),'error'); return; }
+    setEdit(null); await load(); showToast&&showToast('✓ Gespeichert');
+  }
+  async function archive(c){
+    const ok=await uiConfirm({title:'Kriterium archivieren', text:'Verschwindet aus künftigen Stichproben. Bereits erfasste Bewertungen bleiben erhalten und lesbar.', items:[c.prompt], confirmLabel:'Archivieren'});
+    if(!ok) return;
+    const {error}=await sb.from('call_criteria').update({active:false,updated_at:new Date().toISOString()}).eq('id',c.id);
+    if(error){ showToast&&showToast('⚠ '+(error.message||''),'error'); return; } await load();
+  }
+  async function restore(c){ const {error}=await sb.from('call_criteria').update({active:true,updated_at:new Date().toISOString()}).eq('id',c.id); if(!error) await load(); }
+  async function move(c,dir){
+    const i=visible.findIndex(x=>x.id===c.id); const j=i+dir; if(j<0||j>=visible.length) return;
+    const a=visible[i], b=visible[j];
+    await sb.from('call_criteria').update({order_index:b.order_index}).eq('id',a.id);
+    await sb.from('call_criteria').update({order_index:a.order_index}).eq('id',b.id);
+    await load();
+  }
+  const scopeLabel = projId==null ? 'Standard-Bogen (greift, wenn für eine Projekt/Skill-Kombination nichts gepflegt ist)'
+    : (skill==null ? (selProj?selProj.name:'')+' · alle Skills'
+                   : (selProj?selProj.name:'')+' · '+((projSkills.find(s=>s.key===skill)||{}).label||skill));
+
+  return (
+    <div>
+      <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',marginBottom:6}}>
+        <select className="form-select" style={{width:'auto',fontWeight:700}} value={selProjId} onChange={e=>setSelProjId(e.target.value)}>
+          <option value="__global__">★ Standard-Bogen (global)</option>
+          {projList.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+        </select>
+        {selProjId!=='__global__' && (
+          <select className="form-select" style={{width:'auto'}} value={selSkill} onChange={e=>setSelSkill(e.target.value)}>
+            <option value="__all__">Alle Skills (Projekt-Standard)</option>
+            {projSkills.map(s=><option key={s.key} value={s.key}>{s.label}</option>)}
+          </select>
+        )}
+        <div style={{flex:1}}/>
+        <label style={{fontSize:12,display:'flex',alignItems:'center',gap:6,color:'var(--muted)',cursor:'pointer'}}><input type="checkbox" checked={showArchived} onChange={e=>setShowArchived(e.target.checked)}/>Archivierte zeigen</label>
+        <button className="btn btn-primary btn-sm" onClick={openNew}>+ Neues Kriterium</button>
+      </div>
+      <div style={{fontSize:12,color:'var(--muted)',marginBottom:10,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+        <span>Bearbeiteter Bogen: <b>{scopeLabel}</b>. Ampel in <b>{cfg.threshold_unit==='points'?'Punkten':'Prozent'}</b>. Gesamtgewicht (aktiv): <b>{nf(totalWeight)}</b>.</span>
+        <button className="btn btn-sm" onClick={()=>setShowSettings(s=>!s)} style={{marginLeft:'auto'}}>⚙ Bogen-Einstellungen {showSettings?'▲':'▼'}</button>
+      </div>
+      {showSettings && (()=>{ const maxPts=(rows||[]).filter(c=>c.active).reduce((s,c)=>s+(Number(c.weight)||1)*cqTypeMax(c.type,c.max_points),0); const unit=cfg.threshold_unit==='points'; return (
+        <div style={{border:'1px solid var(--border)',borderRadius:10,padding:'14px 16px',marginBottom:14,background:'var(--surface-2)'}}>
+          <div style={{fontSize:13,fontWeight:700,marginBottom:10}}>Ampel &amp; Rückmeldungen — {scopeLabel}</div>
+          <div className="form-row">
+            <div className="form-group"><label className="form-label">Ampel-Einheit</label>
+              <select className="form-select" value={cfg.threshold_unit} onChange={e=>setC('threshold_unit',e.target.value)}>
+                <option value="percent">Prozent (0–100 %)</option>
+                <option value="points">Punkte</option>
+              </select>
+            </div>
+            <div className="form-group"><label className="form-label">grün ab</label>
+              <input className="form-input" type="number" step="0.5" value={cfg.green_min} onChange={e=>setC('green_min',e.target.value)}/>
+            </div>
+            <div className="form-group"><label className="form-label">gelb ab</label>
+              <input className="form-input" type="number" step="0.5" value={cfg.yellow_min} onChange={e=>setC('yellow_min',e.target.value)}/>
+            </div>
+          </div>
+          <div style={{fontSize:11,color:'var(--muted)',marginTop:4}}>{unit?('Punkte — der Bogen umfasst aktuell '+nf(maxPts)+' mögliche Punkte. grün ab '+nf(cfg.green_min)+', gelb ab '+nf(cfg.yellow_min)+', darunter rot.'):('Prozent — grün ab '+nf(cfg.green_min)+' %, gelb ab '+nf(cfg.yellow_min)+' %, darunter rot.')}</div>
+          <div style={{marginTop:12,fontSize:12,fontWeight:700,color:'var(--muted)'}}>Rückmeldungstexte je Stufe <span style={{fontWeight:400}}>(nur HR + Mitarbeiter, NICHT der Kunde)</span></div>
+          <div className="form-group" style={{marginTop:6}}><label className="form-label" style={{color:'#059669'}}>Grün</label>
+            <textarea className="form-input" rows={2} style={{resize:'vertical'}} value={cfg.feedback_green} onChange={e=>setC('feedback_green',e.target.value)} placeholder="Rückmeldung bei grünem Ergebnis…"/>
+          </div>
+          <div className="form-group"><label className="form-label" style={{color:'#d97706'}}>Orange</label>
+            <textarea className="form-input" rows={2} style={{resize:'vertical'}} value={cfg.feedback_amber} onChange={e=>setC('feedback_amber',e.target.value)} placeholder="Rückmeldung bei orangem Ergebnis…"/>
+          </div>
+          <div className="form-group"><label className="form-label" style={{color:'#dc2626'}}>Rot</label>
+            <textarea className="form-input" rows={2} style={{resize:'vertical'}} value={cfg.feedback_red} onChange={e=>setC('feedback_red',e.target.value)} placeholder="Rückmeldung bei rotem Ergebnis…"/>
+          </div>
+          <div style={{display:'flex',justifyContent:'flex-end'}}><button className="btn btn-sm btn-primary" onClick={saveCfg}>💾 Einstellungen speichern</button></div>
+        </div>
+      ); })()}
+
+      {rows===null && <div className="sp-empty">Lade Bogen…</div>}
+      {rows!==null && visible.length===0 && <div className="sp-empty">Noch keine Kriterien für diesen Bogen. Lege das erste an{projId!=null?' — oder pflege alternativ den Standard-Bogen':''}.</div>}
+      {visible.map((c,idx)=>{
+        const prevCat=idx>0?visible[idx-1].category:null;
+        const catHeader=(c.category!==prevCat)?c.category:null;
+        return <React.Fragment key={c.id}>
+          {catHeader!=null && catHeader!=='' && <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em',margin:'12px 0 6px'}}>{catHeader}</div>}
+          <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap',padding:'9px 12px',border:'1px solid var(--border)',borderRadius:8,marginBottom:6,background:c.active?'var(--card)':'var(--surface-2)',opacity:c.active?1:0.6}}>
+            <span style={{fontSize:11,fontWeight:700,padding:'2px 7px',borderRadius:5,whiteSpace:'nowrap',background:'#eef2ff',color:'#4338ca'}}>{cqTypeLabel(c.type)}{(c.type==='points'||c.type==='tristate')?' · max '+nf(c.max_points):''}</span>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontSize:13,fontWeight:600}}>{c.prompt}{!c.active&&<span style={{marginLeft:6,fontSize:10,color:'var(--muted)'}}>(archiviert)</span>}</div>
+              <div style={{fontSize:11,color:'var(--muted)',marginTop:2}}>Gewicht {nf(c.weight)}{c.allow_na?' · „nicht anwendbar" erlaubt':''}{c.agent_hint?' · 👤 Agenten-Hilfe':''}{c.level_hints?' · 🧭 Ausprägungen':''}{c.hint?' · '+c.hint:''}</div>
+            </div>
+            {c.active ? <React.Fragment>
+              <button className="btn btn-sm" onClick={()=>openEdit(c)}>Bearbeiten</button>
+              <button className="btn btn-sm" disabled={idx===0} onClick={()=>move(c,-1)}>↑</button>
+              <button className="btn btn-sm" disabled={idx===visible.length-1} onClick={()=>move(c,1)}>↓</button>
+              <button className="btn btn-sm" style={{color:'var(--red)'}} onClick={()=>archive(c)}>Archivieren</button>
+            </React.Fragment> : <button className="btn btn-sm" onClick={()=>restore(c)}>↩ Wiederherstellen</button>}
+          </div>
+        </React.Fragment>;
+      })}
+
+      {edit && (
+        <div className="modal-overlay" onClick={()=>setEdit(null)}>
+          <div className="modal" style={{width:560,maxWidth:'95vw'}} onClick={e=>e.stopPropagation()}>
+            <div className="modal-header"><span className="modal-title">{edit==='new'?'Neues Kriterium':'Kriterium bearbeiten'}</span><button className="btn btn-sm" onClick={()=>setEdit(null)}>✕</button></div>
+            <div className="modal-body" style={{padding:20}}>
+              <div className="form-row">
+                <div className="form-group"><label className="form-label">Kategorie</label>
+                  <input className="form-input" list="cq-cats" value={form.category} onChange={e=>set('category',e.target.value)} placeholder="z. B. Gesprächseinstieg"/>
+                  <datalist id="cq-cats">{cats.map(s=><option key={s} value={s}/>)}</datalist>
+                </div>
+                <div className="form-group"><label className="form-label">Typ</label>
+                  <select className="form-select" value={form.type} onChange={e=>set('type',e.target.value)}>
+                    {CQ_TYPES.map(([k,l])=><option key={k} value={k}>{l}</option>)}
+                  </select>
+                </div>
+              </div>
+              <div className="form-group" style={{marginTop:10}}><label className="form-label">Kriterium</label>
+                <textarea className="form-input" rows={2} style={{resize:'vertical'}} value={form.prompt} onChange={e=>set('prompt',e.target.value)} placeholder="Was wird geprüft?…"/>
+              </div>
+              <div className="form-group" style={{marginTop:10}}><label className="form-label">Hilfestellung für den Agenten (optional)</label>
+                <textarea className="form-input" rows={2} style={{resize:'vertical'}} value={form.agent_hint} onChange={e=>set('agent_hint',e.target.value)} placeholder="Wie macht der Agent das gut? (sichtbar auch im Mitarbeiter-Portal)"/>
+              </div>
+              {form.type==='tristate' && (
+                <div style={{marginTop:10,padding:'12px 14px',background:'var(--surface-2)',borderRadius:8}}>
+                  <div style={{fontSize:12,fontWeight:700,marginBottom:8}}>Auswerter-Ausprägungen <span style={{fontWeight:400,color:'var(--muted)'}}>— was bedeutet welche Stufe konkret?</span></div>
+                  <div className="form-group"><label className="form-label" style={{color:'#059669'}}>ja (1 Punkt)</label>
+                    <textarea className="form-input" rows={2} style={{resize:'vertical'}} value={form.lh_yes} onChange={e=>set('lh_yes',e.target.value)} placeholder="Wann wird volle Punktzahl vergeben?"/>
+                  </div>
+                  <div className="form-group"><label className="form-label" style={{color:'#d97706'}}>teilweise (0,5 Punkte)</label>
+                    <textarea className="form-input" rows={2} style={{resize:'vertical'}} value={form.lh_partial} onChange={e=>set('lh_partial',e.target.value)} placeholder="Wann gibt es halbe Punktzahl?"/>
+                  </div>
+                  <div className="form-group"><label className="form-label" style={{color:'#dc2626'}}>nein (0 Punkte)</label>
+                    <textarea className="form-input" rows={2} style={{resize:'vertical'}} value={form.lh_no} onChange={e=>set('lh_no',e.target.value)} placeholder="Wann gibt es keine Punkte?"/>
+                  </div>
+                </div>
+              )}
+              <div className="form-row" style={{marginTop:10}}>
+                {(form.type==='points'||form.type==='tristate') && (
+                  <div className="form-group"><label className="form-label">{form.type==='tristate'?'Punkte für „ja"':'Max. Punkte'}</label>
+                    <input className="form-input" type="number" min="0.5" step="0.5" value={form.max_points} onChange={e=>set('max_points',e.target.value)}/>
+                  </div>
+                )}
+                <div className="form-group"><label className="form-label">Gewicht</label>
+                  <input className="form-input" type="number" min="0" step="0.5" value={form.weight} onChange={e=>set('weight',e.target.value)}/>
+                </div>
+                <div className="form-group" style={{alignSelf:'flex-end'}}>
+                  <label style={{fontSize:13,display:'flex',alignItems:'center',gap:7,cursor:'pointer'}}><input type="checkbox" checked={form.allow_na} onChange={e=>set('allow_na',e.target.checked)}/>„Nicht anwendbar" erlauben</label>
+                </div>
+              </div>
+              <div className="form-group" style={{marginTop:10}}><label className="form-label">Hinweis für den Prüfer (optional)</label>
+                <input className="form-input" value={form.hint} onChange={e=>set('hint',e.target.value)} placeholder="Worauf achten?"/>
+              </div>
+              <div style={{marginTop:10,fontSize:11,color:'var(--muted)'}}>
+                {form.type==='points' && ('Punkte 0…'+(Number(form.max_points)||1)+' je Kriterium, gewichtet in den Score.')}
+                {form.type==='yesno' && 'Ja = volle Punktzahl, Nein = 0 — gewichtet in den Score.'}
+                {form.type==='tristate' && ('Dreistufig: ja = '+(Number(form.max_points)||1)+', teilweise = '+((Number(form.max_points)||1)/2)+', nein = 0. „Nicht anwendbar" zählt wie ja (volle Punkte).')}
+                {form.type==='grade' && 'Note 1–5 (1 = beste), in Punkte umgerechnet und gewichtet in den Score.'}
+              </div>
+            </div>
+            <div className="modal-footer" style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
+              <button className="btn btn-sm" onClick={()=>setEdit(null)}>Abbrechen</button>
+              <button className="btn btn-sm btn-primary" onClick={save}>💾 Speichern</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CallQaView({projects, employees, showToast}){
+  const [tab,setTab]=useState('uebersicht');
+  const TABS=[['uebersicht','Übersicht'],['vorschlaege','Testvorschläge'],['bogen','Bewertungsbogen']];
+  return (
+    <div>
+      <div style={{fontSize:20,fontWeight:700,marginBottom:4}}>📞 Call-Qualität</div>
+      <div style={{fontSize:13,color:'var(--muted)',marginBottom:14}}>HR hört Calls einzelner Mitarbeiter an und bewertet sie anhand des Kunden-Bogens (je Projekt und Skill). Daraus entsteht ein Prozent-Score mit Ampel.</div>
+      <div style={{display:'flex',gap:6,marginBottom:16,borderBottom:'1px solid var(--border)'}}>
+        {TABS.map(([k,l])=>(
+          <button key={k} onClick={()=>setTab(k)} style={{padding:'8px 14px',fontSize:13,fontWeight:600,cursor:'pointer',border:'none',background:'none',borderBottom:'2px solid '+(tab===k?'var(--blue)':'transparent'),color:tab===k?'var(--blue)':'var(--muted)'}}>{l}</button>
+        ))}
+      </div>
+      {tab==='uebersicht' && <CallQaOverview projects={projects} employees={employees} showToast={showToast}/>}
+      {tab==='vorschlaege' && <CallQaSuggestions projects={projects} employees={employees} showToast={showToast}/>}
+      {tab==='bogen' && <CallQaCatalog projects={projects} showToast={showToast}/>}
+    </div>
+  );
+}
+
+// ══ Call-Qualität (Schnitt 3: Erfassung am Mitarbeiter + grafisches Ampel-Archiv) ══
+// Score-Bruchteil je Kriterium (0..1). grade 1–5: 1 = beste. yesno: Ja=1. points: erreicht/max.
+function cqFraction(type, points, max){
+  if(points==null||points==='') return null; const p=Number(points); if(isNaN(p)) return null;
+  if(type==='grade') return Math.max(0,Math.min(1,(5-p)/4));
+  if(type==='yesno') return p>=1?1:0;
+  const m=Number(max)||1; return Math.max(0,Math.min(1, m? p/m : 0));
+}
+// Gesamt-Prozent = gewichtete erreichte Bruchteile. n.a. zählt wie ja (volle Punkte). Leere Kriterien zählen nicht.
+function cqTotalPct(scores){ let ws=0, fs=0;
+  (scores||[]).forEach(s=>{ const f = s.na ? 1 : cqFraction(s.type_snapshot,s.points,s.max_points_snapshot); if(f==null) return;
+    const w=Number(s.weight_snapshot)||0; ws+=w; fs+=w*f; });
+  return ws>0 ? Math.round(fs/ws*1000)/10 : null;
+}
+// Erreichte / mögliche Punkte (gewichtet). n.a. = volle Punkte. Leere Kriterien zählen weder oben noch unten.
+function cqPoints(scores){ let got=0, max=0;
+  (scores||[]).forEach(s=>{ const f = s.na ? 1 : cqFraction(s.type_snapshot,s.points,s.max_points_snapshot); if(f==null) return;
+    const w=Number(s.weight_snapshot)||1, mp=Number(s.max_points_snapshot)||0; got+=w*f*mp; max+=w*mp; });
+  return {got:Math.round(got*100)/100, max:Math.round(max*100)/100};
+}
+// Ampel aus (aufgelöster) Config. grün ab green_min, gelb ab yellow_min, sonst rot.
+function cqAmpel(pct, cfg){
+  const g=(cfg&&cfg.green_min!=null)?Number(cfg.green_min):90, y=(cfg&&cfg.yellow_min!=null)?Number(cfg.yellow_min):75;
+  if(pct==null) return {key:'none',color:'#94a3b8',bg:'#f1f5f9',label:'—'};
+  if(pct>=g) return {key:'green',color:'#059669',bg:'#ecfdf5',label:'stark'};
+  if(pct>=y) return {key:'amber',color:'#d97706',bg:'#fffbeb',label:'solide'};
+  return {key:'red',color:'#dc2626',bg:'#fef2f2',label:'daran arbeiten'};
+}
+// Einheitsbewusste Ampel: bei threshold_unit='points' gegen Punkte, sonst gegen Prozent.
+function cqUnit(cfg){ return (cfg&&cfg.threshold_unit)==='points'?'points':'percent'; }
+function cqAmpelU(pct, points, cfg){ return cqUnit(cfg)==='points' ? cqAmpel(points, cfg) : cqAmpel(pct, cfg); }
+function cqNum(n){ return Number(n||0).toLocaleString('de-DE',{maximumFractionDigits:1}); }
+function cqResolveConfig(cfgs, projId, skill){
+  const find=(p,s)=>(cfgs||[]).find(c=>(c.project_id||null)===(p||null)&&(c.skill||null)===(s||null));
+  return find(projId,skill)||find(projId,null)||find(null,null)||{green_min:90,yellow_min:75};
+}
+// Bogen für (Projekt,Skill) laden, Rückfall (proj,skill) → (proj,—) → (—,—).
+async function cqLoadBogen(projId, skill){
+  async function q(p,s){ let x=sb.from('call_criteria').select('*').eq('active',true);
+    x = p==null ? x.is('project_id',null) : x.eq('project_id',p);
+    x = s==null ? x.is('skill',null)      : x.eq('skill',s);
+    const {data}=await x.order('order_index',{ascending:true}); return data||[]; }
+  let rows=await q(projId,skill); let scope='project_skill';
+  if(!rows.length && skill!=null){ rows=await q(projId,null); scope='project'; }
+  if(!rows.length){ rows=await q(null,null); scope='global'; }
+  return {rows, scope};
+}
+function cqRankScores(scores){
+  const arr=(scores||[]).filter(s=>!s.na).map(s=>({s,f:cqFraction(s.type_snapshot,s.points,s.max_points_snapshot)})).filter(x=>x.f!=null);
+  const strong=arr.slice().sort((a,b)=>b.f-a.f).filter(x=>x.f>=0.9).slice(0,3);
+  const weak=arr.slice().sort((a,b)=>a.f-b.f).filter(x=>x.f<0.75).slice(0,3);
+  return {strong, weak};
+}
+
+// Kriterienfarbe je Stufe (unabhängig von Bogen-Einheit): voll=grün, halb=amber, 0=rot.
+function cqCritColor(f){ return f==null?'#94a3b8':(f>=0.99?'#059669':(f>=0.5?'#d97706':'#dc2626')); }
+// Ring-Gauge (Donut). Füllung = Prozent-Anteil; Mitte zeigt big + sub (einheitsabhängig).
+function CqRing({pct, ampel, size, big, sub}){
+  size=size||100; const r=(size-14)/2, c=2*Math.PI*r, off=c*(1-(pct||0)/100);
+  return <svg width={size} height={size} viewBox={'0 0 '+size+' '+size} style={{flexShrink:0}}>
+    <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="#e5e7eb" strokeWidth="9"/>
+    {pct!=null && <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={ampel.color} strokeWidth="9" strokeLinecap="round" strokeDasharray={c} strokeDashoffset={off} transform={'rotate(-90 '+(size/2)+' '+(size/2)+')'}/>}
+    <text x="50%" y="46%" textAnchor="middle" dominantBaseline="middle" style={{fontSize:size*0.24,fontWeight:800,fill:ampel.color,fontFamily:'var(--font-mono)'}}>{big!=null?big:(pct==null?'—':Math.round(pct))}</text>
+    <text x="50%" y="64%" textAnchor="middle" dominantBaseline="middle" style={{fontSize:size*0.1,fontWeight:700,fill:'#94a3b8'}}>{sub||'Prozent'}</text>
+  </svg>;
+}
+function CqTrend({samples, cfg}){
+  const pts=samples.slice().reverse().filter(s=>s.total_pct!=null);
+  if(pts.length<2) return null;
+  const ys0=pts.map(s=>s.total_pct);
+  const W=220,H=46,mn=Math.min.apply(null,ys0),mx=Math.max.apply(null,ys0),span=Math.max(1,mx-mn);
+  const xs=i=>i/(pts.length-1)*(W-8)+4, ys=v=>H-((v-mn)/span)*(H-12)-6;
+  const d=pts.map((s,i)=>(i?'L':'M')+xs(i).toFixed(1)+' '+ys(s.total_pct).toFixed(1)).join(' ');
+  return <svg width={W} height={H} viewBox={'0 0 '+W+' '+H}>
+    <path d={d} fill="none" stroke="#cbd5e1" strokeWidth="2"/>
+    {pts.map((s,i)=>{ const a=cqAmpelU(s.total_pct,s.total_points,cfg); return <circle key={i} cx={xs(i)} cy={ys(s.total_pct)} r={i===pts.length-1?4.5:2.8} fill={a.color}/>; })}
+  </svg>;
+}
+function CqBreakdown({scores, cfg}){
+  const rows=(scores||[]).slice().sort((a,b)=>(a.order_index||0)-(b.order_index||0)); let lastCat=null;
+  return <div style={{marginTop:12}}>
+    {rows.map((s,i)=>{ const f = s.na ? 1 : cqFraction(s.type_snapshot,s.points,s.max_points_snapshot); const col=cqCritColor(f);
+      const catHead=(s.category_snapshot||'')!==lastCat?(s.category_snapshot||''):null; lastCat=s.category_snapshot||'';
+      return <React.Fragment key={i}>
+        {catHead && <div style={{fontSize:10,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em',margin:'10px 0 4px'}}>{catHead}</div>}
+        <div style={{display:'flex',alignItems:'center',gap:10,padding:'5px 0'}}>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontSize:12,fontWeight:600}}>{s.prompt_snapshot}</div>
+            {s.comment && <div style={{fontSize:11,color:'var(--muted)',marginTop:1}}>{s.comment}</div>}
+          </div>
+          <div style={{width:120,height:8,background:'#eef2f4',borderRadius:5,overflow:'hidden',flexShrink:0}}>{f!=null && <div style={{width:(f*100)+'%',height:'100%',background:col}}/>}</div>
+          <div style={{width:64,textAlign:'right',fontSize:12,fontWeight:700,fontFamily:'var(--font-mono)',color:col,flexShrink:0}}>{s.na?'n.a.':(f==null?'—':cqNum((Number(s.max_points_snapshot)||1)*f)+' Pkt')}</div>
+        </div>
+      </React.Fragment>;
+    })}
+  </div>;
+}
+function CqSampleCard({sample, cfg}){
+  const a=cqAmpelU(sample.total_pct,sample.total_points,cfg); const unit=cqUnit(cfg); const {strong,weak}=cqRankScores(sample._scores); const [open,setOpen]=useState(false);
+  const big = unit==='points' ? (sample.total_points==null?'—':cqNum(sample.total_points)) : (sample.total_pct==null?'—':Math.round(sample.total_pct));
+  const sub = unit==='points' ? ('/ '+cqNum(sample.max_points!=null?sample.max_points:0)+' Pkt') : 'Prozent';
+  return <div style={{border:'1px solid var(--border)',borderRadius:12,padding:16,background:'var(--card)',marginBottom:12}}>
+    <div style={{display:'flex',gap:16,alignItems:'center',flexWrap:'wrap'}}>
+      <CqRing pct={sample.total_pct} ampel={a} size={108} big={big} sub={sub}/>
+      <div style={{flex:1,minWidth:180}}>
+        <span style={{display:'inline-block',fontSize:12,fontWeight:800,padding:'3px 11px',borderRadius:20,background:a.bg,color:a.color}}>{a.label}</span>
+        <div style={{fontSize:12,color:'var(--muted)',marginTop:6}}>{sample.sampled_date} · KW {sample.kw}/{sample.year} · {sample.project_id||'—'}{sample.skill?' · '+sample.skill:''}{sample.conducted_by_name?' · '+sample.conducted_by_name:''}</div>
+        {sample.note && <div style={{fontSize:13,marginTop:6}}>{sample.note}</div>}
+        {sample.feedback_text && <div style={{fontSize:12,marginTop:8,padding:'8px 10px',borderRadius:8,background:a.bg,color:a.color,fontWeight:600}}>{sample.feedback_text}</div>}
+      </div>
+    </div>
+    <div style={{display:'flex',gap:16,flexWrap:'wrap',marginTop:12}}>
+      {strong.length>0 && <div style={{flex:1,minWidth:200}}>
+        <div style={{fontSize:11,fontWeight:700,color:'#059669',marginBottom:4}}>✓ Stark</div>
+        {strong.map((x,i)=><div key={i} style={{fontSize:12,padding:'2px 0'}}>{x.s.prompt_snapshot}</div>)}
+      </div>}
+      {weak.length>0 && <div style={{flex:1,minWidth:200}}>
+        <div style={{fontSize:11,fontWeight:700,color:'#dc2626',marginBottom:4}}>→ Daran arbeiten</div>
+        {weak.map((x,i)=><div key={i} style={{fontSize:12,padding:'2px 0'}}>{x.s.prompt_snapshot}</div>)}
+      </div>}
+    </div>
+    <button className="btn btn-sm" style={{marginTop:10}} onClick={()=>setOpen(o=>!o)}>{open?'Details ausblenden':'Alle Kriterien zeigen'}</button>
+    {open && <CqBreakdown scores={sample._scores} cfg={cfg}/>}
+  </div>;
+}
+function CqOlderRow({sample, cfg}){
+  const a=cqAmpelU(sample.total_pct,sample.total_points,cfg); const unit=cqUnit(cfg); const [open,setOpen]=useState(false);
+  const num = unit==='points' ? (sample.total_points==null?'—':cqNum(sample.total_points)) : (sample.total_pct==null?'—':Math.round(sample.total_pct));
+  return <div style={{border:'1px solid var(--border)',borderRadius:8,marginBottom:6,overflow:'hidden'}}>
+    <div onClick={()=>setOpen(o=>!o)} style={{display:'flex',alignItems:'center',gap:12,padding:'8px 12px',cursor:'pointer'}}>
+      <span style={{width:48,textAlign:'center',fontWeight:800,fontFamily:'var(--font-mono)',color:a.color}}>{num}</span>
+      <span style={{width:9,height:9,borderRadius:'50%',background:a.color,flexShrink:0}}/>
+      <div style={{flex:1,minWidth:0,fontSize:12}}>{sample.sampled_date} · KW {sample.kw}/{sample.year} · {sample.project_id||'—'}{sample.skill?' · '+sample.skill:''}</div>
+      <span style={{fontSize:11,color:'var(--muted)'}}>{open?'▲':'▼'}</span>
+    </div>
+    {open && <div style={{padding:'0 12px 12px'}}><CqBreakdown scores={sample._scores} cfg={cfg}/>{sample.feedback_text&&<div style={{fontSize:12,marginTop:8,padding:'6px 9px',borderRadius:7,background:a.bg,color:a.color,fontWeight:600}}>{sample.feedback_text}</div>}{sample.note&&<div style={{fontSize:12,marginTop:6,color:'var(--muted)'}}>{sample.note}</div>}</div>}
+  </div>;
+}
+function CqArchive({samples, cfg}){
+  const unit=cqUnit(cfg); const metric=s=> unit==='points'? s.total_points : s.total_pct;
+  const sorted=samples.slice().sort((a,b)=>String(b.sampled_date).localeCompare(String(a.sampled_date)));
+  const latest=sorted[0], older=sorted.slice(1);
+  const last3=sorted.map(metric).filter(x=>x!=null).slice(0,3);
+  const avg=last3.length?Math.round(last3.reduce((a,b)=>a+b,0)/last3.length*10)/10:null;
+  const avgA=cqAmpel(avg,cfg);
+  return <div>
+    <div style={{display:'flex',gap:24,alignItems:'center',flexWrap:'wrap',marginBottom:14}}>
+      <div><div style={{fontSize:12,color:'var(--muted)',fontWeight:700}}>Stichproben</div><div style={{fontSize:22,fontWeight:800}}>{sorted.length}</div></div>
+      <div><div style={{fontSize:12,color:'var(--muted)',fontWeight:700}}>Ø letzte 3</div><div style={{fontSize:22,fontWeight:800,color:avgA.color}}>{avg==null?'—':(unit==='points'?cqNum(avg)+' Pkt':avg+' %')}</div></div>
+      <div style={{marginLeft:'auto'}}><CqTrend samples={sorted} cfg={cfg}/></div>
+    </div>
+    {latest && <CqSampleCard sample={latest} cfg={cfg}/>}
+    {older.length>0 && <div style={{marginTop:8}}>
+      <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em',marginBottom:6}}>Frühere Stichproben</div>
+      {older.map(s=><CqOlderRow key={s.id} sample={s} cfg={cfg}/>)}
+    </div>}
+  </div>;
+}
+
+// Beispiel-Bogen + Beispiel-Stichproben (NUR Optik, klar markiert, NIE gespeichert — wie Präsentations-Dummy).
+const CQ_DEMO_CRITERIA=[
+  {id:'d1',category:'Gesprächseinstieg',order_index:10,prompt:'Begrüßung & Verabschiedung korrekt',type:'yesno',max_points:1,weight:1,allow_na:true},
+  {id:'d2',category:'Gesprächseinstieg',order_index:20,prompt:'Kunde mit Namen angesprochen',type:'yesno',max_points:1,weight:1,allow_na:true},
+  {id:'d3',category:'Beratung',order_index:30,prompt:'Bedarf sauber ermittelt',type:'grade',max_points:5,weight:2,allow_na:true},
+  {id:'d4',category:'Beratung',order_index:40,prompt:'Lösung verständlich erklärt',type:'grade',max_points:5,weight:2,allow_na:true},
+  {id:'d5',category:'Compliance',order_index:50,prompt:'Pflichtangaben genannt',type:'yesno',max_points:1,weight:1,allow_na:false},
+  {id:'d6',category:'Abschluss',order_index:60,prompt:'Gesamteindruck (0–10)',type:'points',max_points:10,weight:1,allow_na:false},
+];
+function cqDemoSamples(){
+  const mk=(id,off,map,note)=>{ const scores=CQ_DEMO_CRITERIA.map(c=>({criterion_id:c.id,order_index:c.order_index,category_snapshot:c.category,prompt_snapshot:c.prompt,type_snapshot:c.type,max_points_snapshot:c.max_points,weight_snapshot:c.weight,points:map[c.id],na:false,comment:map['c_'+c.id]||null}));
+    const dt=new Date(Date.now()-off*864e5); const cw=getISOWeek(dt);
+    return {id, sampled_date:isoLocal(dt), kw:cw.kw, year:cw.year, project_id:'HolidayCheck', skill:'support', conducted_by_name:'Beispiel', note, total_pct:cqTotalPct(scores), _scores:scores}; };
+  return [
+    mk('demo1',3,{d1:1,d2:1,d3:1,d4:2,d5:1,d6:9,c_d4:'Sehr klar erklärt.'},'Starkes Gespräch, souveräner Abschluss.'),
+    mk('demo2',12,{d1:1,d2:1,d3:2,d4:3,d5:1,d6:7,c_d4:'Erklärung etwas knapp.'},'Solide, Kleinigkeiten in der Beratung.'),
+    mk('demo3',24,{d1:1,d2:0,d3:3,d4:3,d5:0,d6:6,c_d2:'Kunde nicht mit Namen angesprochen.',c_d5:'Pflichtangabe vergessen.'},'Mehrere Punkte offen, bitte nacharbeiten.'),
+  ];
+}
+
+// Erfassungs-Modal: Bogen ausfüllen → Score wird live berechnet und beim Speichern eingefroren.
+function CallSampleModal({emp, onClose, onSaved}){
+  const nf=n=>Number(n||0).toLocaleString('de-DE');
+  const projId=(emp&&emp.project_id)||null;
+  const skill=(((emp&&(emp.project_skill||emp.primary_skill))||'')+'').toLowerCase()||null;
+  const [bogen,setBogen]=useState(null);
+  const [scope,setScope]=useState('');
+  const [isExample,setIsExample]=useState(false);
+  const [cfg,setCfg]=useState({green_min:90,yellow_min:75});
+  const [values,setValues]=useState({});
+  const [note,setNote]=useState('');
+  const [callRef,setCallRef]=useState('');
+  const [date,setDate]=useState(isoLocal(new Date()));
+  const [condName,setCondName]=useState('');
+  const [busy,setBusy]=useState(false);
+  useEffect(()=>{ (async()=>{
+    const r=await cqLoadBogen(projId,skill);
+    if(r.rows.length){ setBogen(r.rows); setScope(r.scope); setIsExample(false); }
+    else { setBogen(CQ_DEMO_CRITERIA); setScope('example'); setIsExample(true); }
+    try{ const rc=await sb.from('call_score_config').select('*'); setCfg(cqResolveConfig(rc.data||[],projId,skill)); }catch(e){}
+    try{ const u=await sb.auth.getUser(); const uid=u&&u.data&&u.data.user&&u.data.user.id;
+      if(uid){ const nr=await sb.from('app_users').select('full_name').eq('user_id',uid).single(); if(nr&&nr.data&&nr.data.full_name) setCondName(nr.data.full_name); } }catch(e){}
+  })(); },[]);
+  const setV=(cid,patch)=>setValues(v=>({...v,[cid]:{...(v[cid]||{}),...patch}}));
+  const preview=(bogen||[]).map(c=>{ const v=values[c.id]||{}; return {type_snapshot:c.type, points:v.na?null:(v.points==null?null:v.points), max_points_snapshot:cqTypeMax(c.type,c.max_points), weight_snapshot:c.weight, na:!!v.na}; });
+  const pct=cqTotalPct(preview); const pts=cqPoints(preview); const amp=cqAmpelU(pct, pts.got, cfg); const unit=cqUnit(cfg);
+  const feedbackFor = amp.key==='green'?(cfg.feedback_green||null) : amp.key==='amber'?(cfg.feedback_amber||null) : amp.key==='red'?(cfg.feedback_red||null) : null;
+  async function save(){
+    if(isExample||pct==null||busy) return; setBusy(true);
+    const scoreRows=bogen.map(c=>{ const v=values[c.id]||{}; return { criterion_id:c.id, order_index:c.order_index||0, category_snapshot:c.category||null, prompt_snapshot:c.prompt, type_snapshot:c.type, max_points_snapshot:cqTypeMax(c.type,c.max_points), weight_snapshot:Number(c.weight)||1, points:v.na?null:(v.points==null?null:Number(v.points)), na:!!v.na, comment:(v.comment&&v.comment.trim())||null, level_hints_snapshot:(c.type==='tristate'&&c.level_hints)?c.level_hints:null }; });
+    const [Y,M,D]=date.split('-').map(Number); const cw=getISOWeek(new Date(Y,M-1,D));
+    let uid=null; try{ const u=await sb.auth.getUser(); uid=u&&u.data&&u.data.user?u.data.user.id:null; }catch(e){}
+    const {data:s,error}=await sb.from('call_samples').insert({ employee_id:emp.id, sampled_date:date, kw:cw.kw, year:cw.year, project_id:projId, skill:skill, criteria_scope:scope, call_ref:callRef.trim()||null, note:note.trim()||null, total_pct:pct, total_points:pts.got, max_points:pts.max, feedback_text:feedbackFor||null, status:'done', conducted_by:uid, conducted_by_name:condName||null, conducted_at:new Date().toISOString() }).select().single();
+    if(error){ setBusy(false); alert('Nicht gespeichert: '+(error.message||'')); return; }
+    const ins=scoreRows.map(r=>({...r, sample_id:s.id}));
+    const {error:e2}=await sb.from('call_scores').insert(ins);
+    setBusy(false);
+    if(e2){ alert('Bewertungen nicht gespeichert: '+(e2.message||'')); return; }
+    onSaved&&onSaved();
+  }
+  return <div className="modal-overlay" onClick={onClose}>
+    <div className="modal" style={{width:660,maxWidth:'96vw',maxHeight:'92vh',display:'flex',flexDirection:'column'}} onClick={e=>e.stopPropagation()}>
+      <div className="modal-header"><span className="modal-title">Call-Stichprobe · {emp.first_name} {emp.last_name}</span><button className="btn btn-sm" onClick={onClose}>✕</button></div>
+      <div className="modal-body" style={{padding:20,overflowY:'auto'}}>
+        {bogen===null ? <div className="sp-empty">Lade Bogen…</div> : <React.Fragment>
+          {isExample && <div style={{padding:'8px 12px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:8,color:'#dc2626',fontWeight:700,fontSize:12,marginBottom:12}}>BEISPIEL-BOGEN — für dieses Projekt/Skill ist noch kein Bogen gepflegt. Diese Erfassung wird <u>nicht</u> gespeichert. Bogen im Tab „Bewertungsbogen" anlegen.</div>}
+          {!isExample && scope!=='project_skill' && <div style={{padding:'6px 10px',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:8,color:'#92400e',fontSize:11,marginBottom:10}}>Kein eigener Bogen für diese Kombination — es gilt der {scope==='project'?'Projekt-Standard':'globale Standard-Bogen'}.</div>}
+          <div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'center',marginBottom:8}}>
+            <div style={{fontSize:12,color:'var(--muted)'}}>Projekt/Skill (automatisch): <b>{projId||'—'}{skill?' · '+skill:''}</b></div>
+            <label style={{fontSize:12,display:'flex',alignItems:'center',gap:6}}>Datum <input className="form-input" type="date" style={{width:150}} value={date} onChange={e=>setDate(e.target.value)}/></label>
+            <input className="form-input" style={{width:170}} placeholder="Call-/Ticket-ID (optional)" value={callRef} onChange={e=>setCallRef(e.target.value)}/>
+          </div>
+          {(bogen||[]).map((c,idx)=>{ const v=values[c.id]||{}; const max=cqTypeMax(c.type,c.max_points);
+            const prevCat=idx>0?(bogen[idx-1].category||''):null; const catH=((c.category||'')!==prevCat)?(c.category||''):null;
+            return <React.Fragment key={c.id}>
+              {catH!=null && catH!=='' && <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em',margin:'12px 0 4px'}}>{catH}</div>}
+              <div style={{padding:'8px 0',borderBottom:'1px solid var(--border)'}}>
+                <div style={{display:'flex',alignItems:'flex-start',gap:10,flexWrap:'wrap'}}>
+                  <div style={{flex:1,minWidth:150}}>
+                    <div style={{fontSize:13,fontWeight:600,opacity:v.na?0.5:1}}>{c.prompt}</div>
+                    {c.agent_hint && <div style={{fontSize:11,color:'var(--muted)',marginTop:2}}>💡 {c.agent_hint}</div>}
+                    {c.hint && <div style={{fontSize:11,color:'var(--muted)',marginTop:1}}>{c.hint}</div>}
+                  </div>
+                  {!v.na && <div style={{display:'flex',gap:6,alignItems:'center',flexShrink:0}}>
+                    {c.type==='points' && <React.Fragment><input className="form-input" type="number" min="0" max={max} step="1" style={{width:80}} value={v.points==null?'':v.points} onChange={e=>setV(c.id,{points:e.target.value===''?null:Number(e.target.value)})}/><span style={{fontSize:11,color:'var(--muted)'}}>/ {nf(max)}</span></React.Fragment>}
+                    {c.type==='yesno' && [['1','Ja'],['0','Nein']].map(([val,l])=><button key={val} className="btn btn-sm" style={{background:String(v.points)===val?(val==='1'?'#059669':'#dc2626'):'transparent',color:String(v.points)===val?'#fff':'var(--text)',border:'1px solid var(--border)',fontWeight:700}} onClick={()=>setV(c.id,{points:Number(val)})}>{l}</button>)}
+                    {c.type==='tristate' && [['ja',max,'#059669'],['teilw.',max/2,'#d97706'],['nein',0,'#dc2626']].map(([l,val,col])=>{ const sel=Number(v.points)===val; return <button key={l} className="btn btn-sm" style={{background:sel?col:'transparent',color:sel?'#fff':'var(--text)',border:'1px solid var(--border)',fontWeight:700}} onClick={()=>setV(c.id,{points:val})}>{l}</button>; })}
+                    {c.type==='grade' && [1,2,3,4,5].map(n=><button key={n} className="btn btn-sm" style={{minWidth:34,background:v.points===n?fbGradeColor(n):'transparent',color:v.points===n?'#fff':'var(--text)',border:'1px solid var(--border)',fontWeight:700}} onClick={()=>setV(c.id,{points:n})}>{n}</button>)}
+                  </div>}
+                  {c.allow_na && <label style={{fontSize:11,display:'flex',alignItems:'center',gap:4,color:'var(--muted)',cursor:'pointer',flexShrink:0}} title="Nicht anwendbar — zählt wie ja (volle Punkte)"><input type="checkbox" checked={!!v.na} onChange={e=>setV(c.id,{na:e.target.checked})}/>n.a.</label>}
+                </div>
+                {c.type==='tristate' && c.level_hints && !v.na && <div style={{marginTop:6,fontSize:11,lineHeight:1.5,background:'var(--surface-2)',borderRadius:6,padding:'6px 8px'}}>
+                  {c.level_hints.yes && <div><b style={{color:'#059669'}}>ja:</b> <span style={{color:'var(--muted)'}}>{c.level_hints.yes}</span></div>}
+                  {c.level_hints.partial && <div><b style={{color:'#d97706'}}>teilw.:</b> <span style={{color:'var(--muted)'}}>{c.level_hints.partial}</span></div>}
+                  {c.level_hints.no && <div><b style={{color:'#dc2626'}}>nein:</b> <span style={{color:'var(--muted)'}}>{c.level_hints.no}</span></div>}
+                </div>}
+                <input className="form-input" style={{marginTop:6,fontSize:12}} placeholder="Kommentar (optional)" value={v.comment||''} onChange={e=>setV(c.id,{comment:e.target.value})}/>
+              </div>
+            </React.Fragment>;
+          })}
+          <div style={{marginTop:12}}><label className="form-label">Gesamteindruck / Freitext</label><textarea className="form-input" rows={3} style={{resize:'vertical'}} value={note} onChange={e=>setNote(e.target.value)} placeholder="Zusammenfassung, Hinweise für den Mitarbeiter…"/></div>
+          {feedbackFor && <div style={{marginTop:10,padding:'8px 10px',borderRadius:8,background:amp.bg,color:amp.color,fontSize:12,fontWeight:600}}>Rückmeldung (wird gespeichert): {feedbackFor}</div>}
+        </React.Fragment>}
+      </div>
+      <div className="modal-footer" style={{display:'flex',gap:12,alignItems:'center',justifyContent:'space-between',flexWrap:'wrap'}}>
+        <div style={{display:'flex',alignItems:'center',gap:10}}>
+          <span style={{fontSize:12,color:'var(--muted)',fontWeight:700}}>Ergebnis</span>
+          <span style={{fontSize:22,fontWeight:800,fontFamily:'var(--font-mono)',color:amp.color}}>{pct==null?'—':(unit==='points'?cqNum(pts.got)+' / '+cqNum(pts.max)+' Pkt':pct+' %')}</span>
+          <span style={{fontSize:12,fontWeight:800,padding:'2px 9px',borderRadius:20,background:amp.bg,color:amp.color}}>{amp.label}</span>
+        </div>
+        <div style={{display:'flex',gap:8}}>
+          <button className="btn btn-sm" onClick={onClose}>Abbrechen</button>
+          <button className="btn btn-sm btn-primary" disabled={busy||isExample||pct==null} title={isExample?'Beispiel-Bogen wird nicht gespeichert':''} onClick={save}>💾 Stichprobe speichern</button>
+        </div>
+      </div>
+    </div>
+  </div>;
+}
+
+// Employee-Modal-Tab: Erfassung starten + grafisches Ampel-Archiv (+ Beispiel-Ansicht für die Optik).
+function CallQaEmployeeTab({emp}){
+  const [samples,setSamples]=useState(null);
+  const [cfgs,setCfgs]=useState([]);
+  const [adding,setAdding]=useState(false);
+  const [demo,setDemo]=useState(false);
+  const projId=(emp&&emp.project_id)||null;
+  const skill=(((emp&&(emp.project_skill||emp.primary_skill))||'')+'').toLowerCase()||null;
+  const cfg=cqResolveConfig(cfgs, projId, skill);
+  async function load(){
+    if(!emp||!emp.id){ setSamples([]); return; }
+    const rs=await sb.from('call_samples').select('*').eq('employee_id',emp.id).eq('status','done');
+    const arr=rs.data||[]; const ids=arr.map(s=>s.id);
+    let sc=[]; if(ids.length){ const r=await sb.from('call_scores').select('*').in('sample_id',ids); sc=r.data||[]; }
+    const byS={}; sc.forEach(x=>{ (byS[x.sample_id]=byS[x.sample_id]||[]).push(x); });
+    setSamples(arr.map(s=>({...s,_scores:byS[s.id]||[]})));
+  }
+  useEffect(()=>{ load(); sb.from('call_score_config').select('*').then(r=>setCfgs(r.data||[])); },[emp&&emp.id]);
+  return <div style={{paddingTop:16}}>
+    <div style={{padding:'11px 13px',background:'var(--surface-2)',borderRadius:8,marginBottom:14,fontSize:12,color:'var(--muted)',lineHeight:1.5}}>
+      <b>Call-Qualität</b> = QM-Bewertung durch HR: eine angehörte Call-Aufnahme, bewertet mit dem Kunden-Bogen (Projekt/Skill automatisch). Ergebnis als Prozent-Score mit Ampel. Der Mitarbeiter sieht sein eigenes Archiv im Portal.
+    </div>
+    <div style={{display:'flex',gap:8,alignItems:'center',marginBottom:16,flexWrap:'wrap'}}>
+      <button className="btn btn-sm btn-primary" onClick={()=>setAdding(true)} disabled={!emp||!emp.id}>+ Stichprobe erfassen</button>
+      <button className="btn btn-sm" onClick={()=>setDemo(d=>!d)} style={{border:'1px solid '+(demo?'#dc2626':'var(--border)'),color:demo?'#dc2626':'var(--text)',fontWeight:700}}>{demo?'Beispiel ausblenden':'👁 Beispiel ansehen'}</button>
+    </div>
+    {demo && <div style={{marginBottom:16}}>
+      <div style={{padding:'8px 12px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:8,color:'#dc2626',fontWeight:700,fontSize:12,marginBottom:12}}>BEISPIEL — nur zur Optik-Beurteilung, nicht gespeichert.</div>
+      <CqArchive samples={cqDemoSamples()} cfg={{green_min:90,yellow_min:75}}/>
+    </div>}
+    {!demo && (samples===null ? <div className="sp-empty">Lade…</div>
+      : samples.length===0 ? <div className="sp-empty">Noch keine Stichproben. Über „+ Stichprobe erfassen" die erste anlegen — oder „👁 Beispiel ansehen" für die Optik.</div>
+      : <CqArchive samples={samples} cfg={cfg}/>)}
+    {adding && <CallSampleModal emp={emp} onClose={()=>setAdding(false)} onSaved={()=>{ setAdding(false); load(); }}/>}
+  </div>;
+}
+
+// ══ Call-Qualität (Schnitt 4: HR-Übersicht + Testvorschläge) ══
+const CQ_PERIODS=[['4w','Letzte 4 Wochen'],['7d','Letzte 7 Tage'],['month','Dieser Monat'],['all','Alle']];
+function cqPeriodFrom(preset){ const now=new Date();
+  if(preset==='7d') return isoLocal(new Date(now.getTime()-6*864e5));
+  if(preset==='4w') return isoLocal(new Date(now.getTime()-27*864e5));
+  if(preset==='month') return isoLocal(new Date(now.getFullYear(),now.getMonth(),1));
+  return null;
+}
+// Verteilungs-Balken grün/gelb/rot (Anzahl je Ampelstufe) — grafisch statt Zahlenwüste.
+function CqDist({d, height}){ const H=height||10; const t=(d.green+d.amber+d.red)||1;
+  const seg=(n,c,k)=> n>0? <div key={k} style={{width:(n/t*100)+'%',background:c}}/> : null;
+  return <div style={{display:'flex',height:H,borderRadius:H/2,overflow:'hidden',background:'#eef2f4'}}>
+    {seg(d.green,'#059669','g')}{seg(d.amber,'#d97706','a')}{seg(d.red,'#dc2626','r')}
+  </div>;
+}
+
+// Übersicht aller Stichproben nach Zeitraum/Projekt/Skill (grafisch).
+function CallQaOverview({projects, employees, showToast}){
+  const [period,setPeriod]=useState('4w');
+  const [projFilter,setProjFilter]=useState('all');
+  const [rows,setRows]=useState(null);
+  const [cfgs,setCfgs]=useState([]);
+  const projList=(projects||[]).filter(p=>p&&p.id).slice().sort((a,b)=>String(a.name).localeCompare(String(b.name),'de'));
+  const empName=id=>{const e=(employees||[]).find(x=>x&&x.id===id);return e?((e.first_name||'')+' '+(e.last_name||'')).trim():'—';};
+  const projName=id=>{const p=projList.find(x=>x.id===id);return p?p.name:(id||'—');};
+  const skillLabel=(pid,sk)=>{ const p=projList.find(x=>x.id===pid); const s=p&&Array.isArray(p.skills)?p.skills.find(z=>String((z&&z.key)||z).toLowerCase()===sk):null; return s?((s.label)||(s.key)||s):(sk||'—'); };
+  useEffect(()=>{ let alive=true; (async()=>{ setRows(null);
+    let q=sb.from('call_samples').select('id,employee_id,project_id,skill,total_pct,total_points,max_points,sampled_date').eq('status','done');
+    const from=cqPeriodFrom(period); if(from) q=q.gte('sampled_date',from);
+    if(projFilter!=='all') q=q.eq('project_id',projFilter);
+    const {data}=await q.order('sampled_date',{ascending:false});
+    const rc=await sb.from('call_score_config').select('*');
+    if(alive){ setCfgs(rc.data||[]); setRows(data||[]); }
+  })(); return ()=>{alive=false;}; },[period,projFilter]);
+
+  const cfgOf=(pid,sk)=>cqResolveConfig(cfgs,pid,sk);
+  const dkey=a=>a.key==='green'?'green':a.key==='amber'?'amber':'red';
+  const withA=(rows||[]).map(s=>({...s,_a:cqAmpelU(s.total_pct,s.total_points,cfgOf(s.project_id,(s.skill||'').toLowerCase()))}));
+  const n=withA.length;
+  const avg=n?Math.round(withA.reduce((a,s)=>a+Number(s.total_pct||0),0)/n):null;   // Übersicht-Ø in % (über Bögen vergleichbar)
+  const dist={green:0,amber:0,red:0}; withA.forEach(s=>{ if(s.total_pct!=null) dist[dkey(s._a)]++; });
+  const avgA=cqAmpel(avg,{green_min:90,yellow_min:75});
+  const groups={}; withA.forEach(s=>{ const k=s.project_id+'|'+((s.skill||'').toLowerCase()); (groups[k]=groups[k]||[]).push(s); });
+  const groupList=Object.keys(groups).map(k=>{ const list=groups[k]; const i=k.indexOf('|'); const pid=k.slice(0,i),sk=k.slice(i+1);
+    const gcfg=cfgOf(pid,sk); const gunit=cqUnit(gcfg); const metric=s=> gunit==='points'? s.total_points : s.total_pct;
+    const vals=list.map(metric).filter(x=>x!=null); const gavg=vals.length?Math.round(vals.reduce((a,b)=>a+b,0)/vals.length*10)/10:0;
+    const gd={green:0,amber:0,red:0}; list.forEach(s=>{ if(metric(s)!=null) gd[dkey(s._a)]++; });
+    return {pid,sk,count:list.length,avg:gavg,unit:gunit,dist:gd,ampel:cqAmpel(gavg,gcfg)}; }).sort((a,b)=>b.count-a.count);
+
+  return <div>
+    <div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'center',marginBottom:16}}>
+      <div style={{display:'flex',border:'1px solid var(--border)',borderRadius:10,overflow:'hidden'}}>
+        {CQ_PERIODS.map(([k,l])=><button key={k} className="btn btn-sm" style={{border:'none',borderRadius:0,background:period===k?'#0F5661':'transparent',color:period===k?'#fff':'var(--text)',fontWeight:700}} onClick={()=>setPeriod(k)}>{l}</button>)}
+      </div>
+      <select className="form-select" style={{width:'auto'}} value={projFilter} onChange={e=>setProjFilter(e.target.value)}>
+        <option value="all">Alle Projekte</option>
+        {projList.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+      </select>
+    </div>
+
+    {rows===null ? <div className="sp-empty">Lade…</div> : n===0 ? <div className="sp-empty">Keine Stichproben im gewählten Zeitraum.</div> : <React.Fragment>
+      <div style={{display:'flex',gap:14,flexWrap:'wrap',marginBottom:18}}>
+        <div style={{flex:'1 1 160px',border:'1px solid var(--border)',borderRadius:12,padding:'14px 16px',background:'var(--card)'}}>
+          <div style={{fontSize:12,color:'var(--muted)',fontWeight:700}}>Stichproben</div>
+          <div style={{fontSize:28,fontWeight:800}}>{n}</div>
+        </div>
+        <div style={{flex:'1 1 160px',border:'1px solid var(--border)',borderRadius:12,padding:'14px 16px',background:'var(--card)'}}>
+          <div style={{fontSize:12,color:'var(--muted)',fontWeight:700}}>Ø-Score</div>
+          <div style={{fontSize:28,fontWeight:800,color:avgA.color}}>{avg==null?'—':avg+' %'}</div>
+        </div>
+        <div style={{flex:'2 1 260px',border:'1px solid var(--border)',borderRadius:12,padding:'14px 16px',background:'var(--card)'}}>
+          <div style={{fontSize:12,color:'var(--muted)',fontWeight:700,marginBottom:8}}>Verteilung</div>
+          <CqDist d={dist} height={12}/>
+          <div style={{display:'flex',gap:14,marginTop:8,fontSize:12,fontWeight:600}}>
+            <span style={{color:'#059669'}}>● {dist.green} stark</span>
+            <span style={{color:'#d97706'}}>● {dist.amber} solide</span>
+            <span style={{color:'#dc2626'}}>● {dist.red} schwach</span>
+          </div>
+        </div>
+      </div>
+
+      <div style={{fontSize:13,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em',marginBottom:8}}>Nach Projekt &amp; Skill</div>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(240px,1fr))',gap:12,marginBottom:20}}>
+        {groupList.map((g,i)=>(
+          <div key={i} style={{border:'1px solid var(--border)',borderRadius:12,padding:'12px 14px',background:'var(--card)'}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',gap:8}}>
+              <div style={{fontWeight:700,fontSize:13,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{projName(g.pid)} · {skillLabel(g.pid,g.sk)}</div>
+              <div style={{fontSize:20,fontWeight:800,color:g.ampel.color,fontFamily:'var(--mono)'}}>{g.unit==='points'?cqNum(g.avg)+' Pkt':g.avg+'%'}</div>
+            </div>
+            <div style={{fontSize:11,color:'var(--muted)',margin:'2px 0 8px'}}>{g.count} Stichprobe{g.count>1?'n':''}</div>
+            <CqDist d={g.dist} height={9}/>
+          </div>
+        ))}
+      </div>
+
+      <div style={{fontSize:13,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em',marginBottom:8}}>Neueste Stichproben</div>
+      <div style={{display:'flex',flexDirection:'column',gap:6}}>
+        {withA.slice(0,20).map(s=>(
+          <div key={s.id} style={{display:'flex',alignItems:'center',gap:12,padding:'8px 12px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)'}}>
+            <span style={{width:52,textAlign:'center',fontWeight:800,fontFamily:'var(--mono)',color:s._a.color}}>{cqUnit(cfgOf(s.project_id,(s.skill||'').toLowerCase()))==='points'?(s.total_points==null?'—':cqNum(s.total_points)):(s.total_pct==null?'—':Math.round(s.total_pct))}</span>
+            <span style={{width:9,height:9,borderRadius:'50%',background:s._a.color,flexShrink:0}}/>
+            <div style={{flex:1,minWidth:0,fontSize:13,fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{empName(s.employee_id)}</div>
+            <div style={{fontSize:11,color:'var(--muted)',whiteSpace:'nowrap'}}>{projName(s.project_id)} · {skillLabel(s.project_id,(s.skill||'').toLowerCase())} · {fmtDate(s.sampled_date)}</div>
+          </div>
+        ))}
+        {withA.length>20 && <div style={{fontSize:12,color:'var(--muted)',padding:'4px 2px'}}>… und {withA.length-20} weitere im Zeitraum.</div>}
+      </div>
+    </React.Fragment>}
+  </div>;
+}
+
+// Testvorschläge: wer sollte getestet werden? Aus Leistung (KPI letzte 2 Wochen) + wer im Zeitraum (4 Wo) keinen Test hatte.
+function CallQaSuggestions({projects, employees, showToast}){
+  const [projFilter,setProjFilter]=useState('all');
+  const [cand,setCand]=useState(null);
+  const [reload,setReload]=useState(0);
+  const [sampleFor,setSampleFor]=useState(null);
+  const projList=(projects||[]).filter(p=>p&&p.id).slice().sort((a,b)=>String(a.name).localeCompare(String(b.name),'de'));
+  const projName=id=>{const p=projList.find(x=>x.id===id);return p?p.name:(id||'—');};
+  useEffect(()=>{ let alive=true; (async()=>{ setCand(null);
+    const now=new Date();
+    let activeEmps=(employees||[]).filter(e=>e&&['active','training'].includes(e.status)&&e.project_id&&(e.project_skill||e.primary_skill)&&!e.kpi_exempt);
+    if(projFilter!=='all') activeEmps=activeEmps.filter(e=>e.project_id===projFilter);
+    // letzter Test je MA
+    const {data:samples}=await sb.from('call_samples').select('employee_id,sampled_date').eq('status','done');
+    const lastBy={}; (samples||[]).forEach(x=>{ const c=lastBy[x.employee_id]; if(!c||String(x.sampled_date)>String(c)) lastBy[x.employee_id]=x.sampled_date; });
+    // KPI letzte 2 ISO-Wochen → Leistungs-Rang je Skill (skillRanking, höher=besser)
+    const w0=getISOWeek(now), w1=getISOWeek(new Date(now.getTime()-7*864e5));
+    const {data:ke}=await sb.from('kpi_entries').select('emp_id,kpi_id,value,kw,year').in('kw',[w0.kw,w1.kw]);
+    const wset=[[w0.kw,w0.year],[w1.kw,w1.year]];
+    const rel=(ke||[]).filter(e=>wset.some(w=>w[0]===e.kw&&w[1]===e.year));
+    const byEmpKpi={}; rel.forEach(e=>{ const k=e.emp_id+'|'+e.kpi_id; (byEmpKpi[k]=byEmpKpi[k]||[]).push(Number(e.value)); });
+    const entries={}; Object.keys(byEmpKpi).forEach(k=>{ const i=k.indexOf('|'); const emp=k.slice(0,i),kpi=k.slice(i+1); const arr=byEmpKpi[k]; (entries[emp]=entries[emp]||[]).push({kpi_id:kpi,value:arr.reduce((a,b)=>a+b,0)/arr.length}); });
+    const combos={}; activeEmps.forEach(e=>{ combos[e.project_id+'|'+(e.project_skill||e.primary_skill)]=1; });
+    const perf={}; Object.keys(combos).forEach(c=>{ const i=c.indexOf('|'); const pid=c.slice(0,i),sk=c.slice(i+1);
+      const ranked=skillRanking(pid,sk,activeEmps,entries); const len=ranked.length;
+      ranked.forEach((r,idx)=>{ perf[r.emp.id]={worst:len>1?idx/(len-1):0,rank:idx+1,size:len}; }); });
+    const from=isoLocal(new Date(now.getTime()-27*864e5));
+    const list=activeEmps.filter(e=>!(lastBy[e.id]&&String(lastBy[e.id])>=from)).map(e=>{
+      const last=lastBy[e.id]||null; const weeks=last?Math.floor((now-new Date(last))/(7*864e5)):null;
+      const p=perf[e.id]||null; const worst=p?p.worst:null; const wp=worst==null?0.5:worst; const rec=last?Math.min(1,(weeks||0)/8):1;
+      const prio=0.6*wp+0.4*rec;
+      return {emp:e,last,weeks,perf:p,worst,prio};
+    }).sort((a,b)=>b.prio-a.prio);
+    if(alive) setCand(list);
+  })(); return ()=>{alive=false;}; },[projFilter,reload]);
+
+  const tier=prio=>prio>=0.66?{c:'#dc2626',bg:'#fef2f2',l:'hoch'}:prio>=0.45?{c:'#d97706',bg:'#fffbeb',l:'mittel'}:{c:'#64748b',bg:'#f1f5f9',l:'niedrig'};
+
+  return <div>
+    <div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'center',marginBottom:8}}>
+      <select className="form-select" style={{width:'auto'}} value={projFilter} onChange={e=>setProjFilter(e.target.value)}>
+        <option value="all">Alle Projekte</option>
+        {projList.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+      </select>
+    </div>
+    <div style={{fontSize:12,color:'var(--muted)',marginBottom:14,lineHeight:1.5}}>Vorschläge nach Priorität: <b>schwächere Leistung</b> (KPI letzte 2 Wochen) und <b>wer in den letzten 4 Wochen keine Stichprobe</b> hatte, zuerst. Bereits getestete MA erscheinen nicht.</div>
+
+    {cand===null ? <div className="sp-empty">Berechne Vorschläge…</div>
+      : cand.length===0 ? <div className="sp-empty">Alle aktiven Mitarbeiter im Zeitraum bereits getestet — nichts offen. 🎉</div>
+      : <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(280px,1fr))',gap:12}}>
+        {cand.slice(0,30).map(c=>{ const t=tier(c.prio); const e=c.emp; const sk=(e.project_skill||e.primary_skill||'').toLowerCase();
+          return <div key={e.id} style={{border:'1px solid var(--border)',borderLeft:'4px solid '+t.c,borderRadius:12,padding:'12px 14px',background:'var(--card)'}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:8}}>
+              <div style={{minWidth:0}}>
+                <div style={{fontWeight:700,fontSize:14,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{e.first_name} {e.last_name}</div>
+                <div style={{fontSize:11,color:'var(--muted)',marginTop:2}}>{projName(e.project_id)}{sk?' · '+sk:''}</div>
+              </div>
+              <span style={{fontSize:11,fontWeight:800,padding:'2px 8px',borderRadius:20,background:t.bg,color:t.c,whiteSpace:'nowrap'}}>{t.l}</span>
+            </div>
+            <div style={{display:'flex',gap:6,flexWrap:'wrap',margin:'10px 0'}}>
+              {c.worst!=null&&c.worst>=0.6 && <span style={{fontSize:10,fontWeight:700,padding:'2px 7px',borderRadius:10,background:'#fef2f2',color:'#dc2626'}}>schwache Leistung</span>}
+              {!c.last && <span style={{fontSize:10,fontWeight:700,padding:'2px 7px',borderRadius:10,background:'#eff6ff',color:'#2563eb'}}>noch nie getestet</span>}
+              {c.last && <span style={{fontSize:10,fontWeight:700,padding:'2px 7px',borderRadius:10,background:'#f1f5f9',color:'#64748b'}}>seit {c.weeks} Wo kein Test</span>}
+              {c.perf && <span style={{fontSize:10,fontWeight:600,padding:'2px 7px',borderRadius:10,background:'#f8fafc',color:'#475569'}}>Leistung Rang {c.perf.rank}/{c.perf.size}</span>}
+            </div>
+            <button className="btn btn-sm btn-primary" style={{width:'100%'}} onClick={()=>setSampleFor(e)}>+ Stichprobe erfassen</button>
+          </div>;
+        })}
+      </div>}
+    {cand&&cand.length>30 && <div style={{fontSize:12,color:'var(--muted)',marginTop:10}}>… und {cand.length-30} weitere Vorschläge.</div>}
+    {sampleFor && <CallSampleModal emp={sampleFor} onClose={()=>setSampleFor(null)} onSaved={()=>{ setSampleFor(null); setReload(r=>r+1); showToast&&showToast('Stichprobe gespeichert','success'); }}/>}
+  </div>;
+}
 // ══ CV-Sync aus öffentlichem Google Sheet (Feature 20) ══
 // Browser-Auto-Sync-Guard: max 1× pro Sitzung (Modul-Flag, reset bei Reload) UND Mindestabstand
 // zum letzten Sync (auto ODER manuell) — verhindert einen Lauf bei jedem Tab-Wechsel/20×-am-Tag.
@@ -33121,6 +33892,7 @@ function PresentationsView({projects, employees, team, showToast}){
   const [saved,setSaved]=useState(false);
   const [loading,setLoading]=useState(true);
   const [dummy,setDummy]=useState(false);       // Beispieldaten — NICHT gespeichert
+  const [callScores,setCallScores]=useState({});// Call-Stichproben best/worst je Skill (Berichtszeitraum)
   const [published,setPublished]=useState(false);
   const [token,setToken]=useState('');
   const [theme,setTheme]=useState({accent:'',font:'',customerLogo:''});   // Look&Feel je Projekt
@@ -33173,6 +33945,11 @@ function PresentationsView({projects, employees, team, showToast}){
   async function publish(){ if(!selProj||dummy) return; setBusy(true);
     const snap=JSON.parse(JSON.stringify(deck)); const names={}; skills.forEach(s=>{ membersFor(s.key).forEach(e=>{ names[e.id]=empName(e); }); }); snap._names=names; snap._skills=skills;
     snap._theme={accent,font:fontFam,projName:selProj.name,customerLogo:theme.customerLogo||'',ourLogo:ourLogo||''};   // Snapshot: Look&Feel einfrieren
+    // Snapshot: nur die ÜBERSICHT einfrieren (Name/Prozent/Ampel). Interne Kriterien-Details + Freitexte
+    // (_detail) werden ABGESTREIFT — sie gehören nicht zum Kunden. Damit hat die öffentliche Seite sie gar nicht.
+    const csClean={}; Object.keys(callScores||{}).forEach(k=>{ const r=callScores[k]||{}; const strip=e=>({name:e.name,pct:e.pct,points:e.points,color:e.color,label:e.label});
+      csClean[k]={best:(r.best||[]).map(strip),worst:(r.worst||[]).map(strip),count:r.count,avg:r.avg,unit:r.unit,max:r.max,thresholds:r.thresholds}; });
+    snap._callscores=csClean;
     const tok=token||genToken(); const title=selProj.name+' · KW '+pNo+'/'+pYear;
     const by=(typeof CURRENT_USER!=='undefined'&&CURRENT_USER)?(CURRENT_USER.name||CURRENT_USER.id):null;
     try{
@@ -33217,9 +33994,77 @@ function PresentationsView({projects, employees, team, showToast}){
       nd.teams[t].calls={vorwoche:fillCalls('vorwoche',1),monat:fillCalls('monat',4.2)};
       nd.teams[t].massnahmen=isSales?'Fokus auf Outbound-Kampagne KW 32; Nachschulung Einwandbehandlung für zwei Agents.':'Zweite Telefonielinie ab KW 33; ACW-Reduktion durch Textbausteine.';
     });
-    setDeck(nd); setDummy(true); setMode('show');
+    setDeck(nd); setCallScores(demoCallScores()); setDummy(true); setMode('show');
   }
   function discardDummy(){ setDummy(false); loadDeck(pNo,pYear); setMode('edit'); }
+
+  // ── Call-Stichproben-Scores für die Präsentationsfolie (best/worst je Skill im Berichtszeitraum) ──
+  // Rang je Mitarbeiter = Ø seiner Stichproben im Zeitraum. k = 3 ab 8 MA, sonst 2. Best/Worst ohne Überlappung.
+  // _sid = neueste Stichprobe des MA (für die aufklappbaren Kriterien-Details, NUR in-app), _note = deren Freitext.
+  function buildCallScores(samples, skillKey, cfgs){
+    const rows=(samples||[]).filter(x=>((((x.skill||'')+'').toLowerCase())===skillKey) && x.total_pct!=null);
+    const byEmp={}; rows.forEach(x=>{ (byEmp[x.employee_id]=byEmp[x.employee_id]||[]).push(x); });
+    const cfg=cqResolveConfig(cfgs, selProj?selProj.id:null, skillKey); const unit=cqUnit(cfg);
+    const ranked=Object.keys(byEmp).map(id=>{ const list=byEmp[id];
+      const avgPct=list.reduce((a,b)=>a+Number(b.total_pct),0)/list.length;
+      const pv=list.map(b=>b.total_points).filter(x=>x!=null); const avgPts=pv.length?pv.reduce((a,b)=>a+Number(b),0)/pv.length:null;
+      const mx=(list.find(b=>b.max_points!=null)||{}).max_points;
+      const latest=list.slice().sort((a,b)=>String(b.sampled_date).localeCompare(String(a.sampled_date)))[0];
+      return {id,pct:avgPct,points:avgPts,max:mx,_sid:latest?latest.id:null,_note:latest?latest.note:null}; })
+      .sort((a,b)=> unit==='points' ? ((b.points||0)-(a.points||0)) : (b.pct-a.pct));
+    const m=ranked.length; if(!m) return {best:[],worst:[],count:0,avg:null,unit,max:null,_sampleIds:[]};
+    const nameOf=id=>{ const e=(employees||[]).find(x=>x&&x.id===id); return e?empName(e):'—'; };
+    const dress=e=>{ const a=cqAmpelU(e.pct,e.points,cfg); return {name:nameOf(e.id),pct:Math.round(e.pct),points:e.points==null?null:Math.round(e.points*10)/10,color:a.color,label:a.label,_sid:e._sid,_note:e._note}; };
+    const k=m>=8?3:2;
+    const best=ranked.slice(0,k).map(dress);
+    const worst=ranked.slice(Math.max(k,m-k)).reverse().map(dress);
+    const avgPctAll=Math.round(ranked.reduce((s,e)=>s+e.pct,0)/m);
+    const pa=ranked.map(e=>e.points).filter(x=>x!=null); const avgPtsAll=pa.length?Math.round(pa.reduce((a,b)=>a+b,0)/pa.length*10)/10:null;
+    const maxP=(ranked.find(e=>e.max!=null)||{}).max;
+    const _sampleIds=[...best,...worst].map(e=>e._sid).filter(Boolean);
+    return {best,worst,count:rows.length,avg:unit==='points'?avgPtsAll:avgPctAll,unit,max:maxP,thresholds:{green:cfg.green_min,yellow:cfg.yellow_min},_sampleIds};
+  }
+  function demoDetail(good){ const cf={green_min:90,yellow_min:75};
+    const rows=[
+      {prompt:'Begrüßung & Verabschiedung',category:'Einstieg',pct:100},
+      {prompt:'Kunde mit Namen angesprochen',category:'Einstieg',pct:good?100:0,comment:good?null:'Namen nicht genutzt.'},
+      {prompt:'Bedarf sauber ermittelt',category:'Beratung',pct:good?100:50},
+      {prompt:'Lösung verständlich erklärt',category:'Beratung',pct:good?75:50,comment:good?'Sehr klar.':'Etwas knapp.'},
+      {prompt:'Pflichtangaben genannt',category:'Compliance',pct:good?100:0,comment:good?null:'Pflichtangabe vergessen.'},
+      {prompt:'Gesamteindruck',category:'Abschluss',pct:good?90:60},
+    ];
+    return { note: good?'Starkes Gespräch, souveräner Abschluss.':'Mehrere Punkte offen, bitte nacharbeiten.',
+      scores: rows.map(r=>({prompt:r.prompt,category:r.category,pct:r.pct,na:false,comment:r.comment||null,color:cqAmpel(r.pct,cf).color})) };
+  }
+  function demoCallScores(){ const out={};
+    const mk=(name,pct,good)=>{ const a=cqAmpel(pct,{green_min:90,yellow_min:75}); return {name,pct,color:a.color,label:a.label,_detail:demoDetail(good)}; };
+    const A=[['Arben Krasniqi',96,true],['Elira Berisha',93,true],['Ardit Gashi',90,true]];
+    const B=[['Blerta Hoxha',64,false],['Faton Rexhaj',71,false],['Leon Berisha',74,false]];
+    (skills||[]).forEach(s=>{ out[s.key]={ best:A.map(x=>mk(x[0],x[1],x[2])), worst:B.map(x=>mk(x[0],x[1],x[2])), count:14, avg:83, thresholds:{green:90,yellow:75} }; });
+    return out;
+  }
+  // Echt-Daten IMMER aus der DB (kein stiller Fallback auf Beispiel): bei Fehler/leer → {} → Folie zeigt Hinweis.
+  // Beispieldaten NUR über fillDummy (Guard: dummy → return). Die _detail-Kriterien werden für die aufklappbare
+  // In-App-Ansicht nachgeladen; beim Veröffentlichen streift publish() sie ab (nicht zum Kunden).
+  useEffect(()=>{ if(dummy) return; let alive=true; (async()=>{
+    if(!selProj){ if(alive) setCallScores({}); return; }
+    try{
+      const {data:samples}=await sb.from('call_samples').select('id,employee_id,skill,total_pct,total_points,max_points,sampled_date,note').eq('project_id',selProj.id).eq('year',pYear).eq('kw',pNo).eq('status','done');
+      const {data:cfgs}=await sb.from('call_score_config').select('*');
+      const out={}; const sids=[];
+      (skills||[]).forEach(s=>{ const r=buildCallScores(samples||[],s.key,cfgs||[]); out[s.key]=r; (r._sampleIds||[]).forEach(id=>sids.push(id)); });
+      let scoresBy={};
+      if(sids.length){ const {data:sc}=await sb.from('call_scores').select('sample_id,prompt_snapshot,type_snapshot,points,max_points_snapshot,na,comment,order_index,category_snapshot').in('sample_id',sids);
+        (sc||[]).forEach(x=>{ (scoresBy[x.sample_id]=scoresBy[x.sample_id]||[]).push(x); }); }
+      (skills||[]).forEach(s=>{ const r=out[s.key]; const cfg=cqResolveConfig(cfgs||[], selProj.id, s.key);
+        const attach=e=>{ if(e._sid){ const list=(scoresBy[e._sid]||[]).slice().sort((a,b)=>(a.order_index||0)-(b.order_index||0));
+            e._detail={ note:e._note||null, scores:list.map(x=>{ const f=x.na?null:cqFraction(x.type_snapshot,x.points,x.max_points_snapshot); const pct=f==null?null:Math.round(f*100);
+              return {prompt:x.prompt_snapshot,category:x.category_snapshot||'',na:!!x.na,comment:x.comment||null,pct:pct,color:x.na?'#94a3b8':cqAmpel(pct,cfg).color}; }) }; }
+          delete e._sid; delete e._note; };
+        (r.best||[]).forEach(attach); (r.worst||[]).forEach(attach); delete r._sampleIds; });
+      if(alive) setCallScores(out);
+    }catch(e){ if(alive) setCallScores({}); }
+  })(); return ()=>{alive=false;}; },[selProjId,pNo,pYear,dummy]);
 
   if(!projList.length) return <div style={{padding:40,textAlign:'center',color:'var(--muted)'}}>Keine Projekte vorhanden.</div>;
   if(!selProj) return <div style={{padding:40,textAlign:'center',color:'var(--muted)'}}>Projekt wählen.</div>;
@@ -33294,7 +34139,7 @@ function PresentationsView({projects, employees, team, showToast}){
 
   // ── Darstellung: 3 Muster-Folien (SVG/CSS) ──
   // Geteilter Renderer (shared/presentation-slides.js) — EINE Foliendarstellung fuer In-App + oeffentliche Seite.
-  const slideCtx=()=>({ deck, accent, font:fontFam, projName:selProj.name, period:{no:pNo,year:pYear}, skills, dummy, ourLogo, customerLogo:theme.customerLogo, membersOf:tk=>membersFor(tk).map(e=>({id:e.id,name:empName(e)})) });
+  const slideCtx=()=>({ deck, accent, font:fontFam, projName:selProj.name, period:{no:pNo,year:pYear}, skills, dummy, ourLogo, customerLogo:theme.customerLogo, callScores, callReviews:deck.callReviews!==false, membersOf:tk=>membersFor(tk).map(e=>({id:e.id,name:empName(e)})) });
   const renderSlides=()=>{ if(!window.PRES) return React.createElement("div",{style:{color:"var(--muted)"}},"Renderer nicht geladen."); return window.PRES.deckSlides(slideCtx()).map((el,i)=>React.createElement(React.Fragment,{key:i},el)); };
 
   const FONTS=[['inherit','Standard'],["'Inter',sans-serif",'Inter'],["'Instrument Serif',serif",'Instrument Serif'],["'JetBrains Mono',monospace",'JetBrains Mono']];
@@ -33314,6 +34159,9 @@ function PresentationsView({projects, employees, team, showToast}){
       <div style={{display:'flex',border:'1px solid var(--border)',borderRadius:10,overflow:'hidden'}}>
         {[['edit','✎ Eingabe'],['show','▦ Darstellung'],['settings','🎨 Look&Feel']].map(([k,l])=><button key={k} className="btn btn-sm" style={{border:'none',borderRadius:0,background:mode===k?accent:'transparent',color:mode===k?'#fff':'var(--text)',fontWeight:700}} onClick={()=>setMode(k)}>{l}</button>)}
       </div>
+      <label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,fontWeight:700,color:'var(--text)',cursor:'pointer',border:'1px solid var(--border)',borderRadius:8,padding:'5px 10px'}} title="Call-Reviews-Folie je Skill in diesen Bericht aufnehmen. Aus = Folie entfällt (Kommentare bleiben erhalten).">
+        <input type="checkbox" checked={deck.callReviews!==false} onChange={e=>setDeck(d=>({...d,callReviews:e.target.checked}))}/>Call-Reviews
+      </label>
       <button className="btn btn-sm" onClick={dummy?discardDummy:fillDummy} style={{border:'1px solid '+(dummy?'#dc2626':'var(--border)'),color:dummy?'#dc2626':'var(--text)',fontWeight:700}}>{dummy?'Beispiel verwerfen':'Beispiel füllen'}</button>
       <button className="btn btn-primary btn-sm" disabled={busy||dummy} title={dummy?'Beispieldaten werden nicht gespeichert':''} onClick={save}>💾 Speichern</button>
       <button className="btn btn-sm" disabled={busy||dummy} onClick={publish} style={{background:published?'transparent':'#059669',color:published?'#059669':'#fff',border:'1px solid #059669',fontWeight:700}} title="Für das Kundenportal freigeben (nur veröffentlichte Berichte sind für den Kunden sichtbar)">{published?'✓ Veröffentlicht — aktualisieren':'🌐 Veröffentlichen'}</button>
@@ -33968,6 +34816,7 @@ function App(){
       {key:'absences',label:'Abwesenheiten',icon:'📅'},
       {key:'urlaubantraege',label:'Urlaubsanträge',icon:'🏖'},
       {key:'feedback',label:'Feedbackgespräche',icon:'💬'},
+      {key:'callqa',label:'Call-Qualität',icon:'📞'},
     ]},
     {sec:'Recruiting', items:[
       {key:'kanban',label:'Recruiting',icon:'🔄'},
@@ -34032,6 +34881,7 @@ function App(){
       'workforce':'<path d="M12.75 12.75a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM7.5 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM8.25 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM9.75 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM10.5 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM12 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM12.75 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM14.25 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM15 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM16.5 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM15 12.75a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM16.5 13.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Z"/> <path fill-rule="evenodd" d="M6.75 2.25A.75.75 0 0 1 7.5 3v1.5h9V3A.75.75 0 0 1 18 3v1.5h.75a3 3 0 0 1 3 3v11.25a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3V7.5a3 3 0 0 1 3-3H6V3a.75.75 0 0 1 .75-.75Zm13.5 9a1.5 1.5 0 0 0-1.5-1.5H5.25a1.5 1.5 0 0 0-1.5 1.5v7.5a1.5 1.5 0 0 0 1.5 1.5h13.5a1.5 1.5 0 0 0 1.5-1.5v-7.5Z" clip-rule="evenodd"/>',
       'employees':'<path d="M4.5 6.375a4.125 4.125 0 1 1 8.25 0 4.125 4.125 0 0 1-8.25 0ZM14.25 8.625a3.375 3.375 0 1 1 6.75 0 3.375 3.375 0 0 1-6.75 0ZM1.5 19.125a7.125 7.125 0 0 1 14.25 0v.003l-.001.119a.75.75 0 0 1-.363.63 13.067 13.067 0 0 1-6.761 1.873c-2.472 0-4.786-.684-6.76-1.873a.75.75 0 0 1-.364-.63l-.001-.122ZM17.25 19.128l-.001.144a2.25 2.25 0 0 1-.233.96 10.088 10.088 0 0 0 5.06-1.01.75.75 0 0 0 .42-.643 4.875 4.875 0 0 0-6.957-4.611 8.586 8.586 0 0 1 1.71 5.157v.003Z"/>',
       'feedback':'<path fill-rule="evenodd" d="M4.848 2.771A49.144 49.144 0 0 1 12 2.25c2.43 0 4.817.178 7.152.52 1.978.292 3.348 2.024 3.348 3.97v6.02c0 1.946-1.37 3.678-3.348 3.97a48.9 48.9 0 0 1-3.476.383.39.39 0 0 0-.297.17l-2.755 4.133a.75.75 0 0 1-1.248 0l-2.755-4.133a.39.39 0 0 0-.297-.17 48.9 48.9 0 0 1-3.476-.384c-1.978-.29-3.348-2.024-3.348-3.97V6.741c0-1.946 1.37-3.68 3.348-3.97Z" clip-rule="evenodd"/>',
+      'callqa':'<path fill-rule="evenodd" d="M1.5 4.5a3 3 0 0 1 3-3h1.372c.86 0 1.61.586 1.819 1.42l1.105 4.423a1.875 1.875 0 0 1-.694 1.955l-1.293.97c-.135.101-.164.249-.126.352a11.285 11.285 0 0 0 6.697 6.697c.103.038.25.009.352-.126l.97-1.293a1.875 1.875 0 0 1 1.955-.694l4.423 1.105c.834.209 1.42.959 1.42 1.82V19.5a3 3 0 0 1-3 3h-2.25C8.552 22.5 1.5 15.448 1.5 6.75V4.5Z" clip-rule="evenodd"/>',
       'timetracking':'<path fill-rule="evenodd" d="M12 2.25c-5.385 0-9.75 4.365-9.75 9.75s4.365 9.75 9.75 9.75 9.75-4.365 9.75-9.75S17.385 2.25 12 2.25ZM12.75 6a.75.75 0 0 0-1.5 0v6c0 .414.336.75.75.75h4.5a.75.75 0 0 0 0-1.5h-3.75V6Z" clip-rule="evenodd"/>',
       'locations':'<path fill-rule="evenodd" d="m11.54 22.351.07.04.028.016a.76.76 0 0 0 .723 0l.028-.015.071-.041a16.975 16.975 0 0 0 1.144-.742 19.58 19.58 0 0 0 2.683-2.282c1.944-1.99 3.963-4.98 3.963-8.827a8.25 8.25 0 0 0-16.5 0c0 3.846 2.02 6.837 3.963 8.827a19.58 19.58 0 0 0 2.682 2.282 16.975 16.975 0 0 0 1.145.742ZM12 13.5a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" clip-rule="evenodd"/>',
       'spaces':'<path d="M6 3a3 3 0 0 0-3 3v2.25a3 3 0 0 0 3 3h2.25a3 3 0 0 0 3-3V6a3 3 0 0 0-3-3H6ZM15.75 3a3 3 0 0 0-3 3v2.25a3 3 0 0 0 3 3H18a3 3 0 0 0 3-3V6a3 3 0 0 0-3-3h-2.25ZM6 12.75a3 3 0 0 0-3 3V18a3 3 0 0 0 3 3h2.25a3 3 0 0 0 3-3v-2.25a3 3 0 0 0-3-3H6ZM17.625 13.5a.75.75 0 0 0-1.5 0v2.625H13.5a.75.75 0 0 0 0 1.5h2.625v2.625a.75.75 0 0 0 1.5 0v-2.625h2.625a.75.75 0 0 0 0-1.5h-2.625V13.5Z"/>',
@@ -34050,6 +34900,7 @@ function App(){
       'projects':'<path d="M19.5 21a3 3 0 0 0 3-3v-4.5a3 3 0 0 0-3-3h-15a3 3 0 0 0-3 3V18a3 3 0 0 0 3 3h15ZM1.5 10.146V6a3 3 0 0 1 3-3h5.379a2.25 2.25 0 0 1 1.59.659l2.122 2.121c.14.141.331.22.53.22H19.5a3 3 0 0 1 3 3v1.146A4.483 4.483 0 0 0 19.5 9h-15a4.483 4.483 0 0 0-3 1.146Z"/>',
       'forecast':'<path d="M18.375 2.25c-1.035 0-1.875.84-1.875 1.875v15.75c0 1.035.84 1.875 1.875 1.875h.75c1.035 0 1.875-.84 1.875-1.875V4.125c0-1.036-.84-1.875-1.875-1.875h-.75ZM9.75 8.625c0-1.036.84-1.875 1.875-1.875h.75c1.036 0 1.875.84 1.875 1.875v11.25c0 1.035-.84 1.875-1.875 1.875h-.75a1.875 1.875 0 0 1-1.875-1.875V8.625ZM3 13.125c0-1.036.84-1.875 1.875-1.875h.75c1.036 0 1.875.84 1.875 1.875v6.75c0 1.035-.84 1.875-1.875 1.875h-.75A1.875 1.875 0 0 1 3 19.875v-6.75Z"/>',
       'profitability':'<path fill-rule="evenodd" d="M12 2.25c-5.385 0-9.75 4.365-9.75 9.75s4.365 9.75 9.75 9.75 9.75-4.365 9.75-9.75S17.385 2.25 12 2.25Zm-1.902 7.098a3.75 3.75 0 0 1 3.903-.884.75.75 0 1 0 .498-1.415A5.25 5.25 0 0 0 8.005 9.75H7.5a.75.75 0 0 0 0 1.5h.054a5.281 5.281 0 0 0 0 1.5H7.5a.75.75 0 0 0 0 1.5h.505a5.25 5.25 0 0 0 6.494 2.701.75.75 0 1 0-.498-1.415 3.75 3.75 0 0 1-4.252-1.286h3.001a.75.75 0 0 0 0-1.5H9.075a3.77 3.77 0 0 1 0-1.5h3.675a.75.75 0 0 0 0-1.5h-3c.105-.14.221-.274.348-.402Z" clip-rule="evenodd"/>',
+      'praesentation':'<path fill-rule="evenodd" d="M2.25 2.25a.75.75 0 0 0 0 1.5H3v10.5a3 3 0 0 0 3 3h1.21l-1.172 3.513a.75.75 0 0 0 1.424.474l.329-.987h8.418l.33.987a.75.75 0 0 0 1.422-.474l-1.17-3.513H18a3 3 0 0 0 3-3V3.75h.75a.75.75 0 0 0 0-1.5H2.25Zm6.54 15h6.42l.5 1.5H8.29l.5-1.5Zm8.085-8.995a.75.75 0 1 0-.75-1.299 12.81 12.81 0 0 0-3.558 3.05L11.03 8.47a.75.75 0 0 0-1.06 0l-2.25 2.25a.75.75 0 1 0 1.06 1.06l1.72-1.72 1.774 1.775a.75.75 0 0 0 1.174-.144 11.31 11.31 0 0 1 3.477-3.146Z" clip-rule="evenodd"/>',
       'superadmin':'<path fill-rule="evenodd" d="M11.078 2.25c-.917 0-1.699.663-1.85 1.567L9.05 4.889c-.02.12-.115.26-.297.348a7.493 7.493 0 0 0-.986.57c-.166.115-.334.126-.45.083L6.3 5.508a1.875 1.875 0 0 0-2.282.819l-.922 1.597a1.875 1.875 0 0 0 .432 2.385l.84.692c.095.078.17.229.154.43a7.598 7.598 0 0 0 0 1.139c.015.2-.059.352-.153.43l-.841.692a1.875 1.875 0 0 0-.432 2.385l.922 1.597a1.875 1.875 0 0 0 2.282.818l1.019-.382c.115-.043.283-.031.45.082.312.214.641.405.985.57.182.088.277.228.297.35l.178 1.071c.151.904.933 1.567 1.85 1.567h1.844c.916 0 1.699-.663 1.85-1.567l.178-1.072c.02-.12.114-.26.297-.349.344-.165.673-.356.985-.57.167-.114.335-.125.45-.082l1.02.382a1.875 1.875 0 0 0 2.28-.819l.923-1.597a1.875 1.875 0 0 0-.432-2.385l-.84-.692c-.095-.078-.17-.229-.154-.43a7.614 7.614 0 0 0 0-1.139c-.016-.2.059-.352.153-.43l.84-.692c.708-.582.891-1.59.433-2.385l-.922-1.597a1.875 1.875 0 0 0-2.282-.818l-1.02.382c-.114.043-.282.031-.449-.083a7.49 7.49 0 0 0-.985-.57c-.183-.087-.277-.227-.297-.348l-.179-1.072a1.875 1.875 0 0 0-1.85-1.567h-1.843ZM12 15.75a3.75 3.75 0 1 0 0-7.5 3.75 3.75 0 0 0 0 7.5Z" clip-rule="evenodd"/>',
       'skillmatrix':'<path fill-rule="evenodd" d="M1.5 5.625c0-1.036.84-1.875 1.875-1.875h17.25c1.035 0 1.875.84 1.875 1.875v12.75c0 1.035-.84 1.875-1.875 1.875H3.375A1.875 1.875 0 0 1 1.5 18.375V5.625ZM21 9.375A.375.375 0 0 0 20.625 9h-7.5a.375.375 0 0 0-.375.375v1.5c0 .207.168.375.375.375h7.5a.375.375 0 0 0 .375-.375v-1.5Zm0 3.75a.375.375 0 0 0-.375-.375h-7.5a.375.375 0 0 0-.375.375v1.5c0 .207.168.375.375.375h7.5a.375.375 0 0 0 .375-.375v-1.5Zm0 3.75a.375.375 0 0 0-.375-.375h-7.5a.375.375 0 0 0-.375.375v1.5c0 .207.168.375.375.375h7.5a.375.375 0 0 0 .375-.375v-1.5ZM10.875 18.75a.375.375 0 0 0 .375-.375v-1.5a.375.375 0 0 0-.375-.375h-7.5a.375.375 0 0 0-.375.375v1.5c0 .207.168.375.375.375h7.5ZM3.375 15h7.5a.375.375 0 0 0 .375-.375v-1.5a.375.375 0 0 0-.375-.375h-7.5a.375.375 0 0 0-.375.375v1.5c0 .207.168.375.375.375Zm0-3.75h7.5a.375.375 0 0 0 .375-.375v-1.5A.375.375 0 0 0 10.875 9h-7.5A.375.375 0 0 0 3 9.375v1.5c0 .207.168.375.375.375Z" clip-rule="evenodd"/>',
       'elearning':'<path d="M11.7 2.805a.75.75 0 0 1 .6 0A60.65 60.65 0 0 1 22.83 8.72a.75.75 0 0 1-.231 1.337 49.948 49.948 0 0 0-9.902 3.912l-.003.002c-.114.06-.227.119-.34.18a.75.75 0 0 1-.707 0A50.88 50.88 0 0 0 7.5 12.173v-.224c0-.131.067-.248.172-.311a54.615 54.615 0 0 1 4.653-2.52.75.75 0 0 0-.65-1.352 56.123 56.123 0 0 0-4.78 2.589 1.858 1.858 0 0 0-.859 1.228 49.803 49.803 0 0 0-4.634-1.527.75.75 0 0 1-.231-1.337A60.653 60.653 0 0 1 11.7 2.805Z"/> <path d="M13.06 15.473a48.45 48.45 0 0 1 7.666-3.282c.134 1.414.22 2.843.255 4.284a.75.75 0 0 1-.46.711 47.87 47.87 0 0 0-8.105 4.342.75.75 0 0 1-.832 0 47.87 47.87 0 0 0-8.104-4.342.75.75 0 0 1-.461-.71c.035-1.442.121-2.87.255-4.286.921.304 1.83.634 2.726.99v1.27a1.5 1.5 0 0 0-.14 2.508c-.09.38-.222.753-.397 1.11.452.213.901.434 1.346.66a6.727 6.727 0 0 0 .551-1.607 1.5 1.5 0 0 0 .14-2.67v-.645a48.549 48.549 0 0 1 3.44 1.667 2.25 2.25 0 0 0 2.12 0Z"/> <path d="M4.462 19.462c.42-.419.753-.89 1-1.395.453.214.902.435 1.347.662a6.742 6.742 0 0 1-1.286 1.794.75.75 0 0 1-1.06-1.06Z"/>',
@@ -34063,8 +34914,11 @@ function App(){
     // vergessenes Icon schon beim Bauen/Testen auf, nicht erst im Betrieb.
     if(!ICONS[key]){
       if(typeof console!=='undefined') console.warn('[nav] Kein Icon für Menüpunkt "'+key+'" — Platzhalter angezeigt. In getIcon() ergänzen.');
-      const PH='<path fill-rule="evenodd" d="M2.25 12c0-5.385 4.365-9.75 9.75-9.75s9.75 4.365 9.75 9.75-4.365 9.75-9.75 9.75S2.25 17.385 2.25 12Zm11.378-3.917c-.89-.777-2.366-.777-3.255 0a.75.75 0 0 1-.988-1.129c1.454-1.272 3.776-1.272 5.23 0 1.513 1.324 1.513 3.518 0 4.842a3.75 3.75 0 0 1-.837.552c-.676.328-1.028.774-1.028 1.152v.75a.75.75 0 0 1-1.5 0v-.75c0-1.279 1.06-2.107 1.875-2.502.182-.088.351-.199.503-.331.83-.727.83-1.857 0-2.584ZM12 18a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Z" clip-rule="evenodd"/>';
-      return '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" style="opacity:.55">'+PH+'</svg>';
+      // Deutlich sichtbarer Fehler-Marker: ROTES Warndreieck bei voller Deckkraft — NICHT ein dezentes
+      // Fragezeichen (das sah aus wie ein normales Hilfe-Icon und fiel im Alltag nicht auf). Ein fehlendes
+      // Icon muss im Menü sofort ins Auge springen, sonst greift die Absicherung beim nächsten Mal wieder nicht.
+      const PH='<path fill-rule="evenodd" d="M9.401 3.003c1.155-2 4.043-2 5.197 0l7.355 12.748c1.154 2-.29 4.5-2.599 4.5H4.645c-2.309 0-3.752-2.5-2.598-4.5L9.4 3.003ZM12 8.25a.75.75 0 0 1 .75.75v3.75a.75.75 0 0 1-1.5 0V9a.75.75 0 0 1 .75-.75Zm0 8.25a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Z" clip-rule="evenodd"/>';
+      return '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="#dc2626">'+PH+'</svg>';
     }
     return '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor">'+ICONS[key]+'</svg>';
   }
@@ -34285,6 +35139,7 @@ function App(){
           )}
           {view==='orgchart'&&<OrgChart projects={projects} employees={employees} orgCharts={orgCharts} setOrgCharts={setOrgCharts}/>}
           {view==='praesentation'&&<PresentationsView projects={projects} employees={employees} team={team} showToast={showToast}/>}
+          {view==='callqa'&&<CallQaView projects={projects} employees={employees} showToast={showToast}/>}
           {view==='skillmatrix'&&<SkillMatrix employees={employees} projects={projects}/>}
           {view==='kanban'&&<RecruitingKanban employees={employees} setEmployees={setEmployees} cvList={cvList} setCvList={setCvList} projects={projects} onPromoteToEmployee={promoteToEmployee} showToast={showToast}/>}
           {view==='onboarding'&&<OnboardingView employees={employees} setEmployees={setEmployees} showToast={showToast}/>}
