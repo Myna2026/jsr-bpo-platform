@@ -1,0 +1,12 @@
+-- =============================================================================
+-- Call-Qualität: globaler Standard-Bogen nur mit ausdrücklicher Freigabe je Projekt  2026-08-12
+-- =============================================================================
+-- Bogen-Auflösung für (Projekt, Skill) wird strikt: exakter (Projekt,Skill)-Bogen ODER
+-- (Projekt, alle Skills)-Bogen. Der GLOBALE Standard-Bogen (project_id/skill NULL) greift
+-- NUR, wenn das Projekt ihn ausdrücklich zulässt — sonst wird die Erfassung gesperrt.
+-- Kein stiller Rückfall auf einen fremden Bogen (falscher Bogen schlechter als keiner).
+--
+-- Additiv/idempotent. Default false = kein Automatik-Rückfall auf global.
+-- Im Supabase SQL-Editor ausführen.
+-- =============================================================================
+alter table public.projects add column if not exists allow_global_bogen boolean not null default false;

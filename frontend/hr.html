@@ -27436,6 +27436,7 @@ function ProjectsAdminTab({projects, setProjects, clients}){
       name:'', client:'', status:'active',
       location:'Tirana',
       color:'#0F5661',
+      allow_global_bogen:false,
       rate_training:0, rate_active:0,
       billing_mode:'productive_hours',
       monthly_flat:0,
@@ -27643,6 +27644,13 @@ function ProjectEditModal({project, onSave, onClose, clients}){
               <div className="form-group">
                 <label className="form-label">Beschreibung / Notizen</label>
                 <textarea className="form-input" rows={3} value={form.description||''} onChange={e=>setF('description',e.target.value)} style={{resize:'vertical'}}/>
+              </div>
+              <div className="form-group">
+                <label style={{display:'flex',alignItems:'center',gap:8,cursor:'pointer',fontSize:13,fontWeight:600}}>
+                  <input type="checkbox" checked={!!form.allow_global_bogen} onChange={e=>setF('allow_global_bogen',e.target.checked)}/>
+                  Call-Qualität: globalen Standard-Bogen für dieses Projekt zulassen
+                </label>
+                <div style={{fontSize:11,color:'var(--muted)',marginTop:2}}>Fehlt für eine Projekt/Skill-Kombination ein eigener Bogen, darf ersatzweise der globale Standard-Bogen verwendet werden. Standard: aus — dann wird die Erfassung gesperrt, statt einen fremden Bogen zu nutzen.</div>
               </div>
             </div>
           )}
@@ -28573,7 +28581,8 @@ const PROJECT_COLS = new Set([
   'language_requirement','description',
   'billing_type','minute_rate','case_price','case_aht_sec','cpo_amount','cpo_per_hour',
   'flat_per_agent','productive_hours','training_mode','training_flat',
-  'color'   // 27x: vorher stiller Drop; Spalte via Migration ADD COLUMN color text
+  'color',  // 27x: vorher stiller Drop; Spalte via Migration ADD COLUMN color text
+  'allow_global_bogen'   // Call-Qualität: globalen Standard-Bogen für dieses Projekt zulassen
 ]);
 async function saveProjectToDB(project){
   if(!project||!project.id){ console.error('[proj] saveProjectToDB: project.id fehlt'); return false; }
@@ -32411,16 +32420,20 @@ function cqResolveConfig(cfgs, projId, skill){
   const find=(p,s)=>(cfgs||[]).find(c=>(c.project_id||null)===(p||null)&&(c.skill||null)===(s||null));
   return find(projId,skill)||find(projId,null)||find(null,null)||{green_min:90,yellow_min:75};
 }
-// Bogen für (Projekt,Skill) laden, Rückfall (proj,skill) → (proj,—) → (—,—).
+// Bogen für (Projekt,Skill) STRIKT laden. KEIN stiller Rückfall auf einen fremden Bogen:
+//   1) exakt (Projekt, Skill)  2) (Projekt, alle Skills) = bewusster Projekt-Bogen
+//   3) globaler Standard NUR wenn das Projekt es ausdrücklich erlaubt (projects.allow_global_bogen)
+//   sonst scope 'none' → Erfassung wird gesperrt (falscher Bogen schlechter als keiner).
 async function cqLoadBogen(projId, skill){
   async function q(p,s){ let x=sb.from('call_criteria').select('*').eq('active',true);
     x = p==null ? x.is('project_id',null) : x.eq('project_id',p);
     x = s==null ? x.is('skill',null)      : x.eq('skill',s);
     const {data}=await x.order('order_index',{ascending:true}); return data||[]; }
-  let rows=await q(projId,skill); let scope='project_skill';
-  if(!rows.length && skill!=null){ rows=await q(projId,null); scope='project'; }
-  if(!rows.length){ rows=await q(null,null); scope='global'; }
-  return {rows, scope};
+  let rows=await q(projId,skill); if(rows.length) return {rows, scope:'project_skill'};
+  if(skill!=null){ rows=await q(projId,null); if(rows.length) return {rows, scope:'project'}; }
+  let allowGlobal=false; try{ const {data:pr}=await sb.from('projects').select('allow_global_bogen').eq('id',projId).single(); allowGlobal=!!(pr&&pr.allow_global_bogen); }catch(e){}
+  if(allowGlobal){ rows=await q(null,null); if(rows.length) return {rows, scope:'global'}; }
+  return {rows:[], scope:'none'};
 }
 function cqRankScores(scores){
   const arr=(scores||[]).filter(s=>!s.na).map(s=>({s,f:cqFraction(s.type_snapshot,s.points,s.max_points_snapshot)})).filter(x=>x.f!=null);
@@ -32571,8 +32584,7 @@ function CallSampleModal({emp, onClose, onSaved}){
   const [busy,setBusy]=useState(false);
   useEffect(()=>{ (async()=>{
     const r=await cqLoadBogen(projId,skill);
-    if(r.rows.length){ setBogen(r.rows); setScope(r.scope); setIsExample(false); }
-    else { setBogen(CQ_DEMO_CRITERIA); setScope('example'); setIsExample(true); }
+    setBogen(r.rows); setScope(r.scope); setIsExample(false);   // rows=[] & scope 'none' → gesperrt (kein Fremd-Bogen)
     try{ const rc=await sb.from('call_score_config').select('*'); setCfg(cqResolveConfig(rc.data||[],projId,skill)); }catch(e){}
     try{ const u=await sb.auth.getUser(); const uid=u&&u.data&&u.data.user&&u.data.user.id;
       if(uid){ const nr=await sb.from('app_users').select('full_name').eq('user_id',uid).single(); if(nr&&nr.data&&nr.data.full_name) setCondName(nr.data.full_name); } }catch(e){}
@@ -32598,9 +32610,14 @@ function CallSampleModal({emp, onClose, onSaved}){
     <div className="modal" style={{width:660,maxWidth:'96vw',maxHeight:'92vh',display:'flex',flexDirection:'column'}} onClick={e=>e.stopPropagation()}>
       <div className="modal-header"><span className="modal-title">Call-Stichprobe · {emp.first_name} {emp.last_name}</span><button className="btn btn-sm" onClick={onClose}>✕</button></div>
       <div className="modal-body" style={{padding:20,overflowY:'auto'}}>
-        {bogen===null ? <div className="sp-empty">Lade Bogen…</div> : <React.Fragment>
-          {isExample && <div style={{padding:'8px 12px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:8,color:'#dc2626',fontWeight:700,fontSize:12,marginBottom:12}}>BEISPIEL-BOGEN — für dieses Projekt/Skill ist noch kein Bogen gepflegt. Diese Erfassung wird <u>nicht</u> gespeichert. Bogen im Tab „Bewertungsbogen" anlegen.</div>}
-          {!isExample && scope!=='project_skill' && <div style={{padding:'6px 10px',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:8,color:'#92400e',fontSize:11,marginBottom:10}}>Kein eigener Bogen für diese Kombination — es gilt der {scope==='project'?'Projekt-Standard':'globale Standard-Bogen'}.</div>}
+        {bogen===null ? <div className="sp-empty">Lade Bogen…</div> : (bogen.length===0) ? (
+          <div style={{padding:'20px 18px',textAlign:'center'}}>
+            <div style={{fontSize:34,marginBottom:8}}>🚫</div>
+            <div style={{fontSize:15,fontWeight:800,color:'#dc2626',marginBottom:6}}>Kein Bewertungsbogen hinterlegt</div>
+            <div style={{fontSize:13,color:'var(--muted)',lineHeight:1.5,maxWidth:420,margin:'0 auto'}}>Für <b>Projekt {projId||'—'}, Skill {skill||'—'}</b> ist kein Bewertungsbogen angelegt. Eine Erfassung mit einem fremden Bogen ist bewusst nicht möglich. Lege im Tab „Bewertungsbogen" einen Bogen für genau diese Kombination an — oder erlaube am Projekt den globalen Standard-Bogen.</div>
+          </div>
+        ) : <React.Fragment>
+          {scope!=='project_skill' && <div style={{padding:'6px 10px',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:8,color:'#92400e',fontSize:11,marginBottom:10}}>Kein skill-eigener Bogen — es gilt der {scope==='project'?'Projekt-Bogen (alle Skills)':'globale Standard-Bogen (für dieses Projekt freigegeben)'}.</div>}
           <div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'center',marginBottom:8}}>
             <div style={{fontSize:12,color:'var(--muted)'}}>Projekt/Skill (automatisch): <b>{projId||'—'}{skill?' · '+skill:''}</b></div>
             <label style={{fontSize:12,display:'flex',alignItems:'center',gap:6}}>Datum <input className="form-input" type="date" style={{width:150}} value={date} onChange={e=>setDate(e.target.value)}/></label>
@@ -32646,7 +32663,7 @@ function CallSampleModal({emp, onClose, onSaved}){
         </div>
         <div style={{display:'flex',gap:8}}>
           <button className="btn btn-sm" onClick={onClose}>Abbrechen</button>
-          <button className="btn btn-sm btn-primary" disabled={busy||isExample||pct==null} title={isExample?'Beispiel-Bogen wird nicht gespeichert':''} onClick={save}>💾 Stichprobe speichern</button>
+          <button className="btn btn-sm btn-primary" disabled={busy||pct==null} onClick={save}>💾 Stichprobe speichern</button>
         </div>
       </div>
     </div>
@@ -32813,6 +32830,13 @@ function CallQaSuggestions({projects, employees, showToast}){
     const now=new Date();
     let activeEmps=(employees||[]).filter(e=>e&&['active','training'].includes(e.status)&&e.project_id&&(e.project_skill||e.primary_skill)&&!e.kpi_exempt);
     if(projFilter!=='all') activeEmps=activeEmps.filter(e=>e.project_id===projFilter);
+    // Nur MA vorschlagen, für deren (Projekt,Skill) ein Bogen existiert — sonst nicht bewertbar (kein Fremd-Bogen).
+    const {data:crit}=await sb.from('call_criteria').select('project_id,skill').eq('active',true);
+    const boSet=new Set(); let globalExists=false;
+    (crit||[]).forEach(c=>{ if(c.project_id==null&&c.skill==null){ globalExists=true; } else boSet.add((c.project_id||'')+'|'+((c.skill||'')+'').toLowerCase()); });
+    const {data:projRows}=await sb.from('projects').select('id,allow_global_bogen'); const allowMap={}; (projRows||[]).forEach(p=>{ allowMap[p.id]=!!p.allow_global_bogen; });
+    const hasBogen=(pid,sk)=> boSet.has(pid+'|'+(sk||'')) || boSet.has(pid+'|') || (globalExists&&allowMap[pid]);
+    activeEmps=activeEmps.filter(e=>hasBogen(e.project_id,((e.project_skill||e.primary_skill||'')+'').toLowerCase()));
     // letzter Test je MA
     const {data:samples}=await sb.from('call_samples').select('employee_id,sampled_date').eq('status','done');
     const lastBy={}; (samples||[]).forEach(x=>{ const c=lastBy[x.employee_id]; if(!c||String(x.sampled_date)>String(c)) lastBy[x.employee_id]=x.sampled_date; });
@@ -32846,10 +32870,10 @@ function CallQaSuggestions({projects, employees, showToast}){
         {projList.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
       </select>
     </div>
-    <div style={{fontSize:12,color:'var(--muted)',marginBottom:14,lineHeight:1.5}}>Vorschläge nach Priorität: <b>schwächere Leistung</b> (KPI letzte 2 Wochen) und <b>wer in den letzten 4 Wochen keine Stichprobe</b> hatte, zuerst. Bereits getestete MA erscheinen nicht.</div>
+    <div style={{fontSize:12,color:'var(--muted)',marginBottom:14,lineHeight:1.5}}>Vorschläge nach Priorität: <b>schwächere Leistung</b> (KPI letzte 2 Wochen) und <b>wer in den letzten 4 Wochen keine Stichprobe</b> hatte, zuerst. Bereits getestete MA erscheinen nicht. Mitarbeiter <b>ohne Bewertungsbogen</b> für ihre Projekt/Skill-Kombination erscheinen ebenfalls nicht (nicht bewertbar).</div>
 
     {cand===null ? <div className="sp-empty">Berechne Vorschläge…</div>
-      : cand.length===0 ? <div className="sp-empty">Alle aktiven Mitarbeiter im Zeitraum bereits getestet — nichts offen. 🎉</div>
+      : cand.length===0 ? <div className="sp-empty">Keine offenen Vorschläge (bereits getestet oder kein Bewertungsbogen für die Kombination).</div>
       : <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(280px,1fr))',gap:12}}>
         {cand.slice(0,30).map(c=>{ const t=tier(c.prio); const e=c.emp; const sk=(e.project_skill||e.primary_skill||'').toLowerCase();
           return <div key={e.id} style={{border:'1px solid var(--border)',borderLeft:'4px solid '+t.c,borderRadius:12,padding:'12px 14px',background:'var(--card)'}}>
