@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"><!DOCTYPE html><html lang="de"><head><meta charset<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet"><link rel="icon" type="image/svg+xml" href="/assets/tive360-mark.svg"><title>TIVE 360°</title><script>window.TIVE_BUILD='__BUILD_ID__';try{console.info('%cTIVE build '+window.TIVE_BUILD,'color:#0F5661;font-weight:700');}catch(e){}</script><script src="https://unpkg.com/react@18/umd/react.development.js"></script><script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script><script src="https://unpkg.com/@babel/standalone/babel.min.js"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script><script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script><script src="shared/jsr-calc.js?v=__BUILD_ID__"></script><style>
+<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"><!DOCTYPE html><html lang="de"><head><meta charset<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet"><link rel="icon" type="image/svg+xml" href="/assets/tive360-mark.svg"><title>TIVE 360°</title><script>window.TIVE_BUILD='__BUILD_ID__';try{console.info('%cTIVE build '+window.TIVE_BUILD,'color:#0F5661;font-weight:700');}catch(e){}</script><script src="https://unpkg.com/react@18/umd/react.development.js"></script><script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script><script src="https://unpkg.com/@babel/standalone/babel.min.js"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script><script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script><script src="shared/jsr-calc.js?v=__BUILD_ID__"></script><script src="shared/presentation-slides.js?v=__BUILD_ID__"></script><style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
   --bg:#F5F6F8;--surface:#FFFFFF;--surface-2:#F1F3F5;--card:#ffffff;
@@ -33076,6 +33076,8 @@ function PresentationsView({projects, employees, team, showToast}){
   const [saved,setSaved]=useState(false);
   const [loading,setLoading]=useState(true);
   const [dummy,setDummy]=useState(false);       // Beispieldaten — NICHT gespeichert
+  const [published,setPublished]=useState(false);
+  const [token,setToken]=useState('');
   const [theme,setTheme]=useState({accent:'',font:'',customerLogo:''});   // Look&Feel je Projekt
   const [ourLogo,setOurLogo]=useState('');      // unser Logo (global)
   const [tplId,setTplId]=useState(null);
@@ -33095,9 +33097,9 @@ function PresentationsView({projects, employees, team, showToast}){
     const base=emptyDeckFor(skills.map(s=>s.key));
     try{ const {data}=await sb.from('presentations').select('*').eq('project_id',selProj.id).eq('period_type','kw').eq('period_year',yr).eq('period_no',no).order('created_at',{ascending:false}).limit(1);
       const row=data&&data[0];
-      if(row){ setRowId(row.id); const rd=row.data||{}; const teams={}; skills.forEach(s=>{ teams[s.key]={...hcEmptyTeam(),...((rd.teams||{})[s.key]||{})}; }); setDeck({...base,...rd,teams}); }
-      else { setRowId(null); setDeck(base); }
-    }catch(e){ setRowId(null); setDeck(base); }
+      if(row){ setRowId(row.id); setPublished(!!row.published); setToken(row.public_token||''); const rd=row.data||{}; const teams={}; skills.forEach(s=>{ teams[s.key]={...hcEmptyTeam(),...((rd.teams||{})[s.key]||{})}; }); setDeck({...base,...rd,teams}); }
+      else { setRowId(null); setPublished(false); setToken(''); setDeck(base); }
+    }catch(e){ setRowId(null); setPublished(false); setToken(''); setDeck(base); }
     setLoading(false);
   }
   useEffect(()=>{ setDummy(false); if(selProj) loadDeck(pNo,pYear); else setLoading(false); },[pNo,pYear,selProjId]);
@@ -33120,6 +33122,23 @@ function PresentationsView({projects, employees, team, showToast}){
     setBusy(false);
   }
   const upd=fn=>setDeck(d=>{ const n=JSON.parse(JSON.stringify(d)); fn(n); return n; });
+
+  function genToken(){ const c='abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'; let s=''; const a=new Uint8Array(24); try{ crypto.getRandomValues(a); }catch(e){} for(let i=0;i<24;i++){ s+=c[(a[i]|| (i*7+3))%62]; } return s; }
+  // Veröffentlichen: Namen einfrieren (öffentlicher Renderer hat keine employees), Token setzen, published=true.
+  async function publish(){ if(!selProj||dummy) return; setBusy(true);
+    const snap=JSON.parse(JSON.stringify(deck)); const names={}; skills.forEach(s=>{ membersFor(s.key).forEach(e=>{ names[e.id]=empName(e); }); }); snap._names=names; snap._skills=skills;
+    snap._theme={accent,font:fontFam,projName:selProj.name,customerLogo:theme.customerLogo||'',ourLogo:ourLogo||''};   // Snapshot: Look&Feel einfrieren
+    const tok=token||genToken(); const title=selProj.name+' · KW '+pNo+'/'+pYear;
+    const by=(typeof CURRENT_USER!=='undefined'&&CURRENT_USER)?(CURRENT_USER.name||CURRENT_USER.id):null;
+    try{
+      if(rowId){ const {error}=await sb.from('presentations').update({data:snap,title,published:true,public_token:tok}).eq('id',rowId); if(error) throw error; }
+      else { const {data,error}=await sb.from('presentations').insert({project_id:selProj.id,period_type:'kw',period_year:pYear,period_no:pNo,title,data:snap,published:true,public_token:tok,created_by:by}).select('id').single(); if(error) throw error; setRowId(data.id); }
+      setPublished(true); setToken(tok); showToast&&showToast('Veröffentlicht','success');
+    }catch(e){ showToast&&showToast('Veröffentlichen fehlgeschlagen: '+(e.message||''),'error'); }
+    setBusy(false);
+  }
+  async function unpublish(){ if(!rowId) return; setBusy(true); try{ const {error}=await sb.from('presentations').update({published:false}).eq('id',rowId); if(error) throw error; setPublished(false); }catch(e){ showToast&&showToast('Zurückziehen fehlgeschlagen: '+(e.message||''),'error'); } setBusy(false); }
+  const pubUrl=token?(location.origin+'/praesentation.html?p='+token):'';
 
   // Look&Feel speichern (Farbe/Font/Kundenlogo je Projekt; unser Logo global).
   async function saveTheme(patch){ const next={...theme,...patch}; setTheme(next);
@@ -33229,72 +33248,9 @@ function PresentationsView({projects, employees, team, showToast}){
   }
 
   // ── Darstellung: 3 Muster-Folien (SVG/CSS) ──
-  const Slide=({children,label})=><div style={{position:'relative',aspectRatio:'16 / 9',background:'#fff',border:'1px solid var(--border)',borderRadius:14,boxShadow:'0 6px 24px rgba(15,23,42,.08)',overflow:'hidden',marginBottom:20,fontFamily:fontFam}}>
-    <div style={{position:'absolute',top:0,left:0,width:6,height:'100%',background:accent}}/>
-    {label&&<div style={{position:'absolute',top:14,right:18,fontSize:11,fontWeight:700,letterSpacing:'.12em',textTransform:'uppercase',color:'var(--muted)'}}>{label}</div>}
-    {(theme.customerLogo||ourLogo)&&<div style={{position:'absolute',bottom:14,right:18,display:'flex',gap:14,alignItems:'center',opacity:.92}}>
-      {theme.customerLogo&&<img src={theme.customerLogo} alt="" style={{height:26,maxWidth:130,objectFit:'contain'}}/>}
-      {ourLogo&&<img src={ourLogo} alt="" style={{height:20,maxWidth:110,objectFit:'contain'}}/>}
-    </div>}
-    <div style={{position:'absolute',inset:0,padding:'clamp(20px,4vw,52px)',display:'flex',flexDirection:'column'}}>{children}</div>
-    {dummy&&<div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',pointerEvents:'none'}}><span style={{transform:'rotate(-24deg)',fontSize:'clamp(44px,11vw,130px)',fontWeight:900,color:'rgba(220,38,38,.10)',letterSpacing:'.1em'}}>BEISPIEL</span></div>}
-  </div>;
-
-  function SlideTitle(){ return (<Slide label={selProj.name}>
-    <div style={{flex:1,display:'flex',flexDirection:'column',justifyContent:'center'}}>
-      <div style={{width:64,height:8,background:accent,borderRadius:4,marginBottom:'clamp(14px,3vh,34px)'}}/>
-      <div style={{fontSize:'clamp(28px,5.5vw,68px)',fontWeight:800,lineHeight:1.05,color:'#0f172a',letterSpacing:'-.02em'}}>Weekly Performance Review</div>
-      <div style={{fontSize:'clamp(16px,2.6vw,30px)',fontWeight:600,color:accent,marginTop:'clamp(6px,1.5vh,16px)'}}>{selProj.name}{deck.titel.untertitel?(' · '+deck.titel.untertitel):''}</div>
-      <div style={{marginTop:'auto',display:'flex',gap:'clamp(18px,4vw,48px)',flexWrap:'wrap',fontSize:'clamp(11px,1.5vw,15px)',color:'var(--muted)',fontWeight:600}}>
-        <span>KW {pNo} / {pYear}</span>{deck.titel.datum&&<span>{deck.titel.datum}</span>}{deck.titel.ansprech&&<span>{deck.titel.ansprech}</span>}
-      </div>
-    </div>
-  </Slide>); }
-
-  function SlideStunden({t}){ const rows=deck.teams[t].stunden.filter(r=>r.kw!==''||r.plan!==''||r.geliefert!=='');
-    const vals=rows.flatMap(r=>[numOr(r.plan,0),numOr(r.rueck,0),numOr(r.geliefert,0)]); const mx=Math.max(1,...vals);
-    const W=760,H=230,pad=30,bw=rows.length?(W-pad*2)/rows.length:0; const bar3=[{k:'plan',c:'#cbd5e1',l:'Plan'},{k:'rueck',c:accent+'99',l:'Rückm.'},{k:'geliefert',c:accent,l:'Geliefert'}];
-    return (<Slide label={(t==='sales'?'Sales':'Support')+' · Stunden'}>
-      <div style={{fontSize:'clamp(18px,3vw,34px)',fontWeight:800,color:'#0f172a'}}>Gelieferte Stunden <span style={{color:accent}}>· {t==='sales'?'Sales':'Support'}</span></div>
-      <div style={{fontSize:'clamp(11px,1.4vw,14px)',color:'var(--muted)',marginBottom:'clamp(8px,2vh,18px)'}}>Plan / Rückmeldung / Geliefert über {rows.length||5} Wochen</div>
-      <div style={{flex:1,minHeight:0}}>
-        <svg viewBox={'0 0 '+W+' '+(H+26)} style={{width:'100%',height:'100%'}} preserveAspectRatio="xMidYMid meet">
-          {rows.map((r,i)=>{ const x0=pad+i*bw; return (<g key={i}>
-            {bar3.map((b,bi)=>{ const v=numOr(r[b.k],0); const h=Math.max(1,v/mx*H); const w=(bw-14)/3; const x=x0+7+bi*w; return <rect key={bi} x={x} y={H-h} width={w-3} height={h} rx="2" fill={b.c}/>; })}
-            <text x={x0+bw/2} y={H+16} textAnchor="middle" fontSize="12" fill="#64748b">KW {r.kw||'—'}</text>
-          </g>); })}
-        </svg>
-      </div>
-      <div style={{display:'flex',gap:'clamp(10px,2vw,26px)',flexWrap:'wrap',marginTop:'clamp(8px,2vh,16px)'}}>
-        {rows.map((r,i)=>{ const pc=pctDiff(r.geliefert,r.rueck); return (<div key={i} style={{fontSize:'clamp(10px,1.3vw,13px)'}}>
-          <span style={{color:'var(--muted)',fontWeight:700}}>KW {r.kw||'—'}: </span>
-          <b style={{color:pc==null?'#64748b':pc<0?'#dc2626':'#059669'}}>{pc==null?'—':(pc>0?'+':'')+fmtNum(pc,1)+' %'}</b>
-          {r.erkl?<span style={{color:'#64748b'}}> · {r.erkl}</span>:null}
-        </div>); })}
-      </div>
-      <div style={{display:'flex',gap:14,marginTop:10,fontSize:11,color:'var(--muted)'}}>{bar3.map(b=><span key={b.k} style={{display:'inline-flex',alignItems:'center',gap:5}}><span style={{width:11,height:11,borderRadius:2,background:b.c}}/>{b.l}</span>)}</div>
-    </Slide>);
-  }
-
-  function SlideCalls({t}){ const cols=callColsFor(t); const members=membersFor(t).filter(e=>((deck.teams[t].members||[]).length===0)||deck.teams[t].members.includes(e.id));
-    const cur=deck.teams[t].calls.vorwoche||{}; const ans=members.map(e=>({emp:e,n:numOr((cur[e.id]||{}).answered,0)})).sort((a,b)=>b.n-a.n);
-    const mx=Math.max(1,...ans.map(a=>a.n)); const rows=members.map(e=>({...(cur[e.id]||{}),answered:(cur[e.id]||{}).answered}));
-    return (<Slide label={(t==='sales'?'Sales':'Support')+' · Calls'}>
-      <div style={{fontSize:'clamp(18px,3vw,34px)',fontWeight:800,color:'#0f172a'}}>Call-Kennzahlen <span style={{color:accent}}>· {t==='sales'?'Sales':'Support'}</span> <span style={{fontSize:'.5em',color:'var(--muted)',fontWeight:600}}>Vorwoche</span></div>
-      <div style={{display:'flex',gap:'clamp(16px,4vw,48px)',margin:'clamp(8px,2vh,18px)0 clamp(10px,2vh,20px)',flexWrap:'wrap'}}>
-        <div><div style={{fontSize:'clamp(26px,5vw,56px)',fontWeight:800,color:accent,lineHeight:1}}>{fmtNum(sumCol(rows,'answered'))}</div><div style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>Answered gesamt</div></div>
-        <div><div style={{fontSize:'clamp(26px,5vw,56px)',fontWeight:800,color:'#0f172a',lineHeight:1}}>{wavgTime(rows,cols.find(c=>/handle|aht/i.test(c.k))?cols.find(c=>/handle|aht/i.test(c.k)).k:'avg_handle','answered')}</div><div style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>Ø Handle (gew.)</div></div>
-      </div>
-      <div style={{flex:1,minHeight:0,overflow:'hidden',display:'flex',flexDirection:'column',gap:'clamp(4px,1vh,9px)'}}>
-        {ans.slice(0,10).map(({emp,n})=>(<div key={emp.id} style={{display:'flex',alignItems:'center',gap:10}}>
-          <span style={{width:'clamp(90px,14vw,150px)',fontSize:'clamp(10px,1.3vw,13px)',fontWeight:600,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{empName(emp)}</span>
-          <div style={{flex:1,height:'clamp(12px,2vh,18px)',background:'#f1f5f9',borderRadius:4,overflow:'hidden'}}><div style={{width:(n/mx*100)+'%',height:'100%',background:accent,borderRadius:4}}/></div>
-          <span style={{width:44,textAlign:'right',fontFamily:'var(--mono)',fontWeight:700,fontSize:'clamp(10px,1.3vw,13px)'}}>{fmtNum(n)}</span>
-        </div>))}
-        {ans.length===0&&<div style={{color:'var(--muted)'}}>Keine Mitarbeiter ausgewählt.</div>}
-      </div>
-    </Slide>);
-  }
+  // Geteilter Renderer (shared/presentation-slides.js) — EINE Foliendarstellung fuer In-App + oeffentliche Seite.
+  const slideCtx=()=>({ deck, accent, font:fontFam, projName:selProj.name, period:{no:pNo,year:pYear}, skills, dummy, ourLogo, customerLogo:theme.customerLogo, membersOf:tk=>membersFor(tk).map(e=>({id:e.id,name:empName(e)})) });
+  const renderSlides=()=>{ if(!window.PRES) return React.createElement("div",{style:{color:"var(--muted)"}},"Renderer nicht geladen."); return window.PRES.deckSlides(slideCtx()).map((el,i)=>React.createElement(React.Fragment,{key:i},el)); };
 
   const FONTS=[['inherit','Standard'],["'Inter',sans-serif",'Inter'],["'Instrument Serif',serif",'Instrument Serif'],["'JetBrains Mono',monospace",'JetBrains Mono']];
   const s0=skills[0]?skills[0].key:'all';
@@ -33315,9 +33271,18 @@ function PresentationsView({projects, employees, team, showToast}){
       </div>
       <button className="btn btn-sm" onClick={dummy?discardDummy:fillDummy} style={{border:'1px solid '+(dummy?'#dc2626':'var(--border)'),color:dummy?'#dc2626':'var(--text)',fontWeight:700}}>{dummy?'Beispiel verwerfen':'Beispiel füllen'}</button>
       <button className="btn btn-primary btn-sm" disabled={busy||dummy} title={dummy?'Beispieldaten werden nicht gespeichert':''} onClick={save}>💾 Speichern</button>
+      <button className="btn btn-sm" disabled={busy||dummy} onClick={publish} style={{background:published?'transparent':'#059669',color:published?'#059669':'#fff',border:'1px solid #059669',fontWeight:700}} title="Für das Kundenportal freigeben (nur veröffentlichte Berichte sind für den Kunden sichtbar)">{published?'✓ Veröffentlicht — aktualisieren':'🌐 Veröffentlichen'}</button>
     </div>
 
     {dummy&&<div style={{background:'#fef2f2',border:'1px solid #fecaca',color:'#b91c1c',borderRadius:10,padding:'10px 14px',marginBottom:14,fontSize:13,fontWeight:700}}>⚠ BEISPIELDATEN — nur zur Optik-Beurteilung. Wird NICHT gespeichert und ist kein echter Bericht. „Beispiel verwerfen" lädt den echten Stand.</div>}
+
+    {!dummy&&published&&pubUrl&&<div style={{background:'#f0fdf4',border:'1px solid #bbf7d0',borderRadius:10,padding:'10px 14px',marginBottom:14,fontSize:12,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+      <span style={{fontWeight:700,color:'#15803d'}}>🌐 Öffentlicher Link:</span>
+      <input readOnly value={pubUrl} onFocus={e=>e.target.select()} style={{flex:1,minWidth:220,padding:'5px 8px',border:'1px solid var(--border)',borderRadius:6,fontFamily:'var(--mono)',fontSize:11}}/>
+      <button className="btn btn-sm" onClick={()=>{try{navigator.clipboard.writeText(pubUrl);showToast&&showToast('Link kopiert','success');}catch(e){}}}>Kopieren</button>
+      <a className="btn btn-sm" href={pubUrl} target="_blank" rel="noreferrer">Öffnen ↗</a>
+      <button className="btn btn-sm" style={{color:'#dc2626'}} disabled={busy} onClick={unpublish}>Zurückziehen</button>
+    </div>}
 
     {loading ? <div style={{padding:40,textAlign:'center',color:'var(--muted)'}}>Lädt…</div> : mode==='settings' ? (
       <div className="card" style={{padding:'18px 20px',maxWidth:560}}>
@@ -33369,9 +33334,8 @@ function PresentationsView({projects, employees, team, showToast}){
       </div>
     ) : (
       <div>
-        <SlideTitle/>
-        {skills.map(s=><React.Fragment key={s.key}><SlideStunden t={s.key}/><SlideCalls t={s.key}/></React.Fragment>)}
-        <div style={{fontSize:11,color:'var(--muted)',lineHeight:1.6}}>Muster-Folien zur Abnahme der Gestaltung (Titel · je Skill: Gelieferte Stunden + Calls). Nach deinem OK: restliche Folientypen im selben Stil (Agenda, Kapazität, CSAT, Mail, Maßnahmen).</div>
+        {renderSlides()}
+        <div style={{fontSize:11,color:'var(--muted)',lineHeight:1.6}}>Muster-Folien zur Abnahme der Gestaltung (Titel · je Skill: Gelieferte Stunden + Calls), gerendert über die geteilte Quelle (identisch zur öffentlichen Seite). Nach deinem OK: restliche Folientypen im selben Stil.</div>
       </div>
     )}
   </div>);

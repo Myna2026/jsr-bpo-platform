@@ -112,6 +112,11 @@ echo "→ Stempeluhr..."
 rsync -az --progress "$LOCAL_DIR/stempel.html" "$SERVER:$REMOTE_BASE/hr/stempel.html"
 rsync -az --progress "$LOCAL_DIR/stempel.html" "$SERVER:$REMOTE_BASE/root/stempel.html"
 
+echo "→ Öffentliche Präsentationsseite (Login-frei, nutzt shared/presentation-slides.js)..."
+rsync -az --progress "$LOCAL_DIR/praesentation.html" "$SERVER:$REMOTE_BASE/hr/praesentation.html"
+rsync -az --progress "$LOCAL_DIR/praesentation.html" "$SERVER:$REMOTE_BASE/client/praesentation.html"
+rsync -az --progress "$LOCAL_DIR/shared/" "$SERVER:$REMOTE_BASE/client/shared/"
+
 echo "→ Geteilte Rechenkerne (shared/jsr-calc.js → beide Portale)..."
 rsync -az --progress "$LOCAL_DIR/shared/" "$SERVER:$REMOTE_BASE/hr/shared/"
 rsync -az --progress "$LOCAL_DIR/shared/" "$SERVER:$REMOTE_BASE/mitarbeiter/shared/"
