@@ -33061,49 +33061,104 @@ function hcEmptyTeam(){ return {fte:'',members:[],stunden:[hcEmptyRow(),hcEmptyR
 function hcEmptyDeck(){ return {titel:{untertitel:'',datum:'',ansprech:''},teams:{sales:hcEmptyTeam(),support:hcEmptyTeam()}}; }
 
 function PresentationsView({projects, employees, team, showToast}){
-  const hcProj=(projects||[]).find(p=>p&&/holiday.?check/i.test(p.name||''))||null;
-  const accent=(hcProj&&hcProj.color)||'#2563eb';
+  const projList=(projects||[]).filter(p=>p&&p.id).slice().sort((a,b)=>String(a.name).localeCompare(String(b.name),'de'));
+  const [selProjId,setSelProjId]=useState(()=>{ const hc=projList.find(p=>/holiday.?check/i.test(p.name||'')); return hc?hc.id:(projList[0]?projList[0].id:''); });
+  const selProj=projList.find(p=>p.id===selProjId)||null;
+  const skills=(selProj&&Array.isArray(selProj.skills)&&selProj.skills.length)?selProj.skills.map(s=>({key:String((s&&s.key)||s).toLowerCase(),label:(s&&s.label)||(s&&s.key)||s})):[{key:'all',label:'Team'}];
   const now=new Date(); const cw=getISOWeek(now);
   const [pYear,setPYear]=useState(cw.year);
   const [pNo,setPNo]=useState(cw.kw);
-  const [mode,setMode]=useState('edit');        // edit | show
-  const [tab,setTab]=useState('sales');          // sales | support (Eingabe)
+  const [mode,setMode]=useState('edit');        // edit | show | settings
+  const [tab,setTab]=useState('');              // aktiver Skill-Tab (Eingabe)
   const [deck,setDeck]=useState(hcEmptyDeck());
   const [rowId,setRowId]=useState(null);
   const [busy,setBusy]=useState(false);
   const [saved,setSaved]=useState(false);
   const [loading,setLoading]=useState(true);
+  const [dummy,setDummy]=useState(false);       // Beispieldaten — NICHT gespeichert
+  const [theme,setTheme]=useState({accent:'',font:'',customerLogo:''});   // Look&Feel je Projekt
+  const [ourLogo,setOurLogo]=useState('');      // unser Logo (global)
+  const [tplId,setTplId]=useState(null);
+  const accent=theme.accent||(selProj&&selProj.color)||'#2563eb';
+  const fontFam=theme.font||'inherit';
+  const emptyDeckFor=keys=>{ const teams={}; (keys||[]).forEach(k=>{teams[k]=hcEmptyTeam();}); return {titel:{untertitel:'',datum:'',ansprech:''},teams}; };
 
-  const membersFor=skill=>(employees||[]).filter(e=>e&&hcProj&&e.project_id===hcProj.id&&['active','training'].includes(e.status)&&String(e.project_skill||'').toLowerCase()===skill)
+  const membersFor=skill=>(employees||[]).filter(e=>e&&selProj&&e.project_id===selProj.id&&['active','training'].includes(e.status)&&String(e.project_skill||'').toLowerCase()===skill)
     .slice().sort((a,b)=>((a.first_name||'')+a.last_name).localeCompare((b.first_name||'')+b.last_name,'de'));
   const empName=e=>((e.first_name||'')+' '+(e.last_name||'')).trim();
+  const callColsFor=t=>HC_CALL_COLS[t]||HC_CALL_COLS.sales;
 
   const kwOptions=[]; for(let i=0;i<16;i++){ let kw=cw.kw-i,yr=cw.year; if(kw<=0){kw+=52;yr--;} kwOptions.push({kw,yr}); }
+  useEffect(()=>{ if(skills.length && !skills.some(s=>s.key===tab)) setTab(skills[0].key); },[selProjId]);
 
-  async function loadDeck(no,yr){ setLoading(true);
-    try{ const {data}=await sb.from('presentations').select('*').eq('project_id',hcProj?hcProj.id:'').eq('period_type','kw').eq('period_year',yr).eq('period_no',no).order('created_at',{ascending:false}).limit(1);
+  async function loadDeck(no,yr){ if(!selProj){ setLoading(false); return; } setLoading(true);
+    const base=emptyDeckFor(skills.map(s=>s.key));
+    try{ const {data}=await sb.from('presentations').select('*').eq('project_id',selProj.id).eq('period_type','kw').eq('period_year',yr).eq('period_no',no).order('created_at',{ascending:false}).limit(1);
       const row=data&&data[0];
-      if(row){ setRowId(row.id); setDeck({...hcEmptyDeck(), ...(row.data||{}), teams:{sales:{...hcEmptyTeam(),...((row.data||{}).teams||{}).sales},support:{...hcEmptyTeam(),...((row.data||{}).teams||{}).support}}}); }
-      else { setRowId(null); setDeck(hcEmptyDeck()); }
-    }catch(e){ setRowId(null); setDeck(hcEmptyDeck()); }
+      if(row){ setRowId(row.id); const rd=row.data||{}; const teams={}; skills.forEach(s=>{ teams[s.key]={...hcEmptyTeam(),...((rd.teams||{})[s.key]||{})}; }); setDeck({...base,...rd,teams}); }
+      else { setRowId(null); setDeck(base); }
+    }catch(e){ setRowId(null); setDeck(base); }
     setLoading(false);
   }
-  useEffect(()=>{ if(hcProj) loadDeck(pNo,pYear); else setLoading(false); },[pNo,pYear,hcProj&&hcProj.id]);
+  useEffect(()=>{ setDummy(false); if(selProj) loadDeck(pNo,pYear); else setLoading(false); },[pNo,pYear,selProjId]);
 
-  async function save(){ if(!hcProj) return; setBusy(true);
+  // Look&Feel je Projekt (presentation_templates) + unser Logo (global, app_config).
+  useEffect(()=>{ if(!selProj){ return; } let alive=true; (async()=>{
+    try{ const {data}=await sb.from('presentation_templates').select('*').eq('project_id',selProj.id).limit(1); const t=data&&data[0];
+      if(alive){ setTplId(t?t.id:null); setTheme({accent:(t&&t.slots&&t.slots.accent)||'',font:(t&&t.slots&&t.slots.font)||'',customerLogo:(t&&t.customer_logo_path)||''}); } }catch(e){}
+    try{ const v=await loadConfigFromDB('jsr_presentation_our_logo'); if(alive&&typeof v==='string') setOurLogo(v); }catch(e){}
+  })(); return ()=>{alive=false;}; },[selProjId]);
+
+  async function save(){ if(!selProj||dummy) return; setBusy(true);
     const by=(typeof CURRENT_USER!=='undefined'&&CURRENT_USER)?(CURRENT_USER.name||CURRENT_USER.id):null;
-    const title='HolidayCheck · KW '+pNo+'/'+pYear;
+    const title=selProj.name+' · KW '+pNo+'/'+pYear;
     try{
       if(rowId){ const {error}=await sb.from('presentations').update({data:deck,title}).eq('id',rowId); if(error) throw error; }
-      else { const {data,error}=await sb.from('presentations').insert({project_id:hcProj.id,period_type:'kw',period_year:pYear,period_no:pNo,title,data:deck,created_by:by}).select('id').single(); if(error) throw error; setRowId(data.id); }
+      else { const {data,error}=await sb.from('presentations').insert({project_id:selProj.id,period_type:'kw',period_year:pYear,period_no:pNo,title,data:deck,created_by:by}).select('id').single(); if(error) throw error; setRowId(data.id); }
       setSaved(true); setTimeout(()=>setSaved(false),2000);
     }catch(e){ showToast&&showToast('Speichern fehlgeschlagen: '+(e.message||''),'error'); }
     setBusy(false);
   }
-  // Immutable-Update (deep-clone reicht: reine Daten).
   const upd=fn=>setDeck(d=>{ const n=JSON.parse(JSON.stringify(d)); fn(n); return n; });
 
-  if(!hcProj) return <div style={{padding:40,textAlign:'center',color:'var(--muted)'}}>Kein Projekt „HolidayCheck" gefunden.</div>;
+  // Look&Feel speichern (Farbe/Font/Kundenlogo je Projekt; unser Logo global).
+  async function saveTheme(patch){ const next={...theme,...patch}; setTheme(next);
+    try{ const rec={project_id:selProj.id,name:selProj.name,layout_key:'holidaycheck',slots:{accent:next.accent||'',font:next.font||''},customer_logo_path:next.customerLogo||null};
+      if(tplId){ await sb.from('presentation_templates').update(rec).eq('id',tplId); }
+      else { const {data}=await sb.from('presentation_templates').insert(rec).select('id').single(); if(data) setTplId(data.id); }
+    }catch(e){ showToast&&showToast('Look&Feel speichern fehlgeschlagen: '+(e.message||''),'error'); } }
+  async function uploadLogo(file, which){ if(!file) return;
+    try{ const ext=(file.name.split('.').pop()||'png').toLowerCase();
+      const path=(which==='our'?'global/our-logo':(selProj.id+'/customer-logo'))+'-'+cw.year+'.'+ext;
+      const {error}=await sb.storage.from('presentation-assets').upload(path,file,{upsert:true,contentType:file.type}); if(error) throw error;
+      const {data}=sb.storage.from('presentation-assets').getPublicUrl(path); const url=data&&data.publicUrl;
+      if(which==='our'){ setOurLogo(url); await saveConfigToDB('jsr_presentation_our_logo',url); }
+      else { await saveTheme({customerLogo:url}); }
+    }catch(e){ showToast&&showToast('Logo-Upload fehlgeschlagen: '+(e.message||''),'error'); } }
+
+  // BEISPIELDATEN (Dummy) — plausible KW-31-Zahlen, NICHT gespeichert. Klar erkennbar (Banner + Wasserzeichen).
+  function fillDummy(){
+    const nd=emptyDeckFor(skills.map(s=>s.key));
+    nd.titel={untertitel:'Weekly Business Review',datum:'01.08.2026',ansprech:'M. Weber, HolidayCheck AG'};
+    const kws=[27,28,29,30,31];
+    skills.forEach((s,si)=>{ const t=s.key; const mem=membersFor(t); const isSales=/sales/.test(t);
+      nd.teams[t].fte=(mem.length?mem.length:8)+(isSales?0:0)+'';
+      nd.teams[t].members=mem.map(e=>e.id);
+      nd.teams[t].stunden=kws.map((kw,i)=>{ const plan=isSales?320+i*8:280+i*6; const rueck=plan-(i===4?12:4); const geliefert=Math.round(rueck*(1+((i===4?-0.14:(i%2?0.03:-0.02))))); return {kw:''+kw,plan:''+plan,rueck:''+rueck,geliefert:''+geliefert,erkl:(i===4?'Ardita 4 Tage krank':(i===1?'Feiertag KW 28':''))}; });
+      const mkmss=x=>{ const m=Math.floor(x); const s2=Math.round((x-m)*60); return m+':'+String(s2).padStart(2,'0'); };
+      const fillCalls=(period,scale)=>{ const o={}; mem.forEach((e,ei)=>{ const base=(isSales?60:80)+((ei*13)%40); const row=isSales
+        ? {no_answer:''+(5+(ei*3)%9),answered:''+Math.round(base*scale),outbound:''+(10+(ei*7)%25),avg_talk:mkmss(3.5+((ei%5)*0.2)),avg_acw:mkmss(0.8+((ei%3)*0.1)),avg_handle:mkmss(4.6+((ei%5)*0.25)),avg_hold:mkmss(0.4+((ei%4)*0.05))}
+        : {answered:''+Math.round(base*scale),outbound:''+(6+(ei*5)%18),tel_hours:''+(20+(ei*3)%15),aht:mkmss(6.2+((ei%5)*0.3)),att:mkmss(4.9+((ei%4)*0.2)),hold:mkmss(0.6+((ei%3)*0.1)),acw:mkmss(1.1+((ei%4)*0.15))};
+        o[e.id]=row; }); return o; };
+      nd.teams[t].calls={vorwoche:fillCalls('vorwoche',1),monat:fillCalls('monat',4.2)};
+      nd.teams[t].massnahmen=isSales?'Fokus auf Outbound-Kampagne KW 32; Nachschulung Einwandbehandlung für zwei Agents.':'Zweite Telefonielinie ab KW 33; ACW-Reduktion durch Textbausteine.';
+    });
+    setDeck(nd); setDummy(true); setMode('show');
+  }
+  function discardDummy(){ setDummy(false); loadDeck(pNo,pYear); setMode('edit'); }
+
+  if(!projList.length) return <div style={{padding:40,textAlign:'center',color:'var(--muted)'}}>Keine Projekte vorhanden.</div>;
+  if(!selProj) return <div style={{padding:40,textAlign:'center',color:'var(--muted)'}}>Projekt wählen.</div>;
 
   // ── Eingabe-Bausteine ──
   const inp=(val,on,ph,w)=><input value={val==null?'':val} onChange={e=>on(e.target.value)} placeholder={ph||''} style={{width:w||'100%',boxSizing:'border-box',padding:'5px 7px',border:'1px solid var(--border)',borderRadius:6,fontSize:12,fontFamily:'var(--mono)',textAlign:'right'}}/>;
@@ -33127,7 +33182,7 @@ function PresentationsView({projects, employees, team, showToast}){
     </table><div style={{fontSize:11,color:'var(--muted)',marginTop:4}}>Diff R−P, Diff G−R und % werden gerechnet (nie getippt). Prozent bezogen auf die Rückmeldung.</div></div>);
   }
 
-  function CallsEdit({t,period}){ const cols=HC_CALL_COLS[t]; const members=membersFor(t); const cur=deck.teams[t].calls[period]||{};
+  function CallsEdit({t,period}){ const cols=callColsFor(t); const members=membersFor(t); const cur=deck.teams[t].calls[period]||{};
     const rows=members.map(e=>({...(cur[e.id]||{}), _id:e.id, answered:(cur[e.id]||{}).answered}));
     return (<div style={{overflowX:'auto',marginTop:6}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:12,minWidth:640}}>
       <thead><tr style={{color:'var(--muted)'}}>
@@ -33174,17 +33229,22 @@ function PresentationsView({projects, employees, team, showToast}){
   }
 
   // ── Darstellung: 3 Muster-Folien (SVG/CSS) ──
-  const Slide=({children,label})=><div style={{position:'relative',aspectRatio:'16 / 9',background:'#fff',border:'1px solid var(--border)',borderRadius:14,boxShadow:'0 6px 24px rgba(15,23,42,.08)',overflow:'hidden',marginBottom:20}}>
+  const Slide=({children,label})=><div style={{position:'relative',aspectRatio:'16 / 9',background:'#fff',border:'1px solid var(--border)',borderRadius:14,boxShadow:'0 6px 24px rgba(15,23,42,.08)',overflow:'hidden',marginBottom:20,fontFamily:fontFam}}>
     <div style={{position:'absolute',top:0,left:0,width:6,height:'100%',background:accent}}/>
     {label&&<div style={{position:'absolute',top:14,right:18,fontSize:11,fontWeight:700,letterSpacing:'.12em',textTransform:'uppercase',color:'var(--muted)'}}>{label}</div>}
+    {(theme.customerLogo||ourLogo)&&<div style={{position:'absolute',bottom:14,right:18,display:'flex',gap:14,alignItems:'center',opacity:.92}}>
+      {theme.customerLogo&&<img src={theme.customerLogo} alt="" style={{height:26,maxWidth:130,objectFit:'contain'}}/>}
+      {ourLogo&&<img src={ourLogo} alt="" style={{height:20,maxWidth:110,objectFit:'contain'}}/>}
+    </div>}
     <div style={{position:'absolute',inset:0,padding:'clamp(20px,4vw,52px)',display:'flex',flexDirection:'column'}}>{children}</div>
+    {dummy&&<div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',pointerEvents:'none'}}><span style={{transform:'rotate(-24deg)',fontSize:'clamp(44px,11vw,130px)',fontWeight:900,color:'rgba(220,38,38,.10)',letterSpacing:'.1em'}}>BEISPIEL</span></div>}
   </div>;
 
-  function SlideTitle(){ return (<Slide label="HolidayCheck">
+  function SlideTitle(){ return (<Slide label={selProj.name}>
     <div style={{flex:1,display:'flex',flexDirection:'column',justifyContent:'center'}}>
       <div style={{width:64,height:8,background:accent,borderRadius:4,marginBottom:'clamp(14px,3vh,34px)'}}/>
       <div style={{fontSize:'clamp(28px,5.5vw,68px)',fontWeight:800,lineHeight:1.05,color:'#0f172a',letterSpacing:'-.02em'}}>Weekly Performance Review</div>
-      <div style={{fontSize:'clamp(16px,2.6vw,30px)',fontWeight:600,color:accent,marginTop:'clamp(6px,1.5vh,16px)'}}>HolidayCheck{deck.titel.untertitel?(' · '+deck.titel.untertitel):''}</div>
+      <div style={{fontSize:'clamp(16px,2.6vw,30px)',fontWeight:600,color:accent,marginTop:'clamp(6px,1.5vh,16px)'}}>{selProj.name}{deck.titel.untertitel?(' · '+deck.titel.untertitel):''}</div>
       <div style={{marginTop:'auto',display:'flex',gap:'clamp(18px,4vw,48px)',flexWrap:'wrap',fontSize:'clamp(11px,1.5vw,15px)',color:'var(--muted)',fontWeight:600}}>
         <span>KW {pNo} / {pYear}</span>{deck.titel.datum&&<span>{deck.titel.datum}</span>}{deck.titel.ansprech&&<span>{deck.titel.ansprech}</span>}
       </div>
@@ -33216,7 +33276,7 @@ function PresentationsView({projects, employees, team, showToast}){
     </Slide>);
   }
 
-  function SlideCalls({t}){ const cols=HC_CALL_COLS[t]; const members=membersFor(t).filter(e=>((deck.teams[t].members||[]).length===0)||deck.teams[t].members.includes(e.id));
+  function SlideCalls({t}){ const cols=callColsFor(t); const members=membersFor(t).filter(e=>((deck.teams[t].members||[]).length===0)||deck.teams[t].members.includes(e.id));
     const cur=deck.teams[t].calls.vorwoche||{}; const ans=members.map(e=>({emp:e,n:numOr((cur[e.id]||{}).answered,0)})).sort((a,b)=>b.n-a.n);
     const mx=Math.max(1,...ans.map(a=>a.n)); const rows=members.map(e=>({...(cur[e.id]||{}),answered:(cur[e.id]||{}).answered}));
     return (<Slide label={(t==='sales'?'Sales':'Support')+' · Calls'}>
@@ -33236,42 +33296,82 @@ function PresentationsView({projects, employees, team, showToast}){
     </Slide>);
   }
 
+  const FONTS=[['inherit','Standard'],["'Inter',sans-serif",'Inter'],["'Instrument Serif',serif",'Instrument Serif'],["'JetBrains Mono',monospace",'JetBrains Mono']];
+  const s0=skills[0]?skills[0].key:'all';
   return (<div style={{maxWidth:1040,margin:'0 auto'}}>
-    <div style={{display:'flex',alignItems:'center',gap:12,flexWrap:'wrap',marginBottom:16}}>
-      <div style={{fontSize:20,fontWeight:800}}>📊 Präsentation · HolidayCheck</div>
-      <div style={{flex:1}}/>
-      {saved&&<span style={{color:'var(--green)',fontWeight:700,fontSize:13}}>✓ Gespeichert</span>}
+    {/* 1) Projekt zuerst, dann Zeitraum */}
+    <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',marginBottom:12}}>
+      <div style={{fontSize:20,fontWeight:800}}>📊 Präsentation</div>
+      <select className="form-select" style={{width:'auto',fontWeight:700}} value={selProjId} onChange={e=>setSelProjId(e.target.value)}>
+        {projList.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+      </select>
       <select className="form-select" style={{width:'auto'}} value={pNo+'-'+pYear} onChange={e=>{const [k,y]=e.target.value.split('-');setPNo(parseInt(k));setPYear(parseInt(y));}}>
         {kwOptions.map(({kw,yr})=><option key={kw+'-'+yr} value={kw+'-'+yr}>KW {kw}/{yr}</option>)}
       </select>
+      <div style={{flex:1}}/>
+      {saved&&<span style={{color:'var(--green)',fontWeight:700,fontSize:13}}>✓ Gespeichert</span>}
       <div style={{display:'flex',border:'1px solid var(--border)',borderRadius:10,overflow:'hidden'}}>
-        {[['edit','✎ Eingabe'],['show','▦ Darstellung']].map(([k,l])=><button key={k} className="btn btn-sm" style={{border:'none',borderRadius:0,background:mode===k?accent:'transparent',color:mode===k?'#fff':'var(--text)',fontWeight:700}} onClick={()=>setMode(k)}>{l}</button>)}
+        {[['edit','✎ Eingabe'],['show','▦ Darstellung'],['settings','🎨 Look&Feel']].map(([k,l])=><button key={k} className="btn btn-sm" style={{border:'none',borderRadius:0,background:mode===k?accent:'transparent',color:mode===k?'#fff':'var(--text)',fontWeight:700}} onClick={()=>setMode(k)}>{l}</button>)}
       </div>
-      <button className="btn btn-primary btn-sm" disabled={busy} onClick={save}>💾 Speichern</button>
+      <button className="btn btn-sm" onClick={dummy?discardDummy:fillDummy} style={{border:'1px solid '+(dummy?'#dc2626':'var(--border)'),color:dummy?'#dc2626':'var(--text)',fontWeight:700}}>{dummy?'Beispiel verwerfen':'Beispiel füllen'}</button>
+      <button className="btn btn-primary btn-sm" disabled={busy||dummy} title={dummy?'Beispieldaten werden nicht gespeichert':''} onClick={save}>💾 Speichern</button>
     </div>
 
-    {loading ? <div style={{padding:40,textAlign:'center',color:'var(--muted)'}}>Lädt…</div> : mode==='edit' ? (
+    {dummy&&<div style={{background:'#fef2f2',border:'1px solid #fecaca',color:'#b91c1c',borderRadius:10,padding:'10px 14px',marginBottom:14,fontSize:13,fontWeight:700}}>⚠ BEISPIELDATEN — nur zur Optik-Beurteilung. Wird NICHT gespeichert und ist kein echter Bericht. „Beispiel verwerfen" lädt den echten Stand.</div>}
+
+    {loading ? <div style={{padding:40,textAlign:'center',color:'var(--muted)'}}>Lädt…</div> : mode==='settings' ? (
+      <div className="card" style={{padding:'18px 20px',maxWidth:560}}>
+        <div style={{fontSize:14,fontWeight:800,marginBottom:12,color:accent}}>Look &amp; Feel · {selProj.name}</div>
+        <div style={{display:'flex',flexDirection:'column',gap:16}}>
+          <label style={{fontSize:13}}>Projektfarbe
+            <div style={{display:'flex',alignItems:'center',gap:10,marginTop:4}}>
+              <input type="color" value={/^#/.test(accent)?accent:'#2563eb'} onChange={e=>saveTheme({accent:e.target.value})} style={{width:44,height:32,border:'1px solid var(--border)',borderRadius:6,padding:0,cursor:'pointer'}}/>
+              <span style={{fontFamily:'var(--mono)',fontSize:12}}>{accent}</span>
+              {theme.accent&&<button className="btn btn-sm" onClick={()=>saveTheme({accent:''})}>Standard (Projektfarbe)</button>}
+            </div>
+          </label>
+          <label style={{fontSize:13}}>Schrift
+            <select className="form-select" style={{width:'100%',marginTop:4}} value={theme.font||'inherit'} onChange={e=>saveTheme({font:e.target.value==='inherit'?'':e.target.value})}>
+              {FONTS.map(([v,l])=><option key={v} value={v}>{l}</option>)}
+            </select>
+          </label>
+          <div style={{fontSize:13}}>Auftraggeber-Logo (je Projekt)
+            <div style={{display:'flex',alignItems:'center',gap:12,marginTop:6}}>
+              {theme.customerLogo?<img src={theme.customerLogo} alt="" style={{height:34,maxWidth:150,objectFit:'contain',border:'1px solid var(--border)',borderRadius:6,padding:4,background:'#fff'}}/>:<span style={{fontSize:12,color:'var(--muted)'}}>kein Logo</span>}
+              <label className="btn btn-sm">Hochladen<input type="file" accept="image/*" style={{display:'none'}} onChange={e=>uploadLogo(e.target.files&&e.target.files[0],'customer')}/></label>
+              {theme.customerLogo&&<button className="btn btn-sm" style={{color:'#dc2626'}} onClick={()=>saveTheme({customerLogo:''})}>Entfernen</button>}
+            </div>
+          </div>
+          <div style={{fontSize:13,borderTop:'1px solid var(--border)',paddingTop:14}}>Unser Logo (einmal, gilt für alle Projekte)
+            <div style={{display:'flex',alignItems:'center',gap:12,marginTop:6}}>
+              {ourLogo?<img src={ourLogo} alt="" style={{height:30,maxWidth:130,objectFit:'contain',border:'1px solid var(--border)',borderRadius:6,padding:4,background:'#fff'}}/>:<span style={{fontSize:12,color:'var(--muted)'}}>kein Logo</span>}
+              <label className="btn btn-sm">Hochladen<input type="file" accept="image/*" style={{display:'none'}} onChange={e=>uploadLogo(e.target.files&&e.target.files[0],'our')}/></label>
+            </div>
+          </div>
+          <div style={{fontSize:11,color:'var(--muted)',lineHeight:1.6}}>Aufbau/Anordnung bleiben gleich — nur Farbe, Schrift und Logos unterscheiden sich je Projekt. Änderungen werden sofort gespeichert und in der Darstellung angewandt.</div>
+        </div>
+      </div>
+    ) : mode==='edit' ? (
       <div>
         <div className="card" style={{padding:'14px 16px',marginBottom:16}}>
-          <div style={{fontSize:13,fontWeight:800,marginBottom:8,color:accent}}>Titel & Kopf</div>
+          <div style={{fontSize:13,fontWeight:800,marginBottom:8,color:accent}}>Titel &amp; Kopf</div>
           <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))',gap:10}}>
             <label style={{fontSize:12}}>Untertitel<input value={deck.titel.untertitel||''} onChange={e=>upd(n=>{n.titel.untertitel=e.target.value;})} className="form-input" style={{width:'100%',marginTop:2}}/></label>
             <label style={{fontSize:12}}>Datum<input value={deck.titel.datum||''} onChange={e=>upd(n=>{n.titel.datum=e.target.value;})} className="form-input" style={{width:'100%',marginTop:2}} placeholder="z.B. 12.08.2026"/></label>
             <label style={{fontSize:12}}>Ansprechpartner<input value={deck.titel.ansprech||''} onChange={e=>upd(n=>{n.titel.ansprech=e.target.value;})} className="form-input" style={{width:'100%',marginTop:2}}/></label>
           </div>
         </div>
-        <div style={{display:'flex',gap:6,marginBottom:12}}>
-          {[['sales','Sales'],['support','Support']].map(([k,l])=><button key={k} className="btn btn-sm" onClick={()=>setTab(k)} style={{background:tab===k?accent:'transparent',color:tab===k?'#fff':'var(--text)',border:'1px solid '+(tab===k?accent:'var(--border)'),fontWeight:700}}>{l}</button>)}
+        <div style={{display:'flex',gap:6,marginBottom:12,flexWrap:'wrap'}}>
+          {skills.map(s=><button key={s.key} className="btn btn-sm" onClick={()=>setTab(s.key)} style={{background:tab===s.key?accent:'transparent',color:tab===s.key?'#fff':'var(--text)',border:'1px solid '+(tab===s.key?accent:'var(--border)'),fontWeight:700}}>{s.label}</button>)}
         </div>
-        <div className="card" style={{padding:'16px 18px'}}><TeamEdit t={tab}/></div>
-        <div style={{fontSize:11,color:'var(--muted)',marginTop:10,lineHeight:1.6}}>Noch offen (nächster Schritt, gleiche Bauart): CSAT (Note 1–5 + Anzahl, je MA über 5 Wochen), Mail-Kennzahlen (STD Task / Mails pro Stunde, je MA), 12-Monats-Kapazitätsmodell (Formeln folgen von dir). Die Darstellung zeigt die 3 Muster-Folien zur Gestaltungs-Abnahme.</div>
+        <div className="card" style={{padding:'16px 18px'}}><TeamEdit t={tab||s0}/></div>
+        <div style={{fontSize:11,color:'var(--muted)',marginTop:10,lineHeight:1.6}}>Noch offen (nächster Schritt, gleiche Bauart): CSAT (Note 1–5 + Anzahl, je MA über 5 Wochen), Mail-Kennzahlen (STD Task / Mails pro Stunde, je MA), 12-Monats-Kapazitätsmodell (Formeln folgen von dir).</div>
       </div>
     ) : (
       <div>
         <SlideTitle/>
-        <SlideStunden t="sales"/>
-        <SlideCalls t="sales"/>
-        <div style={{fontSize:11,color:'var(--muted)',lineHeight:1.6}}>3 Muster-Folien zur Abnahme der Gestaltung (Titel · Gelieferte Stunden Sales · Calls je MA Sales). Nach deinem OK: restliche Folientypen im selben Stil, beide Teams, Agenda, Kapazität, CSAT, Mail, Maßnahmen.</div>
+        {skills.map(s=><React.Fragment key={s.key}><SlideStunden t={s.key}/><SlideCalls t={s.key}/></React.Fragment>)}
+        <div style={{fontSize:11,color:'var(--muted)',lineHeight:1.6}}>Muster-Folien zur Abnahme der Gestaltung (Titel · je Skill: Gelieferte Stunden + Calls). Nach deinem OK: restliche Folientypen im selben Stil (Agenda, Kapazität, CSAT, Mail, Maßnahmen).</div>
       </div>
     )}
   </div>);
