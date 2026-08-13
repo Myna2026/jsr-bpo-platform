@@ -34392,7 +34392,7 @@ function PresentationsView({projects, employees, team, showToast}){
     }catch(e){ setRowId(null); setPublished(false); setToken(''); setDeck(base); }
     setLoading(false);
   }
-  useEffect(()=>{ setDummy(false); if(selProj) loadDeck(pNo,pYear); else setLoading(false); },[pNo,pYear,selProjId]);
+  useEffect(()=>{ setDummy(false); if(selProj){ const rv=reviewWeek(); loadDeck(rv.kw,rv.yr); } else setLoading(false); },[pNo,pYear,selProjId]);
 
   // Look&Feel je Projekt (presentation_templates) + unser Logo (global, app_config).
   useEffect(()=>{ if(!selProj){ return; } let alive=true; (async()=>{
@@ -34402,7 +34402,11 @@ function PresentationsView({projects, employees, team, showToast}){
   })(); return ()=>{alive=false;}; },[selProjId]);
 
   // ── Schnitt 4: Bericht = presentations kind='weekly'. Import-Ablagen als LIVE-Datenquelle (5-Wochen-Fenster). ──
-  const windowWeeks=()=>{ const arr=[]; for(let i=4;i>=0;i--){ let kw=pNo-i,yr=pYear; while(kw<=0){kw+=52;yr--;} arr.push({kw,yr}); } return arr; };
+  // Berichts-KW (pNo) = Produktionswoche; ausgewertet wird die VORWOCHE (Review = pNo − 1). Alle Fenster/Anzeige/
+  // Persistenz hängen an reviewWeek. Datum-basiert (robust über Jahresgrenzen), nie pNo direkt fürs Datenfenster.
+  const reviewMonday=()=>{ const m=isoWeekMonday(pYear,pNo); m.setDate(m.getDate()-7); return m; };
+  const reviewWeek=()=>{ const w=getISOWeek(reviewMonday()); return {kw:w.kw,yr:w.year}; };
+  const windowWeeks=()=>{ const base=reviewMonday(); const arr=[]; for(let i=4;i>=0;i--){ const d=new Date(base); d.setDate(base.getDate()-i*7); const w=getISOWeek(d); arr.push({kw:w.kw,yr:w.year}); } return arr; };
   useEffect(()=>{ if(!selProj){ return; } let alive=true; (async()=>{
     const ws=windowWeeks(); const years=[...new Set(ws.map(w=>w.yr))]; const kws=[...new Set(ws.map(w=>w.kw))];
     try{
@@ -34410,7 +34414,7 @@ function PresentationsView({projects, employees, team, showToast}){
       const {data:wh}=await sb.from('weekly_hours').select('skill,kw,year,hours').eq('project_id',selProj.id).in('year',years).in('kw',kws);
       const hours={}; (wh||[]).forEach(r=>{ if(!inWin(r)) return; const sk=String(r.skill||'').toLowerCase(); const key=sk+'|'+r.year+'|'+r.kw; hours[key]=(hours[key]||0)+Number(r.hours||0); });
       const {data:wc}=await sb.from('weekly_calls').select('employee_id,kw,year,answered,outbound,no_answer,avg_handle_sec,avg_talk_sec,avg_hold_sec,avg_acw_sec').eq('project_id',selProj.id).in('year',years).in('kw',kws);
-      const wcWin=(wc||[]).filter(inWin); const callsByEmp={}; wcWin.filter(r=>r.kw===pNo&&r.year===pYear).forEach(r=>{ callsByEmp[r.employee_id]=r; });   // Vorwoche = Berichts-KW
+      const rv=ws[ws.length-1]; const wcWin=(wc||[]).filter(inWin); const callsByEmp={}; wcWin.filter(r=>r.kw===rv.kw&&r.year===rv.yr).forEach(r=>{ callsByEmp[r.employee_id]=r; });   // Vorwoche = ausgewertete Woche (Review)
       const {data:wg}=await sb.from('weekly_gauges').select('employee_id,kw,year,gesamt_pct,anzahl,dauer_sec,nps,csat').eq('project_id',selProj.id).in('year',years).in('kw',kws);
       const gaugesWin=(wg||[]).filter(inWin);   // 5-Wochen-Fenster, für CSAT (Schnitt 5b)
       const {data:ke}=await sb.from('kpi_entries').select('emp_id,kpi_id,value,kw,year').in('kpi_id',['kpi_hc_open_bookings','kpi_hc_osl','kpi_hc_sales_calls']).in('year',years).in('kw',kws);
@@ -34468,11 +34472,11 @@ function PresentationsView({projects, employees, team, showToast}){
       return {id:e.id,name:empName(e),byWeek,tot:{open:to,osl:tos,calls:tc,cr:crOf(to,tos,tc)}}; })
       .filter(a=>Object.keys(a.byWeek).length).sort((a,b)=>(b.tot.cr||0)-(a.tot.cr||0));
     const team={}; weeks.forEach(wk=>{ let o=0,os=0,c=0,any=false; agents.forEach(a=>{ const v=a.byWeek[wk.key]; if(v){any=true;o+=v.open;os+=v.osl;c+=v.calls;} }); team[wk.key]=any?{open:o,osl:os,calls:c,cr:crOf(o,os,c)}:null; });
-    const rm=isoWeekMonth(pYear,pNo); const mtdWeeks=weeks.filter(wk=>{ const p=wk.key.split('-').map(Number); const m=isoWeekMonth(p[0],p[1]); return m.y===rm.y&&m.m===rm.m; });
+    const rv=ws[ws.length-1]; const rm=isoWeekMonth(rv.yr,rv.kw); const mtdWeeks=weeks.filter(wk=>{ const p=wk.key.split('-').map(Number); const m=isoWeekMonth(p[0],p[1]); return m.y===rm.y&&m.m===rm.m; });
     const mtdAgents=agents.map(a=>{ let o=0,os=0,c=0; mtdWeeks.forEach(wk=>{ const v=a.byWeek[wk.key]; if(v){o+=v.open;os+=v.osl;c+=v.calls;} }); return {id:a.id,name:a.name,open:o,osl:os,calls:c,cr:crOf(o,os,c)}; }).filter(a=>a.calls||a.open||a.osl);
     let mo=0,mos=0,mc=0; mtdAgents.forEach(a=>{mo+=a.open;mos+=a.osl;mc+=a.calls;});
     const mtd={ label:MONTHS_DE[rm.m]+' '+rm.y, weekKws:mtdWeeks.map(w=>w.kw), agents:mtdAgents, team:{open:mo,osl:mos,calls:mc,cr:crOf(mo,mos,mc)} };
-    upd(n=>{ n.teams[t].cr={weeks,reportKey:pYear+'-'+pNo,team,agents,mtd,_src:'imported'}; }); }
+    upd(n=>{ n.teams[t].cr={weeks,reportKey:rv.yr+'-'+rv.kw,team,agents,mtd,_src:'imported'}; }); }
   // Rückmeldung je KW = Team-FTE × 7,5 h × Werktage der KW (Mo–Fr minus Feiertage der dominanten Location). Überschreibbar.
   function applyRueckmeldung(t){ const ws=windowWeeks(); const members=membersFor(t); const fte=numOr(deck.teams[t].fte, null);
     if(fte==null) return;
@@ -34485,7 +34489,7 @@ function PresentationsView({projects, employees, team, showToast}){
         const wd=workdays(w.kw,w.yr); const val=Math.round(fte*7.5*wd*10)/10; rows[i].rueck=String(val).replace('.',','); rows[i].rsrc='system'; }); }); }
   // Calls MTD (5f): weekly_calls über die Berichtsmonats-Wochen summiert (Anzahlen summiert, Zeiten nach Answered gewichtet).
   function applyImportCallsMtd(t){ const ws=windowWeeks(); const members=membersFor(t); const win=stores.callsWin||[];
-    const rm=isoWeekMonth(pYear,pNo);
+    const rv=ws[ws.length-1]; const rm=isoWeekMonth(rv.yr,rv.kw);
     const mtdKeys=ws.filter(w=>{ const m=isoWeekMonth(w.yr,w.kw); return m.y===rm.y&&m.m===rm.m; }).map(w=>w.yr+'-'+w.kw);
     const byEmp={}; win.forEach(r=>{ if(mtdKeys.indexOf(r.year+'-'+r.kw)<0) return; (byEmp[r.employee_id]=byEmp[r.employee_id]||[]).push(r); });
     upd(n=>{ const cur=n.teams[t].calls.monat={...(n.teams[t].calls.monat||{})};
@@ -34498,10 +34502,10 @@ function PresentationsView({projects, employees, team, showToast}){
 
   async function save(){ if(!selProj||dummy) return; setBusy(true);
     const by=(typeof CURRENT_USER!=='undefined'&&CURRENT_USER)?(CURRENT_USER.name||CURRENT_USER.id):null;
-    const title=selProj.name+' · KW '+pNo+'/'+pYear;
+    const rev=reviewWeek(); const title=selProj.name+' · KW '+rev.kw+'/'+rev.yr;
     try{
       if(rowId){ const {error}=await sb.from('presentations').update({data:deck,title,kind:'weekly',updated_at:new Date().toISOString()}).eq('id',rowId); if(error) throw error; }
-      else { const {data,error}=await sb.from('presentations').insert({project_id:selProj.id,period_type:'kw',period_year:pYear,period_no:pNo,title,data:deck,kind:'weekly',created_by:by}).select('id').single(); if(error) throw error; setRowId(data.id); }
+      else { const {data,error}=await sb.from('presentations').insert({project_id:selProj.id,period_type:'kw',period_year:rev.yr,period_no:rev.kw,title,data:deck,kind:'weekly',created_by:by}).select('id').single(); if(error) throw error; setRowId(data.id); }
       setSaved(true); setTimeout(()=>setSaved(false),2000);
     }catch(e){ showToast&&showToast('Speichern fehlgeschlagen: '+(e.message||''),'error'); }
     setBusy(false);
@@ -34518,11 +34522,11 @@ function PresentationsView({projects, employees, team, showToast}){
     const csClean={}; Object.keys(callScores||{}).forEach(k=>{ const r=callScores[k]||{}; const strip=e=>({name:e.name,pct:e.pct,points:e.points,color:e.color,label:e.label});
       csClean[k]={best:(r.best||[]).map(strip),worst:(r.worst||[]).map(strip),count:r.count,avg:r.avg,unit:r.unit,max:r.max,thresholds:r.thresholds}; });
     snap._callscores=csClean;
-    const tok=token||genToken(); const title=selProj.name+' · KW '+pNo+'/'+pYear;
+    const rev=reviewWeek(); const tok=token||genToken(); const title=selProj.name+' · KW '+rev.kw+'/'+rev.yr;
     const by=(typeof CURRENT_USER!=='undefined'&&CURRENT_USER)?(CURRENT_USER.name||CURRENT_USER.id):null;
     try{
       if(rowId){ const {error}=await sb.from('presentations').update({data:snap,title,published:true,public_token:tok,kind:'weekly',updated_at:new Date().toISOString()}).eq('id',rowId); if(error) throw error; }
-      else { const {data,error}=await sb.from('presentations').insert({project_id:selProj.id,period_type:'kw',period_year:pYear,period_no:pNo,title,data:snap,published:true,public_token:tok,kind:'weekly',created_by:by}).select('id').single(); if(error) throw error; setRowId(data.id); }
+      else { const {data,error}=await sb.from('presentations').insert({project_id:selProj.id,period_type:'kw',period_year:rev.yr,period_no:rev.kw,title,data:snap,published:true,public_token:tok,kind:'weekly',created_by:by}).select('id').single(); if(error) throw error; setRowId(data.id); }
       setPublished(true); setToken(tok); showToast&&showToast('Veröffentlicht','success');
     }catch(e){ showToast&&showToast('Veröffentlichen fehlgeschlagen: '+(e.message||''),'error'); }
     setBusy(false);
@@ -34564,7 +34568,7 @@ function PresentationsView({projects, employees, team, showToast}){
     });
     setDeck(nd); setCallScores(demoCallScores()); setDummy(true); setMode('show');
   }
-  function discardDummy(){ setDummy(false); loadDeck(pNo,pYear); setMode('edit'); }
+  function discardDummy(){ setDummy(false); const rv=reviewWeek(); loadDeck(rv.kw,rv.yr); setMode('edit'); }
 
   // ── Call-Stichproben-Scores für die Präsentationsfolie (best/worst je Skill im Berichtszeitraum) ──
   // Rang je Mitarbeiter = Ø seiner Stichproben im Zeitraum. k = 3 ab 8 MA, sonst 2. Best/Worst ohne Überlappung.
@@ -34617,7 +34621,8 @@ function PresentationsView({projects, employees, team, showToast}){
   useEffect(()=>{ if(dummy) return; let alive=true; (async()=>{
     if(!selProj){ if(alive) setCallScores({}); return; }
     try{
-      const {data:samples}=await sb.from('call_samples').select('id,employee_id,skill,total_pct,total_points,max_points,sampled_date,note').eq('project_id',selProj.id).eq('year',pYear).eq('kw',pNo).eq('status','done');
+      const rv=reviewWeek();
+      const {data:samples}=await sb.from('call_samples').select('id,employee_id,skill,total_pct,total_points,max_points,sampled_date,note').eq('project_id',selProj.id).eq('year',rv.yr).eq('kw',rv.kw).eq('status','done');
       const {data:cfgs}=await sb.from('call_score_config').select('*');
       const out={}; const sids=[];
       (skills||[]).forEach(s=>{ const r=buildCallScores(samples||[],s.key,cfgs||[]); out[s.key]=r; (r._sampleIds||[]).forEach(id=>sids.push(id)); });
@@ -34745,7 +34750,7 @@ function PresentationsView({projects, employees, team, showToast}){
           <button className="btn btn-sm btn-primary" disabled={!Object.keys(stores.callsByEmp||{}).length} onClick={()=>applyImportCalls(t)}>Aus Import übernehmen</button>
           {(td.calls||{})._vwsrc==='imported'&&<span style={{fontSize:11,color:'#2563eb',fontWeight:700}}>● Import</span>}
           {(td.calls||{})._vwsrc==='manual'&&<span style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>● manuell geändert</span>}
-          <span style={{fontSize:11,color:'var(--muted)'}}>Answered/Outbound/No Answer + Zeiten (mm:ss) aus weekly_calls, KW {pNo}. {Object.keys(stores.callsByEmp||{}).length} MA im Import.</span>
+          <span style={{fontSize:11,color:'var(--muted)'}}>Answered/Outbound/No Answer + Zeiten (mm:ss) aus weekly_calls, KW {reviewWeek().kw}. {Object.keys(stores.callsByEmp||{}).length} MA im Import.</span>
         </div>
         <CallsEdit t={t} period="vorwoche"/>
       </Section>
@@ -34818,7 +34823,7 @@ function PresentationsView({projects, employees, team, showToast}){
 
   // ── Darstellung: 3 Muster-Folien (SVG/CSS) ──
   // Geteilter Renderer (shared/presentation-slides.js) — EINE Foliendarstellung fuer In-App + oeffentliche Seite.
-  const slideCtx=()=>({ deck, accent, font:fontFam, projName:selProj.name, period:{no:pNo,year:pYear}, skills, dummy, ourLogo, customerLogo:theme.customerLogo, callScores, callReviews:deck.callReviews!==false, membersOf:tk=>membersFor(tk).map(e=>({id:e.id,name:empName(e)})) });
+  const slideCtx=()=>{ const rv=reviewWeek(); return ({ deck, accent, font:fontFam, projName:selProj.name, period:{no:rv.kw,year:rv.yr}, skills, dummy, ourLogo, customerLogo:theme.customerLogo, callScores, callReviews:deck.callReviews!==false, membersOf:tk=>membersFor(tk).map(e=>({id:e.id,name:empName(e)})) }); };
   const renderSlides=()=>{ if(!window.PRES) return React.createElement("div",{style:{color:"var(--muted)"}},"Renderer nicht geladen."); return window.PRES.deckSlides(slideCtx()).map((el,i)=>React.createElement(React.Fragment,{key:i},el)); };
 
   const FONTS=[['inherit','Standard'],["'Inter',sans-serif",'Inter'],["'Instrument Serif',serif",'Instrument Serif'],["'JetBrains Mono',monospace",'JetBrains Mono']];
@@ -34831,8 +34836,9 @@ function PresentationsView({projects, employees, team, showToast}){
         {projList.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
       </select>
       <select className="form-select" style={{width:'auto'}} value={pNo+'-'+pYear} onChange={e=>{const [k,y]=e.target.value.split('-');setPNo(parseInt(k));setPYear(parseInt(y));}}>
-        {kwOptions.map(({kw,yr})=><option key={kw+'-'+yr} value={kw+'-'+yr}>KW {kw}/{yr}</option>)}
+        {kwOptions.map(({kw,yr})=><option key={kw+'-'+yr} value={kw+'-'+yr}>Produktion KW {kw}/{yr}</option>)}
       </select>
+      <span style={{fontSize:12,color:'var(--muted)',fontWeight:700}} title="Ausgewertet wird die Vorwoche der gewählten Produktionswoche">→ Auswertung: KW {reviewWeek().kw}/{reviewWeek().yr}</span>
       <div style={{flex:1}}/>
       {saved&&<span style={{color:'var(--green)',fontWeight:700,fontSize:13}}>✓ Gespeichert</span>}
       <div style={{display:'flex',border:'1px solid var(--border)',borderRadius:10,overflow:'hidden'}}>
