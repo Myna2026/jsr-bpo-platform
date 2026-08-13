@@ -34336,6 +34336,9 @@ function CheckinView({employees, projects, team, showToast, isMobileW}){
 // Rechenwerte werden GERECHNET (fmtNum/pctDiff/wavgTime, Nenner-Guards) und Namen kommen AUS DEM SYSTEM
 // (employees des HolidayCheck-Projekts je Skill) — das verhindert die Alt-Fehler (#DIV/0!, Vorzeichen,
 // Komma/Punkt, Namensabweichungen, falsche Team-Überschrift). Reines SVG/CSS. Snapshot in presentations.data.
+// ISO-Wochen-Montag + Monat der Woche (Donnerstag-Regel) — für Werktage (Rückmeldung 5e) und MTD (5d).
+function isoWeekMonday(y,w){ const jan4=new Date(y,0,4); const dow=(jan4.getDay()||7); const wk1=new Date(jan4); wk1.setDate(jan4.getDate()-(dow-1)); const mon=new Date(wk1); mon.setDate(wk1.getDate()+(w-1)*7); return mon; }
+function isoWeekMonth(y,w){ const th=isoWeekMonday(y,w); th.setDate(th.getDate()+3); return {y:th.getFullYear(), m:th.getMonth()}; }
 const HC_CALL_COLS = {
   sales:   [{k:'no_answer',l:'No Answer',t:'count'},{k:'answered',l:'Answered',t:'count'},{k:'outbound',l:'Outbound',t:'count'},{k:'avg_talk',l:'Avg Talk',t:'time'},{k:'avg_acw',l:'Avg ACW',t:'time'},{k:'avg_handle',l:'Avg Handle',t:'time'},{k:'avg_hold',l:'Avg Hold',t:'time'}],
   support: [{k:'answered',l:'Answered',t:'count'},{k:'outbound',l:'Outbound',t:'count'},{k:'tel_hours',l:'Std. Telefonie',t:'num'},{k:'aht',l:'AHT',t:'time'},{k:'att',l:'ATT',t:'time'},{k:'hold',l:'HOLD',t:'time'},{k:'acw',l:'ACW',t:'time'}]
@@ -34366,7 +34369,7 @@ function PresentationsView({projects, employees, team, showToast}){
   const [theme,setTheme]=useState({accent:'',font:'',customerLogo:''});   // Look&Feel je Projekt
   const [ourLogo,setOurLogo]=useState('');      // unser Logo (global)
   const [tplId,setTplId]=useState(null);
-  const [stores,setStores]=useState({hours:{},callsByEmp:{},callsCount:0,gaugesCount:0,gaugesWin:[],loaded:false});   // Schnitt 4/5: Live-Ablagen (5-Wochen-Fenster)
+  const [stores,setStores]=useState({hours:{},callsByEmp:{},callsCount:0,gaugesCount:0,gaugesWin:[],kpiWin:[],loaded:false});   // Schnitt 4/5: Live-Ablagen (5-Wochen-Fenster)
   const [fteStd,setFteStd]=useState({});   // report_fte: employee_id -> Standard-FTE
   const accent=theme.accent||(selProj&&selProj.color)||'#2563eb';
   const fontFam=theme.font||'inherit';
@@ -34410,10 +34413,12 @@ function PresentationsView({projects, employees, team, showToast}){
       const wcWin=(wc||[]).filter(inWin); const callsByEmp={}; wcWin.filter(r=>r.kw===pNo&&r.year===pYear).forEach(r=>{ callsByEmp[r.employee_id]=r; });   // Vorwoche = Berichts-KW
       const {data:wg}=await sb.from('weekly_gauges').select('employee_id,kw,year,gesamt_pct,anzahl,dauer_sec,nps,csat').eq('project_id',selProj.id).in('year',years).in('kw',kws);
       const gaugesWin=(wg||[]).filter(inWin);   // 5-Wochen-Fenster, für CSAT (Schnitt 5b)
+      const {data:ke}=await sb.from('kpi_entries').select('emp_id,kpi_id,value,kw,year').in('kpi_id',['kpi_hc_open_bookings','kpi_hc_osl','kpi_hc_sales_calls']).in('year',years).in('kw',kws);
+      const kpiWin=(ke||[]).filter(inWin);      // Buchungen/Calls je MA/KW für CR (Schnitt 5d)
       const {data:fte}=await sb.from('report_fte').select('employee_id,fte').eq('project_id',selProj.id);
       const fm={}; (fte||[]).forEach(x=>{ fm[x.employee_id]=Number(x.fte); });
-      if(alive){ setStores({hours,callsByEmp,callsCount:wcWin.length,gaugesCount:gaugesWin.length,gaugesWin,loaded:true}); setFteStd(fm); }
-    }catch(e){ if(alive){ setStores({hours:{},callsByEmp:{},callsCount:0,gaugesCount:0,gaugesWin:[],loaded:true}); } }
+      if(alive){ setStores({hours,callsByEmp,callsCount:wcWin.length,gaugesCount:gaugesWin.length,gaugesWin,kpiWin,loaded:true}); setFteStd(fm); }
+    }catch(e){ if(alive){ setStores({hours:{},callsByEmp:{},callsCount:0,gaugesCount:0,gaugesWin:[],kpiWin:[],loaded:true}); } }
   })(); return ()=>{alive=false;}; },[selProjId,pNo,pYear]);
 
   async function saveFteStd(empId,val){ const num=(val===''||val==null)?null:Number(String(val).replace(',','.'));
@@ -34450,6 +34455,24 @@ function PresentationsView({projects, employees, team, showToast}){
     const rows=members.map(e=>({id:e.id,name:empName(e),fte:(fteStd[e.id]!=null?fteStd[e.id]:1)}));
     const total=Math.round(rows.reduce((s,r)=>s+(Number(r.fte)||0),0)*100)/100;
     upd(n=>{ n.teams[t].fteList={rows,total,_src:'imported'}; if(!n.teams[t].fte) n.teams[t].fte=String(total).replace('.',','); }); }
+  // CR + Buchungen (5d): je MA/KW aus kpi_entries. CR = (Offene + OSL) ÷ Sales Calls × 100. MTD = Berichtsmonats-Wochen.
+  const MONTHS_DE=['Januar','Februar','März','April','Mai','Juni','Juli','August','September','Oktober','November','Dezember'];
+  function applyImportCr(t){ const ws=windowWeeks(); const members=membersFor(t); const win=stores.kpiWin||[];
+    const KID={kpi_hc_open_bookings:'open',kpi_hc_osl:'osl',kpi_hc_sales_calls:'calls'};
+    const val={}; win.forEach(r=>{ if(!ws.some(w=>w.yr===r.year&&w.kw===r.kw)) return; const m=KID[r.kpi_id]; if(!m) return; const key=r.year+'-'+r.kw;
+      ((val[r.emp_id]=val[r.emp_id]||{})[key]=val[r.emp_id][key]||{})[m]=Number(r.value)||0; });
+    const weeks=ws.map(w=>({kw:w.kw,key:w.yr+'-'+w.kw}));
+    const crOf=(o,os,c)=> c>0 ? Math.round((o+os)/c*10000)/100 : null;
+    const agents=members.map(e=>{ const byWeek={}; let to=0,tos=0,tc=0;
+      weeks.forEach(wk=>{ const v=(val[e.id]||{})[wk.key]; if(v && (v.open!=null||v.osl!=null||v.calls!=null)){ const o=v.open||0,os=v.osl||0,c=v.calls||0; byWeek[wk.key]={open:o,osl:os,calls:c,cr:crOf(o,os,c)}; to+=o;tos+=os;tc+=c; } });
+      return {id:e.id,name:empName(e),byWeek,tot:{open:to,osl:tos,calls:tc,cr:crOf(to,tos,tc)}}; })
+      .filter(a=>Object.keys(a.byWeek).length).sort((a,b)=>(b.tot.cr||0)-(a.tot.cr||0));
+    const team={}; weeks.forEach(wk=>{ let o=0,os=0,c=0,any=false; agents.forEach(a=>{ const v=a.byWeek[wk.key]; if(v){any=true;o+=v.open;os+=v.osl;c+=v.calls;} }); team[wk.key]=any?{open:o,osl:os,calls:c,cr:crOf(o,os,c)}:null; });
+    const rm=isoWeekMonth(pYear,pNo); const mtdWeeks=weeks.filter(wk=>{ const p=wk.key.split('-').map(Number); const m=isoWeekMonth(p[0],p[1]); return m.y===rm.y&&m.m===rm.m; });
+    const mtdAgents=agents.map(a=>{ let o=0,os=0,c=0; mtdWeeks.forEach(wk=>{ const v=a.byWeek[wk.key]; if(v){o+=v.open;os+=v.osl;c+=v.calls;} }); return {id:a.id,name:a.name,open:o,osl:os,calls:c,cr:crOf(o,os,c)}; }).filter(a=>a.calls||a.open||a.osl);
+    let mo=0,mos=0,mc=0; mtdAgents.forEach(a=>{mo+=a.open;mos+=a.osl;mc+=a.calls;});
+    const mtd={ label:MONTHS_DE[rm.m]+' '+rm.y, weekKws:mtdWeeks.map(w=>w.kw), agents:mtdAgents, team:{open:mo,osl:mos,calls:mc,cr:crOf(mo,mos,mc)} };
+    upd(n=>{ n.teams[t].cr={weeks,reportKey:pYear+'-'+pNo,team,agents,mtd,_src:'imported'}; }); }
 
   async function save(){ if(!selProj||dummy) return; setBusy(true);
     const by=(typeof CURRENT_USER!=='undefined'&&CURRENT_USER)?(CURRENT_USER.name||CURRENT_USER.id):null;
@@ -34695,6 +34718,24 @@ function PresentationsView({projects, employees, team, showToast}){
         <CallsEdit t={t} period="vorwoche"/>
       </Section>
       <Section title="Call-Kennzahlen — Monat"><CallsEdit t={t} period="monat"/></Section>
+      <Section title="CR & Buchungen (KPI)">
+        <div style={{marginBottom:6,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+          <button className="btn btn-sm btn-primary" disabled={!(stores.kpiWin||[]).length} onClick={()=>applyImportCr(t)}>Aus KPI übernehmen</button>
+          {td.cr&&td.cr._src==='imported'&&<span style={{fontSize:11,color:'#2563eb',fontWeight:700}}>● Import ({(td.cr.agents||[]).length} Agenten)</span>}
+          <span style={{fontSize:11,color:'var(--muted)'}}>CR = (Offene + OSL) ÷ Sales Calls × 100, je KW aus kpi_entries ({(stores.kpiWin||[]).length} Werte im Fenster).</span>
+        </div>
+        {td.cr&&td.cr.weeks? (
+          <div style={{overflowX:'auto'}}><table style={{borderCollapse:'collapse',fontSize:12}}>
+            <thead><tr style={{color:'var(--muted)'}}><th style={{textAlign:'left',padding:'3px 8px',fontWeight:700}}>Team je KW</th>{td.cr.weeks.map(w=><th key={w.key} style={{padding:'3px 10px',fontWeight:700}}>KW {w.kw}</th>)}</tr></thead>
+            <tbody>
+              {[['Buchungen','bk'],['Sales Calls','calls'],['CR %','cr']].map(([lbl,metric])=><tr key={metric} style={{borderTop:'1px solid var(--border)'}}>
+                <td style={{padding:'3px 8px',fontWeight:600}}>{lbl}</td>
+                {td.cr.weeks.map(w=>{ const c=td.cr.team[w.key]; const v=!c?null:metric==='bk'?(c.open+c.osl):metric==='calls'?c.calls:c.cr; return <td key={w.key} style={{padding:'3px 10px',textAlign:'center',fontFamily:'var(--mono)'}}>{v==null?'—':(metric==='cr'?fmtNum(v,1)+' %':fmtNum(v))}</td>; })}
+              </tr>)}
+            </tbody>
+          </table></div>
+        ):<div style={{fontSize:11,color:'var(--muted)'}}>Noch nicht übernommen.</div>}
+      </Section>
       <Section title="CSAT (5 Wochen)">
         <div style={{marginBottom:6,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
           <button className="btn btn-sm btn-primary" disabled={!(stores.gaugesWin||[]).length} onClick={()=>applyImportCsat(t)}>Aus Import übernehmen</button>

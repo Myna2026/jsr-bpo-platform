@@ -76,6 +76,8 @@
     right?h('div',{key:'r',style:{fontFamily:MONO,fontSize:'1.5cqw',fontWeight:600,color:rgba(P.fondText,.8),textAlign:'right'}},right):null
   ]); }
 
+  function emptyPanel(ctx, head, P, msg){ return Slide(ctx, [head, panel(P, h('div',{style:{flex:1,display:'flex',alignItems:'center',justifyContent:'center',textAlign:'center',color:P.muted,fontSize:'1.6cqw'}}, msg))]); }
+
   // Slide = Fond in Kundenfarbe (mit Tiefe) + Logo-Rahmen (weiße Lockups) + geisterhafte KW-Zahl + Inhalt.
   function Slide(ctx, children, opts){ opts=opts||{}; var P=pal(ctx.accent);
     var kw=ctx.period&&ctx.period.no; var ghostTxt=opts.ghost!=null?opts.ghost:(kw!=null?String(kw):'');
@@ -361,6 +363,96 @@
     ]) ]);
   }
 
+  // CR (Folien 6–10) — Daten in deck.teams[tk].cr = {weeks:[{kw,key}], team:{key:{open,osl,calls,cr}},
+  //   agents:[{id,name,byWeek:{key:{open,osl,calls,cr}},tot:{...}}], mtd:{label,weekKws,agents,team}, _src}.
+  //   CR = (Offene + OSL) ÷ Sales Calls × 100 (im Frontend gerechnet, nie getippt).
+  function CrTable(ctx, tk){ var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk);
+    var cr=td.cr||{}; var weeks=cr.weeks||[]; var team=cr.team||{};
+    var head=fondHead(P, lbl, 'Conversion Rate', 'CR = (Offene + OSL) ÷ Calls');
+    if(!weeks.length) return emptyPanel(ctx,head,P,'Keine KPI-Daten in diesem Zeitraum.');
+    var tot={open:0,osl:0,calls:0}; weeks.forEach(function(w){ var c=team[w.key]; if(c){tot.open+=c.open;tot.osl+=c.osl;tot.calls+=c.calls;} }); tot.cr=tot.calls>0?(tot.open+tot.osl)/tot.calls*100:null;
+    var metrics=[{l:'Offene Buchungen',k:'open'},{l:'OSL-Buchungen',k:'osl'},{l:'Buchungen gesamt',k:'bk',b:1},{l:'Sales Calls',k:'calls'},{l:'CR',k:'cr',pct:1,b:1}];
+    var colName='24cqw';
+    function get(c,k){ if(!c) return null; return k==='bk'?c.open+c.osl:k==='cr'?c.cr:c[k]; }
+    function gtot(k){ return k==='bk'?tot.open+tot.osl:k==='cr'?tot.cr:tot[k]; }
+    var hdr=h('div',{key:'h',style:{display:'flex',alignItems:'flex-end',paddingBottom:'.7cqw',borderBottom:'1px solid #e6edef',fontSize:'1.15cqw',fontWeight:700,color:P.muted,textTransform:'uppercase'}},
+      [h('div',{key:'n',style:{width:colName}},'')].concat(weeks.map(function(w){ return h('div',{key:w.key,style:{flex:1,textAlign:'right',fontFamily:MONO,paddingRight:'.6cqw'}},'KW '+w.kw); })).concat([h('div',{key:'g',style:{flex:1,textAlign:'right',paddingRight:'.6cqw',color:P.onLightTxt,fontWeight:800}},'Gesamt')]));
+    var body=metrics.map(function(mt){ return h('div',{key:mt.k,style:{display:'flex',alignItems:'center',padding:'.55cqw 0',borderBottom:'1px solid #f1f5f9',fontWeight:mt.b?800:600}},
+      [h('div',{key:'n',style:{width:colName,fontSize:'1.4cqw',color:P.ink}},mt.l)]
+      .concat(weeks.map(function(w){ var v=get(team[w.key],mt.k); return h('div',{key:w.key,style:{flex:1,textAlign:'right',fontFamily:MONO,fontSize:'1.45cqw',color:mt.b?P.onLightTxt:P.ink,paddingRight:'.6cqw'}}, v==null?'—':(mt.pct?fmtNum(v,1)+' %':fmtNum(v))); }))
+      .concat([h('div',{key:'g',style:{flex:1,textAlign:'right',fontFamily:MONO,fontSize:'1.5cqw',fontWeight:800,color:P.onLightTxt,paddingRight:'.6cqw'}}, (function(){ var v=gtot(mt.k); return v==null?'—':(mt.pct?fmtNum(v,1)+' %':fmtNum(v)); })())])); });
+    return Slide(ctx,[head, panel(P,[ h('div',{key:'t',style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',justifyContent:'center'}}, [hdr].concat(body)) ])]);
+  }
+  function CrChart(ctx, tk){ var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk);
+    var cr=td.cr||{}; var weeks=cr.weeks||[]; var team=cr.team||{};
+    var head=fondHead(P, lbl, 'Conversion Rate — Verlauf', '5 Wochen');
+    if(!weeks.length) return emptyPanel(ctx,head,P,'Keine KPI-Daten.');
+    var dom=zoomDomain(weeks.map(function(w){ return team[w.key]?team[w.key].cr:null; }).filter(function(v){return v!=null;}));
+    return Slide(ctx,[head, panel(P,[
+      h('div',{key:'chart',style:{flex:1,minHeight:0,display:'flex',alignItems:'stretch',gap:'2.4cqw'}},
+        weeks.map(function(w,i){ var c=team[w.key]; var v=c?c.cr:null;
+          return h('div',{key:i,style:{flex:1,display:'flex',flexDirection:'column'}},[
+            h('div',{key:'b',style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',justifyContent:'flex-end',alignItems:'center'}},[
+              h('div',{key:'v',style:{fontFamily:MONO,fontSize:'1.5cqw',fontWeight:800,color:P.onLightTxt,marginBottom:'.5cqw'}}, v==null?'—':fmtNum(v,1)+'%'),
+              h('div',{key:'bar',style:{width:'55%',height:(v==null?0:Math.max(4,frac(v,dom)*88))+'%',background:P.onLight,borderRadius:'.5cqw .5cqw 0 0'}})
+            ]),
+            h('div',{key:'l',style:{textAlign:'center',marginTop:'1cqw',paddingTop:'.8cqw',borderTop:'1px solid #eef2f4',fontFamily:MONO,fontSize:'1.3cqw',fontWeight:700,color:P.ink}},'KW '+w.kw)
+          ]); })),
+      dom.zoomed?h('div',{key:'sc',style:{fontSize:'1cqw',color:P.muted,marginTop:'1cqw',textAlign:'right'}},'Skala ab '+fmtNum(dom.lo,1)+'% (gespreizt) · exakte Werte am Balken'):null
+    ])]);
+  }
+  function AgentCr(ctx, tk){ var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk);
+    var agents=(td.cr&&td.cr.agents)||[];
+    var head=fondHead(P, lbl, 'Conversion Rate je Agent', agents.length?(agents.length+' Agenten · Ø 5 Wochen'):'');
+    if(!agents.length) return emptyPanel(ctx,head,P,'Keine KPI-Daten je Agent.');
+    var dom=zoomDomain(agents.map(function(a){return a.tot.cr;}).filter(function(v){return v!=null;}));
+    var shown=agents.slice(0,16), twoCol=shown.length>7, half=Math.ceil(shown.length/2), groups=twoCol?[shown.slice(0,half),shown.slice(half)]:[shown];
+    function rankRow(a,rank){ var v=a.tot.cr; var w=v==null?0:Math.max(6,frac(v,dom)*100);
+      return h('div',{key:a.id,style:{display:'flex',alignItems:'center',gap:'1.2cqw'}},[
+        h('span',{key:'r',style:{width:'2.2cqw',textAlign:'right',fontFamily:MONO,fontSize:'1.1cqw',fontWeight:700,color:P.muted}},rank+'.'),
+        h('span',{key:'n',style:{width:twoCol?'12cqw':'20cqw',fontSize:'1.25cqw',fontWeight:600,color:P.ink,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},a.name),
+        h('div',{key:'b',style:{flex:1,height:'.85cqw',background:'#eef2f4',borderRadius:'.5cqw',overflow:'hidden'}}, h('div',{style:{width:w+'%',height:'100%',background:P.onLight,borderRadius:'.5cqw'}})),
+        h('span',{key:'v',style:{width:'6cqw',textAlign:'right',fontFamily:MONO,fontWeight:700,fontSize:'1.25cqw',color:P.ink}}, v==null?'—':fmtNum(v,1)+'%')
+      ]); }
+    return Slide(ctx,[head, panel(P,[
+      h('div',{key:'l',style:{flex:1,minHeight:0,display:'flex',gap:'4.5cqw',overflow:'hidden'}}, groups.map(function(g,ci){ return h('div',{key:ci,style:{flex:1,minWidth:0,display:'flex',flexDirection:'column',gap:'.7cqw',justifyContent:g.length<=6?'center':'flex-start'}}, g.map(function(a,ri){ return rankRow(a, ci*half+ri+1); })); })),
+      h('div',{key:'note',style:{fontSize:'1cqw',color:P.muted,marginTop:'1cqw',textAlign:'right'}}, (dom.zoomed?('Balkenskala ab '+fmtNum(dom.lo,1)+'% · '):'')+'CR = (Offene+OSL)÷Calls, Ø über 5 Wochen')
+    ])]);
+  }
+  function AgentCrTrend(ctx, tk){ var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk);
+    var cr=td.cr||{}; var agents=cr.agents||[]; var weeks=cr.weeks||[];
+    var head=fondHead(P, lbl, 'CR-Verlauf je Agent', 'Kleine Vielfache · 5 Wochen');
+    if(!agents.length) return emptyPanel(ctx,head,P,'Keine KPI-Daten je Agent.');
+    var all=[]; agents.forEach(function(a){ weeks.forEach(function(w){ var c=a.byWeek[w.key]; if(c&&c.cr!=null) all.push(c.cr); }); });
+    var dom=zoomDomain(all,0.4); var perRow=agents.length<=8?4:5;
+    function mini(a){ return h('div',{key:a.id,style:{border:'1px solid #eef2f4',borderRadius:'1cqw',padding:'.9cqw 1cqw',display:'flex',flexDirection:'column',minWidth:0}},[
+      h('div',{key:'n',style:{fontSize:'1.1cqw',fontWeight:700,color:P.ink,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',marginBottom:'.4cqw'}},a.name),
+      h('div',{key:'b',style:{display:'flex',alignItems:'flex-end',gap:'.4cqw',height:'6.5cqw'}}, weeks.map(function(w){ var c=a.byWeek[w.key]; var has=c&&c.cr!=null; var ht=has?Math.max(6,frac(c.cr,dom)*100):0;
+        return h('div',{key:w.key,style:{flex:1,display:'flex',flexDirection:'column',justifyContent:'flex-end',alignItems:'center',height:'100%'}},
+          has? h('div',{style:{width:'100%',height:ht+'%',background:P.onLight,borderRadius:'.3cqw .3cqw 0 0'}})
+             : h('div',{style:{width:'100%',height:'100%',display:'flex',alignItems:'center',justifyContent:'center'}}, h('div',{style:{width:'70%',borderTop:'2px dotted #cbd5e1'}}))); })),
+      h('div',{key:'x',style:{display:'flex',gap:'.4cqw',marginTop:'.25cqw'}}, weeks.map(function(w){ return h('div',{key:w.key,style:{flex:1,textAlign:'center',fontFamily:MONO,fontSize:'.75cqw',color:P.muted}}, w.kw); })),
+      h('div',{key:'avg',style:{marginTop:'.35cqw',fontFamily:MONO,fontSize:'1.05cqw',fontWeight:700,color:P.onLightTxt}}, 'Ø '+(a.tot.cr==null?'—':fmtNum(a.tot.cr,1)+'%'))
+    ]); }
+    return Slide(ctx,[head, panel(P,[
+      h('div',{key:'g',style:{flex:1,minHeight:0,display:'grid',gridTemplateColumns:'repeat('+perRow+',1fr)',gap:'1.2cqw',overflow:'hidden',alignContent:'start'}}, agents.map(mini)),
+      h('div',{key:'ft',style:{fontSize:'1cqw',color:P.muted,marginTop:'.8cqw'}}, 'Balken = CR je Woche'+(dom.zoomed?(', Skala ab '+fmtNum(dom.lo,1)+'%'):'')+' · gepunktet = keine Daten (Urlaub/krank)')
+    ])]);
+  }
+  function Mtd(ctx, tk){ var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk);
+    var mtd=(td.cr&&td.cr.mtd)||{}; var agents=mtd.agents||[]; var tm=mtd.team||{};
+    var head=fondHead(P, lbl, 'Monat bis dato (MTD)', mtd.label||'');
+    if(!agents.length) return emptyPanel(ctx,head,P,'Keine KPI-Daten im laufenden Monat.');
+    var colName='26cqw'; var heads=['Mitarbeiter','Offene','OSL','Buchungen','Calls','CR'];
+    var hdr=h('div',{key:'h',style:{display:'flex',alignItems:'flex-end',paddingBottom:'.7cqw',borderBottom:'1px solid #e6edef'}}, heads.map(function(t2,i){ return h('div',{key:i,style:{width:i===0?colName:'auto',flex:i===0?'none':1,textAlign:i===0?'left':'right',fontSize:'1.15cqw',fontWeight:700,color:P.muted,textTransform:'uppercase',paddingRight:'.6cqw'}},t2); }));
+    function line(vals,bold,border){ return h('div',{style:{display:'flex',alignItems:'center',padding:'.45cqw 0',borderBottom:border?null:'1px solid #f1f5f9',borderTop:border||null,marginTop:border?'.2cqw':0,paddingTop:border?'.6cqw':'.45cqw',fontSize:'1.35cqw',fontWeight:bold?800:400,color:P.ink}},
+      [h('div',{key:'n',style:{width:colName,fontWeight:bold?800:600,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},vals[0])]
+      .concat(vals.slice(1).map(function(v,i){ return h('div',{key:i,style:{flex:1,textAlign:'right',fontFamily:MONO,fontWeight:(i===2||i===4)?800:(bold?800:400),color:(i===4)?P.onLightTxt:P.ink,paddingRight:'.6cqw'}}, v); }))); }
+    var body=agents.map(function(a){ return line([a.name,fmtNum(a.open),fmtNum(a.osl),fmtNum(a.open+a.osl),fmtNum(a.calls),a.cr==null?'—':fmtNum(a.cr,1)+'%'],false,null); });
+    var totalRow=line(['Team gesamt',fmtNum(tm.open),fmtNum(tm.osl),fmtNum((tm.open||0)+(tm.osl||0)),fmtNum(tm.calls),tm.cr==null?'—':fmtNum(tm.cr,1)+'%'],true,'2px solid '+P.onLight);
+    return Slide(ctx,[head, panel(P,[ h('div',{key:'tbl',style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',overflow:'hidden'}}, [hdr].concat(body).concat([totalRow])), h('div',{key:'ft',style:{fontSize:'1.05cqw',color:P.muted,marginTop:'.8cqw'}}, 'MTD = Summe der Berichtsmonats-Wochen (KW '+((mtd.weekKws||[]).join(', '))+') · CR = (Offene+OSL)÷Calls') ])]);
+  }
+
   // Call-Reviews-Folie je Bericht schaltbar (ctx.callReviews). WICHTIG: deckSlides UND deckSlideKeys über
   // DENSELBEN Flag gaten → beide bleiben im Gleichschritt, die Keys der übrigen Folien verschieben sich nie.
   // Kommentar-Anker hängen am KEY (nicht an der Position); ein Kommentar auf einer ausgeblendeten Folie bleibt
@@ -369,10 +461,13 @@
   function hasCsat(ctx,k){ var td=(ctx.deck.teams||{})[k]||{}; return !!(td.csat&&td.csat.rows&&td.csat.rows.length); }
   function hasFte(ctx,k){ var td=(ctx.deck.teams||{})[k]||{}; return !!(td.fteList&&td.fteList.rows&&td.fteList.rows.length); }
   function hasStd(ctx,k){ var td=(ctx.deck.teams||{})[k]||{}; return (td.stunden||[]).some(function(r){ return r.kw!==''||r.plan!==''||r.geliefert!==''||r.rueck!==''; }); }
+  function hasCr(ctx,k){ var td=(ctx.deck.teams||{})[k]||{}; return !!(td.cr&&td.cr.agents&&td.cr.agents.length); }
   function deckSlides(ctx){ var out=[Title(ctx)]; (ctx.skills||[]).forEach(function(s){ var k=s.key;
     if(hasFte(ctx,k)) out.push(Fte(ctx,k));
     if(hasStd(ctx,k)) out.push(StundenTable(ctx,k));
-    out.push(Stunden(ctx,k)); out.push(Calls(ctx,k));
+    out.push(Stunden(ctx,k));
+    if(hasCr(ctx,k)){ out.push(CrTable(ctx,k)); out.push(CrChart(ctx,k)); out.push(AgentCr(ctx,k)); out.push(AgentCrTrend(ctx,k)); out.push(Mtd(ctx,k)); }
+    out.push(Calls(ctx,k));
     if(deckShowCalls(ctx)) out.push(CallScores(ctx,k));
     if(hasCsat(ctx,k)) out.push(Csat(ctx,k));
   }); return out; }
@@ -380,11 +475,13 @@
   function deckSlideKeys(ctx){ var out=[{key:'title',label:'Titel'}]; (ctx.skills||[]).forEach(function(s){ var k=s.key, L=skillLabel(ctx,k);
     if(hasFte(ctx,k)) out.push({key:k+':fte',label:L+' · FTE'});
     if(hasStd(ctx,k)) out.push({key:k+':stundentab',label:L+' · Stunden (Tabelle)'});
-    out.push({key:k+':stunden',label:L+' · Stunden'}); out.push({key:k+':calls',label:L+' · Calls'});
+    out.push({key:k+':stunden',label:L+' · Stunden'});
+    if(hasCr(ctx,k)){ out.push({key:k+':crtab',label:L+' · CR (Tabelle)'}); out.push({key:k+':crchart',label:L+' · CR (Verlauf)'}); out.push({key:k+':agentcr',label:L+' · CR je Agent'}); out.push({key:k+':agentcrtrend',label:L+' · CR-Verlauf je Agent'}); out.push({key:k+':mtd',label:L+' · MTD'}); }
+    out.push({key:k+':calls',label:L+' · Calls'});
     if(deckShowCalls(ctx)) out.push({key:k+':callscores',label:L+' · Call-Qualität'});
     if(hasCsat(ctx,k)) out.push({key:k+':csat',label:L+' · CSAT'});
   }); return out; }
 
-  window.PRES = { deckSlides:deckSlides, deckSlideKeys:deckSlideKeys, Title:Title, Fte:Fte, StundenTable:StundenTable, Stunden:Stunden, Calls:Calls, CallScores:CallScores, Csat:Csat, callCols:callCols, pal:pal,
+  window.PRES = { deckSlides:deckSlides, deckSlideKeys:deckSlideKeys, Title:Title, Fte:Fte, StundenTable:StundenTable, Stunden:Stunden, CrTable:CrTable, CrChart:CrChart, AgentCr:AgentCr, AgentCrTrend:AgentCrTrend, Mtd:Mtd, Calls:Calls, CallScores:CallScores, Csat:Csat, callCols:callCols, pal:pal,
     fmtNum:fmtNum, numOr:numOr, pctDiff:pctDiff, wavgTime:wavgTime, sumCol:sumCol, decToMmss:decToMmss, mmssToDec:mmssToDec };
 })();
