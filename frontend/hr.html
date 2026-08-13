@@ -32921,6 +32921,208 @@ function CallQaSuggestions({projects, employees, showToast}){
     {sampleFor && <CallSampleModal emp={sampleFor} onClose={()=>setSampleFor(null)} onSaved={()=>{ setSampleFor(null); setReload(r=>r+1); showToast&&showToast('Stichprobe gespeichert','success'); }}/>}
   </div>;
 }
+// ══ Datenimport (Schnitt 2: Rohdaten-Excel → weekly_hours) ══
+// Import getrennt vom Bericht. Erkennung am INHALT (Header-Mapping je Projekt gespeichert), nie am Dateinamen.
+// Nicht zuordenbare Namen werden GEMELDET (Warnungen), nie still verworfen. Nichts wird Fakt vor der Vorschau.
+const ROHDATEN_FIELDS=[
+  {key:'name',            label:'Mitarbeiter-Name', req:true,  cand:['name','agent','agent name','agentname','mitarbeiter','vollname','full name']},
+  {key:'date',            label:'Datum',            req:true,  cand:['datum','date','tag','day','arbeitstag']},
+  {key:'logtimetelefon',  label:'logtimetelefon',   req:true,  cand:['logtimetelefon','log time telefon','telefonie']},
+  {key:'back_office_sales',label:'back_office_sales',req:false, cand:['back_office_sales','backoffice_sales','back office sales']},
+  {key:'urlaubsteam',     label:'urlaubsteam',      req:false, cand:['urlaubsteam','urlaubs team']},
+  {key:'mailer',          label:'mailer',           req:false, cand:['mailer']},
+  {key:'pause',           label:'pause',            req:false, cand:['pause']},
+  {key:'mittagspause',    label:'mittagspause',     req:false, cand:['mittagspause','mittag','mittags pause']},
+];
+function cqNormHead(s){ return String(s==null?'':s).trim().toLowerCase().replace(/[\s.\-]+/g,'_'); }
+function cqNormName(s){ return String(s==null?'':s).trim().toLowerCase().replace(/\s+/g,' '); }
+function cqSec(v){ const n=Number(String(v==null?'':v).toString().replace(',','.')); return isNaN(n)?0:n; }
+function cqHours(sec){ return Math.round((Number(sec)||0)/3600*100)/100; }
+function cqAutoMap(headers){ const m={}; ROHDATEN_FIELDS.forEach(f=>{ let idx=-1; const H=headers.map(cqNormHead);
+  for(const c of f.cand){ const nc=cqNormHead(c); const i=H.indexOf(nc); if(i>=0){ idx=i; break; } }
+  m[f.key]=idx; }); return m; }
+
+function RohdatenImport({projId, projName, employees, onSaved}){
+  const [file,setFile]=useState(null); const [fileHash,setFileHash]=useState('');
+  const [sheets,setSheets]=useState(null);     // [{name,headers,rows}]
+  const [sheetIdx,setSheetIdx]=useState(0);
+  const [map,setMap]=useState({});
+  const [step,setStep]=useState('upload');     // upload | map | preview
+  const [result,setResult]=useState(null);
+  const [busy,setBusy]=useState(false); const [saved,setSaved]=useState(false); const [err,setErr]=useState('');
+  const cfgKey='jsr_import_map_rohdaten_'+projId;
+  const sheet=sheets?sheets[sheetIdx]:null;
+
+  function onFile(f){ if(!f) return; setErr(''); setSaved(false); setResult(null);
+    const rd=new FileReader();
+    rd.onload=async ev=>{ try{
+      const bytes=new Uint8Array(ev.target.result);
+      const wb=XLSX.read(bytes,{type:'array',cellDates:true});
+      const sh=wb.SheetNames.map(nm=>{ const aoa=XLSX.utils.sheet_to_json(wb.Sheets[nm],{header:1,defval:''});
+        const headers=(aoa[0]||[]).map(x=>String(x==null?'':x)); return {name:nm, headers, rows:aoa.slice(1)}; });
+      setFile(f); setFileHash('sz'+bytes.length);
+      setSheets(sh);
+      // Blatt automatisch: das mit logtimetelefon im Header
+      let pick=0; sh.forEach((s,i)=>{ if(s.headers.map(cqNormHead).includes('logtimetelefon')) pick=i; });
+      setSheetIdx(pick);
+      let savedMap=null; try{ savedMap=await loadConfigFromDB(cfgKey); }catch(e){}
+      const auto=cqAutoMap(sh[pick].headers);
+      setMap(savedMap&&typeof savedMap==='object'?{...auto,...savedMap}:auto);
+      setStep('map');
+    }catch(e){ setErr('Datei nicht lesbar: '+(e.message||'')); } };
+    rd.readAsArrayBuffer(f);
+  }
+  function reMapSheet(i){ setSheetIdx(i); setMap(cqAutoMap(sheets[i].headers)); }
+  const missingReq=ROHDATEN_FIELDS.filter(f=>f.req && (map[f.key]==null||map[f.key]<0));
+
+  async function process(){ if(missingReq.length||!sheet) return; setBusy(true); setErr('');
+    try{ await saveConfigToDB(cfgKey, map); }catch(e){}
+    const {data:aliasRows}=await sb.from('import_aliases').select('alias_name,employee_id').eq('project_id',projId);
+    const aliasMap={}; (aliasRows||[]).forEach(a=>{ aliasMap[cqNormName(a.alias_name)]=a.employee_id; });
+    const emps=(employees||[]).filter(e=>e&&e.project_id===projId);
+    const empById={}; const byName={}; emps.forEach(e=>{ empById[e.id]=e; byName[cqNormName((e.first_name||'')+' '+(e.last_name||''))]=e; });
+    const resolve=nm=>{ const n=cqNormName(nm); if(aliasMap[n]) return empById[aliasMap[n]]||null; return byName[n]||null; };
+    const groups={}, unmatched={};
+    (sheet.rows||[]).forEach(r=>{ const nm=String(r[map.name]==null?'':r[map.name]).trim(); if(!nm) return;
+      const dv=r[map.date]; const dt = dv instanceof Date ? dv : (dv!=='' && dv!=null ? new Date(String(dv)) : null);
+      if(!dt || isNaN(dt.getTime())) return;
+      const cw=getISOWeek(dt); const emp=resolve(nm);
+      if(!emp){ (unmatched[nm]=unmatched[nm]||{name:nm,rows:0}).rows++; return; }
+      const key=emp.id+'|'+cw.kw+'|'+cw.year; const g=groups[key]=groups[key]||{emp,kw:cw.kw,year:cw.year,log:0,bos:0,url:0,mail:0,pause:0,mittag:0};
+      g.log+=cqSec(r[map.logtimetelefon]); g.bos+=cqSec(map.back_office_sales>=0?r[map.back_office_sales]:0); g.url+=cqSec(map.urlaubsteam>=0?r[map.urlaubsteam]:0);
+      g.mail+=cqSec(map.mailer>=0?r[map.mailer]:0); g.pause+=cqSec(map.pause>=0?r[map.pause]:0); g.mittag+=cqSec(map.mittagspause>=0?r[map.mittagspause]:0);
+    });
+    const facts=Object.keys(groups).map(k=>{ const g=groups[k]; const sk=((g.emp.project_skill||g.emp.primary_skill||'')+'').toLowerCase();
+      const hoursSec = sk==='sales' ? (g.log+g.bos+g.url) : sk==='support' ? (g.log+g.mail) : null;
+      return { employee_id:g.emp.id, name:((g.emp.first_name||'')+' '+(g.emp.last_name||'')).trim(), kw:g.kw, year:g.year, skill:sk||null,
+        hours: hoursSec==null?null:cqHours(hoursSec), pause_hours:cqHours(g.pause+g.mittag),
+        raw:{logtimetelefon:g.log,back_office_sales:g.bos,urlaubsteam:g.url,mailer:g.mail,pause:g.pause,mittagspause:g.mittag} }; })
+      .sort((a,b)=> a.year-b.year || a.kw-b.kw || a.name.localeCompare(b.name,'de'));
+    const unmatchedList=Object.values(unmatched).sort((a,b)=>b.rows-a.rows);
+    const weeks=[...new Set(facts.map(f=>f.year+'-'+f.kw))].sort();
+    const warnings=[];
+    if(unmatchedList.length) warnings.push({type:'unmatched',message:unmatchedList.length+' nicht zuordenbare Namen (nicht importiert)',details:unmatchedList.map(u=>u.name+' ('+u.rows+')')});
+    const noSkill=facts.filter(f=>f.skill!=='sales'&&f.skill!=='support');
+    if(noSkill.length) warnings.push({type:'skill',message:noSkill.length+' MA ohne Sales/Support-Skill (nur Pausen, keine Stunden)',details:noSkill.map(f=>f.name)});
+    setResult({facts,unmatched:unmatchedList,weeks,warnings}); setBusy(false); setStep('preview');
+  }
+  async function assignAlias(nm, empId){ if(!empId) return; setBusy(true);
+    await sb.from('import_aliases').insert({project_id:projId, alias_name:nm, employee_id:empId});
+    await process();
+  }
+  async function save(){ if(!result||busy) return; setBusy(true); setErr('');
+    const ts=isoLocal(new Date())+'_'+fileHash;
+    const path=projId+'/rohdaten/'+ts+'_'+(file.name||'rohdaten.xlsx');
+    let storagePath=null; try{ const up=await sb.storage.from('weekly-imports').upload(path,file,{upsert:true,contentType:file.type||'application/octet-stream'}); if(!up.error) storagePath=path; }catch(e){}
+    let uid=null,uname=null; try{ const u=await sb.auth.getUser(); uid=u&&u.data&&u.data.user&&u.data.user.id||null; if(uid){ const nr=await sb.from('app_users').select('full_name').eq('user_id',uid).single(); uname=nr&&nr.data&&nr.data.full_name||null; } }catch(e){}
+    const wkCount={}; result.facts.forEach(f=>{ const k=f.year+'|'+f.kw; wkCount[k]=(wkCount[k]||0)+1; });
+    const primary=Object.keys(wkCount).sort((a,b)=>wkCount[b]-wkCount[a])[0]; const pkw=primary?Number(primary.split('|')[1]):null, pyy=primary?Number(primary.split('|')[0]):null;
+    const status=result.unmatched.length?'partial':'ok';
+    const {data:imp,error:ie}=await sb.from('data_imports').insert({ project_id:projId, source_type:'rohdaten', kw:pkw, year:pyy, file_name:file.name, file_hash:fileHash, storage_path:storagePath, status, warnings:result.warnings, row_count:(sheet.rows||[]).length, matched_count:result.facts.length, unmatched_count:result.unmatched.length, uploaded_by:uid, uploaded_by_name:uname }).select('id').single();
+    if(ie){ setBusy(false); setErr('Import nicht gespeichert: '+(ie.message||'')); return; }
+    for(const wk of result.weeks){ const yy=Number(wk.split('-')[0]),kw=Number(wk.split('-')[1]); await sb.from('weekly_hours').delete().eq('project_id',projId).eq('kw',kw).eq('year',yy); }
+    const rows=result.facts.map(f=>({ import_id:imp.id, project_id:projId, employee_id:f.employee_id, kw:f.kw, year:f.year, skill:f.skill, hours:f.hours, pause_hours:f.pause_hours, raw:f.raw }));
+    const {error:fe}=await sb.from('weekly_hours').insert(rows);
+    setBusy(false);
+    if(fe){ setErr('Fakten nicht gespeichert: '+(fe.message||'')); return; }
+    setSaved(true); setStep('upload'); setSheets(null); setFile(null); setResult(null); onSaved&&onSaved();
+  }
+
+  return <div>
+    {err && <div style={{padding:'8px 12px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:8,color:'#dc2626',fontSize:12,marginBottom:12}}>{err}</div>}
+    {saved && <div style={{padding:'8px 12px',background:'#ecfdf5',border:'1px solid #a7f3d0',borderRadius:8,color:'#059669',fontSize:12,marginBottom:12,fontWeight:700}}>✓ Import gespeichert.</div>}
+
+    {step==='upload' && <label style={{display:'inline-flex',alignItems:'center',gap:8,padding:'10px 16px',border:'1px dashed var(--border)',borderRadius:10,cursor:'pointer',fontWeight:700}}>
+      ⬆ Rohdaten-Excel wählen
+      <input type="file" accept=".xlsx,.xls" style={{display:'none'}} onChange={e=>{ const f=e.target.files&&e.target.files[0]; e.target.value=''; onFile(f); }}/>
+    </label>}
+
+    {step==='map' && sheet && <div>
+      <div style={{fontSize:13,fontWeight:700,marginBottom:8}}>Spalten zuordnen <span style={{fontWeight:400,color:'var(--muted)'}}>— Datei „{file&&file.name}"</span></div>
+      {sheets.length>1 && <div style={{marginBottom:10,fontSize:12}}>Blatt: <select className="form-select" style={{width:'auto'}} value={sheetIdx} onChange={e=>reMapSheet(Number(e.target.value))}>{sheets.map((s,i)=><option key={i} value={i}>{s.name} ({s.headers.length} Spalten)</option>)}</select></div>}
+      <div style={{fontSize:11,color:'var(--muted)',marginBottom:8}}>Erkennung am Inhalt: ordne jedem Feld die passende Spaltenüberschrift zu. Wird je Projekt gespeichert und in Folgewochen vorbelegt.</div>
+      <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}><tbody>
+        {ROHDATEN_FIELDS.map(f=>{ const bad=f.req && (map[f.key]==null||map[f.key]<0); return <tr key={f.key} style={{borderBottom:'1px solid var(--border)'}}>
+          <td style={{padding:'6px 8px',fontWeight:600,whiteSpace:'nowrap'}}>{f.label}{f.req&&<span style={{color:'#dc2626'}}> *</span>}</td>
+          <td style={{padding:'6px 8px'}}>
+            <select className="form-select" style={{width:'100%',borderColor:bad?'#dc2626':undefined}} value={map[f.key]==null?-1:map[f.key]} onChange={e=>setMap(m=>({...m,[f.key]:Number(e.target.value)}))}>
+              <option value={-1}>{f.req?'— bitte wählen —':'— nicht vorhanden —'}</option>
+              {sheet.headers.map((h,i)=><option key={i} value={i}>{h||('Spalte '+(i+1))}</option>)}
+            </select>
+          </td>
+        </tr>; })}
+      </tbody></table>
+      {missingReq.length>0 && <div style={{fontSize:11,color:'#dc2626',marginTop:8}}>Fehlende Pflichtspalten: {missingReq.map(f=>f.label).join(', ')} — nicht einlesbar, bis zugeordnet.</div>}
+      <div style={{display:'flex',gap:8,marginTop:12}}>
+        <button className="btn btn-sm" onClick={()=>{ setStep('upload'); setSheets(null); setFile(null); }}>Abbrechen</button>
+        <button className="btn btn-sm btn-primary" disabled={missingReq.length>0||busy} onClick={process}>Verarbeiten (Vorschau)</button>
+      </div>
+    </div>}
+
+    {step==='preview' && result && <div>
+      <div style={{display:'flex',gap:20,flexWrap:'wrap',marginBottom:12}}>
+        <div><div style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>Zugeordnet</div><div style={{fontSize:22,fontWeight:800}}>{result.facts.length}</div></div>
+        <div><div style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>Nicht zuordenbar</div><div style={{fontSize:22,fontWeight:800,color:result.unmatched.length?'#dc2626':'#059669'}}>{result.unmatched.length}</div></div>
+        <div><div style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>Wochen</div><div style={{fontSize:22,fontWeight:800}}>{result.weeks.map(w=>'KW'+w.split('-')[1]).join(', ')||'—'}</div></div>
+      </div>
+      {result.unmatched.length>0 && <div style={{border:'1px solid #fecaca',background:'#fef2f2',borderRadius:10,padding:'10px 12px',marginBottom:12}}>
+        <div style={{fontSize:12,fontWeight:800,color:'#dc2626',marginBottom:6}}>Nicht zuordenbare Namen — bitte zuordnen (wird als Alias gespeichert):</div>
+        {result.unmatched.map((u,i)=><div key={i} style={{display:'flex',alignItems:'center',gap:8,padding:'3px 0',flexWrap:'wrap'}}>
+          <span style={{fontWeight:600,minWidth:160}}>{u.name} <span style={{color:'var(--muted)',fontWeight:400}}>({u.rows} Tage)</span></span>
+          <select className="form-select" style={{width:'auto',fontSize:12}} defaultValue="" onChange={e=>{ if(e.target.value) assignAlias(u.name, e.target.value); }}>
+            <option value="">→ Mitarbeiter wählen…</option>
+            {(employees||[]).filter(e=>e&&e.project_id===projId).slice().sort((a,b)=>((a.first_name||'')+a.last_name).localeCompare((b.first_name||'')+b.last_name,'de')).map(e=><option key={e.id} value={e.id}>{e.first_name} {e.last_name}{e.project_skill?' · '+e.project_skill:''}</option>)}
+          </select>
+        </div>)}
+      </div>}
+      <div style={{maxHeight:280,overflowY:'auto',border:'1px solid var(--border)',borderRadius:8,marginBottom:12}}>
+        <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+          <thead><tr style={{position:'sticky',top:0,background:'var(--surface-2)'}}>{['Mitarbeiter','KW','Skill','Stunden','Pausen'].map(h=><th key={h} style={{textAlign:'left',padding:'6px 8px',fontSize:11,color:'var(--muted)'}}>{h}</th>)}</tr></thead>
+          <tbody>{result.facts.map((f,i)=><tr key={i} style={{borderTop:'1px solid var(--border)'}}>
+            <td style={{padding:'5px 8px'}}>{f.name}</td><td style={{padding:'5px 8px'}}>KW {f.kw}/{f.year}</td>
+            <td style={{padding:'5px 8px'}}>{f.skill||'—'}</td>
+            <td style={{padding:'5px 8px',fontFamily:'var(--mono)',fontWeight:700}}>{f.hours==null?'—':f.hours.toLocaleString('de-DE',{minimumFractionDigits:2,maximumFractionDigits:2})} h</td>
+            <td style={{padding:'5px 8px',fontFamily:'var(--mono)',color:'var(--muted)'}}>{f.pause_hours.toLocaleString('de-DE',{minimumFractionDigits:2,maximumFractionDigits:2})} h</td>
+          </tr>)}</tbody>
+        </table>
+      </div>
+      <div style={{display:'flex',gap:8}}>
+        <button className="btn btn-sm" onClick={()=>setStep('map')}>Zurück zur Zuordnung</button>
+        <button className="btn btn-sm btn-primary" disabled={busy||result.facts.length===0} onClick={save}>💾 Import speichern ({result.facts.length} Zeilen)</button>
+      </div>
+      <div style={{fontSize:11,color:'var(--muted)',marginTop:8}}>Nur zugeordnete Zeilen werden gespeichert. Nicht zuordenbare bleiben als Warnung am Import — nach dem Zuordnen erneut verarbeiten. Re-Import derselben Woche ersetzt die Werte (solange kein Bericht sie eingefroren hat).</div>
+    </div>}
+  </div>;
+}
+
+function DataImportView({projects, employees}){
+  const projList=(projects||[]).filter(p=>p&&p.id).slice().sort((a,b)=>String(a.name).localeCompare(String(b.name),'de'));
+  const [projId,setProjId]=useState(()=>{ const hc=projList.find(p=>/holiday.?check/i.test(p.name||'')); return hc?hc.id:(projList[0]?projList[0].id:''); });
+  const selProj=projList.find(p=>p.id===projId)||null;
+  const [imports,setImports]=useState(null); const [tick,setTick]=useState(0);
+  useEffect(()=>{ let alive=true; (async()=>{ if(!projId){ setImports([]); return; }
+    const {data}=await sb.from('data_imports').select('*').eq('project_id',projId).eq('source_type','rohdaten').order('created_at',{ascending:false}).limit(12);
+    if(alive) setImports(data||[]); })(); return ()=>{alive=false;}; },[projId,tick]);
+  return <div style={{maxWidth:1000}}>
+    <div style={{fontSize:20,fontWeight:700,marginBottom:4}}>📥 Datenimport</div>
+    <div style={{fontSize:13,color:'var(--muted)',marginBottom:14}}>Wöchentliche Rohdaten getrennt vom Bericht. Erkennung am Inhalt; nicht zuordenbare Namen werden gemeldet, nie still verworfen.</div>
+    <div style={{display:'flex',gap:10,alignItems:'center',marginBottom:16,flexWrap:'wrap'}}>
+      <select className="form-select" style={{width:'auto',fontWeight:700}} value={projId} onChange={e=>setProjId(e.target.value)}>{projList.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select>
+      <span style={{fontSize:12,color:'var(--muted)'}}>Quelle: Rohdaten-Excel (agent_qm)</span>
+    </div>
+    {selProj && <div style={{border:'1px solid var(--border)',borderRadius:12,padding:16,marginBottom:18,background:'var(--card)'}}>
+      <RohdatenImport projId={projId} projName={selProj.name} employees={employees} onSaved={()=>setTick(t=>t+1)}/>
+    </div>}
+    <div style={{fontSize:13,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em',marginBottom:8}}>Letzte Importe</div>
+    {imports===null ? <div className="sp-empty">Lädt…</div> : imports.length===0 ? <div className="sp-empty">Noch keine Importe für dieses Projekt.</div> :
+      <div style={{display:'flex',flexDirection:'column',gap:6}}>{imports.map(im=><div key={im.id} style={{display:'flex',alignItems:'center',gap:12,padding:'8px 12px',border:'1px solid var(--border)',borderRadius:8,flexWrap:'wrap'}}>
+        <span style={{fontSize:11,fontWeight:800,padding:'2px 8px',borderRadius:20,background:im.status==='ok'?'#ecfdf5':im.status==='partial'?'#fffbeb':'#fef2f2',color:im.status==='ok'?'#059669':im.status==='partial'?'#d97706':'#dc2626'}}>{im.status==='ok'?'vollständig':im.status==='partial'?'teilweise':'Fehler'}</span>
+        <span style={{fontSize:12,fontWeight:600}}>KW {im.kw}/{im.year}</span>
+        <span style={{fontSize:11,color:'var(--muted)',flex:1,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{im.file_name} · {im.matched_count} zugeordnet{im.unmatched_count?(' · '+im.unmatched_count+' offen'):''}</span>
+        <span style={{fontSize:11,color:'var(--muted)'}}>{fmtDate(im.created_at)}{im.uploaded_by_name?' · '+im.uploaded_by_name:''}</span>
+      </div>)}</div>}
+  </div>;
+}
 // ══ CV-Sync aus öffentlichem Google Sheet (Feature 20) ══
 // Browser-Auto-Sync-Guard: max 1× pro Sitzung (Modul-Flag, reset bei Reload) UND Mindestabstand
 // zum letzten Sync (auto ODER manuell) — verhindert einen Lauf bei jedem Tab-Wechsel/20×-am-Tag.
@@ -34881,6 +35083,7 @@ function App(){
       {key:'forecast',label:'Forecast',icon:'📈'},
       {key:'profitability',label:'Wirtschaftlichkeit',icon:'💹'},
       ...((team&&(team.role_keys||[]).some(r=>r==='management')) ? [{key:'praesentation',label:'Präsentationen',icon:'📊'}] : []),   // Management-only
+      ...((team&&(team.role_keys||[]).some(r=>r==='management')) ? [{key:'dataimport',label:'Datenimport',icon:'📥'}] : []),   // Management-only
     ]},
     {sec:'System', items:[
       {key:'superadmin',label:'System / Konfiguration',icon:'⚙️'},
@@ -34948,6 +35151,7 @@ function App(){
       'forecast':'<path d="M18.375 2.25c-1.035 0-1.875.84-1.875 1.875v15.75c0 1.035.84 1.875 1.875 1.875h.75c1.035 0 1.875-.84 1.875-1.875V4.125c0-1.036-.84-1.875-1.875-1.875h-.75ZM9.75 8.625c0-1.036.84-1.875 1.875-1.875h.75c1.036 0 1.875.84 1.875 1.875v11.25c0 1.035-.84 1.875-1.875 1.875h-.75a1.875 1.875 0 0 1-1.875-1.875V8.625ZM3 13.125c0-1.036.84-1.875 1.875-1.875h.75c1.036 0 1.875.84 1.875 1.875v6.75c0 1.035-.84 1.875-1.875 1.875h-.75A1.875 1.875 0 0 1 3 19.875v-6.75Z"/>',
       'profitability':'<path fill-rule="evenodd" d="M12 2.25c-5.385 0-9.75 4.365-9.75 9.75s4.365 9.75 9.75 9.75 9.75-4.365 9.75-9.75S17.385 2.25 12 2.25Zm-1.902 7.098a3.75 3.75 0 0 1 3.903-.884.75.75 0 1 0 .498-1.415A5.25 5.25 0 0 0 8.005 9.75H7.5a.75.75 0 0 0 0 1.5h.054a5.281 5.281 0 0 0 0 1.5H7.5a.75.75 0 0 0 0 1.5h.505a5.25 5.25 0 0 0 6.494 2.701.75.75 0 1 0-.498-1.415 3.75 3.75 0 0 1-4.252-1.286h3.001a.75.75 0 0 0 0-1.5H9.075a3.77 3.77 0 0 1 0-1.5h3.675a.75.75 0 0 0 0-1.5h-3c.105-.14.221-.274.348-.402Z" clip-rule="evenodd"/>',
       'praesentation':'<path fill-rule="evenodd" d="M2.25 2.25a.75.75 0 0 0 0 1.5H3v10.5a3 3 0 0 0 3 3h1.21l-1.172 3.513a.75.75 0 0 0 1.424.474l.329-.987h8.418l.33.987a.75.75 0 0 0 1.422-.474l-1.17-3.513H18a3 3 0 0 0 3-3V3.75h.75a.75.75 0 0 0 0-1.5H2.25Zm6.54 15h6.42l.5 1.5H8.29l.5-1.5Zm8.085-8.995a.75.75 0 1 0-.75-1.299 12.81 12.81 0 0 0-3.558 3.05L11.03 8.47a.75.75 0 0 0-1.06 0l-2.25 2.25a.75.75 0 1 0 1.06 1.06l1.72-1.72 1.774 1.775a.75.75 0 0 0 1.174-.144 11.31 11.31 0 0 1 3.477-3.146Z" clip-rule="evenodd"/>',
+      'dataimport':'<path fill-rule="evenodd" d="M12 2.25a.75.75 0 0 1 .75.75v11.69l3.22-3.22a.75.75 0 1 1 1.06 1.06l-4.5 4.5a.75.75 0 0 1-1.06 0l-4.5-4.5a.75.75 0 1 1 1.06-1.06l3.22 3.22V3a.75.75 0 0 1 .75-.75Zm-9 13.5a.75.75 0 0 1 .75.75v2.25a1.5 1.5 0 0 0 1.5 1.5h13.5a1.5 1.5 0 0 0 1.5-1.5V16.5a.75.75 0 0 1 1.5 0v2.25a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3V16.5a.75.75 0 0 1 .75-.75Z" clip-rule="evenodd"/>',
       'superadmin':'<path fill-rule="evenodd" d="M11.078 2.25c-.917 0-1.699.663-1.85 1.567L9.05 4.889c-.02.12-.115.26-.297.348a7.493 7.493 0 0 0-.986.57c-.166.115-.334.126-.45.083L6.3 5.508a1.875 1.875 0 0 0-2.282.819l-.922 1.597a1.875 1.875 0 0 0 .432 2.385l.84.692c.095.078.17.229.154.43a7.598 7.598 0 0 0 0 1.139c.015.2-.059.352-.153.43l-.841.692a1.875 1.875 0 0 0-.432 2.385l.922 1.597a1.875 1.875 0 0 0 2.282.818l1.019-.382c.115-.043.283-.031.45.082.312.214.641.405.985.57.182.088.277.228.297.35l.178 1.071c.151.904.933 1.567 1.85 1.567h1.844c.916 0 1.699-.663 1.85-1.567l.178-1.072c.02-.12.114-.26.297-.349.344-.165.673-.356.985-.57.167-.114.335-.125.45-.082l1.02.382a1.875 1.875 0 0 0 2.28-.819l.923-1.597a1.875 1.875 0 0 0-.432-2.385l-.84-.692c-.095-.078-.17-.229-.154-.43a7.614 7.614 0 0 0 0-1.139c-.016-.2.059-.352.153-.43l.84-.692c.708-.582.891-1.59.433-2.385l-.922-1.597a1.875 1.875 0 0 0-2.282-.818l-1.02.382c-.114.043-.282.031-.449-.083a7.49 7.49 0 0 0-.985-.57c-.183-.087-.277-.227-.297-.348l-.179-1.072a1.875 1.875 0 0 0-1.85-1.567h-1.843ZM12 15.75a3.75 3.75 0 1 0 0-7.5 3.75 3.75 0 0 0 0 7.5Z" clip-rule="evenodd"/>',
       'skillmatrix':'<path fill-rule="evenodd" d="M1.5 5.625c0-1.036.84-1.875 1.875-1.875h17.25c1.035 0 1.875.84 1.875 1.875v12.75c0 1.035-.84 1.875-1.875 1.875H3.375A1.875 1.875 0 0 1 1.5 18.375V5.625ZM21 9.375A.375.375 0 0 0 20.625 9h-7.5a.375.375 0 0 0-.375.375v1.5c0 .207.168.375.375.375h7.5a.375.375 0 0 0 .375-.375v-1.5Zm0 3.75a.375.375 0 0 0-.375-.375h-7.5a.375.375 0 0 0-.375.375v1.5c0 .207.168.375.375.375h7.5a.375.375 0 0 0 .375-.375v-1.5Zm0 3.75a.375.375 0 0 0-.375-.375h-7.5a.375.375 0 0 0-.375.375v1.5c0 .207.168.375.375.375h7.5a.375.375 0 0 0 .375-.375v-1.5ZM10.875 18.75a.375.375 0 0 0 .375-.375v-1.5a.375.375 0 0 0-.375-.375h-7.5a.375.375 0 0 0-.375.375v1.5c0 .207.168.375.375.375h7.5ZM3.375 15h7.5a.375.375 0 0 0 .375-.375v-1.5a.375.375 0 0 0-.375-.375h-7.5a.375.375 0 0 0-.375.375v1.5c0 .207.168.375.375.375Zm0-3.75h7.5a.375.375 0 0 0 .375-.375v-1.5A.375.375 0 0 0 10.875 9h-7.5A.375.375 0 0 0 3 9.375v1.5c0 .207.168.375.375.375Z" clip-rule="evenodd"/>',
       'elearning':'<path d="M11.7 2.805a.75.75 0 0 1 .6 0A60.65 60.65 0 0 1 22.83 8.72a.75.75 0 0 1-.231 1.337 49.948 49.948 0 0 0-9.902 3.912l-.003.002c-.114.06-.227.119-.34.18a.75.75 0 0 1-.707 0A50.88 50.88 0 0 0 7.5 12.173v-.224c0-.131.067-.248.172-.311a54.615 54.615 0 0 1 4.653-2.52.75.75 0 0 0-.65-1.352 56.123 56.123 0 0 0-4.78 2.589 1.858 1.858 0 0 0-.859 1.228 49.803 49.803 0 0 0-4.634-1.527.75.75 0 0 1-.231-1.337A60.653 60.653 0 0 1 11.7 2.805Z"/> <path d="M13.06 15.473a48.45 48.45 0 0 1 7.666-3.282c.134 1.414.22 2.843.255 4.284a.75.75 0 0 1-.46.711 47.87 47.87 0 0 0-8.105 4.342.75.75 0 0 1-.832 0 47.87 47.87 0 0 0-8.104-4.342.75.75 0 0 1-.461-.71c.035-1.442.121-2.87.255-4.286.921.304 1.83.634 2.726.99v1.27a1.5 1.5 0 0 0-.14 2.508c-.09.38-.222.753-.397 1.11.452.213.901.434 1.346.66a6.727 6.727 0 0 0 .551-1.607 1.5 1.5 0 0 0 .14-2.67v-.645a48.549 48.549 0 0 1 3.44 1.667 2.25 2.25 0 0 0 2.12 0Z"/> <path d="M4.462 19.462c.42-.419.753-.89 1-1.395.453.214.902.435 1.347.662a6.742 6.742 0 0 1-1.286 1.794.75.75 0 0 1-1.06-1.06Z"/>',
@@ -34993,7 +35197,7 @@ function App(){
     if(!ff && ['profitability','productivity','locations','payroll'].includes(view)) setView('cockpit'); },[view]);
   // Präsentationen sind Management-only (nicht HR): Direktaufruf abfangen.
   useEffect(()=>{ const mgmt=(team&&(team.role_keys||[]).some(r=>r==='management'));
-    if(!mgmt && view==='praesentation') setView('cockpit'); },[view]);
+    if(!mgmt && (view==='praesentation'||view==='dataimport')) setView('cockpit'); },[view]);
   const allNavSections = isEmpUser
     ? [{sec:'Mein Bereich', items:[{key:'mein-plan',label:'Mein Schichtplan',icon:'📋'}]}, ...navSections]
     : navSections;
@@ -35186,6 +35390,7 @@ function App(){
           )}
           {view==='orgchart'&&<OrgChart projects={projects} employees={employees} orgCharts={orgCharts} setOrgCharts={setOrgCharts}/>}
           {view==='praesentation'&&<PresentationsView projects={projects} employees={employees} team={team} showToast={showToast}/>}
+          {view==='dataimport'&&<DataImportView projects={projects} employees={employees}/>}
           {view==='callqa'&&<CallQaView projects={projects} employees={employees} showToast={showToast}/>}
           {view==='skillmatrix'&&<SkillMatrix employees={employees} projects={projects}/>}
           {view==='kanban'&&<RecruitingKanban employees={employees} setEmployees={setEmployees} cvList={cvList} setCvList={setCvList} projects={projects} onPromoteToEmployee={promoteToEmployee} showToast={showToast}/>}
