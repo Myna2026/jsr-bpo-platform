@@ -32938,9 +32938,42 @@ function cqNormHead(s){ return String(s==null?'':s).trim().toLowerCase().replace
 function cqNormName(s){ return String(s==null?'':s).trim().toLowerCase().replace(/\s+/g,' '); }
 function cqSec(v){ const n=Number(String(v==null?'':v).toString().replace(',','.')); return isNaN(n)?0:n; }
 function cqHours(sec){ return Math.round((Number(sec)||0)/3600*100)/100; }
-function cqAutoMap(headers){ const m={}; ROHDATEN_FIELDS.forEach(f=>{ let idx=-1; const H=headers.map(cqNormHead);
-  for(const c of f.cand){ const nc=cqNormHead(c); const i=H.indexOf(nc); if(i>=0){ idx=i; break; } }
+function cqAutoMap(headers, fields){ const m={}; const H=headers.map(cqNormHead); (fields||ROHDATEN_FIELDS).forEach(f=>{ let idx=-1;
+  for(const c of f.cand){ const nc=cqNormHead(c); let i=H.indexOf(nc); if(i<0) i=H.findIndex(h=>h.indexOf(nc)>=0); if(i>=0){ idx=i; break; } }
   m[f.key]=idx; }); return m; }
+// Wert-Parser je Feldtyp (Import B/C): Zahlen, Zählwerte, Prozent, Dauer (Sekunden ODER h:mm:ss)
+function cqInt(v){ const n=parseInt(String(v==null?'':v).replace(/[^\d\-]/g,''),10); return isNaN(n)?null:n; }
+function cqNumV(v){ const s=String(v==null?'':v).replace(/[^\d,.\-]/g,'').replace(',','.'); if(s===''||s==='-') return null; const n=Number(s); return isNaN(n)?null:n; }
+function cqDur(v){ if(v==null||v==='') return null; const s=String(v).trim();
+  if(s.indexOf(':')>=0){ const p=s.split(':').map(x=>Number(x)||0); let sec=0; for(const x of p) sec=sec*60+x; return sec; }
+  return cqNumV(s); }
+function cqParse(kind,v){ return kind==='int'?cqInt(v) : kind==='dur'?cqDur(v) : cqNumV(v); }
+// Datum robust lesen (JS-Date, TT.MM.JJJJ, JJJJ-MM-TT). Lokales Date — nur ISO-Woche wird extrahiert.
+function cqDate(v){ if(v==null||v==='') return null; if(v instanceof Date) return isNaN(v.getTime())?null:v;
+  const s=String(v).trim();
+  let m=s.match(/^(\d{1,2})[.\/](\d{1,2})[.\/](\d{2,4})/); if(m){ let y=+m[3]; if(y<100)y+=2000; const d=new Date(y,(+m[2])-1,+m[1]); return isNaN(d.getTime())?null:d; }
+  m=s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/); if(m){ const d=new Date(+m[1],(+m[2])-1,+m[3]); return isNaN(d.getTime())?null:d; }
+  const d=new Date(s); return isNaN(d.getTime())?null:d; }
+const DATE_HEAD_CAND=['interval start','interval start time','interval','zeitraum','datum','date','start','tag'];
+function fmtDur(sec){ if(sec==null) return '—'; sec=Math.round(sec); const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60; return (h?h+':'+String(m).padStart(2,'0'):String(m))+':'+String(s).padStart(2,'0'); }
+const CALLS_FIELDS=[
+  {key:'name',          label:'Agent-Name',       req:true,  kind:'name', cand:['agent name','agentname','agent','name','mitarbeiter']},
+  {key:'answered',      label:'Answered',         req:true,  kind:'int',  cand:['answered','angenommen','answered calls','calls answered']},
+  {key:'outbound',      label:'Outbound',         req:false, kind:'int',  cand:['outbound','outbound calls','ausgehend']},
+  {key:'no_answer',     label:'Alert-No Answer',  req:false, kind:'int',  cand:['alert-no answer','alert no answer','no answer','not answered','verpasst','missed']},
+  {key:'avg_handle_sec',label:'Avg Handle',       req:false, kind:'dur',  cand:['avg handle','average handle','avg handle time','avg handling time','aht']},
+  {key:'avg_talk_sec',  label:'Avg Talk',         req:false, kind:'dur',  cand:['avg talk','average talk','avg talk time','talk time']},
+  {key:'avg_hold_sec',  label:'Avg Hold',         req:false, kind:'dur',  cand:['avg hold','average hold','avg hold time','hold time']},
+  {key:'avg_acw_sec',   label:'Avg ACW',          req:false, kind:'dur',  cand:['avg acw','average acw','acw','after call work','wrap up','wrapup']},
+];
+const GAUGES_FIELDS=[
+  {key:'name',      label:'Name',      req:true,  kind:'name', cand:['name','agent name','agent','mitarbeiter']},
+  {key:'gesamt_pct',label:'Gesamt %',  req:true,  kind:'pct',  cand:['gesamt','gesamt%','gesamt %','gesamt prozent','total','score','ergebnis']},
+  {key:'anzahl',    label:'Anzahl',    req:false, kind:'int',  cand:['anzahl','count','anzahl bewertungen','bewertungen','n']},
+  {key:'dauer_sec', label:'Dauer',     req:false, kind:'dur',  cand:['dauer','duration','avg duration','dauer sek','durchschnittliche dauer']},
+  {key:'nps',       label:'NPS',       req:false, kind:'num',  cand:['nps']},
+  {key:'csat',      label:'CSAT',      req:false, kind:'num',  cand:['csat','zufriedenheit','satisfaction']},
+];
 
 function RohdatenImport({projId, projName, employees, onSaved}){
   const [file,setFile]=useState(null); const [fileHash,setFileHash]=useState('');
@@ -32966,24 +32999,25 @@ function RohdatenImport({projId, projName, employees, onSaved}){
       let pick=0; sh.forEach((s,i)=>{ if(s.headers.map(cqNormHead).includes('logtimetelefon')) pick=i; });
       setSheetIdx(pick);
       let savedMap=null; try{ savedMap=await loadConfigFromDB(cfgKey); }catch(e){}
-      const auto=cqAutoMap(sh[pick].headers);
+      const auto=cqAutoMap(sh[pick].headers, ROHDATEN_FIELDS);
       setMap(savedMap&&typeof savedMap==='object'?{...auto,...savedMap}:auto);
       setStep('map');
     }catch(e){ setErr('Datei nicht lesbar: '+(e.message||'')); } };
     rd.readAsArrayBuffer(f);
   }
-  function reMapSheet(i){ setSheetIdx(i); setMap(cqAutoMap(sheets[i].headers)); }
+  function reMapSheet(i){ setSheetIdx(i); setMap(cqAutoMap(sheets[i].headers, ROHDATEN_FIELDS)); }
   const missingReq=ROHDATEN_FIELDS.filter(f=>f.req && (map[f.key]==null||map[f.key]<0));
 
   async function process(){ if(missingReq.length||!sheet) return; setBusy(true); setErr('');
     try{ await saveConfigToDB(cfgKey, map); }catch(e){}
     const {data:aliasRows}=await sb.from('import_aliases').select('alias_name,employee_id').eq('project_id',projId);
-    const aliasMap={}; (aliasRows||[]).forEach(a=>{ aliasMap[cqNormName(a.alias_name)]=a.employee_id; });
+    const aliasMap={}, ignoredSet={}; (aliasRows||[]).forEach(a=>{ const k=cqNormName(a.alias_name); if(a.employee_id) aliasMap[k]=a.employee_id; else ignoredSet[k]=true; });
     const emps=(employees||[]).filter(e=>e&&e.project_id===projId);
     const empById={}; const byName={}; emps.forEach(e=>{ empById[e.id]=e; byName[cqNormName((e.first_name||'')+' '+(e.last_name||''))]=e; });
     const resolve=nm=>{ const n=cqNormName(nm); if(aliasMap[n]) return empById[aliasMap[n]]||null; return byName[n]||null; };
     const groups={}, unmatched={};
     (sheet.rows||[]).forEach(r=>{ const nm=String(r[map.name]==null?'':r[map.name]).trim(); if(!nm) return;
+      if(ignoredSet[cqNormName(nm)]) return;
       const dv=r[map.date]; const dt = dv instanceof Date ? dv : (dv!=='' && dv!=null ? new Date(String(dv)) : null);
       if(!dt || isNaN(dt.getTime())) return;
       const cw=getISOWeek(dt); const emp=resolve(nm);
@@ -33008,6 +33042,10 @@ function RohdatenImport({projId, projName, employees, onSaved}){
   }
   async function assignAlias(nm, empId){ if(!empId) return; setBusy(true);
     await sb.from('import_aliases').insert({project_id:projId, alias_name:nm, employee_id:empId});
+    await process();
+  }
+  async function ignoreAlias(nm){ setBusy(true);
+    await sb.from('import_aliases').insert({project_id:projId, alias_name:nm, employee_id:null});
     await process();
   }
   async function save(){ if(!result||busy) return; setBusy(true); setErr('');
@@ -33066,13 +33104,14 @@ function RohdatenImport({projId, projName, employees, onSaved}){
         <div><div style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>Wochen</div><div style={{fontSize:22,fontWeight:800}}>{result.weeks.map(w=>'KW'+w.split('-')[1]).join(', ')||'—'}</div></div>
       </div>
       {result.unmatched.length>0 && <div style={{border:'1px solid #fecaca',background:'#fef2f2',borderRadius:10,padding:'10px 12px',marginBottom:12}}>
-        <div style={{fontSize:12,fontWeight:800,color:'#dc2626',marginBottom:6}}>Nicht zuordenbare Namen — bitte zuordnen (wird als Alias gespeichert):</div>
+        <div style={{fontSize:12,fontWeight:800,color:'#dc2626',marginBottom:6}}>Nicht zuordenbare Namen — zuordnen oder dauerhaft ignorieren (beides wird als Alias gespeichert):</div>
         {result.unmatched.map((u,i)=><div key={i} style={{display:'flex',alignItems:'center',gap:8,padding:'3px 0',flexWrap:'wrap'}}>
           <span style={{fontWeight:600,minWidth:160}}>{u.name} <span style={{color:'var(--muted)',fontWeight:400}}>({u.rows} Tage)</span></span>
           <select className="form-select" style={{width:'auto',fontSize:12}} defaultValue="" onChange={e=>{ if(e.target.value) assignAlias(u.name, e.target.value); }}>
             <option value="">→ Mitarbeiter wählen…</option>
             {(employees||[]).filter(e=>e&&e.project_id===projId).slice().sort((a,b)=>((a.first_name||'')+a.last_name).localeCompare((b.first_name||'')+b.last_name,'de')).map(e=><option key={e.id} value={e.id}>{e.first_name} {e.last_name}{e.project_skill?' · '+e.project_skill:''}</option>)}
           </select>
+          <button className="btn btn-sm" disabled={busy} onClick={()=>ignoreAlias(u.name)} title="Diesen Namen dauerhaft aus dem Import ausschließen (kein Mitarbeiter)">Ignorieren</button>
         </div>)}
       </div>}
       <div style={{maxHeight:280,overflowY:'auto',border:'1px solid var(--border)',borderRadius:8,marginBottom:12}}>
@@ -33095,23 +33134,187 @@ function RohdatenImport({projId, projName, employees, onSaved}){
   </div>;
 }
 
+// Generischer Wochen-Pivot-Import (Import B Call-CSV, Import C Gauges-Excel).
+// Eine Datei = eine Woche (KW manuell gewählt, keine Datumsspalte). Eine Zeile je Agent/Name.
+// Feld-getrieben (fields), Zieltabelle (table); Feld-keys = Spaltennamen der Tabelle.
+function PivotImport({projId, employees, source, fields, table, accept, hint, onSaved}){
+  const nowW=getISOWeek(new Date());
+  const [kw,setKw]=useState(nowW.kw); const [year,setYear]=useState(nowW.year);
+  const [file,setFile]=useState(null); const [fileHash,setFileHash]=useState('');
+  const [sheets,setSheets]=useState(null); const [sheetIdx,setSheetIdx]=useState(0);
+  const [map,setMap]=useState({}); const [step,setStep]=useState('upload');
+  const [result,setResult]=useState(null);
+  const [busy,setBusy]=useState(false); const [saved,setSaved]=useState(false); const [err,setErr]=useState('');
+  const cfgKey='jsr_import_map_'+source+'_'+projId;
+  const sheet=sheets?sheets[sheetIdx]:null;
+  const valFields=fields.filter(f=>f.key!=='name');
+
+  function onFile(f){ if(!f) return; setErr(''); setSaved(false); setResult(null);
+    const rd=new FileReader();
+    rd.onload=async ev=>{ try{
+      const bytes=new Uint8Array(ev.target.result);
+      const wb=XLSX.read(bytes,{type:'array',cellDates:true,raw:false});
+      const sh=wb.SheetNames.map(nm=>{ const aoa=XLSX.utils.sheet_to_json(wb.Sheets[nm],{header:1,defval:''});
+        return {name:nm, headers:(aoa[0]||[]).map(x=>String(x==null?'':x)), rows:aoa.slice(1)}; });
+      setFile(f); setFileHash('sz'+bytes.length); setSheets(sh);
+      let pick=0; let best=-1; sh.forEach((s,i)=>{ const m=cqAutoMap(s.headers,fields); const hit=fields.filter(fl=>m[fl.key]>=0).length; if(hit>best){best=hit;pick=i;} });
+      setSheetIdx(pick);
+      // KW aus der Datei ableiten (z. B. Spalte „Interval Start") und vorschlagen — statt heutiger Woche.
+      const dh=sh[pick].headers.map(cqNormHead); let dcol=-1;
+      for(const c of DATE_HEAD_CAND){ const nc=cqNormHead(c); let i=dh.indexOf(nc); if(i<0) i=dh.findIndex(h=>h.indexOf(nc)>=0); if(i>=0){ dcol=i; break; } }
+      if(dcol>=0){ for(const r of (sh[pick].rows||[])){ const dt=cqDate(r[dcol]); if(dt){ const w=getISOWeek(dt); setKw(w.kw); setYear(w.year); break; } } }
+      let savedMap=null; try{ savedMap=await loadConfigFromDB(cfgKey); }catch(e){}
+      const auto=cqAutoMap(sh[pick].headers,fields);
+      setMap(savedMap&&typeof savedMap==='object'?{...auto,...savedMap}:auto); setStep('map');
+    }catch(e){ setErr('Datei nicht lesbar: '+(e.message||'')); } };
+    rd.readAsArrayBuffer(f);
+  }
+  function reMapSheet(i){ setSheetIdx(i); setMap(cqAutoMap(sheets[i].headers,fields)); }
+  const missingReq=fields.filter(f=>f.req && (map[f.key]==null||map[f.key]<0));
+
+  async function process(){ if(missingReq.length||!sheet) return; setBusy(true); setErr('');
+    try{ await saveConfigToDB(cfgKey, map); }catch(e){}
+    const {data:aliasRows}=await sb.from('import_aliases').select('alias_name,employee_id').eq('project_id',projId);
+    const aliasMap={}, ignoredSet={}; (aliasRows||[]).forEach(a=>{ const k=cqNormName(a.alias_name); if(a.employee_id) aliasMap[k]=a.employee_id; else ignoredSet[k]=true; });
+    const emps=(employees||[]).filter(e=>e&&e.project_id===projId);
+    const empById={}, byName={}; emps.forEach(e=>{ empById[e.id]=e; byName[cqNormName((e.first_name||'')+' '+(e.last_name||''))]=e; });
+    const resolve=nm=>{ const n=cqNormName(nm); if(aliasMap[n]) return empById[aliasMap[n]]||null; return byName[n]||null; };
+    const seen={}, facts=[], unmatched={}, dups=[]; let ignoredCount=0;
+    (sheet.rows||[]).forEach(r=>{ const nm=String(r[map.name]==null?'':r[map.name]).trim(); if(!nm) return;
+      if(ignoredSet[cqNormName(nm)]){ ignoredCount++; return; }
+      const emp=resolve(nm);
+      if(!emp){ (unmatched[nm]=unmatched[nm]||{name:nm,rows:0}).rows++; return; }
+      if(seen[emp.id]){ dups.push(nm); return; } seen[emp.id]=true;
+      const vals={}, raw={}; valFields.forEach(f=>{ const idx=map[f.key]; const rv = idx>=0? r[idx] : ''; vals[f.key]=cqParse(f.kind,rv); if(idx>=0) raw[f.key]=rv; });
+      facts.push({ employee_id:emp.id, name:((emp.first_name||'')+' '+(emp.last_name||'')).trim(), vals, raw });
+    });
+    facts.sort((a,b)=>a.name.localeCompare(b.name,'de'));
+    const unmatchedList=Object.values(unmatched).sort((a,b)=>b.rows-a.rows);
+    const warnings=[];
+    if(unmatchedList.length) warnings.push({type:'unmatched',message:unmatchedList.length+' nicht zuordenbare Namen (nicht importiert)',details:unmatchedList.map(u=>u.name+' ('+u.rows+')')});
+    if(dups.length) warnings.push({type:'duplicate',message:dups.length+' doppelte Namen (nur erste Zeile übernommen)',details:dups});
+    setResult({facts,unmatched:unmatchedList,warnings,ignoredCount}); setBusy(false); setStep('preview');
+  }
+  async function assignAlias(nm, empId){ if(!empId) return; setBusy(true);
+    await sb.from('import_aliases').insert({project_id:projId, alias_name:nm, employee_id:empId}); await process();
+  }
+  async function ignoreAlias(nm){ setBusy(true);
+    await sb.from('import_aliases').insert({project_id:projId, alias_name:nm, employee_id:null}); await process();
+  }
+  async function save(){ if(!result||busy) return; setBusy(true); setErr('');
+    const ts=isoLocal(new Date())+'_'+fileHash; const path=projId+'/'+source+'/'+ts+'_'+(file.name||source);
+    let storagePath=null; try{ const up=await sb.storage.from('weekly-imports').upload(path,file,{upsert:true,contentType:file.type||'application/octet-stream'}); if(!up.error) storagePath=path; }catch(e){}
+    let uid=null,uname=null; try{ const u=await sb.auth.getUser(); uid=u&&u.data&&u.data.user&&u.data.user.id||null; if(uid){ const nr=await sb.from('app_users').select('full_name').eq('user_id',uid).single(); uname=nr&&nr.data&&nr.data.full_name||null; } }catch(e){}
+    const status=result.unmatched.length?'partial':'ok';
+    const {data:imp,error:ie}=await sb.from('data_imports').insert({ project_id:projId, source_type:source, kw:Number(kw), year:Number(year), file_name:file.name, file_hash:fileHash, storage_path:storagePath, status, warnings:result.warnings, row_count:(sheet.rows||[]).length, matched_count:result.facts.length, unmatched_count:result.unmatched.length, uploaded_by:uid, uploaded_by_name:uname }).select('id').single();
+    if(ie){ setBusy(false); setErr('Import nicht gespeichert: '+(ie.message||'')); return; }
+    await sb.from(table).delete().eq('project_id',projId).eq('kw',Number(kw)).eq('year',Number(year));
+    const rows=result.facts.map(f=>({ import_id:imp.id, project_id:projId, employee_id:f.employee_id, kw:Number(kw), year:Number(year), ...f.vals, raw:f.raw }));
+    const {error:fe}=await sb.from(table).insert(rows);
+    setBusy(false);
+    if(fe){ setErr('Fakten nicht gespeichert: '+(fe.message||'')); return; }
+    setSaved(true); setStep('upload'); setSheets(null); setFile(null); setResult(null); onSaved&&onSaved();
+  }
+  const fmtVal=(f,v)=> v==null?'—' : f.kind==='dur'?fmtDur(v) : f.kind==='pct'?(v.toLocaleString('de-DE',{maximumFractionDigits:1})+' %') : f.kind==='int'?v.toLocaleString('de-DE') : v.toLocaleString('de-DE',{maximumFractionDigits:2});
+
+  return <div>
+    {err && <div style={{padding:'8px 12px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:8,color:'#dc2626',fontSize:12,marginBottom:12}}>{err}</div>}
+    {saved && <div style={{padding:'8px 12px',background:'#ecfdf5',border:'1px solid #a7f3d0',borderRadius:8,color:'#059669',fontSize:12,marginBottom:12,fontWeight:700}}>✓ Import KW {kw}/{year} gespeichert.</div>}
+    <div style={{display:'flex',gap:10,alignItems:'center',marginBottom:12,flexWrap:'wrap'}}>
+      <span style={{fontSize:12,fontWeight:700}}>Woche:</span>
+      <span style={{fontSize:12}}>KW <input type="number" min={1} max={53} value={kw} onChange={e=>setKw(e.target.value)} style={{width:64,padding:'4px 6px',border:'1px solid var(--border)',borderRadius:6}}/></span>
+      <span style={{fontSize:12}}>Jahr <input type="number" min={2024} max={2100} value={year} onChange={e=>setYear(e.target.value)} style={{width:80,padding:'4px 6px',border:'1px solid var(--border)',borderRadius:6}}/></span>
+      <span style={{fontSize:11,color:'var(--muted)'}}>Diese Datei zählt für die gewählte Woche.</span>
+    </div>
+
+    {step==='upload' && <label style={{display:'inline-flex',alignItems:'center',gap:8,padding:'10px 16px',border:'1px dashed var(--border)',borderRadius:10,cursor:'pointer',fontWeight:700}}>
+      ⬆ {hint}
+      <input type="file" accept={accept} style={{display:'none'}} onChange={e=>{ const f=e.target.files&&e.target.files[0]; e.target.value=''; onFile(f); }}/>
+    </label>}
+
+    {step==='map' && sheet && <div>
+      <div style={{fontSize:13,fontWeight:700,marginBottom:8}}>Spalten zuordnen <span style={{fontWeight:400,color:'var(--muted)'}}>— Datei „{file&&file.name}"</span></div>
+      {sheets.length>1 && <div style={{marginBottom:10,fontSize:12}}>Blatt: <select className="form-select" style={{width:'auto'}} value={sheetIdx} onChange={e=>reMapSheet(Number(e.target.value))}>{sheets.map((s,i)=><option key={i} value={i}>{s.name} ({s.headers.length})</option>)}</select></div>}
+      <div style={{fontSize:11,color:'var(--muted)',marginBottom:8}}>Erkennung am Inhalt. Zuordnung wird je Projekt gespeichert und vorbelegt.</div>
+      <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}><tbody>
+        {fields.map(f=>{ const bad=f.req && (map[f.key]==null||map[f.key]<0); return <tr key={f.key} style={{borderBottom:'1px solid var(--border)'}}>
+          <td style={{padding:'6px 8px',fontWeight:600,whiteSpace:'nowrap'}}>{f.label}{f.req&&<span style={{color:'#dc2626'}}> *</span>}{f.kind==='dur'&&<span style={{color:'var(--muted)',fontWeight:400}}> (Sek. o. h:mm:ss)</span>}</td>
+          <td style={{padding:'6px 8px'}}>
+            <select className="form-select" style={{width:'100%',borderColor:bad?'#dc2626':undefined}} value={map[f.key]==null?-1:map[f.key]} onChange={e=>setMap(m=>({...m,[f.key]:Number(e.target.value)}))}>
+              <option value={-1}>{f.req?'— bitte wählen —':'— nicht vorhanden —'}</option>
+              {sheet.headers.map((h,i)=><option key={i} value={i}>{h||('Spalte '+(i+1))}</option>)}
+            </select>
+          </td>
+        </tr>; })}
+      </tbody></table>
+      {missingReq.length>0 && <div style={{fontSize:11,color:'#dc2626',marginTop:8}}>Fehlende Pflichtspalten: {missingReq.map(f=>f.label).join(', ')}.</div>}
+      <div style={{display:'flex',gap:8,marginTop:12}}>
+        <button className="btn btn-sm" onClick={()=>{ setStep('upload'); setSheets(null); setFile(null); }}>Abbrechen</button>
+        <button className="btn btn-sm btn-primary" disabled={missingReq.length>0||busy} onClick={process}>Verarbeiten (Vorschau)</button>
+      </div>
+    </div>}
+
+    {step==='preview' && result && <div>
+      <div style={{display:'flex',gap:20,flexWrap:'wrap',marginBottom:12}}>
+        <div><div style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>Zugeordnet</div><div style={{fontSize:22,fontWeight:800}}>{result.facts.length}</div></div>
+        <div><div style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>Nicht zuordenbar</div><div style={{fontSize:22,fontWeight:800,color:result.unmatched.length?'#dc2626':'#059669'}}>{result.unmatched.length}</div></div>
+        <div><div style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>Woche</div><div style={{fontSize:22,fontWeight:800}}>KW {kw}/{year}</div></div>
+        {result.ignoredCount>0 && <div><div style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>Ignoriert</div><div style={{fontSize:22,fontWeight:800,color:'var(--muted)'}}>{result.ignoredCount}</div></div>}
+      </div>
+      {result.unmatched.length>0 && <div style={{border:'1px solid #fecaca',background:'#fef2f2',borderRadius:10,padding:'10px 12px',marginBottom:12}}>
+        <div style={{fontSize:12,fontWeight:800,color:'#dc2626',marginBottom:6}}>Nicht zuordenbare Namen — zuordnen oder dauerhaft ignorieren (beides wird als Alias gespeichert):</div>
+        {result.unmatched.map((u,i)=><div key={i} style={{display:'flex',alignItems:'center',gap:8,padding:'3px 0',flexWrap:'wrap'}}>
+          <span style={{fontWeight:600,minWidth:160}}>{u.name} <span style={{color:'var(--muted)',fontWeight:400}}>({u.rows}×)</span></span>
+          <select className="form-select" style={{width:'auto',fontSize:12}} defaultValue="" onChange={e=>{ if(e.target.value) assignAlias(u.name, e.target.value); }}>
+            <option value="">→ Mitarbeiter wählen…</option>
+            {(employees||[]).filter(e=>e&&e.project_id===projId).slice().sort((a,b)=>((a.first_name||'')+a.last_name).localeCompare((b.first_name||'')+b.last_name,'de')).map(e=><option key={e.id} value={e.id}>{e.first_name} {e.last_name}{e.project_skill?' · '+e.project_skill:''}</option>)}
+          </select>
+          <button className="btn btn-sm" disabled={busy} onClick={()=>ignoreAlias(u.name)} title="Diesen Namen dauerhaft aus dem Import ausschließen (kein Mitarbeiter)">Ignorieren</button>
+        </div>)}
+      </div>}
+      <div style={{maxHeight:300,overflow:'auto',border:'1px solid var(--border)',borderRadius:8,marginBottom:12}}>
+        <table style={{width:'100%',borderCollapse:'collapse',fontSize:12,whiteSpace:'nowrap'}}>
+          <thead><tr style={{position:'sticky',top:0,background:'var(--surface-2)'}}><th style={{textAlign:'left',padding:'6px 8px',fontSize:11,color:'var(--muted)'}}>Mitarbeiter</th>{valFields.map(f=><th key={f.key} style={{textAlign:'right',padding:'6px 8px',fontSize:11,color:'var(--muted)'}}>{f.label}</th>)}</tr></thead>
+          <tbody>{result.facts.map((f,i)=><tr key={i} style={{borderTop:'1px solid var(--border)'}}>
+            <td style={{padding:'5px 8px'}}>{f.name}</td>
+            {valFields.map(vf=><td key={vf.key} style={{padding:'5px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{fmtVal(vf,f.vals[vf.key])}</td>)}
+          </tr>)}</tbody>
+        </table>
+      </div>
+      <div style={{display:'flex',gap:8}}>
+        <button className="btn btn-sm" onClick={()=>setStep('map')}>Zurück zur Zuordnung</button>
+        <button className="btn btn-sm btn-primary" disabled={busy||result.facts.length===0} onClick={save}>💾 Import speichern ({result.facts.length} Zeilen)</button>
+      </div>
+      <div style={{fontSize:11,color:'var(--muted)',marginTop:8}}>Re-Import derselben Woche ersetzt die Werte. Nur zugeordnete Zeilen werden gespeichert.</div>
+    </div>}
+  </div>;
+}
+
 function DataImportView({projects, employees}){
   const projList=(projects||[]).filter(p=>p&&p.id).slice().sort((a,b)=>String(a.name).localeCompare(String(b.name),'de'));
   const [projId,setProjId]=useState(()=>{ const hc=projList.find(p=>/holiday.?check/i.test(p.name||'')); return hc?hc.id:(projList[0]?projList[0].id:''); });
   const selProj=projList.find(p=>p.id===projId)||null;
+  const [source,setSource]=useState('rohdaten');
   const [imports,setImports]=useState(null); const [tick,setTick]=useState(0);
   useEffect(()=>{ let alive=true; (async()=>{ if(!projId){ setImports([]); return; }
-    const {data}=await sb.from('data_imports').select('*').eq('project_id',projId).eq('source_type','rohdaten').order('created_at',{ascending:false}).limit(12);
-    if(alive) setImports(data||[]); })(); return ()=>{alive=false;}; },[projId,tick]);
+    const {data}=await sb.from('data_imports').select('*').eq('project_id',projId).eq('source_type',source).order('created_at',{ascending:false}).limit(12);
+    if(alive) setImports(data||[]); })(); return ()=>{alive=false;}; },[projId,source,tick]);
+  const SOURCES=[{key:'rohdaten',label:'Rohdaten-Excel',sub:'Stunden je Skill (agent_qm)'},{key:'calls',label:'Call-CSV',sub:'Answered, AHT, Outbound …'},{key:'gauges',label:'Gauges-Excel',sub:'Gesamt%, NPS, CSAT'}];
   return <div style={{maxWidth:1000}}>
     <div style={{fontSize:20,fontWeight:700,marginBottom:4}}>📥 Datenimport</div>
     <div style={{fontSize:13,color:'var(--muted)',marginBottom:14}}>Wöchentliche Rohdaten getrennt vom Bericht. Erkennung am Inhalt; nicht zuordenbare Namen werden gemeldet, nie still verworfen.</div>
-    <div style={{display:'flex',gap:10,alignItems:'center',marginBottom:16,flexWrap:'wrap'}}>
+    <div style={{display:'flex',gap:10,alignItems:'center',marginBottom:14,flexWrap:'wrap'}}>
       <select className="form-select" style={{width:'auto',fontWeight:700}} value={projId} onChange={e=>setProjId(e.target.value)}>{projList.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select>
-      <span style={{fontSize:12,color:'var(--muted)'}}>Quelle: Rohdaten-Excel (agent_qm)</span>
+    </div>
+    <div style={{display:'flex',gap:8,marginBottom:16,flexWrap:'wrap'}}>
+      {SOURCES.map(s=><button key={s.key} onClick={()=>setSource(s.key)} style={{textAlign:'left',padding:'8px 14px',borderRadius:10,cursor:'pointer',border:'1px solid '+(source===s.key?'var(--accent,#2563eb)':'var(--border)'),background:source===s.key?'var(--accent-soft,#eff6ff)':'var(--card)'}}>
+        <div style={{fontSize:13,fontWeight:700}}>{s.label}</div><div style={{fontSize:11,color:'var(--muted)'}}>{s.sub}</div>
+      </button>)}
     </div>
     {selProj && <div style={{border:'1px solid var(--border)',borderRadius:12,padding:16,marginBottom:18,background:'var(--card)'}}>
-      <RohdatenImport projId={projId} projName={selProj.name} employees={employees} onSaved={()=>setTick(t=>t+1)}/>
+      {source==='rohdaten' && <RohdatenImport projId={projId} projName={selProj.name} employees={employees} onSaved={()=>setTick(t=>t+1)}/>}
+      {source==='calls' && <PivotImport projId={projId} employees={employees} source="calls" fields={CALLS_FIELDS} table="weekly_calls" accept=".csv,.xlsx,.xls" hint="Call-CSV wählen" onSaved={()=>setTick(t=>t+1)}/>}
+      {source==='gauges' && <PivotImport projId={projId} employees={employees} source="gauges" fields={GAUGES_FIELDS} table="weekly_gauges" accept=".xlsx,.xls,.csv" hint="Gauges-Excel wählen" onSaved={()=>setTick(t=>t+1)}/>}
     </div>}
     <div style={{fontSize:13,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em',marginBottom:8}}>Letzte Importe</div>
     {imports===null ? <div className="sp-empty">Lädt…</div> : imports.length===0 ? <div className="sp-empty">Noch keine Importe für dieses Projekt.</div> :
