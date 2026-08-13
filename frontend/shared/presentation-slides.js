@@ -455,6 +455,26 @@
     return Slide(ctx,[head, panel(P,[ h('div',{key:'tbl',style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',overflow:'hidden'}}, [hdr].concat(body).concat([totalRow])), h('div',{key:'ft',style:{fontSize:'1.05cqw',color:P.muted,marginTop:'.8cqw'}}, 'MTD = Summe der Berichtsmonats-Wochen (KW '+((mtd.weekKws||[]).join(', '))+') · CR = (Offene+OSL)÷Calls') ])]);
   }
 
+  // Fehlzeiten — Krankheitstage je Woche (System, aus Abwesenheiten) + Kommentar je Woche (manuell).
+  //   deck.teams[tk].fehlzeiten = {weeks:[{kw,key}], krank:{key:num}, comment:{key:text}, _src}.
+  function Fehlzeiten(ctx, tk){ var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk);
+    var fz=td.fehlzeiten||{}; var weeks=fz.weeks||[]; var krank=fz.krank||{}; var comment=fz.comment||{};
+    var head=fondHead(P, lbl, 'Fehlzeiten', 'Krankheitstage je Woche');
+    if(!weeks.length) return emptyPanel(ctx,head,P,'Keine Fehlzeiten-Daten.');
+    var total=0; weeks.forEach(function(w){ total+=(krank[w.key]||0); });
+    return Slide(ctx,[head, panel(P,[
+      h('div',{key:'g',style:{flex:1,minHeight:0,display:'flex',gap:'2cqw',alignItems:'stretch'}}, weeks.map(function(w){ var k=krank[w.key]||0; var c=comment[w.key]||'';
+        return h('div',{key:w.key,style:{flex:1,minWidth:0,display:'flex',flexDirection:'column',border:'1px solid #eef2f4',borderRadius:'1.2cqw',padding:'1.6cqw 1.4cqw'}},[
+          h('div',{key:'kw',style:{fontFamily:MONO,fontSize:'1.3cqw',fontWeight:700,color:P.muted}},'KW '+w.kw),
+          h('div',{key:'n',style:{fontSize:'4.6cqw',fontWeight:800,color:k>0?P.onLightTxt:P.muted,lineHeight:1.1,marginTop:'.4cqw'}}, fmtNum(k)),
+          h('div',{key:'l',style:{fontSize:'1.1cqw',color:P.muted,fontWeight:700}}, k===1?'Krankheitstag':'Krankheitstage'),
+          c?h('div',{key:'c',style:{marginTop:'1cqw',fontSize:'1.2cqw',color:P.ink,lineHeight:1.35}}, c):null
+        ]);
+      })),
+      h('div',{key:'ft',style:{fontSize:'1.15cqw',color:P.muted,marginTop:'1.4cqw'}}, 'Summe '+fmtNum(total)+' Krankheitstage im Zeitraum · aus Abwesenheiten (Mo–Fr)')
+    ])]);
+  }
+
   // Folie 14 — Maßnahmen & Ausblick (Freitext, je Absatz ein Punkt).
   function Massnahmen(ctx, tk){ var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk);
     var txt=(td.massnahmen||'').trim(); var head=fondHead(P, lbl, 'Maßnahmen & Ausblick', '');
@@ -493,10 +513,12 @@
   function hasLangzeit(ctx,k){ var td=(ctx.deck.teams||{})[k]||{}; return !!(td.langzeit&&td.langzeit.rows&&td.langzeit.rows.length); }
   function hasCallsMtd(ctx,k){ var td=(ctx.deck.teams||{})[k]||{}; return !!(td.calls&&td.calls.monat&&Object.keys(td.calls.monat).length); }
   function hasMassnahmen(ctx,k){ var td=(ctx.deck.teams||{})[k]||{}; return !!((td.massnahmen||'').trim()); }
+  function hasFehlzeiten(ctx,k){ var td=(ctx.deck.teams||{})[k]||{}; return !!(td.fehlzeiten&&td.fehlzeiten.weeks&&td.fehlzeiten.weeks.length); }
   function deckSlides(ctx){ var out=[Title(ctx)]; (ctx.skills||[]).forEach(function(s){ var k=s.key;
     if(hasFte(ctx,k)) out.push(Fte(ctx,k));
     if(hasStd(ctx,k)) out.push(StundenTable(ctx,k));
     out.push(Stunden(ctx,k));
+    if(hasFehlzeiten(ctx,k)) out.push(Fehlzeiten(ctx,k));
     if(hasLangzeit(ctx,k)) out.push(Langzeit(ctx,k));
     if(hasCr(ctx,k)){ out.push(CrTable(ctx,k)); out.push(CrChart(ctx,k)); out.push(AgentCr(ctx,k)); out.push(AgentCrTrend(ctx,k)); out.push(Mtd(ctx,k)); }
     out.push(Calls(ctx,k));
@@ -510,6 +532,7 @@
     if(hasFte(ctx,k)) out.push({key:k+':fte',label:L+' · FTE'});
     if(hasStd(ctx,k)) out.push({key:k+':stundentab',label:L+' · Stunden (Tabelle)'});
     out.push({key:k+':stunden',label:L+' · Stunden'});
+    if(hasFehlzeiten(ctx,k)) out.push({key:k+':fehlzeiten',label:L+' · Fehlzeiten'});
     if(hasLangzeit(ctx,k)) out.push({key:k+':langzeit',label:L+' · Langzeit'});
     if(hasCr(ctx,k)){ out.push({key:k+':crtab',label:L+' · CR (Tabelle)'}); out.push({key:k+':crchart',label:L+' · CR (Verlauf)'}); out.push({key:k+':agentcr',label:L+' · CR je Agent'}); out.push({key:k+':agentcrtrend',label:L+' · CR-Verlauf je Agent'}); out.push({key:k+':mtd',label:L+' · MTD'}); }
     out.push({key:k+':calls',label:L+' · Calls'});
@@ -519,6 +542,6 @@
     if(hasMassnahmen(ctx,k)) out.push({key:k+':massnahmen',label:L+' · Maßnahmen'});
   }); return out; }
 
-  window.PRES = { deckSlides:deckSlides, deckSlideKeys:deckSlideKeys, Title:Title, Fte:Fte, StundenTable:StundenTable, Stunden:Stunden, Langzeit:Langzeit, CrTable:CrTable, CrChart:CrChart, AgentCr:AgentCr, AgentCrTrend:AgentCrTrend, Mtd:Mtd, Calls:Calls, CallsMtd:CallsMtd, Massnahmen:Massnahmen, CallScores:CallScores, Csat:Csat, callCols:callCols, pal:pal,
+  window.PRES = { deckSlides:deckSlides, deckSlideKeys:deckSlideKeys, Title:Title, Fte:Fte, StundenTable:StundenTable, Stunden:Stunden, Fehlzeiten:Fehlzeiten, Langzeit:Langzeit, CrTable:CrTable, CrChart:CrChart, AgentCr:AgentCr, AgentCrTrend:AgentCrTrend, Mtd:Mtd, Calls:Calls, CallsMtd:CallsMtd, Massnahmen:Massnahmen, CallScores:CallScores, Csat:Csat, callCols:callCols, pal:pal,
     fmtNum:fmtNum, numOr:numOr, pctDiff:pctDiff, wavgTime:wavgTime, sumCol:sumCol, decToMmss:decToMmss, mmssToDec:mmssToDec };
 })();
