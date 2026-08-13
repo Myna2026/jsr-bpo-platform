@@ -34366,7 +34366,7 @@ function PresentationsView({projects, employees, team, showToast}){
   const [theme,setTheme]=useState({accent:'',font:'',customerLogo:''});   // Look&Feel je Projekt
   const [ourLogo,setOurLogo]=useState('');      // unser Logo (global)
   const [tplId,setTplId]=useState(null);
-  const [stores,setStores]=useState({hours:{},callsCount:0,gaugesCount:0,loaded:false});   // Schnitt 4: Live-Ablagen (5-Wochen-Fenster)
+  const [stores,setStores]=useState({hours:{},callsByEmp:{},callsCount:0,gaugesCount:0,gaugesWin:[],loaded:false});   // Schnitt 4/5: Live-Ablagen (5-Wochen-Fenster)
   const [fteStd,setFteStd]=useState({});   // report_fte: employee_id -> Standard-FTE
   const accent=theme.accent||(selProj&&selProj.color)||'#2563eb';
   const fontFam=theme.font||'inherit';
@@ -34403,14 +34403,17 @@ function PresentationsView({projects, employees, team, showToast}){
   useEffect(()=>{ if(!selProj){ return; } let alive=true; (async()=>{
     const ws=windowWeeks(); const years=[...new Set(ws.map(w=>w.yr))]; const kws=[...new Set(ws.map(w=>w.kw))];
     try{
+      const inWin=r=>ws.some(w=>w.kw===r.kw&&w.yr===r.year);
       const {data:wh}=await sb.from('weekly_hours').select('skill,kw,year,hours').eq('project_id',selProj.id).in('year',years).in('kw',kws);
-      const hours={}; (wh||[]).forEach(r=>{ if(!ws.some(w=>w.kw===r.kw&&w.yr===r.year)) return; const sk=String(r.skill||'').toLowerCase(); const key=sk+'|'+r.year+'|'+r.kw; hours[key]=(hours[key]||0)+Number(r.hours||0); });
-      const cq=await sb.from('weekly_calls').select('id',{count:'exact',head:true}).eq('project_id',selProj.id).in('year',years).in('kw',kws);
-      const gq=await sb.from('weekly_gauges').select('id',{count:'exact',head:true}).eq('project_id',selProj.id).in('year',years).in('kw',kws);
+      const hours={}; (wh||[]).forEach(r=>{ if(!inWin(r)) return; const sk=String(r.skill||'').toLowerCase(); const key=sk+'|'+r.year+'|'+r.kw; hours[key]=(hours[key]||0)+Number(r.hours||0); });
+      const {data:wc}=await sb.from('weekly_calls').select('employee_id,kw,year,answered,outbound,no_answer,avg_handle_sec,avg_talk_sec,avg_hold_sec,avg_acw_sec').eq('project_id',selProj.id).in('year',years).in('kw',kws);
+      const wcWin=(wc||[]).filter(inWin); const callsByEmp={}; wcWin.filter(r=>r.kw===pNo&&r.year===pYear).forEach(r=>{ callsByEmp[r.employee_id]=r; });   // Vorwoche = Berichts-KW
+      const {data:wg}=await sb.from('weekly_gauges').select('employee_id,kw,year,gesamt_pct,anzahl,dauer_sec,nps,csat').eq('project_id',selProj.id).in('year',years).in('kw',kws);
+      const gaugesWin=(wg||[]).filter(inWin);   // 5-Wochen-Fenster, für CSAT (Schnitt 5b)
       const {data:fte}=await sb.from('report_fte').select('employee_id,fte').eq('project_id',selProj.id);
       const fm={}; (fte||[]).forEach(x=>{ fm[x.employee_id]=Number(x.fte); });
-      if(alive){ setStores({hours,callsCount:(cq&&cq.count)||0,gaugesCount:(gq&&gq.count)||0,loaded:true}); setFteStd(fm); }
-    }catch(e){ if(alive){ setStores({hours:{},callsCount:0,gaugesCount:0,loaded:true}); } }
+      if(alive){ setStores({hours,callsByEmp,callsCount:wcWin.length,gaugesCount:gaugesWin.length,gaugesWin,loaded:true}); setFteStd(fm); }
+    }catch(e){ if(alive){ setStores({hours:{},callsByEmp:{},callsCount:0,gaugesCount:0,gaugesWin:[],loaded:true}); } }
   })(); return ()=>{alive=false;}; },[selProjId,pNo,pYear]);
 
   async function saveFteStd(empId,val){ const num=(val===''||val==null)?null:Number(String(val).replace(',','.'));
@@ -34423,6 +34426,13 @@ function PresentationsView({projects, employees, team, showToast}){
   function applyImportHours(t){ const ws=windowWeeks(); upd(n=>{ const rows=n.teams[t].stunden;
     ws.forEach((w,i)=>{ if(!rows[i]) rows[i]=hcEmptyRow(); rows[i].kw=''+w.kw; const h=stores.hours[t+'|'+w.yr+'|'+w.kw];
       if(h!=null){ rows[i].geliefert=String(Math.round(h*10)/10).replace('.',','); rows[i].gsrc='imported'; } }); }); }
+  // Call-Kennzahlen Vorwoche (Berichts-KW) aus weekly_calls je Mitarbeiter übernehmen. Sekunden → mm:ss.
+  const secToMmss=s=>{ if(s==null||s==='') return ''; const x=Math.round(Number(s)||0); return Math.floor(x/60)+':'+String(x%60).padStart(2,'0'); };
+  function applyImportCalls(t){ const members=membersFor(t); upd(n=>{ const cur=n.teams[t].calls.vorwoche={...(n.teams[t].calls.vorwoche||{})};
+    members.forEach(e=>{ const r=(stores.callsByEmp||{})[e.id]; if(!r) return;
+      cur[e.id]={ no_answer:r.no_answer!=null?String(r.no_answer):'', answered:r.answered!=null?String(r.answered):'', outbound:r.outbound!=null?String(r.outbound):'',
+        avg_talk:secToMmss(r.avg_talk_sec), avg_acw:secToMmss(r.avg_acw_sec), avg_handle:secToMmss(r.avg_handle_sec), avg_hold:secToMmss(r.avg_hold_sec) }; });
+    (n.teams[t].calls=n.teams[t].calls||{})._vwsrc='imported'; }); }
 
   async function save(){ if(!selProj||dummy) return; setBusy(true);
     const by=(typeof CURRENT_USER!=='undefined'&&CURRENT_USER)?(CURRENT_USER.name||CURRENT_USER.id):null;
@@ -34602,7 +34612,7 @@ function PresentationsView({projects, employees, team, showToast}){
         {members.length===0&&<tr><td colSpan={cols.length+1} style={{padding:10,color:'var(--muted)'}}>Keine {t==='sales'?'Sales':'Support'}-Mitarbeiter im System.</td></tr>}
         {members.map(e=>{ const c=cur[e.id]||{}; return (<tr key={e.id} style={{borderTop:'1px solid var(--border)'}}>
           <td style={{padding:'3px 6px',whiteSpace:'nowrap'}}>{empName(e)}</td>
-          {cols.map(col=><td key={col.k} style={{padding:'3px 6px',width:col.t==='time'?78:70}}>{inp(c[col.k],v=>upd(n=>{ (n.teams[t].calls[period][e.id]=n.teams[t].calls[period][e.id]||{})[col.k]=v; }),col.t==='time'?'mm:ss':'')}</td>)}
+          {cols.map(col=><td key={col.k} style={{padding:'3px 6px',width:col.t==='time'?78:70}}>{inp(c[col.k],v=>upd(n=>{ (n.teams[t].calls[period][e.id]=n.teams[t].calls[period][e.id]||{})[col.k]=v; if(period==='vorwoche')(n.teams[t].calls=n.teams[t].calls||{})._vwsrc='manual'; }),col.t==='time'?'mm:ss':'')}</td>)}
         </tr>); })}
         {members.length>0&&<tr style={{borderTop:'2px solid '+accent,fontWeight:800}}>
           <td style={{padding:'5px 6px'}}>Gesamt</td>
@@ -34654,7 +34664,15 @@ function PresentationsView({projects, employees, team, showToast}){
         </div>
       </Section>
       <Section title="Gelieferte Stunden (5 Wochen)"><StundenEdit t={t}/></Section>
-      <Section title="Call-Kennzahlen — Vorwoche"><CallsEdit t={t} period="vorwoche"/></Section>
+      <Section title="Call-Kennzahlen — Vorwoche">
+        <div style={{marginBottom:6,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+          <button className="btn btn-sm btn-primary" disabled={!Object.keys(stores.callsByEmp||{}).length} onClick={()=>applyImportCalls(t)}>Aus Import übernehmen</button>
+          {(td.calls||{})._vwsrc==='imported'&&<span style={{fontSize:11,color:'#2563eb',fontWeight:700}}>● Import</span>}
+          {(td.calls||{})._vwsrc==='manual'&&<span style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>● manuell geändert</span>}
+          <span style={{fontSize:11,color:'var(--muted)'}}>Answered/Outbound/No Answer + Zeiten (mm:ss) aus weekly_calls, KW {pNo}. {Object.keys(stores.callsByEmp||{}).length} MA im Import.</span>
+        </div>
+        <CallsEdit t={t} period="vorwoche"/>
+      </Section>
       <Section title="Call-Kennzahlen — Monat"><CallsEdit t={t} period="monat"/></Section>
       <Section title="Maßnahmen">
         <textarea value={td.massnahmen||''} onChange={e=>upd(n=>{n.teams[t].massnahmen=e.target.value;})} placeholder="Maßnahmen als Freitext…" style={{width:'100%',boxSizing:'border-box',minHeight:70,padding:'8px 10px',border:'1px solid var(--border)',borderRadius:8,fontSize:13,fontFamily:'inherit'}}/>
