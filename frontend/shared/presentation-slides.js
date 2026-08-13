@@ -260,15 +260,55 @@
     }
   }
 
+  // CSAT (Folie 13) — Kundenzufriedenheit je Mitarbeiter über das 5-Wochen-Fenster. Daten aus weekly_gauges,
+  // beim Übernehmen in deck.teams[tk].csat = {weeks:[{kw,key}], rows:[{id,name,cells:{key:{v,n}},avg}], _src}
+  // eingefroren (Namen im Snapshot → öffentliche Seite braucht keine employees). Ø gewichtet nach n (Anzahl).
+  function Csat(ctx, tk){ var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk);
+    var cs=td.csat||{}; var weeks=cs.weeks||[]; var rows=cs.rows||[];
+    var rangeTxt=weeks.length?('KW '+weeks[0].kw+' – KW '+weeks[weeks.length-1].kw):'';
+    var head=fondHead(P, lbl+' · CSAT', 'Kundenzufriedenheit', rangeTxt);
+    if(!rows.length){ return Slide(ctx,[head, panel(P, h('div',{style:{flex:1,display:'flex',alignItems:'center',justifyContent:'center',textAlign:'center'}}, h('div',{},[
+      h('div',{key:'t',style:{fontSize:'2.4cqw',fontWeight:800,color:P.ink}},'Keine CSAT-Daten in diesem Zeitraum'),
+      h('div',{key:'s',style:{fontSize:'1.4cqw',marginTop:'1cqw',color:P.muted}},'Für '+lbl+' liegen keine Gauges-/CSAT-Werte vor.')
+    ])))]); }
+    function wavg(list){ var sv=0,sn=0; (list||[]).forEach(function(c){ if(c&&c.v!=null){ var n=(c.n||0)||1; sv+=c.v*n; sn+=n; } }); return sn?sv/sn:null; }
+    var teamWeek={}; weeks.forEach(function(w){ teamWeek[w.key]=wavg(rows.map(function(r){ return r.cells[w.key]; })); });
+    var teamAvg=wavg(rows.map(function(r){ return {v:r.avg,n:1}; }));
+    var colName='30cqw';
+    function valCell(c){ if(!c||c.v==null) return h('div',{style:{flex:1,textAlign:'center',fontFamily:MONO,fontSize:'1.4cqw',color:'#cbd5e1'}},'—');
+      return h('div',{style:{flex:1,textAlign:'center'}},[
+        h('div',{key:'v',style:{fontFamily:MONO,fontSize:'1.55cqw',fontWeight:700,color:P.ink}}, fmtNum(c.v,1)),
+        (c.n!=null)?h('div',{key:'n',style:{fontSize:'.95cqw',color:P.muted}},'n='+fmtNum(c.n)):null
+      ]);
+    }
+    var headerRow=h('div',{key:'hd',style:{display:'flex',alignItems:'flex-end',gap:'1cqw',paddingBottom:'.8cqw',borderBottom:'1px solid #e6edef',marginBottom:'.5cqw'}},
+      [h('div',{key:'n',style:{width:colName,fontSize:'1.2cqw',fontWeight:700,color:P.muted,textTransform:'uppercase',letterSpacing:'.06em'}},'Mitarbeiter')]
+      .concat(weeks.map(function(w){ return h('div',{key:w.key,style:{flex:1,textAlign:'center',fontFamily:MONO,fontSize:'1.2cqw',fontWeight:700,color:P.muted}},'KW '+w.kw); }))
+      .concat([h('div',{key:'avg',style:{flex:1,textAlign:'center',fontSize:'1.2cqw',fontWeight:800,color:P.onLightTxt}},'Ø')]));
+    var body=rows.map(function(r,i){ return h('div',{key:r.id||i,style:{display:'flex',alignItems:'center',gap:'1cqw',padding:'.4cqw 0',borderBottom:'1px solid #f1f5f9'}},
+      [h('div',{key:'n',style:{width:colName,fontSize:'1.35cqw',fontWeight:600,color:P.ink,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},r.name)]
+      .concat(weeks.map(function(w){ return valCell(r.cells[w.key]); }))
+      .concat([h('div',{key:'avg',style:{flex:1,textAlign:'center',fontFamily:MONO,fontSize:'1.6cqw',fontWeight:800,color:P.onLightTxt}}, r.avg==null?'—':fmtNum(r.avg,1))])); });
+    var teamRow=h('div',{key:'team',style:{display:'flex',alignItems:'center',gap:'1cqw',paddingTop:'.7cqw',marginTop:'.2cqw',borderTop:'2px solid '+P.onLight}},
+      [h('div',{key:'n',style:{width:colName,fontSize:'1.35cqw',fontWeight:800,color:P.ink}},'Team Ø')]
+      .concat(weeks.map(function(w){ var v=teamWeek[w.key]; return h('div',{key:w.key,style:{flex:1,textAlign:'center',fontFamily:MONO,fontSize:'1.5cqw',fontWeight:800,color:P.ink}}, v==null?'—':fmtNum(v,1)); }))
+      .concat([h('div',{key:'avg',style:{flex:1,textAlign:'center',fontFamily:MONO,fontSize:'1.7cqw',fontWeight:800,color:P.onLightTxt}}, teamAvg==null?'—':fmtNum(teamAvg,1))]));
+    return Slide(ctx, [ head, panel(P, [
+      h('div',{key:'tbl',style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',overflow:'hidden'}}, [headerRow].concat(body).concat([teamRow])),
+      h('div',{key:'ft',style:{fontSize:'1.1cqw',color:P.muted,marginTop:'1cqw'}},'CSAT je Mitarbeiter und Woche · n = Anzahl Bewertungen · Ø gewichtet nach n')
+    ]) ]);
+  }
+
   // Call-Reviews-Folie je Bericht schaltbar (ctx.callReviews). WICHTIG: deckSlides UND deckSlideKeys über
   // DENSELBEN Flag gaten → beide bleiben im Gleichschritt, die Keys der übrigen Folien verschieben sich nie.
   // Kommentar-Anker hängen am KEY (nicht an der Position); ein Kommentar auf einer ausgeblendeten Folie bleibt
   // in der DB und wird nur nicht angezeigt (kein Verlust, keine Fehlzuordnung).
   function deckShowCalls(ctx){ return ctx.callReviews!==false; }
-  function deckSlides(ctx){ var out=[Title(ctx)]; (ctx.skills||[]).forEach(function(s){ out.push(Stunden(ctx,s.key)); out.push(Calls(ctx,s.key)); if(deckShowCalls(ctx)) out.push(CallScores(ctx,s.key)); }); return out; }
+  function hasCsat(ctx,k){ var td=(ctx.deck.teams||{})[k]||{}; return !!(td.csat&&td.csat.rows&&td.csat.rows.length); }
+  function deckSlides(ctx){ var out=[Title(ctx)]; (ctx.skills||[]).forEach(function(s){ out.push(Stunden(ctx,s.key)); out.push(Calls(ctx,s.key)); if(deckShowCalls(ctx)) out.push(CallScores(ctx,s.key)); if(hasCsat(ctx,s.key)) out.push(Csat(ctx,s.key)); }); return out; }
   // Folien-Identität (für Kommentar-Anker) — dieselbe Reihenfolge wie deckSlides.
-  function deckSlideKeys(ctx){ var out=[{key:'title',label:'Titel'}]; (ctx.skills||[]).forEach(function(s){ out.push({key:s.key+':stunden',label:skillLabel(ctx,s.key)+' · Stunden'}); out.push({key:s.key+':calls',label:skillLabel(ctx,s.key)+' · Calls'}); if(deckShowCalls(ctx)) out.push({key:s.key+':callscores',label:skillLabel(ctx,s.key)+' · Call-Qualität'}); }); return out; }
+  function deckSlideKeys(ctx){ var out=[{key:'title',label:'Titel'}]; (ctx.skills||[]).forEach(function(s){ out.push({key:s.key+':stunden',label:skillLabel(ctx,s.key)+' · Stunden'}); out.push({key:s.key+':calls',label:skillLabel(ctx,s.key)+' · Calls'}); if(deckShowCalls(ctx)) out.push({key:s.key+':callscores',label:skillLabel(ctx,s.key)+' · Call-Qualität'}); if(hasCsat(ctx,s.key)) out.push({key:s.key+':csat',label:skillLabel(ctx,s.key)+' · CSAT'}); }); return out; }
 
-  window.PRES = { deckSlides:deckSlides, deckSlideKeys:deckSlideKeys, Title:Title, Stunden:Stunden, Calls:Calls, CallScores:CallScores, callCols:callCols, pal:pal,
+  window.PRES = { deckSlides:deckSlides, deckSlideKeys:deckSlideKeys, Title:Title, Stunden:Stunden, Calls:Calls, CallScores:CallScores, Csat:Csat, callCols:callCols, pal:pal,
     fmtNum:fmtNum, numOr:numOr, pctDiff:pctDiff, wavgTime:wavgTime, sumCol:sumCol, decToMmss:decToMmss, mmssToDec:mmssToDec };
 })();
