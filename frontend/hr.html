@@ -33309,6 +33309,41 @@ function PivotImport({projId, employees, source, fields, table, accept, hint, on
   </div>;
 }
 
+// Pausen-Gegencheck (Schnitt 6): Auftraggeber-Pausen aus dem Import (weekly_hours.pause_hours = DH+DI) je
+// Skill × KW. „Unsere gestempelten" Pausen + Differenz erscheinen, sobald die Zeiterfassung Daten liefert
+// (Vergleichsbetrieb). NICHT in der Kundenpräsentation — interner Gegencheck. Sichtbar nur bei Pausendaten.
+function PausenGegencheck({projId}){
+  const [data,setData]=useState(null);
+  useEffect(()=>{ let alive=true; (async()=>{ if(!projId){ setData({weeks:[],agg:{}}); return; }
+    const today=new Date(); const weeks=[]; for(let i=5;i>=0;i--){ const d=new Date(today); d.setDate(today.getDate()-i*7); const w=getISOWeek(d); weeks.push({kw:w.kw,yr:w.year,key:w.year+'-'+w.kw}); }
+    const years=[...new Set(weeks.map(w=>w.yr))]; const kws=[...new Set(weeks.map(w=>w.kw))];
+    const {data:wh}=await sb.from('weekly_hours').select('skill,kw,year,employee_id,pause_hours').eq('project_id',projId).in('year',years).in('kw',kws);
+    const inW=r=>weeks.some(w=>w.kw===r.kw&&w.yr===r.year);
+    const agg={}; (wh||[]).forEach(r=>{ if(!inW(r)||r.pause_hours==null) return; const sk=String(r.skill||'—').toLowerCase(); const key=r.year+'-'+r.kw; const a=(agg[sk]=agg[sk]||{}); const c=(a[key]=a[key]||{sum:0,n:0}); c.sum+=Number(r.pause_hours||0); c.n++; });
+    if(alive) setData({weeks,agg});
+  })(); return ()=>{alive=false;}; },[projId]);
+  if(!data) return null;
+  const skills=Object.keys(data.agg);
+  if(!skills.length) return null;   // sichtbar nur bei Vergleichs-/Pausendaten
+  const hh=v=>v==null?'—':v.toLocaleString('de-DE',{minimumFractionDigits:1,maximumFractionDigits:1})+' h';
+  return <div style={{marginTop:22}}>
+    <div style={{fontSize:13,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em',marginBottom:6}}>Pausen-Gegencheck (intern)</div>
+    <div style={{fontSize:11,color:'var(--muted)',marginBottom:10}}>Auftraggeber-Pausen aus dem Import (DH+DI). Unsere gestempelten Pausen und die Differenz erscheinen, sobald die Zeiterfassung Daten liefert (Vergleichsbetrieb). Nicht Teil der Kundenpräsentation.</div>
+    {skills.map(sk=><div key={sk} style={{border:'1px solid var(--border)',borderRadius:10,padding:12,marginBottom:12}}>
+      <div style={{fontSize:12,fontWeight:800,marginBottom:8,textTransform:'capitalize'}}>{sk}</div>
+      <div style={{overflowX:'auto'}}><table style={{borderCollapse:'collapse',fontSize:12,minWidth:520}}>
+        <thead><tr style={{color:'var(--muted)'}}><th style={{textAlign:'left',padding:'3px 8px'}}></th>{data.weeks.map(w=><th key={w.key} style={{padding:'3px 10px',fontWeight:700}}>KW {w.kw}</th>)}</tr></thead>
+        <tbody>
+          <tr style={{borderTop:'1px solid var(--border)'}}><td style={{padding:'3px 8px',fontWeight:600}}>Auftraggeber (Summe)</td>{data.weeks.map(w=>{ const c=(data.agg[sk]||{})[w.key]; return <td key={w.key} style={{padding:'3px 10px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:700}}>{c?hh(c.sum):'—'}</td>; })}</tr>
+          <tr style={{borderTop:'1px solid var(--border)'}}><td style={{padding:'3px 8px',fontWeight:600}}>Auftraggeber (Ø je MA)</td>{data.weeks.map(w=>{ const c=(data.agg[sk]||{})[w.key]; return <td key={w.key} style={{padding:'3px 10px',textAlign:'right',fontFamily:'var(--mono)'}}>{c&&c.n?hh(c.sum/c.n):'—'}</td>; })}</tr>
+          <tr style={{borderTop:'1px solid var(--border)',color:'var(--muted)'}}><td style={{padding:'3px 8px',fontWeight:600}}>Unsere (gestempelt)</td>{data.weeks.map(w=><td key={w.key} style={{padding:'3px 10px',textAlign:'right',fontFamily:'var(--mono)'}}>—</td>)}</tr>
+          <tr style={{borderTop:'1px solid var(--border)',color:'var(--muted)'}}><td style={{padding:'3px 8px',fontWeight:600}}>Differenz</td>{data.weeks.map(w=><td key={w.key} style={{padding:'3px 10px',textAlign:'right',fontFamily:'var(--mono)'}}>—</td>)}</tr>
+        </tbody>
+      </table></div>
+    </div>)}
+  </div>;
+}
+
 function DataImportView({projects, employees}){
   const projList=(projects||[]).filter(p=>p&&p.id).slice().sort((a,b)=>String(a.name).localeCompare(String(b.name),'de'));
   const [projId,setProjId]=useState(()=>{ const hc=projList.find(p=>/holiday.?check/i.test(p.name||'')); return hc?hc.id:(projList[0]?projList[0].id:''); });
@@ -33343,6 +33378,7 @@ function DataImportView({projects, employees}){
         <span style={{fontSize:11,color:'var(--muted)',flex:1,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{im.file_name} · {im.matched_count} zugeordnet{im.unmatched_count?(' · '+im.unmatched_count+' offen'):''}</span>
         <span style={{fontSize:11,color:'var(--muted)'}}>{fmtDate(im.created_at)}{im.uploaded_by_name?' · '+im.uploaded_by_name:''}</span>
       </div>)}</div>}
+    <PausenGegencheck projId={projId}/>
   </div>;
 }
 // ══ CV-Sync aus öffentlichem Google Sheet (Feature 20) ══
