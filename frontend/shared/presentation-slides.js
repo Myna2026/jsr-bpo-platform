@@ -145,6 +145,68 @@
     ]);
   }
 
+  // Folie 2 — Besetzung & FTE. Daten in deck.teams[tk].fteList = {rows:[{id,name,fte}], total, _src}.
+  function Fte(ctx, tk){ var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk);
+    var fl=td.fteList||{}; var rows=fl.rows||[]; var total=(fl.total!=null)?fl.total:numOr(td.fte,null);
+    var head=fondHead(P, lbl, 'Besetzung & FTE', rows.length?(rows.length+' Mitarbeiter'):'');
+    if(!rows.length){ return Slide(ctx,[head, panel(P, h('div',{style:{flex:1,display:'flex',alignItems:'center',justifyContent:'center',textAlign:'center'}}, h('div',{},[
+      h('div',{key:'t',style:{fontSize:'2.4cqw',fontWeight:800,color:P.ink}},'Keine Besetzung übernommen'),
+      h('div',{key:'s',style:{fontSize:'1.4cqw',marginTop:'1cqw',color:P.muted}},'FTE-Standard je Mitarbeiter pflegen und übernehmen.')
+    ])))]); }
+    var cols3=rows.length>8?3:(rows.length>4?2:1); var per=Math.ceil(rows.length/cols3); var groups=[]; for(var g=0;g<cols3;g++) groups.push(rows.slice(g*per,(g+1)*per));
+    return Slide(ctx, [ head, panel(P, [
+      h('div',{key:'top',style:{display:'flex',alignItems:'baseline',gap:'1.4cqw',marginBottom:'2cqw',flexShrink:0}},[
+        h('span',{key:'n',style:{fontSize:'6cqw',fontWeight:800,color:P.onLightTxt,lineHeight:1,fontVariantNumeric:'tabular-nums'}}, total==null?'—':fmtNum(total,2)),
+        h('span',{key:'l',style:{fontSize:'1.7cqw',fontWeight:700,color:P.muted}},'FTE gesamt')
+      ]),
+      h('div',{key:'grid',style:{flex:1,minHeight:0,display:'flex',gap:'3.5cqw',overflow:'hidden'}},
+        groups.map(function(grp,gi){ return h('div',{key:gi,style:{flex:1,minWidth:0,display:'flex',flexDirection:'column',gap:'.5cqw'}},
+          grp.map(function(r,ri){ return h('div',{key:r.id||ri,style:{display:'flex',alignItems:'center',justifyContent:'space-between',gap:'1cqw',padding:'.45cqw 0',borderBottom:'1px solid #f1f5f9'}},[
+            h('span',{key:'n',style:{fontSize:'1.4cqw',fontWeight:600,color:P.ink,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},r.name),
+            h('span',{key:'f',style:{fontFamily:MONO,fontSize:'1.4cqw',fontWeight:700,color:P.onLightTxt,flexShrink:0}},fmtNum(r.fte,2))
+          ]); })
+        ); })
+      )
+    ]) ]);
+  }
+
+  // Folie 3 — Gelieferte Stunden als 8-Spalten-Tabelle (KW · Plan · Rückmeldung · Diff R−P · Geliefert · Diff G−R · % · Erläuterung).
+  function StundenTable(ctx, tk){ var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk);
+    var rows=(td.stunden||[]).filter(function(r){ return r.kw!==''||r.plan!==''||r.geliefert!==''||r.rueck!==''; });
+    var head=fondHead(P, lbl, 'Gelieferte Stunden', 'Plan · Rückmeldung · Geliefert');
+    if(!rows.length){ return Slide(ctx,[head, panel(P, h('div',{style:{flex:1,display:'flex',alignItems:'center',justifyContent:'center',color:P.muted,fontSize:'1.6cqw'}},'Keine Stundendaten in diesem Zeitraum.'))]); }
+    var heads=['KW','Geplant FC','Rückmeldung','Diff R−P','Geliefert','Diff G−R','% (Rückm.)','Erläuterung'];
+    var ws=['9%','13%','14%','11%','13%','11%','11%','18%'];
+    function cell(txt,i,st){ return h('div',{key:i,style:Object.assign({width:ws[i],padding:'0 .6cqw',boxSizing:'border-box',textAlign:i===0?'left':i===7?'left':'right',fontFamily:i>=1&&i<=6?MONO:'inherit'},st||{})}, txt); }
+    var hdr=h('div',{key:'h',style:{display:'flex',alignItems:'flex-end',paddingBottom:'.7cqw',borderBottom:'1px solid #e6edef',marginBottom:'.4cqw',fontSize:'1.15cqw',fontWeight:700,color:P.muted,textTransform:'uppercase',letterSpacing:'.04em'}}, heads.map(function(hh,i){ return cell(hh,i); }));
+    var sp=0,sr=0,sg=0;
+    var body=rows.map(function(r,ri){ var plan=numOr(r.plan,null),rueck=numOr(r.rueck,null),gel=numOr(r.geliefert,null);
+      if(r.plan!==''&&r.plan!=null)sp+=plan; if(r.rueck!==''&&r.rueck!=null)sr+=rueck; if(r.geliefert!==''&&r.geliefert!=null)sg+=gel;
+      var dRP=(r.rueck!==''&&r.plan!=='')?rueck-plan:null; var dGR=(r.geliefert!==''&&r.rueck!=='')?gel-rueck:null; var pc=pctDiff(r.geliefert,r.rueck);
+      return h('div',{key:ri,style:{display:'flex',alignItems:'center',padding:'.5cqw 0',borderBottom:'1px solid #f1f5f9',fontSize:'1.35cqw',color:P.ink}},[
+        cell('KW '+(r.kw||'—'),0,{fontWeight:700}),
+        cell(r.plan===''||r.plan==null?'—':fmtNum(plan),1),
+        cell(r.rueck===''||r.rueck==null?'—':fmtNum(rueck),2),
+        cell(dRP==null?'—':(dRP>0?'+':'')+fmtNum(dRP),3,{color:dRP==null?P.muted:dRP<0?'#dc2626':'#059669',fontWeight:700}),
+        cell(r.geliefert===''||r.geliefert==null?'—':fmtNum(gel),4,{fontWeight:700}),
+        cell(dGR==null?'—':(dGR>0?'+':'')+fmtNum(dGR),5,{color:dGR==null?P.muted:dGR<0?'#dc2626':'#059669',fontWeight:700}),
+        cell(pc==null?'—':(pc>0?'+':'')+fmtNum(pc,1)+' %',6,{color:pc==null?P.muted:pc<0?'#dc2626':'#059669',fontWeight:700}),
+        cell(r.erkl||'',7,{fontFamily:'inherit',fontSize:'1.15cqw',color:P.muted,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'})
+      ]);
+    });
+    var tdRP=sr-sp, tdGR=sg-sr, tpc=(sr>0)?(sg-sr)/sr*100:null;
+    var totalRow=h('div',{key:'t',style:{display:'flex',alignItems:'center',paddingTop:'.7cqw',marginTop:'.2cqw',borderTop:'2px solid '+P.onLight,fontSize:'1.4cqw',fontWeight:800,color:P.ink}},[
+      cell('Gesamt',0),cell(fmtNum(sp),1),cell(fmtNum(sr),2),
+      cell((tdRP>0?'+':'')+fmtNum(tdRP),3,{color:tdRP<0?'#dc2626':'#059669'}),
+      cell(fmtNum(sg),4),cell((tdGR>0?'+':'')+fmtNum(tdGR),5,{color:tdGR<0?'#dc2626':'#059669'}),
+      cell(tpc==null?'—':(tpc>0?'+':'')+fmtNum(tpc,1)+' %',6,{color:tpc==null?P.muted:tpc<0?'#dc2626':'#059669'}),cell('',7)
+    ]);
+    return Slide(ctx, [ head, panel(P, [
+      h('div',{key:'tbl',style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',overflow:'hidden'}}, [hdr].concat(body).concat([totalRow])),
+      h('div',{key:'ft',style:{fontSize:'1.1cqw',color:P.muted,marginTop:'1cqw'}},'Diff R−P, Diff G−R und % werden gerechnet · Prozent bezogen auf die Rückmeldung.')
+    ]) ]);
+  }
+
   function Calls(ctx, tk){ var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk); var cols=callCols(tk);
     var members=(ctx.membersOf(tk)||[]).filter(function(m){ return ((td.members||[]).length===0)||(td.members||[]).indexOf(m.id)>=0; });
     var cur=(td.calls&&td.calls.vorwoche)||{};
@@ -305,10 +367,24 @@
   // in der DB und wird nur nicht angezeigt (kein Verlust, keine Fehlzuordnung).
   function deckShowCalls(ctx){ return ctx.callReviews!==false; }
   function hasCsat(ctx,k){ var td=(ctx.deck.teams||{})[k]||{}; return !!(td.csat&&td.csat.rows&&td.csat.rows.length); }
-  function deckSlides(ctx){ var out=[Title(ctx)]; (ctx.skills||[]).forEach(function(s){ out.push(Stunden(ctx,s.key)); out.push(Calls(ctx,s.key)); if(deckShowCalls(ctx)) out.push(CallScores(ctx,s.key)); if(hasCsat(ctx,s.key)) out.push(Csat(ctx,s.key)); }); return out; }
+  function hasFte(ctx,k){ var td=(ctx.deck.teams||{})[k]||{}; return !!(td.fteList&&td.fteList.rows&&td.fteList.rows.length); }
+  function hasStd(ctx,k){ var td=(ctx.deck.teams||{})[k]||{}; return (td.stunden||[]).some(function(r){ return r.kw!==''||r.plan!==''||r.geliefert!==''||r.rueck!==''; }); }
+  function deckSlides(ctx){ var out=[Title(ctx)]; (ctx.skills||[]).forEach(function(s){ var k=s.key;
+    if(hasFte(ctx,k)) out.push(Fte(ctx,k));
+    if(hasStd(ctx,k)) out.push(StundenTable(ctx,k));
+    out.push(Stunden(ctx,k)); out.push(Calls(ctx,k));
+    if(deckShowCalls(ctx)) out.push(CallScores(ctx,k));
+    if(hasCsat(ctx,k)) out.push(Csat(ctx,k));
+  }); return out; }
   // Folien-Identität (für Kommentar-Anker) — dieselbe Reihenfolge wie deckSlides.
-  function deckSlideKeys(ctx){ var out=[{key:'title',label:'Titel'}]; (ctx.skills||[]).forEach(function(s){ out.push({key:s.key+':stunden',label:skillLabel(ctx,s.key)+' · Stunden'}); out.push({key:s.key+':calls',label:skillLabel(ctx,s.key)+' · Calls'}); if(deckShowCalls(ctx)) out.push({key:s.key+':callscores',label:skillLabel(ctx,s.key)+' · Call-Qualität'}); if(hasCsat(ctx,s.key)) out.push({key:s.key+':csat',label:skillLabel(ctx,s.key)+' · CSAT'}); }); return out; }
+  function deckSlideKeys(ctx){ var out=[{key:'title',label:'Titel'}]; (ctx.skills||[]).forEach(function(s){ var k=s.key, L=skillLabel(ctx,k);
+    if(hasFte(ctx,k)) out.push({key:k+':fte',label:L+' · FTE'});
+    if(hasStd(ctx,k)) out.push({key:k+':stundentab',label:L+' · Stunden (Tabelle)'});
+    out.push({key:k+':stunden',label:L+' · Stunden'}); out.push({key:k+':calls',label:L+' · Calls'});
+    if(deckShowCalls(ctx)) out.push({key:k+':callscores',label:L+' · Call-Qualität'});
+    if(hasCsat(ctx,k)) out.push({key:k+':csat',label:L+' · CSAT'});
+  }); return out; }
 
-  window.PRES = { deckSlides:deckSlides, deckSlideKeys:deckSlideKeys, Title:Title, Stunden:Stunden, Calls:Calls, CallScores:CallScores, Csat:Csat, callCols:callCols, pal:pal,
+  window.PRES = { deckSlides:deckSlides, deckSlideKeys:deckSlideKeys, Title:Title, Fte:Fte, StundenTable:StundenTable, Stunden:Stunden, Calls:Calls, CallScores:CallScores, Csat:Csat, callCols:callCols, pal:pal,
     fmtNum:fmtNum, numOr:numOr, pctDiff:pctDiff, wavgTime:wavgTime, sumCol:sumCol, decToMmss:decToMmss, mmssToDec:mmssToDec };
 })();
