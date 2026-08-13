@@ -1,0 +1,14 @@
+-- =============================================================================
+-- weekly_hours: Sales Calls je Mitarbeiter/Woche (aus Rohdaten-Excel, Spalte sales_calls)  2026-08-13
+-- =============================================================================
+-- Sales Calls stehen in der Rohdaten-Excel (Spalte J, "sales_calls") — dieselbe Datei/Körnung
+-- wie die Stunden. Darum als zusätzliche Spalte in weekly_hours (kein eigener Fakt-Typ nötig).
+-- Zählwert (ganze Zahl), je (project, employee, kw, year) über die Tageszeilen summiert.
+--
+-- Verwendung: CR = (Offene + OSL-Buchungen) ÷ Sales Calls × 100. Sales Calls kommen ab jetzt
+-- HIER her (nicht mehr aus dem KPI kpi_hc_sales_calls); Buchungen bleiben vorerst manuell in
+-- kpi_entries (kpi_hc_open_bookings / kpi_hc_osl), bis die Buchungsquelle geklärt ist.
+--
+-- Additiv/idempotent. Im Supabase SQL-Editor ausführen.
+-- =============================================================================
+alter table public.weekly_hours add column if not exists sales_calls int;

@@ -32933,6 +32933,7 @@ const ROHDATEN_FIELDS=[
   {key:'mailer',          label:'mailer',           req:false, cand:['mailer']},
   {key:'pause',           label:'pause',            req:false, cand:['pause']},
   {key:'mittagspause',    label:'mittagspause',     req:false, cand:['mittagspause','mittag','mittags pause']},
+  {key:'sales_calls',     label:'sales_calls',      req:false, cand:['sales_calls','sales calls','salescalls']},
 ];
 function cqNormHead(s){ return String(s==null?'':s).trim().toLowerCase().replace(/[\s.\-]+/g,'_'); }
 function cqNormName(s){ return String(s==null?'':s).trim().toLowerCase().replace(/\s+/g,' '); }
@@ -33038,15 +33039,16 @@ function RohdatenImport({projId, projName, employees, onSaved}){
       if(!dt) return;
       const cw=getISOWeek(dt); const emp=resolve(nm);
       if(!emp){ (unmatched[nm]=unmatched[nm]||{name:nm,rows:0}).rows++; return; }
-      const key=emp.id+'|'+cw.kw+'|'+cw.year; const g=groups[key]=groups[key]||{emp,kw:cw.kw,year:cw.year,log:0,bos:0,url:0,mail:0,pause:0,mittag:0};
+      const key=emp.id+'|'+cw.kw+'|'+cw.year; const g=groups[key]=groups[key]||{emp,kw:cw.kw,year:cw.year,log:0,bos:0,url:0,mail:0,pause:0,mittag:0,sc:0};
       g.log+=cqSec(r[map.logtimetelefon]); g.bos+=cqSec(map.back_office_sales>=0?r[map.back_office_sales]:0); g.url+=cqSec(map.urlaubsteam>=0?r[map.urlaubsteam]:0);
       g.mail+=cqSec(map.mailer>=0?r[map.mailer]:0); g.pause+=cqSec(map.pause>=0?r[map.pause]:0); g.mittag+=cqSec(map.mittagspause>=0?r[map.mittagspause]:0);
+      g.sc+=cqSec(map.sales_calls>=0?r[map.sales_calls]:0);
     });
     const facts=Object.keys(groups).map(k=>{ const g=groups[k]; const sk=((g.emp.project_skill||g.emp.primary_skill||'')+'').toLowerCase();
       const hoursSec = sk==='sales' ? (g.log+g.bos+g.url) : sk==='support' ? (g.log+g.mail) : null;
       return { employee_id:g.emp.id, name:((g.emp.first_name||'')+' '+(g.emp.last_name||'')).trim(), kw:g.kw, year:g.year, skill:sk||null,
-        hours: hoursSec==null?null:cqHours(hoursSec), pause_hours:cqHours(g.pause+g.mittag),
-        raw:{logtimetelefon:g.log,back_office_sales:g.bos,urlaubsteam:g.url,mailer:g.mail,pause:g.pause,mittagspause:g.mittag} }; })
+        hours: hoursSec==null?null:cqHours(hoursSec), pause_hours:cqHours(g.pause+g.mittag), sales_calls:Math.round(g.sc),
+        raw:{logtimetelefon:g.log,back_office_sales:g.bos,urlaubsteam:g.url,mailer:g.mail,pause:g.pause,mittagspause:g.mittag,sales_calls:g.sc} }; })
       .sort((a,b)=> a.year-b.year || a.kw-b.kw || a.name.localeCompare(b.name,'de'));
     const unmatchedList=Object.values(unmatched).sort((a,b)=>b.rows-a.rows);
     const weeks=[...new Set(facts.map(f=>f.year+'-'+f.kw))].sort();
@@ -33075,7 +33077,7 @@ function RohdatenImport({projId, projName, employees, onSaved}){
     const {data:imp,error:ie}=await sb.from('data_imports').insert({ project_id:projId, source_type:'rohdaten', kw:pkw, year:pyy, file_name:file.name, file_hash:fileHash, storage_path:storagePath, status, warnings:result.warnings, row_count:(sheet.rows||[]).length, matched_count:result.facts.length, unmatched_count:result.unmatched.length, uploaded_by:uid, uploaded_by_name:uname }).select('id').single();
     if(ie){ setBusy(false); setErr('Import nicht gespeichert: '+(ie.message||'')); return; }
     for(const wk of result.weeks){ const yy=Number(wk.split('-')[0]),kw=Number(wk.split('-')[1]); await sb.from('weekly_hours').delete().eq('project_id',projId).eq('kw',kw).eq('year',yy); }
-    const rows=result.facts.map(f=>({ import_id:imp.id, project_id:projId, employee_id:f.employee_id, kw:f.kw, year:f.year, skill:f.skill, hours:f.hours, pause_hours:f.pause_hours, raw:f.raw }));
+    const rows=result.facts.map(f=>({ import_id:imp.id, project_id:projId, employee_id:f.employee_id, kw:f.kw, year:f.year, skill:f.skill, hours:f.hours, pause_hours:f.pause_hours, sales_calls:f.sales_calls, raw:f.raw }));
     const {error:fe}=await sb.from('weekly_hours').insert(rows);
     setBusy(false);
     if(fe){ setErr('Fakten nicht gespeichert: '+(fe.message||'')); return; }
@@ -33132,12 +33134,13 @@ function RohdatenImport({projId, projName, employees, onSaved}){
       </div>}
       <div style={{maxHeight:280,overflowY:'auto',border:'1px solid var(--border)',borderRadius:8,marginBottom:12}}>
         <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
-          <thead><tr style={{position:'sticky',top:0,background:'var(--surface-2)'}}>{['Mitarbeiter','KW','Skill','Stunden','Pausen'].map(h=><th key={h} style={{textAlign:'left',padding:'6px 8px',fontSize:11,color:'var(--muted)'}}>{h}</th>)}</tr></thead>
+          <thead><tr style={{position:'sticky',top:0,background:'var(--surface-2)'}}>{['Mitarbeiter','KW','Skill','Stunden','Pausen','Sales Calls'].map(h=><th key={h} style={{textAlign:'left',padding:'6px 8px',fontSize:11,color:'var(--muted)'}}>{h}</th>)}</tr></thead>
           <tbody>{result.facts.map((f,i)=><tr key={i} style={{borderTop:'1px solid var(--border)'}}>
             <td style={{padding:'5px 8px'}}>{f.name}</td><td style={{padding:'5px 8px'}}>KW {f.kw}/{f.year}</td>
             <td style={{padding:'5px 8px'}}>{f.skill||'—'}</td>
             <td style={{padding:'5px 8px',fontFamily:'var(--mono)',fontWeight:700}}>{f.hours==null?'—':f.hours.toLocaleString('de-DE',{minimumFractionDigits:2,maximumFractionDigits:2})} h</td>
             <td style={{padding:'5px 8px',fontFamily:'var(--mono)',color:'var(--muted)'}}>{f.pause_hours.toLocaleString('de-DE',{minimumFractionDigits:2,maximumFractionDigits:2})} h</td>
+            <td style={{padding:'5px 8px',fontFamily:'var(--mono)'}}>{f.sales_calls?f.sales_calls.toLocaleString('de-DE'):'—'}</td>
           </tr>)}</tbody>
         </table>
       </div>
@@ -34369,7 +34372,7 @@ function PresentationsView({projects, employees, team, showToast}){
   const [theme,setTheme]=useState({accent:'',font:'',customerLogo:''});   // Look&Feel je Projekt
   const [ourLogo,setOurLogo]=useState('');      // unser Logo (global)
   const [tplId,setTplId]=useState(null);
-  const [stores,setStores]=useState({hours:{},callsByEmp:{},callsWin:[],callsCount:0,gaugesCount:0,gaugesWin:[],kpiWin:[],loaded:false});   // Schnitt 4/5: Live-Ablagen (5-Wochen-Fenster)
+  const [stores,setStores]=useState({hours:{},scByEmp:{},callsByEmp:{},callsWin:[],callsCount:0,gaugesCount:0,gaugesWin:[],kpiWin:[],loaded:false});   // Schnitt 4/5: Live-Ablagen (5-Wochen-Fenster)
   const [fteStd,setFteStd]=useState({});   // report_fte: employee_id -> Standard-FTE
   const accent=theme.accent||(selProj&&selProj.color)||'#2563eb';
   const fontFam=theme.font||'inherit';
@@ -34411,18 +34414,19 @@ function PresentationsView({projects, employees, team, showToast}){
     const ws=windowWeeks(); const years=[...new Set(ws.map(w=>w.yr))]; const kws=[...new Set(ws.map(w=>w.kw))];
     try{
       const inWin=r=>ws.some(w=>w.kw===r.kw&&w.yr===r.year);
-      const {data:wh}=await sb.from('weekly_hours').select('skill,kw,year,hours').eq('project_id',selProj.id).in('year',years).in('kw',kws);
-      const hours={}; (wh||[]).forEach(r=>{ if(!inWin(r)) return; const sk=String(r.skill||'').toLowerCase(); const key=sk+'|'+r.year+'|'+r.kw; hours[key]=(hours[key]||0)+Number(r.hours||0); });
+      const {data:wh}=await sb.from('weekly_hours').select('skill,kw,year,hours,employee_id,sales_calls').eq('project_id',selProj.id).in('year',years).in('kw',kws);
+      const hours={}, scByEmp={}; (wh||[]).forEach(r=>{ if(!inWin(r)) return; const sk=String(r.skill||'').toLowerCase(); const key=sk+'|'+r.year+'|'+r.kw; hours[key]=(hours[key]||0)+Number(r.hours||0);
+        if(r.sales_calls!=null){ const ek=r.year+'-'+r.kw; (scByEmp[r.employee_id]=scByEmp[r.employee_id]||{})[ek]=(scByEmp[r.employee_id][ek]||0)+Number(r.sales_calls); } });
       const {data:wc}=await sb.from('weekly_calls').select('employee_id,kw,year,answered,outbound,no_answer,avg_handle_sec,avg_talk_sec,avg_hold_sec,avg_acw_sec').eq('project_id',selProj.id).in('year',years).in('kw',kws);
       const rv=ws[ws.length-1]; const wcWin=(wc||[]).filter(inWin); const callsByEmp={}; wcWin.filter(r=>r.kw===rv.kw&&r.year===rv.yr).forEach(r=>{ callsByEmp[r.employee_id]=r; });   // Vorwoche = ausgewertete Woche (Review)
       const {data:wg}=await sb.from('weekly_gauges').select('employee_id,kw,year,gesamt_pct,anzahl,dauer_sec,nps,csat').eq('project_id',selProj.id).in('year',years).in('kw',kws);
       const gaugesWin=(wg||[]).filter(inWin);   // 5-Wochen-Fenster, für CSAT (Schnitt 5b)
-      const {data:ke}=await sb.from('kpi_entries').select('emp_id,kpi_id,value,kw,year').in('kpi_id',['kpi_hc_open_bookings','kpi_hc_osl','kpi_hc_sales_calls']).in('year',years).in('kw',kws);
-      const kpiWin=(ke||[]).filter(inWin);      // Buchungen/Calls je MA/KW für CR (Schnitt 5d)
+      const {data:ke}=await sb.from('kpi_entries').select('emp_id,kpi_id,value,kw,year').in('kpi_id',['kpi_hc_open_bookings','kpi_hc_osl']).in('year',years).in('kw',kws);
+      const kpiWin=(ke||[]).filter(inWin);      // Buchungen (offen/OSL) je MA/KW — manuell im KPI-Tab; Sales Calls kommen aus scByEmp (Import)
       const {data:fte}=await sb.from('report_fte').select('employee_id,fte').eq('project_id',selProj.id);
       const fm={}; (fte||[]).forEach(x=>{ fm[x.employee_id]=Number(x.fte); });
-      if(alive){ setStores({hours,callsByEmp,callsWin:wcWin,callsCount:wcWin.length,gaugesCount:gaugesWin.length,gaugesWin,kpiWin,loaded:true}); setFteStd(fm); }
-    }catch(e){ if(alive){ setStores({hours:{},callsByEmp:{},callsWin:[],callsCount:0,gaugesCount:0,gaugesWin:[],kpiWin:[],loaded:true}); } }
+      if(alive){ setStores({hours,scByEmp,callsByEmp,callsWin:wcWin,callsCount:wcWin.length,gaugesCount:gaugesWin.length,gaugesWin,kpiWin,loaded:true}); setFteStd(fm); }
+    }catch(e){ if(alive){ setStores({hours:{},scByEmp:{},callsByEmp:{},callsWin:[],callsCount:0,gaugesCount:0,gaugesWin:[],kpiWin:[],loaded:true}); } }
   })(); return ()=>{alive=false;}; },[selProjId,pNo,pYear]);
 
   async function saveFteStd(empId,val){ const num=(val===''||val==null)?null:Number(String(val).replace(',','.'));
@@ -34462,13 +34466,15 @@ function PresentationsView({projects, employees, team, showToast}){
   // CR + Buchungen (5d): je MA/KW aus kpi_entries. CR = (Offene + OSL) ÷ Sales Calls × 100. MTD = Berichtsmonats-Wochen.
   const MONTHS_DE=['Januar','Februar','März','April','Mai','Juni','Juli','August','September','Oktober','November','Dezember'];
   function applyImportCr(t){ const ws=windowWeeks(); const members=membersFor(t); const win=stores.kpiWin||[];
-    const KID={kpi_hc_open_bookings:'open',kpi_hc_osl:'osl',kpi_hc_sales_calls:'calls'};
+    const KID={kpi_hc_open_bookings:'open',kpi_hc_osl:'osl'};   // Buchungen aus KPI (manuell); Sales Calls aus Import (scByEmp)
     const val={}; win.forEach(r=>{ if(!ws.some(w=>w.yr===r.year&&w.kw===r.kw)) return; const m=KID[r.kpi_id]; if(!m) return; const key=r.year+'-'+r.kw;
       ((val[r.emp_id]=val[r.emp_id]||{})[key]=val[r.emp_id][key]||{})[m]=Number(r.value)||0; });
+    const sc=stores.scByEmp||{};
     const weeks=ws.map(w=>({kw:w.kw,key:w.yr+'-'+w.kw}));
     const crOf=(o,os,c)=> c>0 ? Math.round((o+os)/c*10000)/100 : null;
     const agents=members.map(e=>{ const byWeek={}; let to=0,tos=0,tc=0;
-      weeks.forEach(wk=>{ const v=(val[e.id]||{})[wk.key]; if(v && (v.open!=null||v.osl!=null||v.calls!=null)){ const o=v.open||0,os=v.osl||0,c=v.calls||0; byWeek[wk.key]={open:o,osl:os,calls:c,cr:crOf(o,os,c)}; to+=o;tos+=os;tc+=c; } });
+      weeks.forEach(wk=>{ const v=(val[e.id]||{})[wk.key]||{}; const c=((sc[e.id]||{})[wk.key]);
+        if(v.open!=null||v.osl!=null||c!=null){ const o=v.open||0,os=v.osl||0,cc=c||0; byWeek[wk.key]={open:o,osl:os,calls:cc,cr:crOf(o,os,cc)}; to+=o;tos+=os;tc+=cc; } });
       return {id:e.id,name:empName(e),byWeek,tot:{open:to,osl:tos,calls:tc,cr:crOf(to,tos,tc)}}; })
       .filter(a=>Object.keys(a.byWeek).length).sort((a,b)=>(b.tot.cr||0)-(a.tot.cr||0));
     const team={}; weeks.forEach(wk=>{ let o=0,os=0,c=0,any=false; agents.forEach(a=>{ const v=a.byWeek[wk.key]; if(v){any=true;o+=v.open;os+=v.osl;c+=v.calls;} }); team[wk.key]=any?{open:o,osl:os,calls:c,cr:crOf(o,os,c)}:null; });
@@ -34762,11 +34768,11 @@ function PresentationsView({projects, employees, team, showToast}){
         </div>
         <CallsEdit t={t} period="monat"/>
       </Section>
-      <Section title="CR & Buchungen (KPI)">
+      <Section title="CR & Buchungen">
         <div style={{marginBottom:6,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
-          <button className="btn btn-sm btn-primary" disabled={!(stores.kpiWin||[]).length} onClick={()=>applyImportCr(t)}>Aus KPI übernehmen</button>
-          {td.cr&&td.cr._src==='imported'&&<span style={{fontSize:11,color:'#2563eb',fontWeight:700}}>● Import ({(td.cr.agents||[]).length} Agenten)</span>}
-          <span style={{fontSize:11,color:'var(--muted)'}}>CR = (Offene + OSL) ÷ Sales Calls × 100, je KW aus kpi_entries ({(stores.kpiWin||[]).length} Werte im Fenster).</span>
+          <button className="btn btn-sm btn-primary" disabled={!(stores.kpiWin||[]).length && !Object.keys(stores.scByEmp||{}).length} onClick={()=>applyImportCr(t)}>CR zusammenstellen</button>
+          {td.cr&&td.cr._src==='imported'&&<span style={{fontSize:11,color:'#2563eb',fontWeight:700}}>● {(td.cr.agents||[]).length} Agenten</span>}
+          <span style={{fontSize:11,color:'var(--muted)'}}>CR = (Offene + OSL) ÷ Sales Calls × 100. Sales Calls aus Import ({Object.keys(stores.scByEmp||{}).length} MA), Buchungen aus KPI-Tab ({(stores.kpiWin||[]).length} Werte). Ohne Buchungen zeigt CR 0 %.</span>
         </div>
         {td.cr&&td.cr.weeks? (
           <div style={{overflowX:'auto'}}><table style={{borderCollapse:'collapse',fontSize:12}}>
