@@ -34369,7 +34369,7 @@ function PresentationsView({projects, employees, team, showToast}){
   const [theme,setTheme]=useState({accent:'',font:'',customerLogo:''});   // Look&Feel je Projekt
   const [ourLogo,setOurLogo]=useState('');      // unser Logo (global)
   const [tplId,setTplId]=useState(null);
-  const [stores,setStores]=useState({hours:{},callsByEmp:{},callsCount:0,gaugesCount:0,gaugesWin:[],kpiWin:[],loaded:false});   // Schnitt 4/5: Live-Ablagen (5-Wochen-Fenster)
+  const [stores,setStores]=useState({hours:{},callsByEmp:{},callsWin:[],callsCount:0,gaugesCount:0,gaugesWin:[],kpiWin:[],loaded:false});   // Schnitt 4/5: Live-Ablagen (5-Wochen-Fenster)
   const [fteStd,setFteStd]=useState({});   // report_fte: employee_id -> Standard-FTE
   const accent=theme.accent||(selProj&&selProj.color)||'#2563eb';
   const fontFam=theme.font||'inherit';
@@ -34417,8 +34417,8 @@ function PresentationsView({projects, employees, team, showToast}){
       const kpiWin=(ke||[]).filter(inWin);      // Buchungen/Calls je MA/KW für CR (Schnitt 5d)
       const {data:fte}=await sb.from('report_fte').select('employee_id,fte').eq('project_id',selProj.id);
       const fm={}; (fte||[]).forEach(x=>{ fm[x.employee_id]=Number(x.fte); });
-      if(alive){ setStores({hours,callsByEmp,callsCount:wcWin.length,gaugesCount:gaugesWin.length,gaugesWin,kpiWin,loaded:true}); setFteStd(fm); }
-    }catch(e){ if(alive){ setStores({hours:{},callsByEmp:{},callsCount:0,gaugesCount:0,gaugesWin:[],kpiWin:[],loaded:true}); } }
+      if(alive){ setStores({hours,callsByEmp,callsWin:wcWin,callsCount:wcWin.length,gaugesCount:gaugesWin.length,gaugesWin,kpiWin,loaded:true}); setFteStd(fm); }
+    }catch(e){ if(alive){ setStores({hours:{},callsByEmp:{},callsWin:[],callsCount:0,gaugesCount:0,gaugesWin:[],kpiWin:[],loaded:true}); } }
   })(); return ()=>{alive=false;}; },[selProjId,pNo,pYear]);
 
   async function saveFteStd(empId,val){ const num=(val===''||val==null)?null:Number(String(val).replace(',','.'));
@@ -34483,6 +34483,18 @@ function PresentationsView({projects, employees, team, showToast}){
     upd(n=>{ const rows=n.teams[t].stunden;
       ws.forEach((w,i)=>{ if(!rows[i]) rows[i]=hcEmptyRow(); rows[i].kw=''+w.kw;
         const wd=workdays(w.kw,w.yr); const val=Math.round(fte*7.5*wd*10)/10; rows[i].rueck=String(val).replace('.',','); rows[i].rsrc='system'; }); }); }
+  // Calls MTD (5f): weekly_calls über die Berichtsmonats-Wochen summiert (Anzahlen summiert, Zeiten nach Answered gewichtet).
+  function applyImportCallsMtd(t){ const ws=windowWeeks(); const members=membersFor(t); const win=stores.callsWin||[];
+    const rm=isoWeekMonth(pYear,pNo);
+    const mtdKeys=ws.filter(w=>{ const m=isoWeekMonth(w.yr,w.kw); return m.y===rm.y&&m.m===rm.m; }).map(w=>w.yr+'-'+w.kw);
+    const byEmp={}; win.forEach(r=>{ if(mtdKeys.indexOf(r.year+'-'+r.kw)<0) return; (byEmp[r.employee_id]=byEmp[r.employee_id]||[]).push(r); });
+    upd(n=>{ const cur=n.teams[t].calls.monat={...(n.teams[t].calls.monat||{})};
+      members.forEach(e=>{ const list=byEmp[e.id]; if(!list||!list.length) return;
+        const sum=k=>list.reduce((s,r)=>s+(Number(r[k])||0),0);
+        const wavgSec=k=>{ let ts=0,wsum=0; list.forEach(r=>{ const v=Number(r[k]); const w=Number(r.answered)||0; if(!isNaN(v)&&w>0){ts+=v*w;wsum+=w;} }); return wsum?ts/wsum:null; };
+        cur[e.id]={ no_answer:String(sum('no_answer')), answered:String(sum('answered')), outbound:String(sum('outbound')),
+          avg_talk:secToMmss(wavgSec('avg_talk_sec')), avg_acw:secToMmss(wavgSec('avg_acw_sec')), avg_handle:secToMmss(wavgSec('avg_handle_sec')), avg_hold:secToMmss(wavgSec('avg_hold_sec')) }; });
+      (n.teams[t].calls=n.teams[t].calls||{})._mtdsrc='imported'; n.teams[t].calls._mtdKws=mtdKeys.map(k=>Number(k.split('-')[1])); }); }
 
   async function save(){ if(!selProj||dummy) return; setBusy(true);
     const by=(typeof CURRENT_USER!=='undefined'&&CURRENT_USER)?(CURRENT_USER.name||CURRENT_USER.id):null;
@@ -34737,7 +34749,14 @@ function PresentationsView({projects, employees, team, showToast}){
         </div>
         <CallsEdit t={t} period="vorwoche"/>
       </Section>
-      <Section title="Call-Kennzahlen — Monat"><CallsEdit t={t} period="monat"/></Section>
+      <Section title="Call-Kennzahlen — Monat (MTD)">
+        <div style={{marginBottom:6,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+          <button className="btn btn-sm btn-primary" disabled={!(stores.callsWin||[]).length} onClick={()=>applyImportCallsMtd(t)}>Aus Import übernehmen (MTD)</button>
+          {(td.calls||{})._mtdsrc==='imported'&&<span style={{fontSize:11,color:'#2563eb',fontWeight:700}}>● Import (KW {((td.calls||{})._mtdKws||[]).join(', ')})</span>}
+          <span style={{fontSize:11,color:'var(--muted)'}}>Berichtsmonats-Wochen aus weekly_calls: Anzahlen summiert, Zeiten nach Answered gewichtet.</span>
+        </div>
+        <CallsEdit t={t} period="monat"/>
+      </Section>
       <Section title="CR & Buchungen (KPI)">
         <div style={{marginBottom:6,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
           <button className="btn btn-sm btn-primary" disabled={!(stores.kpiWin||[]).length} onClick={()=>applyImportCr(t)}>Aus KPI übernehmen</button>
@@ -34772,6 +34791,24 @@ function PresentationsView({projects, employees, team, showToast}){
             </tr>)}</tbody>
           </table></div>
         ):<div style={{fontSize:11,color:'var(--muted)'}}>Noch nicht übernommen.</div>}
+      </Section>
+      <Section title="Langzeit-Entwicklung (12 Monate, manuell)">
+        <div style={{marginBottom:8,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+          <label style={{fontSize:12,color:'var(--muted)'}}>Jahr</label>
+          <input value={(td.langzeit&&td.langzeit.year)||pYear} onChange={e=>upd(n=>{ n.teams[t].langzeit=n.teams[t].langzeit||{rows:[]}; n.teams[t].langzeit.year=e.target.value; })} style={{width:80,padding:'4px 6px',border:'1px solid var(--border)',borderRadius:6,fontSize:12}}/>
+          <span style={{fontSize:11,color:'var(--muted)'}}>Voll manuell (Formeln folgen). Zeilen frei benennbar. Erscheint als Folie 5, sobald Zeilen existieren.</span>
+        </div>
+        {((td.langzeit&&td.langzeit.rows)||[]).length>0&&<div style={{overflowX:'auto'}}>
+          <table style={{borderCollapse:'collapse',fontSize:11}}>
+            <thead><tr style={{color:'var(--muted)'}}><th style={{textAlign:'left',padding:'2px 4px'}}>Bezeichnung</th>{['Jan','Feb','Mär','Apr','Mai','Jun','Jul','Aug','Sep','Okt','Nov','Dez'].map(m=><th key={m} style={{padding:'2px 3px'}}>{m}</th>)}<th></th></tr></thead>
+            <tbody>{td.langzeit.rows.map((r,ri)=><tr key={ri}>
+              <td style={{padding:'2px 4px'}}><input value={r.label||''} onChange={e=>upd(n=>{n.teams[t].langzeit.rows[ri].label=e.target.value;})} placeholder="z.B. Umsatz" style={{width:120,padding:'3px 5px',border:'1px solid var(--border)',borderRadius:5,fontSize:11}}/></td>
+              {Array.from({length:12}).map((_,mi)=><td key={mi} style={{padding:'2px 3px'}}><input value={(r.m&&r.m[mi])||''} onChange={e=>upd(n=>{ const row=n.teams[t].langzeit.rows[ri]; row.m=row.m||Array(12).fill(''); row.m[mi]=e.target.value; })} style={{width:38,padding:'3px 3px',border:'1px solid var(--border)',borderRadius:5,fontSize:11,textAlign:'right',fontFamily:'var(--mono)'}}/></td>)}
+              <td style={{padding:'2px 4px'}}><button className="btn btn-sm" onClick={()=>upd(n=>{ n.teams[t].langzeit.rows.splice(ri,1); })} title="Zeile entfernen">✕</button></td>
+            </tr>)}</tbody>
+          </table>
+        </div>}
+        <button className="btn btn-sm" style={{marginTop:6}} onClick={()=>upd(n=>{ n.teams[t].langzeit=n.teams[t].langzeit||{year:pYear,rows:[]}; n.teams[t].langzeit.rows=n.teams[t].langzeit.rows||[]; n.teams[t].langzeit.rows.push({label:'',m:Array(12).fill('')}); })}>+ Zeile hinzufügen</button>
       </Section>
       <Section title="Maßnahmen">
         <textarea value={td.massnahmen||''} onChange={e=>upd(n=>{n.teams[t].massnahmen=e.target.value;})} placeholder="Maßnahmen als Freitext…" style={{width:'100%',boxSizing:'border-box',minHeight:70,padding:'8px 10px',border:'1px solid var(--border)',borderRadius:8,fontSize:13,fontFamily:'inherit'}}/>

@@ -209,15 +209,17 @@
     ]) ]);
   }
 
-  function Calls(ctx, tk){ var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk); var cols=callCols(tk);
+  function Calls(ctx, tk){ return CallsView(ctx, tk, 'vorwoche', 'Vorwoche'); }
+  function CallsMtd(ctx, tk){ return CallsView(ctx, tk, 'monat', 'Monat (MTD)'); }
+  function CallsView(ctx, tk, period, eyebrow){ var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk); var cols=callCols(tk);
     var members=(ctx.membersOf(tk)||[]).filter(function(m){ return ((td.members||[]).length===0)||(td.members||[]).indexOf(m.id)>=0; });
-    var cur=(td.calls&&td.calls.vorwoche)||{};
+    var cur=(td.calls&&td.calls[period])||{};
     var rows=members.map(function(m){ var c=cur[m.id]||{}; return Object.assign({},c,{answered:c.answered}); });
     var ans=members.map(function(m){ return {m:m,n:numOr((cur[m.id]||{}).answered,0)}; }).sort(function(a,b){ return b.n-a.n; });
     var dom=zoomDomain(ans.map(function(a){ return a.n; }));   // gespreizte Skala: nahe Werte sichtbar unterscheiden
     var htCol=cols.filter(function(c){ return /handle|aht/i.test(c.k); })[0]; var htKey=htCol?htCol.k:'avg_handle';
     return Slide(ctx, [
-      fondHead(P, lbl+' · Vorwoche', 'Call-Kennzahlen'),
+      fondHead(P, lbl+' · '+eyebrow, 'Call-Kennzahlen'),
       panel(P, (function(){
         // Liste = Inhalt. Kopfzahlen KOMPAKT einzeilig (nicht zwei große Blöcke). Bei >7 MA zwei Spalten,
         // damit auch 15 Zeilen (Support) mit lesbarem Abstand passen — feste Zeilenhöhe, nicht flex-gestaucht.
@@ -453,6 +455,32 @@
     return Slide(ctx,[head, panel(P,[ h('div',{key:'tbl',style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',overflow:'hidden'}}, [hdr].concat(body).concat([totalRow])), h('div',{key:'ft',style:{fontSize:'1.05cqw',color:P.muted,marginTop:'.8cqw'}}, 'MTD = Summe der Berichtsmonats-Wochen (KW '+((mtd.weekKws||[]).join(', '))+') · CR = (Offene+OSL)÷Calls') ])]);
   }
 
+  // Folie 14 — Maßnahmen & Ausblick (Freitext, je Absatz ein Punkt).
+  function Massnahmen(ctx, tk){ var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk);
+    var txt=(td.massnahmen||'').trim(); var head=fondHead(P, lbl, 'Maßnahmen & Ausblick', '');
+    if(!txt) return emptyPanel(ctx,head,P,'Keine Maßnahmen hinterlegt.');
+    var paras=txt.split(/\n+/).filter(function(x){ return x.trim(); });
+    return Slide(ctx,[head, panel(P, h('div',{style:{flex:1,minHeight:0,overflow:'hidden',display:'flex',flexDirection:'column',justifyContent:'center',gap:'1.6cqw'}},
+      paras.map(function(p,i){ return h('div',{key:i,style:{display:'flex',gap:'1.4cqw',alignItems:'flex-start'}},[
+        h('div',{key:'d',style:{width:'1.2cqw',height:'1.2cqw',borderRadius:'50%',background:P.onLight,marginTop:'.7cqw',flexShrink:0}}),
+        h('div',{key:'t',style:{fontSize:'2cqw',lineHeight:1.4,color:P.ink,fontWeight:500}}, p)
+      ]); })
+    ))]);
+  }
+  // Folie 5 — Langzeit-Entwicklung, 12 Monate (voll manuell). deck.teams[tk].langzeit={year, rows:[{label, m:[12]}]}.
+  function Langzeit(ctx, tk){ var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk);
+    var lz=td.langzeit||{}; var rows=lz.rows||[];
+    var head=fondHead(P, lbl, 'Langzeit-Entwicklung', lz.year?(''+lz.year):'12 Monate');
+    if(!rows.length) return emptyPanel(ctx,head,P,'Keine Langzeit-Daten hinterlegt.');
+    var M=['Jan','Feb','Mär','Apr','Mai','Jun','Jul','Aug','Sep','Okt','Nov','Dez']; var colName='24cqw';
+    var hdr=h('div',{key:'h',style:{display:'flex',alignItems:'flex-end',paddingBottom:'.5cqw',borderBottom:'1px solid #e6edef',fontSize:'1.05cqw',fontWeight:700,color:P.muted}},
+      [h('div',{key:'n',style:{width:colName}},'')].concat(M.map(function(m,i){ return h('div',{key:i,style:{flex:1,textAlign:'center'}},m); })));
+    function row(r,ri){ return h('div',{key:ri,style:{display:'flex',alignItems:'center',padding:'.3cqw 0',borderBottom:'1px solid #f6f8f9',fontSize:'1.15cqw',color:P.ink}},
+      [h('div',{key:'n',style:{width:colName,fontWeight:600,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},r.label||'')]
+      .concat(M.map(function(m,i){ var v=(r.m||[])[i]; return h('div',{key:i,style:{flex:1,textAlign:'center',fontFamily:MONO,fontSize:'1.05cqw',color:(v===''||v==null)?'#cbd5e1':P.ink}}, (v===''||v==null)?'·':v); }))); }
+    return Slide(ctx,[head, panel(P,[ h('div',{key:'t',style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',overflow:'hidden'}}, [hdr].concat(rows.map(row))) ])]);
+  }
+
   // Call-Reviews-Folie je Bericht schaltbar (ctx.callReviews). WICHTIG: deckSlides UND deckSlideKeys über
   // DENSELBEN Flag gaten → beide bleiben im Gleichschritt, die Keys der übrigen Folien verschieben sich nie.
   // Kommentar-Anker hängen am KEY (nicht an der Position); ein Kommentar auf einer ausgeblendeten Folie bleibt
@@ -462,26 +490,35 @@
   function hasFte(ctx,k){ var td=(ctx.deck.teams||{})[k]||{}; return !!(td.fteList&&td.fteList.rows&&td.fteList.rows.length); }
   function hasStd(ctx,k){ var td=(ctx.deck.teams||{})[k]||{}; return (td.stunden||[]).some(function(r){ return r.kw!==''||r.plan!==''||r.geliefert!==''||r.rueck!==''; }); }
   function hasCr(ctx,k){ var td=(ctx.deck.teams||{})[k]||{}; return !!(td.cr&&td.cr.agents&&td.cr.agents.length); }
+  function hasLangzeit(ctx,k){ var td=(ctx.deck.teams||{})[k]||{}; return !!(td.langzeit&&td.langzeit.rows&&td.langzeit.rows.length); }
+  function hasCallsMtd(ctx,k){ var td=(ctx.deck.teams||{})[k]||{}; return !!(td.calls&&td.calls.monat&&Object.keys(td.calls.monat).length); }
+  function hasMassnahmen(ctx,k){ var td=(ctx.deck.teams||{})[k]||{}; return !!((td.massnahmen||'').trim()); }
   function deckSlides(ctx){ var out=[Title(ctx)]; (ctx.skills||[]).forEach(function(s){ var k=s.key;
     if(hasFte(ctx,k)) out.push(Fte(ctx,k));
     if(hasStd(ctx,k)) out.push(StundenTable(ctx,k));
     out.push(Stunden(ctx,k));
+    if(hasLangzeit(ctx,k)) out.push(Langzeit(ctx,k));
     if(hasCr(ctx,k)){ out.push(CrTable(ctx,k)); out.push(CrChart(ctx,k)); out.push(AgentCr(ctx,k)); out.push(AgentCrTrend(ctx,k)); out.push(Mtd(ctx,k)); }
     out.push(Calls(ctx,k));
+    if(hasCallsMtd(ctx,k)) out.push(CallsMtd(ctx,k));
     if(deckShowCalls(ctx)) out.push(CallScores(ctx,k));
     if(hasCsat(ctx,k)) out.push(Csat(ctx,k));
+    if(hasMassnahmen(ctx,k)) out.push(Massnahmen(ctx,k));
   }); return out; }
   // Folien-Identität (für Kommentar-Anker) — dieselbe Reihenfolge wie deckSlides.
   function deckSlideKeys(ctx){ var out=[{key:'title',label:'Titel'}]; (ctx.skills||[]).forEach(function(s){ var k=s.key, L=skillLabel(ctx,k);
     if(hasFte(ctx,k)) out.push({key:k+':fte',label:L+' · FTE'});
     if(hasStd(ctx,k)) out.push({key:k+':stundentab',label:L+' · Stunden (Tabelle)'});
     out.push({key:k+':stunden',label:L+' · Stunden'});
+    if(hasLangzeit(ctx,k)) out.push({key:k+':langzeit',label:L+' · Langzeit'});
     if(hasCr(ctx,k)){ out.push({key:k+':crtab',label:L+' · CR (Tabelle)'}); out.push({key:k+':crchart',label:L+' · CR (Verlauf)'}); out.push({key:k+':agentcr',label:L+' · CR je Agent'}); out.push({key:k+':agentcrtrend',label:L+' · CR-Verlauf je Agent'}); out.push({key:k+':mtd',label:L+' · MTD'}); }
     out.push({key:k+':calls',label:L+' · Calls'});
+    if(hasCallsMtd(ctx,k)) out.push({key:k+':callsmtd',label:L+' · Calls (MTD)'});
     if(deckShowCalls(ctx)) out.push({key:k+':callscores',label:L+' · Call-Qualität'});
     if(hasCsat(ctx,k)) out.push({key:k+':csat',label:L+' · CSAT'});
+    if(hasMassnahmen(ctx,k)) out.push({key:k+':massnahmen',label:L+' · Maßnahmen'});
   }); return out; }
 
-  window.PRES = { deckSlides:deckSlides, deckSlideKeys:deckSlideKeys, Title:Title, Fte:Fte, StundenTable:StundenTable, Stunden:Stunden, CrTable:CrTable, CrChart:CrChart, AgentCr:AgentCr, AgentCrTrend:AgentCrTrend, Mtd:Mtd, Calls:Calls, CallScores:CallScores, Csat:Csat, callCols:callCols, pal:pal,
+  window.PRES = { deckSlides:deckSlides, deckSlideKeys:deckSlideKeys, Title:Title, Fte:Fte, StundenTable:StundenTable, Stunden:Stunden, Langzeit:Langzeit, CrTable:CrTable, CrChart:CrChart, AgentCr:AgentCr, AgentCrTrend:AgentCrTrend, Mtd:Mtd, Calls:Calls, CallsMtd:CallsMtd, Massnahmen:Massnahmen, CallScores:CallScores, Csat:Csat, callCols:callCols, pal:pal,
     fmtNum:fmtNum, numOr:numOr, pctDiff:pctDiff, wavgTime:wavgTime, sumCol:sumCol, decToMmss:decToMmss, mmssToDec:mmssToDec };
 })();
