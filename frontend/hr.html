@@ -5279,7 +5279,7 @@ function EmployeeList({employees, setEmployees, projects, seedSearch, navFilter,
           const ln=String(row[1]||'').trim();
           if(!fn&&!ln) return;
           if(!fn||!ln){errors.push('Zeile '+(ri+5)+': Vor/Nachname fehlt');return;}
-          const dateStr=v=>v instanceof Date?v.toISOString().slice(0,10):String(v||'').slice(0,10);
+          const dateStr=v=>{ const d=cqDate(v); return d?isoLocal(d):''; };   // sicher lesen + kein toISOString-Tagesversatz; unklar → leer
           imported.push({
             id:'emp_'+Date.now()+'_'+ri+Math.random().toString(36).slice(2,6),
             status:'active',
@@ -32948,12 +32948,28 @@ function cqDur(v){ if(v==null||v==='') return null; const s=String(v).trim();
   if(s.indexOf(':')>=0){ const p=s.split(':').map(x=>Number(x)||0); let sec=0; for(const x of p) sec=sec*60+x; return sec; }
   return cqNumV(s); }
 function cqParse(kind,v){ return kind==='int'?cqInt(v) : kind==='dur'?cqDur(v) : cqNumV(v); }
-// Datum robust lesen (JS-Date, TT.MM.JJJJ, JJJJ-MM-TT). Lokales Date — nur ISO-Woche wird extrahiert.
+// Datum aus Dateien robust lesen. JS-Date (aus xlsx cellDates) unverändert übernehmen.
+// Strings: ISO JJJJ-MM-TT; TT.MM.JJJJ (deutsch, Punkt); amerikanisch M/T/JJJJ erkannt an
+// AM/PM hinter der Uhrzeit ODER daran, dass eine Zahl >12 ist. SLASH ohne AM/PM und beide
+// Zahlen <=12 ist MEHRDEUTIG → null. Kein Raten: ein falsch gelesenes Datum ist schlimmer
+// als ein fehlendes. Rückgabe ist ein LOKALES Date (kein toISOString-Versatz).
 function cqDate(v){ if(v==null||v==='') return null; if(v instanceof Date) return isNaN(v.getTime())?null:v;
   const s=String(v).trim();
-  let m=s.match(/^(\d{1,2})[.\/](\d{1,2})[.\/](\d{2,4})/); if(m){ let y=+m[3]; if(y<100)y+=2000; const d=new Date(y,(+m[2])-1,+m[1]); return isNaN(d.getTime())?null:d; }
-  m=s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/); if(m){ const d=new Date(+m[1],(+m[2])-1,+m[3]); return isNaN(d.getTime())?null:d; }
-  const d=new Date(s); return isNaN(d.getTime())?null:d; }
+  let m=s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/); if(m){ const d=new Date(+m[1],(+m[2])-1,+m[3]); return isNaN(d.getTime())?null:d; }
+  m=s.match(/^(\d{1,2})([.\/])(\d{1,2})\2(\d{2,4})/); if(m){ let a=+m[1], sep=m[2], b=+m[3], y=+m[4]; if(y<100) y+=2000;
+    const usSig=/\d\s*[ap]m\b/i.test(s);            // AM/PM hinter der Uhrzeit → amerikanisch
+    let day,mon;
+    if(a>12 && b<=12){ day=a; mon=b; }              // 15/8 → Tag/Monat
+    else if(b>12 && a<=12){ mon=a; day=b; }         // 8/15 → Monat/Tag (amerikanisch)
+    else if(a<=12 && b<=12){
+      if(usSig){ mon=a; day=b; }                    // AM/PM → amerikanisch M/T
+      else if(sep==='.'){ day=a; mon=b; }           // TT.MM.JJJJ (deutsch)
+      else return null;                             // Slash, beide <=12, kein AM/PM → mehrdeutig → KEIN Raten
+    } else return null;                             // beide >12 → ungültig
+    const d=new Date(y,mon-1,day); return isNaN(d.getTime())?null:d;
+  }
+  return null;   // kein sicher erkennbares Format → lieber fehlend als falsch
+}
 const DATE_HEAD_CAND=['interval start','interval start time','interval','zeitraum','datum','date','start','tag'];
 function fmtDur(sec){ if(sec==null) return '—'; sec=Math.round(sec); const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60; return (h?h+':'+String(m).padStart(2,'0'):String(m))+':'+String(s).padStart(2,'0'); }
 const CALLS_FIELDS=[
@@ -33018,8 +33034,8 @@ function RohdatenImport({projId, projName, employees, onSaved}){
     const groups={}, unmatched={};
     (sheet.rows||[]).forEach(r=>{ const nm=String(r[map.name]==null?'':r[map.name]).trim(); if(!nm) return;
       if(ignoredSet[cqNormName(nm)]) return;
-      const dv=r[map.date]; const dt = dv instanceof Date ? dv : (dv!=='' && dv!=null ? new Date(String(dv)) : null);
-      if(!dt || isNaN(dt.getTime())) return;
+      const dt=cqDate(r[map.date]);
+      if(!dt) return;
       const cw=getISOWeek(dt); const emp=resolve(nm);
       if(!emp){ (unmatched[nm]=unmatched[nm]||{name:nm,rows:0}).rows++; return; }
       const key=emp.id+'|'+cw.kw+'|'+cw.year; const g=groups[key]=groups[key]||{emp,kw:cw.kw,year:cw.year,log:0,bos:0,url:0,mail:0,pause:0,mittag:0};
@@ -34350,6 +34366,8 @@ function PresentationsView({projects, employees, team, showToast}){
   const [theme,setTheme]=useState({accent:'',font:'',customerLogo:''});   // Look&Feel je Projekt
   const [ourLogo,setOurLogo]=useState('');      // unser Logo (global)
   const [tplId,setTplId]=useState(null);
+  const [stores,setStores]=useState({hours:{},callsCount:0,gaugesCount:0,loaded:false});   // Schnitt 4: Live-Ablagen (5-Wochen-Fenster)
+  const [fteStd,setFteStd]=useState({});   // report_fte: employee_id -> Standard-FTE
   const accent=theme.accent||(selProj&&selProj.color)||'#2563eb';
   const fontFam=theme.font||'inherit';
   const emptyDeckFor=keys=>{ const teams={}; (keys||[]).forEach(k=>{teams[k]=hcEmptyTeam();}); return {titel:{untertitel:'',datum:'',ansprech:''},teams}; };
@@ -34380,12 +34398,38 @@ function PresentationsView({projects, employees, team, showToast}){
     try{ const v=await loadConfigFromDB('jsr_presentation_our_logo'); if(alive&&typeof v==='string') setOurLogo(v); }catch(e){}
   })(); return ()=>{alive=false;}; },[selProjId]);
 
+  // ── Schnitt 4: Bericht = presentations kind='weekly'. Import-Ablagen als LIVE-Datenquelle (5-Wochen-Fenster). ──
+  const windowWeeks=()=>{ const arr=[]; for(let i=4;i>=0;i--){ let kw=pNo-i,yr=pYear; while(kw<=0){kw+=52;yr--;} arr.push({kw,yr}); } return arr; };
+  useEffect(()=>{ if(!selProj){ return; } let alive=true; (async()=>{
+    const ws=windowWeeks(); const years=[...new Set(ws.map(w=>w.yr))]; const kws=[...new Set(ws.map(w=>w.kw))];
+    try{
+      const {data:wh}=await sb.from('weekly_hours').select('skill,kw,year,hours').eq('project_id',selProj.id).in('year',years).in('kw',kws);
+      const hours={}; (wh||[]).forEach(r=>{ if(!ws.some(w=>w.kw===r.kw&&w.yr===r.year)) return; const sk=String(r.skill||'').toLowerCase(); const key=sk+'|'+r.year+'|'+r.kw; hours[key]=(hours[key]||0)+Number(r.hours||0); });
+      const cq=await sb.from('weekly_calls').select('id',{count:'exact',head:true}).eq('project_id',selProj.id).in('year',years).in('kw',kws);
+      const gq=await sb.from('weekly_gauges').select('id',{count:'exact',head:true}).eq('project_id',selProj.id).in('year',years).in('kw',kws);
+      const {data:fte}=await sb.from('report_fte').select('employee_id,fte').eq('project_id',selProj.id);
+      const fm={}; (fte||[]).forEach(x=>{ fm[x.employee_id]=Number(x.fte); });
+      if(alive){ setStores({hours,callsCount:(cq&&cq.count)||0,gaugesCount:(gq&&gq.count)||0,loaded:true}); setFteStd(fm); }
+    }catch(e){ if(alive){ setStores({hours:{},callsCount:0,gaugesCount:0,loaded:true}); } }
+  })(); return ()=>{alive=false;}; },[selProjId,pNo,pYear]);
+
+  async function saveFteStd(empId,val){ const num=(val===''||val==null)?null:Number(String(val).replace(',','.'));
+    const next={...fteStd}; if(num==null||isNaN(num)) delete next[empId]; else next[empId]=num; setFteStd(next);
+    try{ if(num==null||isNaN(num)){ await sb.from('report_fte').delete().eq('project_id',selProj.id).eq('employee_id',empId); }
+      else { await sb.from('report_fte').upsert({project_id:selProj.id,employee_id:empId,fte:num,updated_at:new Date().toISOString()},{onConflict:'project_id,employee_id'}); } }
+    catch(e){ showToast&&showToast('FTE speichern fehlgeschlagen: '+(e.message||''),'error'); } }
+  const teamFteSum=t=>membersFor(t).reduce((s,e)=>s+(fteStd[e.id]!=null?fteStd[e.id]:0),0);
+  // „Gelieferte Stunden" je Skill aus weekly_hours übernehmen → geliefert + KW, Provenance 'imported'.
+  function applyImportHours(t){ const ws=windowWeeks(); upd(n=>{ const rows=n.teams[t].stunden;
+    ws.forEach((w,i)=>{ if(!rows[i]) rows[i]=hcEmptyRow(); rows[i].kw=''+w.kw; const h=stores.hours[t+'|'+w.yr+'|'+w.kw];
+      if(h!=null){ rows[i].geliefert=String(Math.round(h*10)/10).replace('.',','); rows[i].gsrc='imported'; } }); }); }
+
   async function save(){ if(!selProj||dummy) return; setBusy(true);
     const by=(typeof CURRENT_USER!=='undefined'&&CURRENT_USER)?(CURRENT_USER.name||CURRENT_USER.id):null;
     const title=selProj.name+' · KW '+pNo+'/'+pYear;
     try{
-      if(rowId){ const {error}=await sb.from('presentations').update({data:deck,title}).eq('id',rowId); if(error) throw error; }
-      else { const {data,error}=await sb.from('presentations').insert({project_id:selProj.id,period_type:'kw',period_year:pYear,period_no:pNo,title,data:deck,created_by:by}).select('id').single(); if(error) throw error; setRowId(data.id); }
+      if(rowId){ const {error}=await sb.from('presentations').update({data:deck,title,kind:'weekly',updated_at:new Date().toISOString()}).eq('id',rowId); if(error) throw error; }
+      else { const {data,error}=await sb.from('presentations').insert({project_id:selProj.id,period_type:'kw',period_year:pYear,period_no:pNo,title,data:deck,kind:'weekly',created_by:by}).select('id').single(); if(error) throw error; setRowId(data.id); }
       setSaved(true); setTimeout(()=>setSaved(false),2000);
     }catch(e){ showToast&&showToast('Speichern fehlgeschlagen: '+(e.message||''),'error'); }
     setBusy(false);
@@ -34405,8 +34449,8 @@ function PresentationsView({projects, employees, team, showToast}){
     const tok=token||genToken(); const title=selProj.name+' · KW '+pNo+'/'+pYear;
     const by=(typeof CURRENT_USER!=='undefined'&&CURRENT_USER)?(CURRENT_USER.name||CURRENT_USER.id):null;
     try{
-      if(rowId){ const {error}=await sb.from('presentations').update({data:snap,title,published:true,public_token:tok}).eq('id',rowId); if(error) throw error; }
-      else { const {data,error}=await sb.from('presentations').insert({project_id:selProj.id,period_type:'kw',period_year:pYear,period_no:pNo,title,data:snap,published:true,public_token:tok,created_by:by}).select('id').single(); if(error) throw error; setRowId(data.id); }
+      if(rowId){ const {error}=await sb.from('presentations').update({data:snap,title,published:true,public_token:tok,kind:'weekly',updated_at:new Date().toISOString()}).eq('id',rowId); if(error) throw error; }
+      else { const {data,error}=await sb.from('presentations').insert({project_id:selProj.id,period_type:'kw',period_year:pYear,period_no:pNo,title,data:snap,published:true,public_token:tok,kind:'weekly',created_by:by}).select('id').single(); if(error) throw error; setRowId(data.id); }
       setPublished(true); setToken(tok); showToast&&showToast('Veröffentlicht','success');
     }catch(e){ showToast&&showToast('Veröffentlichen fehlgeschlagen: '+(e.message||''),'error'); }
     setBusy(false);
@@ -34535,7 +34579,11 @@ function PresentationsView({projects, employees, team, showToast}){
           <td style={{padding:'3px 6px',width:100}}>{inp(r.plan,v=>upd(n=>{n.teams[t].stunden[i].plan=v;}))}</td>
           <td style={{padding:'3px 6px',width:100}}>{inp(r.rueck,v=>upd(n=>{n.teams[t].stunden[i].rueck=v;}))}</td>
           <td style={{padding:'3px 6px',width:80,textAlign:'right',fontFamily:'var(--mono)',color:dRP<0?'#dc2626':'#059669'}}>{fmtNum(dRP)}</td>
-          <td style={{padding:'3px 6px',width:100}}>{inp(r.geliefert,v=>upd(n=>{n.teams[t].stunden[i].geliefert=v;}))}</td>
+          <td style={{padding:'3px 6px',width:110}}>
+            {inp(r.geliefert,v=>upd(n=>{n.teams[t].stunden[i].geliefert=v;n.teams[t].stunden[i].gsrc='manual';}))}
+            {r.gsrc==='imported'&&<div style={{fontSize:9,color:'#2563eb',fontWeight:700,textAlign:'right',marginTop:1}}>● Import</div>}
+            {r.gsrc==='manual'&&<div style={{fontSize:9,color:'var(--muted)',fontWeight:700,textAlign:'right',marginTop:1}}>● manuell</div>}
+          </td>
           <td style={{padding:'3px 6px',width:80,textAlign:'right',fontFamily:'var(--mono)',color:dGR<0?'#dc2626':'#059669'}}>{fmtNum(dGR)}</td>
           <td style={{padding:'3px 6px',width:90,textAlign:'right',fontFamily:'var(--mono)',color:pc==null?'var(--muted)':pc<0?'#dc2626':'#059669'}}>{pc==null?'—':fmtNum(pc,1)+' %'}</td>
           <td style={{padding:'3px 6px'}}><input value={r.erkl||''} onChange={e=>upd(n=>{n.teams[t].stunden[i].erkl=e.target.value;})} placeholder="z.B. Ardita 4 Tage krank" style={{width:'100%',boxSizing:'border-box',padding:'5px 7px',border:'1px solid var(--border)',borderRadius:6,fontSize:12}}/></td>
@@ -34568,16 +34616,41 @@ function PresentationsView({projects, employees, team, showToast}){
 
   function TeamEdit({t}){ const td=deck.teams[t];
     return (<div>
+      <Section title="Import-Datenquelle (5 Wochen)">
+        {!stores.loaded ? <div style={{fontSize:12,color:'var(--muted)'}}>Lädt Importdaten…</div> : (()=>{ const ws=windowWeeks();
+          const any=ws.some(w=>stores.hours[t+'|'+w.yr+'|'+w.kw]!=null);
+          return (<div>
+            <div style={{overflowX:'auto'}}><table style={{borderCollapse:'collapse',fontSize:12}}>
+              <thead><tr style={{color:'var(--muted)'}}>{ws.map(w=><th key={w.kw+'-'+w.yr} style={{padding:'3px 12px',fontWeight:700}}>KW {w.kw}</th>)}</tr></thead>
+              <tbody><tr>{ws.map(w=>{ const h=stores.hours[t+'|'+w.yr+'|'+w.kw]; return <td key={w.kw+'-'+w.yr} style={{padding:'3px 12px',textAlign:'center',fontFamily:'var(--mono)',fontWeight:700,color:h==null?'var(--muted)':'#2563eb'}}>{h==null?'—':fmtNum(Math.round(h*10)/10,1)}</td>; })}</tr></tbody>
+            </table></div>
+            <div style={{display:'flex',alignItems:'center',gap:10,marginTop:8,flexWrap:'wrap'}}>
+              <button className="btn btn-sm btn-primary" disabled={!any} onClick={()=>applyImportHours(t)}>Gelieferte Stunden übernehmen</button>
+              <span style={{fontSize:11,color:'var(--muted)'}}>Summe der gelieferten Std. je KW aus dem Import ({t}). Calls: {stores.callsCount} · Gauges: {stores.gaugesCount} Zeilen im Fenster.</span>
+            </div>
+            {!any&&<div style={{fontSize:11,color:'#b45309',marginTop:6}}>Keine importierten Stunden für dieses Fenster/diesen Skill. Erst unter „📥 Datenimport" hochladen.</div>}
+          </div>); })()}
+      </Section>
       <Section title="Besetzung (FTE) & Namensliste">
         <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',marginBottom:8}}>
-          <label style={{fontSize:12,color:'var(--muted)'}}>FTE</label>
+          <label style={{fontSize:12,color:'var(--muted)'}}>Team-FTE</label>
           <div style={{width:90}}>{inp(td.fte,v=>upd(n=>{n.teams[t].fte=v;}),'z.B. 8,5')}</div>
+          <button className="btn btn-sm" title="Team-FTE aus den Standard-FTE der Mitarbeiter summieren" onClick={()=>upd(n=>{n.teams[t].fte=String(Math.round(teamFteSum(t)*100)/100).replace('.',',');})}>= Summe Standard ({fmtNum(Math.round(teamFteSum(t)*100)/100,2)})</button>
           <span style={{fontSize:12,color:'var(--muted)'}}>{membersFor(t).length} MA im System · {(td.members||[]).length} gewählt</span>
         </div>
         <div style={{display:'flex',flexWrap:'wrap',gap:6}}>
           {membersFor(t).map(e=>{ const on=(td.members||[]).includes(e.id);
             return <button key={e.id} className="btn btn-sm" onClick={()=>upd(n=>{ const m=new Set(n.teams[t].members||[]); m.has(e.id)?m.delete(e.id):m.add(e.id); n.teams[t].members=[...m]; })}
               style={{background:on?accent:'transparent',color:on?'#fff':'var(--text)',border:'1px solid '+(on?accent:'var(--border)')}}>{on?'✓ ':''}{empName(e)}</button>; })}
+        </div>
+        <div style={{marginTop:10,borderTop:'1px dashed var(--border)',paddingTop:8}}>
+          <div style={{fontSize:11,color:'var(--muted)',marginBottom:6}}>Standard-FTE je Mitarbeiter (fester Wert, Fallback für jeden Bericht — telefonie-only, ohne Overhead):</div>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(190px,1fr))',gap:6}}>
+            {membersFor(t).map(e=><div key={e.id+'|'+(fteStd[e.id]!=null?fteStd[e.id]:'x')} style={{display:'flex',alignItems:'center',gap:6}}>
+              <span style={{fontSize:12,flex:1,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{empName(e)}</span>
+              <input defaultValue={fteStd[e.id]!=null?String(fteStd[e.id]).replace('.',','):''} onBlur={ev=>saveFteStd(e.id,ev.target.value)} placeholder="1,00" style={{width:58,padding:'4px 6px',border:'1px solid var(--border)',borderRadius:6,fontSize:12,fontFamily:'var(--mono)',textAlign:'right'}}/>
+            </div>)}
+          </div>
         </div>
       </Section>
       <Section title="Gelieferte Stunden (5 Wochen)"><StundenEdit t={t}/></Section>
