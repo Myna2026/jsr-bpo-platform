@@ -34615,6 +34615,7 @@ function PresentationsView({projects, employees, team, showToast}){
   const [fteStd,setFteStd]=useState({});   // report_fte: employee_id -> Standard-FTE
   const dirtyRef=useRef(false);            // ungespeicherte Änderungen seit letztem Laden/Speichern
   const periodRef=useRef({pNo:lastFull.kw,pYear:lastFull.year,projId:selProjId});   // vorheriger Zeitraum (für Auto-Save beim Wechsel)
+  const [measures,setMeasures]=useState(null);   // Maßnahmen-Nachverfolgung (report_measures, Carry-over je Projekt+Skill)
   const accent=theme.accent||(selProj&&selProj.color)||'#2563eb';
   const fontFam=theme.font||'inherit';
   const emptyDeckFor=keys=>{ const teams={}; (keys||[]).forEach(k=>{teams[k]=hcEmptyTeam();}); return {titel:{untertitel:'',datum:'',ansprech:''},teams}; };
@@ -34840,6 +34841,7 @@ function PresentationsView({projects, employees, team, showToast}){
     const csClean={}; Object.keys(callScores||{}).forEach(k=>{ const r=callScores[k]||{}; const strip=e=>({name:e.name,pct:e.pct,points:e.points,color:e.color,label:e.label});
       csClean[k]={best:(r.best||[]).map(strip),worst:(r.worst||[]).map(strip),count:r.count,avg:r.avg,unit:r.unit,max:r.max,thresholds:r.thresholds}; });
     snap._callscores=csClean;
+    snap._measures=(measures||[]).map(m=>({id:m.id,text:m.text,status:m.status,comment:m.comment,created_kw:m.created_kw,created_year:m.created_year}));   // Maßnahmen-Stand einfrieren (Kunde read-only)
     const rev=reviewWeek(); const tok=token||genToken(); const title=selProj.name+' · KW '+rev.kw+'/'+rev.yr;
     const by=(typeof CURRENT_USER!=='undefined'&&CURRENT_USER)?(CURRENT_USER.name||CURRENT_USER.id):null;
     try{
@@ -35157,8 +35159,25 @@ function PresentationsView({projects, employees, team, showToast}){
 
   // ── Darstellung: 3 Muster-Folien (SVG/CSS) ──
   // Geteilter Renderer (shared/presentation-slides.js) — EINE Foliendarstellung fuer In-App + oeffentliche Seite.
+  // Maßnahmen-Nachverfolgung: report_measures je Projekt+Skill, Carry-over (offene wandern mit, in dieser Woche
+  // erledigte noch sichtbar). Interaktiv in der Darstellung; beim Publish in den Snapshot eingefroren (read-only Kunde).
+  const mSkill=()=>String((skills.find(x=>x.key===tab)||skills[0]||{}).key||'').toLowerCase();
+  const loadMeasures=async()=>{ if(!selProj){ setMeasures(null); return; } const rv=reviewWeek(); const sk=mSkill();
+    try{ const {data}=await sb.from('report_measures').select('*').eq('project_id',selProj.id).eq('skill',sk).order('seq',{ascending:true}).order('created_at',{ascending:true});
+      setMeasures((data||[]).filter(m=> m.status!=='done' || (m.done_year===rv.yr && m.done_kw===rv.kw))); }
+    catch(e){ setMeasures([]); } };
+  useEffect(()=>{ loadMeasures(); },[selProjId,tab,pNo,pYear]);   // eslint-disable-line
+  async function measureAction(a){ if(!selProj) return; const rv=reviewWeek(); const sk=mSkill();
+    const by=(team&&(team.full_name||team.name))||null;
+    try{
+      if(a.type==='add'){ if(!a.text) return; const seq=(measures||[]).length; const {error}=await sb.from('report_measures').insert({project_id:selProj.id,skill:sk,text:a.text,status:'open',created_year:rv.yr,created_kw:rv.kw,seq,created_by_name:by}); if(error) throw error; }
+      else if(a.type==='status'){ const patch={status:a.status,updated_at:new Date().toISOString()}; if(a.status==='done'){patch.done_year=rv.yr;patch.done_kw=rv.kw;}else{patch.done_year=null;patch.done_kw=null;} const {error}=await sb.from('report_measures').update(patch).eq('id',a.id); if(error) throw error; }
+      else if(a.type==='comment'){ const {error}=await sb.from('report_measures').update({comment:a.comment,updated_at:new Date().toISOString()}).eq('id',a.id); if(error) throw error; }
+      else if(a.type==='delete'){ const {error}=await sb.from('report_measures').delete().eq('id',a.id); if(error) throw error; }
+      await loadMeasures();
+    }catch(e){ showToast&&showToast('Maßnahme speichern fehlgeschlagen: '+(e.message||''),'error'); } }
   // Bericht ist PER-SKILL: nur der gewählte Skill (tab) erscheint in der Darstellung/öffentlichen Seite — nie beide.
-  const slideCtx=()=>{ const rv=reviewWeek(); const sk=skills.find(x=>x.key===tab)||skills[0]; return ({ deck, accent, font:fontFam, projName:selProj.name, period:{no:rv.kw,year:rv.yr}, skills:(sk?[sk]:skills), dummy, ourLogo, customerLogo:theme.customerLogo, callScores, callReviews:deck.callReviews!==false, membersOf:tk2=>membersFor(tk2).map(e=>({id:e.id,name:empName(e)})) }); };
+  const slideCtx=()=>{ const rv=reviewWeek(); const sk=skills.find(x=>x.key===tab)||skills[0]; return ({ deck, accent, font:fontFam, projName:selProj.name, period:{no:rv.kw,year:rv.yr}, skills:(sk?[sk]:skills), dummy, ourLogo, customerLogo:theme.customerLogo, callScores, callReviews:deck.callReviews!==false, measures, onMeasure:measureAction, membersOf:tk2=>membersFor(tk2).map(e=>({id:e.id,name:empName(e)})) }); };
   const renderSlides=()=>{ if(!window.PRES) return React.createElement("div",{style:{color:"var(--muted)"}},"Renderer nicht geladen."); return window.PRES.deckSlides(slideCtx()).map((el,i)=>React.createElement(React.Fragment,{key:i},el)); };
 
   const FONTS=[['inherit','Standard'],["'Inter',sans-serif",'Inter'],["'Instrument Serif',serif",'Instrument Serif'],["'JetBrains Mono',monospace",'JetBrains Mono']];

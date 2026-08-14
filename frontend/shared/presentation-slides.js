@@ -514,17 +514,44 @@
     ])]);
   }
 
-  // Folie 14 — Maßnahmen & Ausblick (Freitext, je Absatz ein Punkt).
-  function Massnahmen(ctx, tk){ var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk);
-    var txt=(td.massnahmen||'').trim(); var head=fondHead(P, lbl, 'Maßnahmen & Ausblick', '');
-    if(!txt) return emptyPanel(ctx,head,P,'Keine Maßnahmen hinterlegt.');
-    var paras=txt.split(/\n+/).filter(function(x){ return x.trim(); });
-    return Slide(ctx,[head, panel(P, h('div',{style:{flex:1,minHeight:0,overflow:'hidden',display:'flex',flexDirection:'column',justifyContent:'center',gap:'1.6cqw'}},
-      paras.map(function(p,i){ return h('div',{key:i,style:{display:'flex',gap:'1.4cqw',alignItems:'flex-start'}},[
-        h('div',{key:'d',style:{width:'1.2cqw',height:'1.2cqw',borderRadius:'50%',background:P.onLight,marginTop:'.7cqw',flexShrink:0}}),
-        h('div',{key:'t',style:{fontSize:'2cqw',lineHeight:1.4,color:P.ink,fontWeight:500}}, p)
-      ]); })
-    ))]);
+  // Folie 14 — Maßnahmen als FORTLAUFENDE Liste (Nachverfolgung). ctx.measures = [{id,text,status,comment,
+  //   created_kw,created_year}] (Carry-over lädt hr.html). Mit ctx.onMeasure(action) INTERAKTIV (in-App, auch in
+  //   der Darstellung pflegbar); ohne onMeasure read-only (öffentliche Seite/PDF, aus Snapshot). Fallback: Freitext.
+  var MEAS_ST={open:{l:'Offen',c:'#dc2626',bg:'#fef2f2'},in_progress:{l:'In Arbeit',c:'#d97706',bg:'#fffbeb'},done:{l:'Erledigt',c:'#059669',bg:'#ecfdf5'}};
+  function Massnahmen(ctx, tk){ return h(MassnahmenSlide,{ctx:ctx,tk:tk}); }
+  function MassnahmenSlide(props){ var ctx=props.ctx, tk=props.tk; var P=pal(ctx.accent); var lbl=skillLabel(ctx,tk);
+    var measures=ctx.measures, onM=ctx.onMeasure;
+    var nt=R.useState(''); var newText=nt[0], setNewText=nt[1];
+    var head=fondHead(P, lbl, 'Maßnahmen', measures?'Nachverfolgung':'');
+    if(measures==null){ var td=(ctx.deck.teams||{})[tk]||{}; var txt=(td.massnahmen||'').trim();
+      if(!txt) return emptyPanel(ctx,head,P,'Keine Maßnahmen hinterlegt.');
+      var paras=txt.split(/\n+/).filter(function(x){ return x.trim(); });
+      return Slide(ctx,[head, panel(P, h('div',{style:{flex:1,minHeight:0,overflow:'hidden',display:'flex',flexDirection:'column',justifyContent:'center',gap:'1.6cqw'}},
+        paras.map(function(p,i){ return h('div',{key:i,style:{display:'flex',gap:'1.4cqw',alignItems:'flex-start'}},[ h('div',{key:'d',style:{width:'1.2cqw',height:'1.2cqw',borderRadius:'50%',background:P.onLight,marginTop:'.7cqw',flexShrink:0}}), h('div',{key:'t',style:{fontSize:'2cqw',lineHeight:1.4,color:P.ink,fontWeight:500}}, p) ]); })
+      ))]); }
+    var pk=ctx.period||{}; var newThisWeek=measures.filter(function(m){ return m.created_kw===pk.no && m.created_year===pk.year; }).length;
+    var canAdd=onM && newThisWeek<5;
+    function dots(m){ return h('div',{style:{display:'flex',gap:'.5cqw'}}, ['open','in_progress','done'].map(function(k){ var s=MEAS_ST[k]; var on=m.status===k;
+      return h('span',{key:k,onClick:function(){ onM({type:'status',id:m.id,status:k}); },title:s.l,style:{cursor:'pointer',width:'1.5cqw',height:'1.5cqw',borderRadius:'50%',background:on?s.c:'#fff',border:'.2cqw solid '+s.c,boxSizing:'border-box'}}); })); }
+    var list=h('div',{key:'l',style:{flex:1,minHeight:0,overflowY:'auto',display:'flex',flexDirection:'column',gap:'.9cqw'}},
+      measures.length? measures.map(function(m,i){ var s=MEAS_ST[m.status]||MEAS_ST.open;
+        return h('div',{key:m.id||i,style:{display:'flex',gap:'1.2cqw',alignItems:'flex-start',padding:'1cqw 1.3cqw',borderRadius:'1cqw',background:s.bg,border:'1px solid '+rgba(s.c,.3)}},[
+          h('div',{key:'st',style:{flexShrink:0,paddingTop:'.15cqw'}}, onM? dots(m) : h('span',{style:{display:'inline-block',width:'1.3cqw',height:'1.3cqw',borderRadius:'50%',background:s.c}})),
+          h('div',{key:'b',style:{flex:1,minWidth:0}},[
+            h('div',{key:'t',style:{fontSize:'1.7cqw',fontWeight:600,color:P.ink,lineHeight:1.3}}, m.text),
+            onM? h('input',{key:'c'+(m.comment||''),defaultValue:m.comment||'',placeholder:'Kommentar…',onBlur:function(e){ if((e.target.value||'')!==(m.comment||'')) onM({type:'comment',id:m.id,comment:e.target.value}); },style:{marginTop:'.4cqw',width:'100%',boxSizing:'border-box',fontSize:'1.25cqw',padding:'.4cqw .6cqw',border:'1px solid '+rgba(s.c,.35),borderRadius:'.6cqw',background:'#fff',color:P.ink}})
+              : (m.comment? h('div',{key:'c',style:{marginTop:'.3cqw',fontSize:'1.3cqw',color:P.muted}}, m.comment):null)
+          ]),
+          h('div',{key:'lb',style:{flexShrink:0,fontSize:'1.1cqw',fontWeight:800,color:s.c,alignSelf:'center'}}, s.l),
+          onM? h('span',{key:'x',onClick:function(){ onM({type:'delete',id:m.id}); },title:'Entfernen',style:{cursor:'pointer',color:P.muted,fontSize:'1.5cqw',fontWeight:800,flexShrink:0,alignSelf:'center'}},'✕'):null
+        ]);
+      }) : [h('div',{key:'e',style:{color:P.muted,fontSize:'1.5cqw',textAlign:'center',padding:'2cqw'}}, onM?'Noch keine Maßnahmen — unten eintragen.':'Keine Maßnahmen hinterlegt.')]
+    );
+    var addRow = canAdd? h('div',{key:'a',style:{display:'flex',gap:'.8cqw',marginTop:'1cqw',flexShrink:0}},[
+      h('input',{key:'i',value:newText,placeholder:'Neue Maßnahme (max. 5 je Woche)…',onChange:function(e){ setNewText(e.target.value); },onKeyDown:function(e){ if(e.key==='Enter'&&newText.trim()){ onM({type:'add',text:newText.trim()}); setNewText(''); } },style:{flex:1,fontSize:'1.4cqw',padding:'.6cqw .8cqw',border:'1px solid '+P.onLight,borderRadius:'.6cqw',background:'#fff',color:P.ink}}),
+      h('span',{key:'b',onClick:function(){ if(newText.trim()){ onM({type:'add',text:newText.trim()}); setNewText(''); } },style:{cursor:'pointer',fontSize:'1.4cqw',fontWeight:800,color:'#fff',background:P.onLight,borderRadius:'.6cqw',padding:'.6cqw 1.2cqw',display:'flex',alignItems:'center'}},'+ Hinzufügen')
+    ]) : (onM? h('div',{key:'cap',style:{marginTop:'.8cqw',fontSize:'1.1cqw',color:P.muted,flexShrink:0}},'Maximal 5 neue Maßnahmen je Woche erreicht.'):null);
+    return Slide(ctx,[head, panel(P,[list, addRow])]);
   }
   // Folie 5 — Langzeit-Entwicklung, 12 Monate (voll manuell). deck.teams[tk].langzeit={year, rows:[{label, m:[12]}]}.
   function Langzeit(ctx, tk){ var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk);
@@ -551,7 +578,7 @@
   function hasCr(ctx,k){ var td=(ctx.deck.teams||{})[k]||{}; return !!(td.cr&&td.cr.agents&&td.cr.agents.length); }
   function hasLangzeit(ctx,k){ var td=(ctx.deck.teams||{})[k]||{}; return !!(td.langzeit&&td.langzeit.rows&&td.langzeit.rows.length); }
   function hasCallsMtd(ctx,k){ var td=(ctx.deck.teams||{})[k]||{}; return !!(td.calls&&td.calls.monat&&Object.keys(td.calls.monat).length); }
-  function hasMassnahmen(ctx,k){ var td=(ctx.deck.teams||{})[k]||{}; return !!((td.massnahmen||'').trim()); }
+  function hasMassnahmen(ctx,k){ var td=(ctx.deck.teams||{})[k]||{}; return !!((td.massnahmen||'').trim()) || !!(ctx.measures&&ctx.measures.length); }
   function hasFehlzeiten(ctx,k){ var td=(ctx.deck.teams||{})[k]||{}; return !!(td.fehlzeiten&&td.fehlzeiten.weeks&&td.fehlzeiten.weeks.length); }
   // Ein Skill kommt in den Bericht, wenn er IRGENDWELCHE Daten hat (verhindert leere Fremd-Skill-Folien, z. B.
   // "Support", wenn nur Sales gepflegt ist). Innerhalb eines aktiven Skills erscheinen ALLE 14 Kern-Folien in fester
