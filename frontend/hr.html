@@ -34731,7 +34731,9 @@ function PresentationsView({projects, employees, team, showToast}){
         const rootRow=on.find(r=>!r.parent_id); const rootId=rootRow?rootRow.id:on[0].id;
         const empById={}; (employees||[]).forEach(e=>{ if(e) empById[e.id]=e; });
         const skillPeople=new Set(); (employees||[]).forEach(e=>{ if(!e) return; const os=String(e.project_skill||'').toLowerCase()===t || empAssignments(e).some(a=>a.project_id===selProj.id&&String(a.skill||'').toLowerCase()===t); if(os) skillPeople.add(e.id); });
-        const keep=id=>{ const e=empById[id]; return !!(e&&(skillPeople.has(id)||isOverheadEmp(e))); };
+        // NUR Skill-Leute (Agenten + skill-zugeordnete Führung via Assignment) + PROJEKTLEITUNG (tier 'lead', über allen Skills).
+        // NICHT alle Overhead — sonst rutschen Support-Teamlead/Trainer/QM in den Sales-Zweig.
+        const keep=id=>{ const e=empById[id]; if(!e) return false; if(skillPeople.has(id)) return true; return isOverheadEmp(e)&&overheadTier(e.position)==='lead'; };
         const inc=new Set([rootId]); Object.keys(byId).forEach(id=>{ if((byId[id].employees||[]).some(keep)) inc.add(id); });
         [...inc].forEach(id=>{ let cur=byId[id],g=0; while(cur&&cur.parent&&g<20){ inc.add(cur.parent); cur=byId[cur.parent]; g++; } });
         const depthOf=id=>{ let d=0,cur=byId[id],g=0; while(cur&&cur.parent&&g<20){ d++; cur=byId[cur.parent]; g++; } return d; };
@@ -34809,7 +34811,7 @@ function PresentationsView({projects, employees, team, showToast}){
   function genToken(){ const c='abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'; let s=''; const a=new Uint8Array(24); try{ crypto.getRandomValues(a); }catch(e){} for(let i=0;i<24;i++){ s+=c[(a[i]|| (i*7+3))%62]; } return s; }
   // Veröffentlichen: Namen einfrieren (öffentlicher Renderer hat keine employees), Token setzen, published=true.
   async function publish(){ if(!selProj||dummy) return; setBusy(true);
-    const snap=JSON.parse(JSON.stringify(deck)); const names={}; skills.forEach(s=>{ membersFor(s.key).forEach(e=>{ names[e.id]=empName(e); }); }); snap._names=names; snap._skills=skills;
+    const snap=JSON.parse(JSON.stringify(deck)); const _sk=skills.find(x=>x.key===tab)||skills[0]; const shownSkills=_sk?[_sk]:skills; const names={}; shownSkills.forEach(s=>{ membersFor(s.key).forEach(e=>{ names[e.id]=empName(e); }); }); snap._names=names; snap._skills=shownSkills;   // nur gewählter Skill
     snap._theme={accent,font:fontFam,projName:selProj.name,customerLogo:theme.customerLogo||'',ourLogo:ourLogo||''};   // Snapshot: Look&Feel einfrieren
     // Snapshot: nur die ÜBERSICHT einfrieren (Name/Prozent/Ampel). Interne Kriterien-Details + Freitexte
     // (_detail) werden ABGESTREIFT — sie gehören nicht zum Kunden. Damit hat die öffentliche Seite sie gar nicht.
@@ -35133,7 +35135,8 @@ function PresentationsView({projects, employees, team, showToast}){
 
   // ── Darstellung: 3 Muster-Folien (SVG/CSS) ──
   // Geteilter Renderer (shared/presentation-slides.js) — EINE Foliendarstellung fuer In-App + oeffentliche Seite.
-  const slideCtx=()=>{ const rv=reviewWeek(); return ({ deck, accent, font:fontFam, projName:selProj.name, period:{no:rv.kw,year:rv.yr}, skills, dummy, ourLogo, customerLogo:theme.customerLogo, callScores, callReviews:deck.callReviews!==false, membersOf:tk=>membersFor(tk).map(e=>({id:e.id,name:empName(e)})) }); };
+  // Bericht ist PER-SKILL: nur der gewählte Skill (tab) erscheint in der Darstellung/öffentlichen Seite — nie beide.
+  const slideCtx=()=>{ const rv=reviewWeek(); const sk=skills.find(x=>x.key===tab)||skills[0]; return ({ deck, accent, font:fontFam, projName:selProj.name, period:{no:rv.kw,year:rv.yr}, skills:(sk?[sk]:skills), dummy, ourLogo, customerLogo:theme.customerLogo, callScores, callReviews:deck.callReviews!==false, membersOf:tk2=>membersFor(tk2).map(e=>({id:e.id,name:empName(e)})) }); };
   const renderSlides=()=>{ if(!window.PRES) return React.createElement("div",{style:{color:"var(--muted)"}},"Renderer nicht geladen."); return window.PRES.deckSlides(slideCtx()).map((el,i)=>React.createElement(React.Fragment,{key:i},el)); };
 
   const FONTS=[['inherit','Standard'],["'Inter',sans-serif",'Inter'],["'Instrument Serif',serif",'Instrument Serif'],["'JetBrains Mono',monospace",'JetBrains Mono']];
@@ -35234,8 +35237,12 @@ function PresentationsView({projects, employees, team, showToast}){
       </div>
     ) : (
       <div>
+        {skills.length>1 && <div style={{display:'flex',gap:6,marginBottom:12,flexWrap:'wrap',alignItems:'center'}}>
+          <span style={{fontSize:12,color:'var(--muted)',fontWeight:700}}>Skill:</span>
+          {skills.map(s=><button key={s.key} className="btn btn-sm" onClick={()=>setTab(s.key)} style={{background:tab===s.key?accent:'transparent',color:tab===s.key?'#fff':'var(--text)',border:'1px solid '+(tab===s.key?accent:'var(--border)'),fontWeight:700}}>{s.label}</button>)}
+        </div>}
         {renderSlides()}
-        <div style={{fontSize:11,color:'var(--muted)',lineHeight:1.6}}>Muster-Folien zur Abnahme der Gestaltung (Titel · je Skill: Gelieferte Stunden + Calls), gerendert über die geteilte Quelle (identisch zur öffentlichen Seite). Nach deinem OK: restliche Folientypen im selben Stil.</div>
+        <div style={{fontSize:11,color:'var(--muted)',lineHeight:1.6}}>Bericht für den gewählten Skill ({(skills.find(x=>x.key===tab)||skills[0]||{}).label||''}). Öffentliche Seite und PDF zeigen exakt diese Folien.</div>
       </div>
     )}
   </div>);

@@ -149,6 +149,30 @@
     ]);
   }
 
+  // Organigramm-Baum, der sich AUTOMATISCH ins 16:9 skaliert (misst Inhalt vs. verfügbare Höhe → transform:scale).
+  // So ist der ganze Zweig sichtbar, egal wie viele Ebenen/Personen. Karten in Präsentations-Optik.
+  function FteOrgBody(props){ var P=props.P, org=props.org;
+    var wrapRef=R.useRef(null), innerRef=R.useRef(null); var s=R.useState(1); var scale=s[0], setScale=s[1];
+    R.useLayoutEffect(function(){ var w=wrapRef.current, el=innerRef.current; if(!w||!el) return;
+      var availH=w.clientHeight, availW=w.clientWidth, needH=el.scrollHeight, needW=el.scrollWidth;
+      var sc=1; if(needH>availH&&availH>0) sc=Math.min(sc, availH/needH); if(needW>availW&&availW>0) sc=Math.min(sc, availW/needW);
+      sc=Math.max(0.35, sc); if(Math.abs(sc-scale)>0.01) setScale(sc);
+    });
+    var byDepth={}; (org.nodes||[]).forEach(function(nd){ (byDepth[nd.depth]=byDepth[nd.depth]||[]).push(nd); });
+    var depths=Object.keys(byDepth).map(Number).sort(function(a,b){ return a-b; });
+    function card(nd){ return h('div',{key:nd.id,style:{border:'1px solid #e6edef',borderTop:'.4cqw solid '+P.onLight,borderRadius:'1cqw',padding:'1cqw 1.3cqw',minWidth:'15cqw',maxWidth:'27cqw',background:'#fff',boxShadow:'0 .6cqw 1.4cqw -1cqw rgba(3,20,26,.25)'}},[
+      h('div',{key:'t',style:{fontSize:'1.5cqw',fontWeight:800,color:P.ink,lineHeight:1.1}},nd.title||'—'),
+      nd.subtitle?h('div',{key:'s',style:{fontSize:'.95cqw',fontWeight:700,letterSpacing:'.08em',color:P.muted,textTransform:'uppercase',marginTop:'.15cqw'}},nd.subtitle):null,
+      (nd.members&&nd.members.length)?h('div',{key:'m',style:{display:'flex',flexDirection:'column',gap:'.3cqw',marginTop:'.7cqw'}}, nd.members.map(function(m,i){ return h('div',{key:i,style:{display:'flex',justifyContent:'space-between',alignItems:'center',gap:'.9cqw'}},[
+        h('span',{key:'n',style:{fontSize:'1.2cqw',color:P.ink,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},m.name),
+        m.fte!=null?h('span',{key:'f',style:{fontFamily:MONO,fontSize:'1.1cqw',fontWeight:800,color:P.onLightTxt,background:rgba(P.onLight,.12),borderRadius:'.5cqw',padding:'.05cqw .55cqw',flexShrink:0}},fmtNum(m.fte,2)):null
+      ]); })):null
+    ]); }
+    var levels=[]; depths.forEach(function(d,di){ if(di>0) levels.push(h('div',{key:'c'+d,style:{width:'.2cqw',height:'2.2cqw',background:'#d5dde3',alignSelf:'center'}}));
+      levels.push(h('div',{key:'l'+d,style:{display:'flex',justifyContent:'center',gap:'2.4cqw',flexWrap:'wrap'}}, byDepth[d].map(card))); });
+    return h('div',{ref:wrapRef,style:{flex:1,minHeight:0,overflow:'hidden',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center'}},
+      h('div',{ref:innerRef,style:{transformOrigin:'center center',transform:'scale('+scale+')',display:'flex',flexDirection:'column',alignItems:'center'}}, levels));
+  }
   // Folie 2 — Besetzung & FTE. Daten in deck.teams[tk].fteList = {rows:[{id,name,fte}], total, org?, _src}.
   // Mit org (Organigramm-Zweig aus org_nodes): Baum in Präsentations-Optik (Kundenfarbe-Fond, weiße Karten,
   // Verbindungslinien), FTE an den Karten. Ohne org: Namensliste als Fallback.
@@ -164,23 +188,7 @@
       h('span',{key:'n',style:{fontSize:'5.4cqw',fontWeight:800,color:P.onLightTxt,lineHeight:1,fontVariantNumeric:'tabular-nums'}}, total==null?'—':fmtNum(total,2)),
       h('span',{key:'l',style:{fontSize:'1.6cqw',fontWeight:700,color:P.muted}},'FTE gesamt')
     ]);
-    if(hasOrg){
-      var byDepth={}; org.nodes.forEach(function(nd){ (byDepth[nd.depth]=byDepth[nd.depth]||[]).push(nd); });
-      var depths=Object.keys(byDepth).map(Number).sort(function(a,b){ return a-b; });
-      function card(nd){ return h('div',{key:nd.id,style:{border:'1px solid #e6edef',borderTop:'.4cqw solid '+P.onLight,borderRadius:'1cqw',padding:'1cqw 1.3cqw',minWidth:'15cqw',maxWidth:'27cqw',background:'#fff',boxShadow:'0 .6cqw 1.4cqw -1cqw rgba(3,20,26,.25)'}},[
-        h('div',{key:'t',style:{fontSize:'1.5cqw',fontWeight:800,color:P.ink,lineHeight:1.1}},nd.title||'—'),
-        nd.subtitle?h('div',{key:'s',style:{fontSize:'.95cqw',fontWeight:700,letterSpacing:'.08em',color:P.muted,textTransform:'uppercase',marginTop:'.15cqw'}},nd.subtitle):null,
-        (nd.members&&nd.members.length)?h('div',{key:'m',style:{display:'flex',flexDirection:'column',gap:'.3cqw',marginTop:'.7cqw'}}, nd.members.map(function(m,i){ return h('div',{key:i,style:{display:'flex',justifyContent:'space-between',alignItems:'center',gap:'.9cqw'}},[
-          h('span',{key:'n',style:{fontSize:'1.2cqw',color:P.ink,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},m.name),
-          m.fte!=null?h('span',{key:'f',style:{fontFamily:MONO,fontSize:'1.1cqw',fontWeight:800,color:P.onLightTxt,background:rgba(P.onLight,.12),borderRadius:'.5cqw',padding:'.05cqw .55cqw',flexShrink:0}},fmtNum(m.fte,2)):null
-        ]); })):null
-      ]); }
-      var levels=[]; depths.forEach(function(d,di){ if(di>0) levels.push(h('div',{key:'c'+d,style:{width:'.2cqw',height:'2.2cqw',background:'#d5dde3',alignSelf:'center'}}));
-        levels.push(h('div',{key:'l'+d,style:{display:'flex',justifyContent:'center',gap:'2.4cqw',flexWrap:'wrap'}}, byDepth[d].map(card))); });
-      return Slide(ctx, [ head, panel(P, [ totalBadge,
-        h('div',{key:'org',style:{flex:1,minHeight:0,overflow:'hidden',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center'}}, levels)
-      ]) ]);
-    }
+    if(hasOrg){ return Slide(ctx, [ head, panel(P, [ totalBadge, h(FteOrgBody,{P:P, org:org}) ]) ]); }
     // Fallback: Namensliste (kein Organigramm gepflegt)
     var cols3=rows.length>8?3:(rows.length>4?2:1); var per=Math.ceil(rows.length/cols3); var groups=[]; for(var g=0;g<cols3;g++) groups.push(rows.slice(g*per,(g+1)*per));
     return Slide(ctx, [ head, panel(P, [ totalBadge,
