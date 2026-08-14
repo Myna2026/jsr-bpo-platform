@@ -150,20 +150,33 @@
   }
 
   // Organigramm-Baum in LESBARER Größe (kein Schrumpfen). Wird der Baum zu groß, sind Knoten mit Kindern
-  // AUF-/ZUKLAPPBAR (▾/▸) — Ebenen einklappen statt alles verkleinern. In-App scrollbar; Karten in Präsentations-Optik.
+  // AUTO-FIT: passt sich von selbst ins 16:9-Format ein (kein Klick nötig → gilt auch für PDF/Kundenseite).
+  // Zwei Hebel: (a) Agenten in mehreren Spalten je Karte → kompakter, weniger Höhe; (b) natürliche Höhe messen
+  // und per transform:scale einpassen. Aufklappen (▾/▸) bleibt zusätzlich für die In-App-Ansicht.
   function FteOrgBody(props){ var P=props.P, org=props.org;
     var st=R.useState({}); var collapsed=st[0], setCollapsed=st[1];
+    var wrapRef=R.useRef(null), innerRef=R.useRef(null), scaleRef=R.useRef(1);
+    var sc=R.useState(1), scale=sc[0], setScale=sc[1];
     var nodes=org.nodes||[]; var byId={}; nodes.forEach(function(n){ byId[n.id]=n; });
     var children={}; nodes.forEach(function(n){ if(n.parent&&byId[n.parent]){ (children[n.parent]=children[n.parent]||[]).push(n); } });
     Object.keys(children).forEach(function(k){ children[k].sort(function(a,b){ return (a.seq||0)-(b.seq||0); }); });
     var roots=nodes.filter(function(n){ return !n.parent||!byId[n.parent]; }).sort(function(a,b){ return (a.seq||0)-(b.seq||0); });
     function toggle(id){ setCollapsed(function(c){ var n2=Object.assign({},c); if(n2[id]) delete n2[id]; else n2[id]=true; return n2; }); }
+    // scrollHeight ist die Layouthöhe VOR transform → stabile Messung, kein Render-Loop (Guard via scaleRef).
+    R.useLayoutEffect(function(){ var wrap=wrapRef.current, inner=innerRef.current; if(!wrap||!inner) return;
+      var avail=wrap.clientHeight, need=inner.scrollHeight; if(!avail||!need) return;
+      var k=need>avail? Math.max(0.35, avail/need) : 1;
+      if(Math.abs(k-scaleRef.current)>0.005){ scaleRef.current=k; setScale(k); }
+    });
     function node(nd){ var kids=children[nd.id]||[]; var coll=!!collapsed[nd.id];
-      var mem=(nd.members&&nd.members.length)?h('div',{key:'m',style:{display:'grid',gridTemplateColumns:(nd.members.length>4?'1fr 1fr':'1fr'),gap:'.25cqw .9cqw',marginTop:'.7cqw'}}, nd.members.map(function(m,i){ return h('div',{key:i,style:{display:'flex',justifyContent:'space-between',alignItems:'center',gap:'.7cqw'}},[
+      var mc=(nd.members&&nd.members.length)||0;
+      var cols= mc>18?4 : mc>10?3 : mc>4?2 : 1;   // Agenten mehrspaltig → Höhe begrenzt
+      var mem= mc?h('div',{key:'m',style:{display:'grid',gridTemplateColumns:'repeat('+cols+',minmax(0,1fr))',gap:'.25cqw .9cqw',marginTop:'.7cqw'}}, nd.members.map(function(m,i){ return h('div',{key:i,style:{display:'flex',justifyContent:'space-between',alignItems:'center',gap:'.7cqw'}},[
           h('span',{key:'n',style:{fontSize:'1.15cqw',color:P.ink,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},m.name),
           m.fte!=null?h('span',{key:'f',style:{fontFamily:MONO,fontSize:'1.05cqw',fontWeight:800,color:P.onLightTxt,background:rgba(P.onLight,.12),borderRadius:'.5cqw',padding:'.05cqw .5cqw',flexShrink:0}},fmtNum(m.fte,2)):null
         ]); })):null;
-      var cardEl=h('div',{style:{border:'1px solid #e6edef',borderTop:'.4cqw solid '+P.onLight,borderRadius:'1cqw',padding:'.9cqw 1.2cqw',minWidth:'16cqw',maxWidth:'30cqw',background:'#fff',boxShadow:'0 .6cqw 1.4cqw -1cqw rgba(3,20,26,.25)'}},[
+      var maxW= cols>=3?'50cqw' : cols===2?'34cqw' : '30cqw';   // mehrspaltige Karten dürfen breiter werden
+      var cardEl=h('div',{style:{border:'1px solid #e6edef',borderTop:'.4cqw solid '+P.onLight,borderRadius:'1cqw',padding:'.9cqw 1.2cqw',minWidth:'16cqw',maxWidth:maxW,background:'#fff',boxShadow:'0 .6cqw 1.4cqw -1cqw rgba(3,20,26,.25)'}},[
         h('div',{key:'h',style:{display:'flex',justifyContent:'space-between',alignItems:'baseline',gap:'1cqw'}},[
           h('div',{key:'t',style:{fontSize:'1.5cqw',fontWeight:800,color:P.ink,lineHeight:1.1}},nd.title||'—'),
           kids.length?h('span',{key:'x',onClick:function(){ toggle(nd.id); },title:coll?'Aufklappen':'Einklappen',style:{cursor:'pointer',userSelect:'none',fontFamily:MONO,fontSize:'1.2cqw',fontWeight:800,color:P.onLight,flexShrink:0}}, coll?('▸ '+kids.length):'▾'):null
@@ -177,7 +190,8 @@
         (!coll&&kids.length)?h('div',{key:'k',style:{display:'flex',gap:'2.2cqw',justifyContent:'center',alignItems:'flex-start'}}, kids.map(node)):null
       ]);
     }
-    return h('div',{style:{flex:1,minHeight:0,overflow:'auto',display:'flex',justifyContent:'center',alignItems:'flex-start',paddingTop:'.6cqw'}}, roots.map(node));
+    return h('div',{ref:wrapRef,style:{flex:1,minHeight:0,overflow:'hidden',display:'flex',justifyContent:'center',alignItems:'flex-start'}},
+      h('div',{ref:innerRef,style:{transform:'scale('+scale+')',transformOrigin:'top center',display:'flex',gap:'2.2cqw',justifyContent:'center',alignItems:'flex-start',paddingTop:'.6cqw'}}, roots.map(node)));
   }
   // Folie 2 — Besetzung & FTE. Daten in deck.teams[tk].fteList = {rows:[{id,name,fte}], total, org?, _src}.
   // Mit org (Organigramm-Zweig aus org_nodes): Baum in Präsentations-Optik (Kundenfarbe-Fond, weiße Karten,

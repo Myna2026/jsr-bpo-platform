@@ -34912,6 +34912,44 @@ function hcEmptyRow(){ return {kw:'',plan:'',rueck:'',geliefert:'',erkl:''}; }
 function hcEmptyTeam(){ return {fte:'',members:[],stunden:[hcEmptyRow(),hcEmptyRow(),hcEmptyRow(),hcEmptyRow(),hcEmptyRow()],calls:{vorwoche:{},monat:{}},massnahmen:''}; }
 function hcEmptyDeck(){ return {titel:{untertitel:'',datum:'',ansprech:''},teams:{sales:hcEmptyTeam(),support:hcEmptyTeam()}}; }
 
+// Buchungs-Erfassung je Agent (Wochenraster): Offene + OSL je KW → kpi_entries (kpi_hc_open_bookings/kpi_hc_osl).
+// Auto-Speichern je Zelle (gezieltes delete+insert nur dieser kpi_id — andere KPIs der Woche bleiben unberührt).
+function BookingGrid({projId, skill, members, weeks, kpiWin, onChanged}){
+  const seed=()=>{ const m={}; (kpiWin||[]).forEach(r=>{ const met=r.kpi_id==='kpi_hc_open_bookings'?'open':(r.kpi_id==='kpi_hc_osl'?'osl':null); if(!met) return; const k=r.year+'-'+r.kw; const em=(m[r.emp_id]=m[r.emp_id]||{}); (em[k]=em[k]||{})[met]=r.value; }); return m; };
+  const [vals,setVals]=useState(seed);
+  const [flash,setFlash]=useState('');
+  useEffect(()=>{ setVals(seed()); },[projId,skill,(kpiWin||[]).length]);   // eslint-disable-line
+  if(!members.length) return <div style={{fontSize:11,color:'var(--muted)'}}>Keine aktiven Mitarbeiter dieses Skills auf dem Projekt.</div>;
+  const nm=e=>((e.first_name||'')+' '+(e.last_name||'')).trim()||'—';
+  const setCell=(empId,key,met,raw)=>{ setVals(v=>{ const n={...v}; const em={...(n[empId]||{})}; const cell={...(em[key]||{})}; cell[met]=raw; em[key]=cell; n[empId]=em; return n; }); };
+  const saveCell=async(empId,w,met,raw)=>{ const kpiId=met==='open'?'kpi_hc_open_bookings':'kpi_hc_osl';
+    const s=String(raw==null?'':raw).trim().replace(',','.'); const num=s===''?null:Number(s);
+    if(s!==''&&(isNaN(num)||num<0)) return;   // ungültig → nicht speichern, Eingabe bleibt sichtbar
+    try{ await sb.from('kpi_entries').delete().eq('emp_id',empId).eq('kpi_id',kpiId).eq('kw',w.kw).eq('year',w.yr);
+      if(num!=null) await sb.from('kpi_entries').insert({emp_id:empId,kpi_id:kpiId,value:num,kw:w.kw,year:w.yr});
+      setFlash(empId+'|'+w.key+'|'+met); setTimeout(()=>setFlash(''),700);
+      if(onChanged) onChanged(empId,w,met,num);
+    }catch(err){ /* Eingabe bleibt im Feld sichtbar */ }
+  };
+  const inp=(empId,w,met)=>{ const cur=((vals[empId]||{})[w.key]||{})[met]; const fk=empId+'|'+w.key+'|'+met;
+    return <input value={cur==null?'':cur} onChange={e=>setCell(empId,w.key,met,e.target.value)} onBlur={e=>saveCell(empId,w,met,e.target.value)} inputMode="numeric" placeholder="–"
+      style={{width:44,textAlign:'center',fontFamily:'var(--mono)',fontSize:12,padding:'2px 3px',border:'1px solid '+(flash===fk?'#059669':'var(--border)'),borderRadius:5,background:flash===fk?'#ecfdf5':'var(--surface)'}}/>;
+  };
+  return <div style={{overflowX:'auto',marginTop:8}}>
+    <table style={{borderCollapse:'collapse',fontSize:12}}>
+      <thead>
+        <tr style={{color:'var(--muted)'}}><th rowSpan={2} style={{textAlign:'left',padding:'3px 8px',fontWeight:700,position:'sticky',left:0,background:'var(--surface)',zIndex:1}}>Agent</th>{weeks.map(w=><th key={w.key} colSpan={2} style={{padding:'2px 6px',fontWeight:700,textAlign:'center',borderLeft:'1px solid var(--border)'}}>KW {w.kw}</th>)}</tr>
+        <tr style={{color:'var(--muted)'}}>{weeks.map(w=>[<th key={w.key+'o'} style={{padding:'1px 4px',fontWeight:600,fontSize:10,borderLeft:'1px solid var(--border)'}}>Offen</th>,<th key={w.key+'s'} style={{padding:'1px 4px',fontWeight:600,fontSize:10}}>OSL</th>])}</tr>
+      </thead>
+      <tbody>
+        {members.map(e=><tr key={e.id} style={{borderTop:'1px solid var(--border)'}}>
+          <td style={{padding:'3px 8px',whiteSpace:'nowrap',position:'sticky',left:0,background:'var(--surface)',zIndex:1}}>{nm(e)}</td>
+          {weeks.map(w=>[<td key={w.key+'o'} style={{padding:'2px 4px',borderLeft:'1px solid var(--border)'}}>{inp(e.id,w,'open')}</td>,<td key={w.key+'s'} style={{padding:'2px 4px'}}>{inp(e.id,w,'osl')}</td>])}
+        </tr>)}
+      </tbody>
+    </table>
+  </div>;
+}
 function PresentationsView({projects, employees, team, showToast}){
   const projList=(projects||[]).filter(p=>p&&p.id).slice().sort((a,b)=>String(a.name).localeCompare(String(b.name),'de'));
   const [selProjId,setSelProjId]=useState(()=>{ const hc=projList.find(p=>/holiday.?check/i.test(p.name||'')); return hc?hc.id:(projList[0]?projList[0].id:''); });
@@ -34996,6 +35034,9 @@ function PresentationsView({projects, employees, team, showToast}){
   const reviewMonday=()=>isoWeekMonday(pYear,pNo);
   const reviewWeek=()=>({kw:pNo,yr:pYear});
   const windowWeeks=()=>{ const base=reviewMonday(); const arr=[]; for(let i=4;i>=0;i--){ const d=new Date(base); d.setDate(base.getDate()-i*7); const w=getISOWeek(d); arr.push({kw:w.kw,yr:w.year}); } return arr; };
+  // Buchungs-Raster hat eine Zelle gespeichert → stores.kpiWin live nachziehen, damit „CR zusammenstellen" die neuen Werte nutzt.
+  const onBookingChanged=(empId,w,met,num)=>{ const kpiId=met==='open'?'kpi_hc_open_bookings':'kpi_hc_osl';
+    setStores(s=>{ const kw=(s.kpiWin||[]).filter(r=>!(r.emp_id===empId&&r.kpi_id===kpiId&&r.kw===w.kw&&r.year===w.yr)); if(num!=null) kw.push({emp_id:empId,kpi_id:kpiId,kw:w.kw,year:w.yr,value:num}); return {...s,kpiWin:kw}; }); };
   useEffect(()=>{ if(!selProj){ return; } let alive=true; (async()=>{
     const ws=windowWeeks(); const years=[...new Set(ws.map(w=>w.yr))]; const kws=[...new Set(ws.map(w=>w.kw))];
     try{
@@ -35426,8 +35467,13 @@ function PresentationsView({projects, employees, team, showToast}){
         <div style={{marginBottom:6,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
           <button className="btn btn-sm btn-primary" onClick={()=>applyImportCr(t)}>CR zusammenstellen</button>
           {td.cr&&td.cr._src==='imported'&&<span style={{fontSize:11,color:'#2563eb',fontWeight:700}}>● {(td.cr.agents||[]).length} Agenten</span>}
-          <span style={{fontSize:11,color:'var(--muted)'}}>Team-CR aus kpi_project_entries (gepflegte Kennzahl „CR", Wochen + Monat). Agenten-CR = (Offene + OSL) ÷ Sales Calls je MA — Buchungen aus dem Performance-Tab, Sales Calls aus dem Import ({Object.keys(stores.scByEmp||{}).length} MA); leer bis Buchungen gepflegt.</span>
+          <span style={{fontSize:11,color:'var(--muted)'}}>Team-CR aus kpi_project_entries (gepflegte Kennzahl „CR", Wochen + Monat). Agenten-CR = (Offene + OSL) ÷ Sales Calls je MA — Buchungen unten je Agent erfassen, Sales Calls aus dem Import ({Object.keys(stores.scByEmp||{}).length} MA).</span>
         </div>
+        <details style={{marginBottom:8}} open>
+          <summary style={{cursor:'pointer',fontSize:12,fontWeight:700}}>Buchungen je Agent erfassen (Offene + OSL, je KW)</summary>
+          <div style={{fontSize:11,color:'var(--muted)',margin:'4px 0'}}>Direkt eintragen, wird automatisch gespeichert. Danach oben „CR zusammenstellen".</div>
+          <BookingGrid projId={selProj.id} skill={t} members={membersFor(t)} weeks={windowWeeks().map(w=>({...w,key:w.yr+'-'+w.kw}))} kpiWin={stores.kpiWin} onChanged={onBookingChanged}/>
+        </details>
         {td.cr&&td.cr.weeks? (
           <div style={{overflowX:'auto'}}><table style={{borderCollapse:'collapse',fontSize:12}}>
             <thead><tr style={{color:'var(--muted)'}}><th style={{textAlign:'left',padding:'3px 8px',fontWeight:700}}>Team je KW</th>{td.cr.weeks.map(w=><th key={w.key} style={{padding:'3px 10px',fontWeight:700}}>KW {w.kw}</th>)}</tr></thead>
