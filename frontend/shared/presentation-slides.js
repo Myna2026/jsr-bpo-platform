@@ -193,14 +193,46 @@
     return h('div',{ref:wrapRef,style:{flex:1,minHeight:0,overflow:'hidden',display:'flex',justifyContent:'center',alignItems:'flex-start'}},
       h('div',{ref:innerRef,style:{transform:'scale('+scale+')',transformOrigin:'top center',display:'flex',gap:'2.2cqw',justifyContent:'center',alignItems:'flex-start',paddingTop:'.6cqw'}}, roots.map(node)));
   }
-  // Folie 2 — Besetzung & FTE. Daten in deck.teams[tk].fteList = {rows:[{id,name,fte}], total, org?, _src}.
+  // FUNKTIONS-BÄNDER (Variante B): drei beschriftete Ebenen untereinander — Projektleitung / Overhead / Agenten.
+  // KEINE Linien, KEINE Skalierung. Personen als vollfarbige Kacheln (Funktionsfarbe pp.color + Kontrast pp.txt,
+  // in hr.html gebacken). Agenten-Raster adaptiv (Spalten nach Anzahl). Passt für 7 (Sales) wie 17 (Support).
+  function FteBandsBody(bands, P){
+    function tile(pp, big){
+      return h('div',{key:pp.id,style:{background:pp.color,color:pp.txt,borderRadius:'.9cqw',padding:big?'.85cqw 1.05cqw':'.62cqw .8cqw',display:'flex',flexDirection:'column',gap:'.2cqw',minWidth:0,boxShadow:'0 .4cqw 1cqw -.6cqw rgba(3,20,26,.45)',flex:big?'1 1 16cqw':'0 1 auto',maxWidth:big?'30cqw':'none'}},[
+        h('div',{key:'n',style:{fontSize:big?'1.55cqw':'1.25cqw',fontWeight:800,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',lineHeight:1.12}},pp.name),
+        h('div',{key:'m',style:{display:'flex',justifyContent:'space-between',alignItems:'center',gap:'.5cqw'}},[
+          h('span',{key:'r',style:{fontSize:big?'.95cqw':'.9cqw',fontWeight:700,opacity:.82,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}, big?(pp.role||''):''),
+          h('span',{key:'f',style:{fontFamily:MONO,fontSize:big?'1.1cqw':'1cqw',fontWeight:800,background:'rgba(255,255,255,.22)',borderRadius:'.5cqw',padding:'.05cqw .55cqw',flexShrink:0}}, fmtNum(pp.fte,2))
+        ])
+      ]);
+    }
+    function band(b){ var isAgent=b.key==='agent'; var n=b.people.length; var body;
+      if(isAgent){ var cols=n<=6?3:n<=8?4:n<=15?5:n<=24?6:7;
+        body=h('div',{key:'g',style:{display:'grid',gridTemplateColumns:'repeat('+cols+',minmax(0,1fr))',gap:'.7cqw'}}, b.people.map(function(pp){ return tile(pp,false); }));
+      } else {
+        body=h('div',{key:'g',style:{display:'flex',flexWrap:'wrap',gap:'.7cqw'}}, b.people.map(function(pp){ return tile(pp,true); }));
+      }
+      return h('div',{key:b.key,style:{marginBottom:'1.3cqw'}},[
+        h('div',{key:'h',style:{display:'flex',alignItems:'center',gap:'.7cqw',marginBottom:'.6cqw'}},[
+          h('span',{key:'l',style:{fontSize:'1.15cqw',fontWeight:800,letterSpacing:'.12em',textTransform:'uppercase',color:P.muted}}, b.label),
+          h('span',{key:'c',style:{fontFamily:MONO,fontSize:'1cqw',fontWeight:700,color:P.muted,opacity:.7}}, n),
+          h('span',{key:'r',style:{flex:1,height:'1px',background:'#e2e8ee'}})
+        ]),
+        body
+      ]);
+    }
+    return h('div',{style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',overflow:'hidden'}}, bands.map(band));
+  }
+  // Folie 2 — Besetzung & FTE. Daten in deck.teams[tk].fteList = {rows:[{id,name,fte}], total, bands?, org?, _src}.
   // Mit org (Organigramm-Zweig aus org_nodes): Baum in Präsentations-Optik (Kundenfarbe-Fond, weiße Karten,
   // Verbindungslinien), FTE an den Karten. Ohne org: Namensliste als Fallback.
   function Fte(ctx, tk){ var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk);
-    var fl=td.fteList||{}; var rows=fl.rows||[]; var org=fl.org; var total=(fl.total!=null)?fl.total:numOr(td.fte,null);
-    var hasOrg=!!(org&&org.nodes&&org.nodes.length&&org.nodes.some(function(nd){ return nd.members&&nd.members.length; }));
-    var head=fondHead(P, lbl, 'Besetzung & FTE', rows.length?(rows.length+' Mitarbeiter'):'');
-    if(!rows.length && !hasOrg){ return Slide(ctx,[head, panel(P, h('div',{style:{flex:1,display:'flex',alignItems:'center',justifyContent:'center',textAlign:'center'}}, h('div',{},[
+    var fl=td.fteList||{}; var rows=fl.rows||[]; var org=fl.org; var bands=fl.bands; var total=(fl.total!=null)?fl.total:numOr(td.fte,null);
+    var hasBands=!!(bands&&bands.length&&bands.some(function(b){ return b.people&&b.people.length; }));
+    var hasOrg=!hasBands&&!!(org&&org.nodes&&org.nodes.length&&org.nodes.some(function(nd){ return nd.members&&nd.members.length; }));
+    var pcount=hasBands?bands.reduce(function(s,b){ return s+b.people.length; },0):rows.length;
+    var head=fondHead(P, lbl, 'Besetzung & FTE', pcount?(pcount+' Mitarbeiter'):'');
+    if(!rows.length && !hasBands && !hasOrg){ return Slide(ctx,[head, panel(P, h('div',{style:{flex:1,display:'flex',alignItems:'center',justifyContent:'center',textAlign:'center'}}, h('div',{},[
       h('div',{key:'t',style:{fontSize:'2.4cqw',fontWeight:800,color:P.ink}},'Keine Besetzung übernommen'),
       h('div',{key:'s',style:{fontSize:'1.4cqw',marginTop:'1cqw',color:P.muted}},'FTE-Standard je Mitarbeiter pflegen und übernehmen.')
     ])))]); }
@@ -208,6 +240,7 @@
       h('span',{key:'n',style:{fontSize:'5.4cqw',fontWeight:800,color:P.onLightTxt,lineHeight:1,fontVariantNumeric:'tabular-nums'}}, total==null?'—':fmtNum(total,2)),
       h('span',{key:'l',style:{fontSize:'1.6cqw',fontWeight:700,color:P.muted}},'FTE gesamt')
     ]);
+    if(hasBands){ return Slide(ctx, [ head, panel(P, [ totalBadge, FteBandsBody(bands, P) ]) ]); }
     if(hasOrg){ return Slide(ctx, [ head, panel(P, [ totalBadge, h(FteOrgBody,{P:P, org:org}) ]) ]); }
     // Fallback: Namensliste (kein Organigramm gepflegt)
     var cols3=rows.length>8?3:(rows.length>4?2:1); var per=Math.ceil(rows.length/cols3); var groups=[]; for(var g=0;g<cols3;g++) groups.push(rows.slice(g*per,(g+1)*per));

@@ -9442,6 +9442,17 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
   );
 }
 
+// ── Funktions-Farbsystem (IDENTISCH zum Kundenportal client.html posCategory/posColorFor) ──
+// EINE Ableitung: Position → Kategorie (pl|overhead|agent|neutral) → feste Farbe. Overhead-Liste aus derselben
+// Config wie overheadTier (jsr_overhead_positions_v1). Kontrast via yiqText. Keine zweite Farblogik.
+const FN_PL='#0E7C86', FN_AGENT='#64748B', FN_NEUTRAL='#9AA6B2';
+const FN_OVERHEAD={teamleiter:'#3B6FB0',teamlead:'#3B6FB0',trainer:'#3F8F5C',qm:'#C0912E',supervisor:'#8A5A9E',coach:'#B5654F'};
+const FN_FALLBACK=['#3B6FB0','#3F8F5C','#C0912E','#8A5A9E','#B5654F','#5F8C8E'];
+function fnOverheadColor(lc){ if(FN_OVERHEAD[lc]) return FN_OVERHEAD[lc]; let h=0; const s=String(lc||''); for(let i=0;i<s.length;i++) h=(h*31+s.charCodeAt(i))>>>0; return FN_FALLBACK[h%FN_FALLBACK.length]; }
+function fnCats(){ const parse=k=>{ try{ const r=JSON.parse(localStorage.getItem(k)||'null'); const arr=Array.isArray(r)?r:[]; return new Set(arr.map(x=>(x&&typeof x==='object'&&x.pos)?x.pos:x).filter(Boolean).map(s=>String(s).toLowerCase().trim())); }catch(e){ return new Set(); } };
+  const overhead=parse('jsr_overhead_positions_v1'); if(!overhead.size) ['projektleiter','trainer','teamleiter','qm','supervisor','coach','ansprechpartner'].forEach(x=>overhead.add(x)); return {overhead}; }
+function fnCategory(position,cats){ const p=String(position||'').toLowerCase().trim(); if(!p) return {cat:'neutral',label:'—'}; if(p==='projektleiter') return {cat:'pl',label:'Projektleiter'}; if(cats&&cats.overhead.has(p)) return {cat:'overhead',label:position,key:p}; if(p.indexOf('agent')>=0||p==='asp') return {cat:'agent',label:'Agent'}; return {cat:'neutral',label:position}; }
+function fnColor(position,cats){ const c=fnCategory(position,cats); return c.cat==='pl'?FN_PL:c.cat==='overhead'?fnOverheadColor(c.key):c.cat==='agent'?FN_AGENT:FN_NEUTRAL; }
 // Signatur der Organigramm-Bau-EINGABEN je Projekt-MA: id → {name, position, tier, skills}. NICHT die
 // Knoten-Anordnung → manuelles Verschieben ändert die Signatur nicht (kein Fehlalarm). Ausscheiden/
 // Projektwechsel fallen automatisch raus, weil die Liste schon active/training + Zuweisung-auf-Projekt ist.
@@ -35101,28 +35112,22 @@ function PresentationsView({projects, employees, team, showToast}){
   function applyFteList(t){ const members=membersFor(t);
     const rows=members.map(e=>({id:e.id,name:empName(e),fte:(fteStd[e.id]!=null?fteStd[e.id]:1)}));
     const total=Math.round(rows.reduce((s,r)=>s+(Number(r.fte)||0),0)*100)/100;
-    upd(n=>{ const prevOrg=(n.teams[t].fteList&&n.teams[t].fteList.org)||null; n.teams[t].fteList={rows,total,org:prevOrg,_src:'imported'}; if(!n.teams[t].fte) n.teams[t].fte=String(total).replace('.',','); });
-    (async()=>{ try{
-      const {data:on}=await sb.from('org_nodes').select('id,parent_id,title,subtitle,employees,seq').eq('project_id',selProj.id);
-      let org=null;
-      if(on&&on.length){
-        const byId={}; on.forEach(r=>{ byId[r.id]={id:r.id,title:r.title||'',subtitle:r.subtitle||'',employees:Array.isArray(r.employees)?r.employees:[],parent:r.parent_id||null,seq:r.seq||0}; });
-        const rootRow=on.find(r=>!r.parent_id); const rootId=rootRow?rootRow.id:on[0].id;
-        const empById={}; (employees||[]).forEach(e=>{ if(e) empById[e.id]=e; });
-        const skillPeople=new Set(); (employees||[]).forEach(e=>{ if(!e) return; const os=String(e.project_skill||'').toLowerCase()===t || empAssignments(e).some(a=>a.project_id===selProj.id&&String(a.skill||'').toLowerCase()===t); if(os) skillPeople.add(e.id); });
-        // NUR Skill-Leute (Agenten + skill-zugeordnete Führung via Assignment) + PROJEKTLEITUNG (tier 'lead', über allen Skills).
-        // NICHT alle Overhead — sonst rutschen Support-Teamlead/Trainer/QM in den Sales-Zweig.
-        const keep=id=>{ const e=empById[id]; if(!e) return false; if(skillPeople.has(id)) return true; return isOverheadEmp(e)&&overheadTier(e.position)==='lead'; };
-        const inc=new Set([rootId]); Object.keys(byId).forEach(id=>{ if((byId[id].employees||[]).some(keep)) inc.add(id); });
-        [...inc].forEach(id=>{ let cur=byId[id],g=0; while(cur&&cur.parent&&g<20){ inc.add(cur.parent); cur=byId[cur.parent]; g++; } });
-        const depthOf=id=>{ let d=0,cur=byId[id],g=0; while(cur&&cur.parent&&g<20){ d++; cur=byId[cur.parent]; g++; } return d; };
-        const onodes=[...inc].map(id=>byId[id]).filter(Boolean).map(nd=>({ id:nd.id, title:nd.title, subtitle:nd.subtitle, depth:depthOf(nd.id), seq:nd.seq, parent:(inc.has(nd.parent)?nd.parent:null),
-          members:(nd.employees||[]).filter(keep).map(eid=>({name:empName(empById[eid]),fte:(fteStd[eid]!=null?fteStd[eid]:null)})) }))
-          .sort((a,b)=>a.depth-b.depth||a.seq-b.seq);   // Struktur-Knoten (auch leere Vorfahren) behalten, sonst reißt der Baum
-        if(onodes.length && onodes.reduce((s,nd)=>s+nd.members.length,0)>0) org={rootId,nodes:onodes};
-      }
-      if(org) upd(n=>{ if(n.teams[t]&&n.teams[t].fteList) n.teams[t].fteList.org=org; });
-    }catch(e){} })(); }
+    // Drei Funktions-Bänder (Projektleitung / Overhead / Agenten) statt Baum. Personen = Skill-Leute des Projekts
+    // + Projektleitung des Projekts. Kategorie+Farbe aus dem Funktions-Farbsystem (fnColor) in den Snapshot gebacken
+    // → öffentliche Seite/PDF brauchen KEINE Farb-/Kategorie-Logik. Kein Baum, keine Skalierung.
+    const cats=fnCats();
+    const onSkill=e=>String(e.project_skill||'').toLowerCase()===t || empAssignments(e).some(a=>a.project_id===selProj.id&&String(a.skill||'').toLowerCase()===t);
+    const isPL=e=>fnCategory(e.position,cats).cat==='pl';
+    const projEmp=(employees||[]).filter(e=>e&&['active','training'].includes(e.status)&&empAssignments(e).some(a=>a.project_id===selProj.id));
+    const people=projEmp.filter(e=>onSkill(e)||isPL(e));
+    const mk=e=>{ const col=fnColor(e.position,cats); const ci=fnCategory(e.position,cats);
+      return {id:e.id,name:empName(e),fte:(fteStd[e.id]!=null?fteStd[e.id]:1),color:col,txt:yiqText(col),
+        role:(ci.cat==='pl'?'Projektleiter':ci.cat==='overhead'?(e.position||'Overhead'):ci.cat==='agent'?'Agent':(e.position||''))}; };
+    const bd={pl:[],overhead:[],agent:[]};
+    people.forEach(e=>{ const cat=fnCategory(e.position,cats).cat; const key=cat==='pl'?'pl':cat==='agent'?'agent':'overhead'; bd[key].push(mk(e)); });
+    Object.keys(bd).forEach(k=>bd[k].sort((a,b)=>a.name.localeCompare(b.name,'de')));
+    const bands=[{key:'pl',label:'Projektleitung',people:bd.pl},{key:'overhead',label:'Overhead',people:bd.overhead},{key:'agent',label:'Agenten',people:bd.agent}].filter(b=>b.people.length);
+    upd(n=>{ n.teams[t].fteList={rows,total,bands,_src:'imported'}; if(!n.teams[t].fte) n.teams[t].fte=String(total).replace('.',','); }); }
   // CR + Buchungen (5d): je MA/KW aus kpi_entries. CR = (Offene + OSL) ÷ Sales Calls × 100. MTD = Berichtsmonats-Wochen.
   const MONTHS_DE=['Januar','Februar','März','April','Mai','Juni','Juli','August','September','Oktober','November','Dezember'];
   async function applyImportCr(t){ const ws=windowWeeks(); const members=membersFor(t); const win=stores.kpiWin||[];
