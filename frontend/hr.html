@@ -33331,52 +33331,87 @@ function wmPrevRange(level, cur){ if(level==='all'||!cur.from) return null;
     return {from:pf, to:new Date(pf.getFullYear(),pf.getMonth(),Math.min(cur.to.getDate(),dim))}; }
   return null;
 }
-function RecruitingMarketingView(){
+function RecruitingMarketingView({employees}){
   const [rows,setRows]=useState(null);   // null=lädt, []=leer/Fehler, [...]=Daten
   const [err,setErr]=useState('');
+  const [cvs,setCvs]=useState([]);
   const [level,setLevel]=useState('month');
   const today=new Date();
   useEffect(()=>{ let alive=true; (async()=>{
     try{ const {data,error}=await sb.from('windsor_marketing').select('*'); if(error) throw error;
-      const parsed=(data||[]).map(r=>({ date:wmDate(r.date), datasource:String(r.datasource||'').toLowerCase(), account_name:r.account_name, source:r.source, campaign:String(r.campaign||'').trim(),
+      const parsed=(data||[]).map(r=>({ date:wmDate(r.date), datasource:String(r.datasource||'').toLowerCase(), campaign:String(r.campaign||'').trim(),
         spend:wmNum(r.spend), impressions:wmNum(r.impressions), clicks:wmNum(r.clicks), reach:wmNum(r.reach), followers_count:wmNum(r.followers_count) })).filter(x=>x.date);
       parsed.sort((a,b)=>a.date-b.date);
       if(alive) setRows(parsed);
     }catch(e){ if(alive){ setErr(e.message||'Ladefehler'); setRows([]); } }
   })(); return ()=>{alive=false;}; },[]);
-  const cur=wmRange(level,today);
-  const inRange=(d,r)=>!!(r && (!r.from||d>=r.from) && (!r.to||d<=r.to));
-  const rowsCur=(rows||[]).filter(x=>inRange(x.date,cur));
-  const meta=rowsCur.filter(x=>x.datasource==='facebook');
-  const insta=rowsCur.filter(x=>x.datasource==='instagram');
+  useEffect(()=>{ let alive=true; (async()=>{ try{ const {data}=await sb.from('cvs').select('id,cv_date'); if(alive) setCvs(data||[]); }catch(e){} })(); return ()=>{alive=false;}; },[]);
+
+  const d0=(()=>{ const d=new Date(today); d.setHours(0,0,0,0); return d; })();
+  const startDate=(rows&&rows.length)?rows[0].date:null;
+  const cur = level==='all' ? {from:startDate, to:d0} : wmRange(level, today);
+  const prev = wmPrevRange(level, cur);   // null bei 'all'
+  const inR=(dt,r)=>!!(dt&&r&&(!r.from||dt>=r.from)&&(!r.to||dt<=r.to));
+  const metaIn=r=>(rows||[]).filter(x=>x.datasource==='facebook'&&inR(x.date,r));
+  const instaIn=r=>(rows||[]).filter(x=>x.datasource==='instagram'&&inR(x.date,r));
   const sum=(a,k)=>a.reduce((s,x)=>s+(x[k]||0),0);
-  const fmtD=d=>d?d.toLocaleDateString('de-DE',{day:'numeric',month:'short'}):'';
+  const appsIn=r=>{ if(!r) return 0;
+    const a=(cvs||[]).filter(c=>inR(wmDate(c.cv_date),r)).length;
+    const b=(employees||[]).filter(e=>e&&e.source==='cv'&&inR(wmDate(e.cv_received_at),r)).length;
+    return a+b; };
+  const rowsCur=[...metaIn(cur),...instaIn(cur)];
+
   const eur=n=>n==null?'—':n.toLocaleString('de-DE',{minimumFractionDigits:2,maximumFractionDigits:2})+' €';
   const int=n=>n==null?'—':Math.round(n).toLocaleString('de-DE');
-  const rangeLabel = level==='all' ? ((rows&&rows.length)?('seit '+fmtD(rows[0].date)):'') : level==='today' ? fmtD(cur.to) : (fmtD(cur.from)+' – '+fmtD(cur.to));
+  const fmtD=d=>d?d.toLocaleDateString('de-DE',{day:'numeric',month:'short'}):'';
+  const rangeLabel = level==='all' ? (startDate?('seit '+fmtD(startDate)):'') : level==='today' ? fmtD(cur.to) : (fmtD(cur.from)+' – '+fmtD(cur.to));
+  const cmpLabel = level==='today'?'vs. gestern':level==='week'?'vs. Vorwoche':level==='month'?'vs. Vormonat':'';
+
+  const METRICS=[
+    {key:'spend', label:'Ausgaben (Meta)', fmt:eur, good:'neutral', val:r=>sum(metaIn(r),'spend')},
+    {key:'metaReach', label:'Meta-Reichweite', fmt:int, good:'up', sub:'bezahlt', val:r=>sum(metaIn(r),'reach')},
+    {key:'instaReach', label:'Instagram-Reichweite', fmt:int, good:'up', sub:'organisch', val:r=>sum(instaIn(r),'reach')},
+    {key:'apps', label:'Bewerbungen', fmt:int, good:'up', val:r=>appsIn(r)},
+    {key:'cpa', label:'Kosten je Bewerbung', fmt:eur, good:'down', val:r=>{ const a=appsIn(r); return a>0? sum(metaIn(r),'spend')/a : null; }},
+  ];
+  const chip=(c,p,good)=>{ if(c==null||p==null) return null;
+    if(p===0) return c>0?{txt:'neu',color:'var(--muted)'}:null;
+    const pct=(c-p)/p*100; const up=pct>0.5, down=pct<-0.5;
+    let color='var(--muted)'; if(good==='up') color=up?'#059669':down?'#dc2626':'var(--muted)'; else if(good==='down') color=down?'#059669':up?'#dc2626':'var(--muted)';
+    return {txt:(up?'▲':down?'▼':'▬')+' '+(pct>0?'+':'')+pct.toLocaleString('de-DE',{maximumFractionDigits:0})+' %', color}; };
+  const campSpend={}; metaIn(cur).forEach(x=>{ if((x.spend||0)>0 && x.campaign) campSpend[x.campaign]=(campSpend[x.campaign]||0)+x.spend; });
+  const nCamp=Object.keys(campSpend).length;
   const box=(bg,bd,col,txt)=><div style={{padding:'12px 16px',borderRadius:10,background:bg,border:'1px solid '+bd,color:col,fontSize:13,fontWeight:700}}>{txt}</div>;
-  const stat=(label,val,sub)=><div style={{flex:1,minWidth:150,border:'1px solid var(--border)',borderRadius:12,padding:'12px 16px',background:'var(--card)'}}>
-    <div style={{fontSize:11,fontWeight:800,letterSpacing:'.06em',textTransform:'uppercase',color:'var(--muted)'}}>{label}</div>
-    <div style={{fontSize:24,fontWeight:800,lineHeight:1.2,marginTop:2}}>{val}</div>
-    {sub?<div style={{fontSize:11,color:'var(--muted)',marginTop:2}}>{sub}</div>:null}
-  </div>;
-  return <div style={{maxWidth:1040}}>
+
+  return <div style={{maxWidth:1100}}>
     <div style={{fontSize:20,fontWeight:800,marginBottom:2}}>📣 Recruiting Marketing</div>
     <div style={{fontSize:13,color:'var(--muted)',marginBottom:14}}>Wo wir bei der Bewerbergewinnung stehen — Meta-Anzeigen und Instagram organisch.</div>
     <div style={{display:'flex',gap:6,marginBottom:6,flexWrap:'wrap'}}>
       {WM_LEVELS.map(([k,l])=><button key={k} className="btn btn-sm" onClick={()=>setLevel(k)} style={{fontWeight:700,background:level===k?'var(--accent,#2563eb)':'transparent',color:level===k?'#fff':'var(--text)',border:'1px solid '+(level===k?'var(--accent,#2563eb)':'var(--border)')}}>{l}</button>)}
     </div>
-    <div style={{fontSize:12,color:'var(--muted)',marginBottom:16}}>{rangeLabel}</div>
+    <div style={{fontSize:12,color:'var(--muted)',marginBottom:16}}>{rangeLabel}{cmpLabel&&prev?(' · Vergleich '+cmpLabel+' ('+fmtD(prev.from)+' – '+fmtD(prev.to)+')'):''}</div>
     {rows===null ? <div className="sp-empty">Lädt…</div>
       : err ? box('#fef2f2','#fecaca','#b91c1c','Marketingdaten konnten nicht geladen werden: '+err)
-      : !rowsCur.length ? box('var(--surface-2)','var(--border)','var(--muted)', level==='today' ? 'Für heute liegen noch keine Daten vor — Windsor schreibt den Vortag um 00:00 UTC.' : 'Keine Marketingdaten für diesen Zeitraum.')
+      : !rowsCur.length ? box('var(--surface-2)','var(--border)','var(--muted)', level==='today'?'Für heute liegen noch keine Daten vor — Windsor schreibt den Vortag um 00:00 UTC.':'Keine Marketingdaten für diesen Zeitraum.')
       : <div>
-          <div style={{display:'flex',gap:12,flexWrap:'wrap'}}>
-            {stat('Ausgaben (Meta)', eur(sum(meta,'spend')), meta.length+' Tage')}
-            {stat('Meta-Reichweite', int(sum(meta,'reach')), 'bezahlt · Tages-Summe')}
-            {stat('Instagram-Reichweite', int(sum(insta,'reach')), 'organisch · Tages-Summe')}
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(180px,1fr))',gap:12}}>
+            {METRICS.map(m=>{ const cv=m.val(cur); const pv=prev?m.val(prev):null; const c=chip(cv,pv,m.good);
+              return <div key={m.key} style={{border:'1px solid var(--border)',borderRadius:12,padding:'14px 16px',background:'var(--card)'}}>
+                <div style={{fontSize:11,fontWeight:800,letterSpacing:'.06em',textTransform:'uppercase',color:'var(--muted)'}}>{m.label}</div>
+                <div style={{fontSize:26,fontWeight:800,lineHeight:1.15,marginTop:3}}>{m.fmt(cv)}</div>
+                <div style={{display:'flex',alignItems:'center',gap:8,marginTop:4,minHeight:16}}>
+                  {c ? <span style={{fontSize:12,fontWeight:800,color:c.color}}>{c.txt}</span> : <span style={{fontSize:11,color:'var(--muted)'}}>{level==='all'?'seit Start':''}</span>}
+                  {m.sub?<span style={{fontSize:11,color:'var(--muted)'}}>{m.sub}</span>:null}
+                </div>
+              </div>; })}
           </div>
-          <div style={{fontSize:11,color:'var(--muted)',marginTop:10}}>Reichweite ist die Summe der Tageswerte (nicht deduplizierte Unique-Reichweite). Meta (bezahlt) und Instagram (organisch) werden bewusst getrennt geführt. Bewerbungen, Kosten je Bewerbung und der Vorperioden-Vergleich folgen als Nächstes.</div>
+          {nCamp>1 && <div style={{marginTop:12,padding:'10px 14px',borderRadius:10,background:'#fffbeb',border:'1px solid #fde68a',color:'#b45309',fontSize:12,fontWeight:700}}>⚠ In diesem Zeitraum liefen {nCamp} Kampagnen gleichzeitig — die Kosten je Bewerbung sind dann nur grob, weil sich Bewerbungen nicht einer Kampagne zuordnen lassen.</div>}
+          <div style={{fontSize:11,color:'var(--muted)',marginTop:12,lineHeight:1.6}}>
+            Reichweite = Summe der Tageswerte (nicht deduplizierte Unique-Reichweite); Meta (bezahlt) und Instagram (organisch) getrennt.
+            Bewerbungen = CV-Eingänge im Zeitraum (offene CVs + bereits übernommene Bewerber).
+            Kosten je Bewerbung = Meta-Ausgaben ÷ Bewerbungen — <b>Näherung</b>, da keine Herkunft Bewerber↔Anzeige; belastbar, solange nur eine Kampagne läuft.
+            {cmpLabel?(' Vergleich '+cmpLabel+': gleich langer Ausschnitt der Vorperiode.'):''}
+          </div>
         </div>}
   </div>;
 }
@@ -36024,7 +36059,7 @@ function App(){
           {view==='orgchart'&&<OrgChart projects={projects} employees={employees} orgCharts={orgCharts} setOrgCharts={setOrgCharts}/>}
           {view==='praesentation'&&<PresentationsView projects={projects} employees={employees} team={team} showToast={showToast}/>}
           {view==='dataimport'&&<DataImportView projects={projects} employees={employees}/>}
-          {view==='recmkt'&&<RecruitingMarketingView/>}
+          {view==='recmkt'&&<RecruitingMarketingView employees={employees}/>}
           {view==='callqa'&&<CallQaView projects={projects} employees={employees} showToast={showToast}/>}
           {view==='skillmatrix'&&<SkillMatrix employees={employees} projects={projects}/>}
           {view==='kanban'&&<RecruitingKanban employees={employees} setEmployees={setEmployees} cvList={cvList} setCvList={setCvList} projects={projects} onPromoteToEmployee={promoteToEmployee} showToast={showToast}/>}
