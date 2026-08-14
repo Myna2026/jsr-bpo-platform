@@ -8864,6 +8864,10 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
   },[]);
   const [selfEdit,setSelfEdit]=useState(false);   // eigenes Cockpit anpassen (jsr_user_cockpits_v1[user_id])
   const [cockpitVer,setCockpitVer]=useState(0);   // Re-Render nach Reset auf Rollen-Vorlage
+  // S1b: per-User Reihenfolge + Ausblenden der Management-Cockpit-Blöcke (jsr_mgmt_cockpit_v1[user_id]={order,hidden}).
+  const [mgmtCk,setMgmtCk]=useState(null); const [mgmtEdit,setMgmtEdit]=useState(false); const [mgmtDrag,setMgmtDrag]=useState(null);
+  useEffect(()=>{ let alive=true; (async()=>{ try{ const c=await loadConfigFromDB('jsr_mgmt_cockpit_v1'); const uid=team&&team.user_id; const e=(c&&uid&&c[uid])||{}; if(alive) setMgmtCk({order:Array.isArray(e.order)?e.order:null,hidden:Array.isArray(e.hidden)?e.hidden:[]}); }catch(err){ if(alive) setMgmtCk({order:null,hidden:[]}); } })(); return ()=>{alive=false;}; },[team]);
+  const saveMgmtCk=async(next)=>{ setMgmtCk(next); const uid=team&&team.user_id; if(!uid) return; try{ const c=(await loadConfigFromDB('jsr_mgmt_cockpit_v1'))||{}; c[uid]=next; await saveConfigToDB('jsr_mgmt_cockpit_v1',c); }catch(e){} };
   // Mobile: feste, kuratierte Reihenfolge statt der Desktop-Widget-Konfiguration (auf schmalem Screen
   // unbrauchbar). Gilt für ALLE mobilen Viewports; die Desktop-Konfig (jsr_user_cockpits_v1) bleibt unberührt.
   if(isMobileW) return <CockpitMobile employees={employees} projects={projects} plans={plans} team={team}
@@ -9006,33 +9010,54 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
       {val:_kuendM,label:'Kündigungen',sub:'laufender Monat',color:'#b91c1c'},
       {val:inbox.length,label:'Bewerbungen',sub:'ungesichtet',color:'#6366f1',nav:'kanban'},
     ];
+    // S1b: Block-Registry — Reihenfolge + Aus-/Einblenden per User (Drag im Bearbeiten-Modus).
+    const tilesBlock=<div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:10,marginBottom:14}}>
+      {tiles6.map((k,i)=>(<div key={i} onClick={k.nav?()=>onNavigate&&onNavigate({kind:'view',view:k.nav}):undefined} style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--r-lg)',padding:'14px 16px',boxShadow:'var(--shadow-xs)',cursor:k.nav?'pointer':undefined}}>
+        <div style={{fontSize:10,fontWeight:600,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',marginBottom:6}}>{k.label}{k.nav?' →':''}</div>
+        <div style={{fontSize:26,fontWeight:800,color:k.color,fontFamily:'var(--mono)',lineHeight:1}}>{k.val}</div>
+        <div style={{fontSize:10,color:'var(--muted)',marginTop:4}}>{k.sub}</div>
+      </div>))}
+    </div>;
+    const blockNodes={
+      kalender: <CockpitCalendar4Weeks onNavigate={onNavigate}/>,
+      tiles: tilesBlock,
+      cveingang: cvEingang,
+      marketing: <CockpitMarketingTile team={team} employees={employees} mobile={false} onNavigate={onNavigate}/>,
+      projekte: projekteBlock,
+      quote: wblock('quote_woche', <Widget_KrankUrlaubQuote employees={employees} projects={projects}/>),
+      abwesend: abwesendBlock,
+      ma: wblock('ma_per_project', <Widget_MaPerProject employees={employees} projects={projects}/>),
+      vertraege: vertraegeBlock,
+      training: hasTraining ? wblock('training_status', <Widget_TrainingStatus plans={plans}/>) : null,
+      fabletics: <Widget_DailyReports employees={employees} projects={projects} team={team}/>,
+      kpis: <CockpitProjectKpis projects={projects} team={team} mobile={false}/>,
+    };
+    const BLOCK_LABELS={kalender:'Kalender · 4 Wochen',tiles:'Kennzahlen-Kacheln',cveingang:'CV-Eingang',marketing:'Recruiting Marketing',projekte:'Projekte',quote:'Krank-/Urlaubsquote',abwesend:'Abwesenheiten heute',ma:'MA je Projekt·Skill',vertraege:'Vertrags-Auslauf',training:'Schulungen',fabletics:'Fabletics-Berichte',kpis:'KPIs je Projekt·Skill'};
+    const DEF_ORDER=['kalender','tiles','cveingang','marketing','projekte','quote','abwesend','ma','vertraege','training','fabletics','kpis'];
+    const _ck=mgmtCk||{order:null,hidden:[]};
+    const _ord=(Array.isArray(_ck.order)?_ck.order:DEF_ORDER).filter(k=>DEF_ORDER.includes(k));
+    const order=_ord.concat(DEF_ORDER.filter(k=>!_ord.includes(k)));   // neue Blöcke ans Ende
+    const hiddenSet=new Set(_ck.hidden||[]);
+    const toggleHide=(k)=>{ const h=new Set(hiddenSet); h.has(k)?h.delete(k):h.add(k); saveMgmtCk({order,hidden:[...h]}); };
+    const onDropBlk=(k)=>{ if(mgmtDrag&&mgmtDrag!==k){ const ord=order.slice(); const fi=ord.indexOf(mgmtDrag),ti=ord.indexOf(k); if(fi>=0&&ti>=0){ ord.splice(fi,1); ord.splice(ti,0,mgmtDrag); saveMgmtCk({order:ord,hidden:[...hiddenSet]}); } } setMgmtDrag(null); };
+    const isDefault=(!_ck.order||JSON.stringify(order)===JSON.stringify(DEF_ORDER))&&hiddenSet.size===0;
     return(<React.Fragment>
       <CockpitTodayEvents mobile={false} onNavigate={onNavigate}/>
       <div style={{display:'flex',justifyContent:'flex-end',gap:8,marginBottom:10}}>
-        {hasOwnCockpit&&<button className="btn btn-sm" style={{background:'transparent',color:'var(--muted)'}} onClick={resetToRoleTpl} title="Eigenen Zuschnitt entfernen und die Rollen-Vorlage übernehmen">↩ Auf Vorlage zurücksetzen</button>}
-        <button className="btn btn-sm" onClick={()=>setSelfEdit(true)} title="Widgets deines Cockpits auswählen und ordnen">⚙ Cockpit anpassen</button>
+        {mgmtEdit&&!isDefault&&<button className="btn btn-sm" style={{background:'transparent',color:'var(--muted)'}} onClick={()=>saveMgmtCk({order:null,hidden:[]})} title="Standard-Anordnung wiederherstellen">↩ Standard</button>}
+        <button className="btn btn-sm" onClick={()=>setMgmtEdit(!mgmtEdit)} style={mgmtEdit?{background:'#fffbeb',color:'#b45309',border:'1.5px solid #f59e0b'}:undefined} title="Blöcke umsortieren und aus-/einblenden">{mgmtEdit?'✓ Fertig':'✏ Anordnen'}</button>
       </div>
-      {selfEdit && <CockpitEditor roleDef={{label:'dein Cockpit'}} current={resolveMyCockpit(team, employees)} onSave={(widgets)=>{ const uid=team&&team.user_id; if(uid){ saveUserCockpits({...loadUserCockpits(), [uid]:widgets}); } setSelfEdit(false); }} onClose={()=>setSelfEdit(false)}/>}
-      {/* 2) Kalender-Monatsübersicht (aktuelle + 3 kommende Wochen) */}
-      <CockpitCalendar4Weeks onNavigate={onNavigate}/>
-      {/* 3) Sechs Kacheln, zwei Reihen zu dritt */}
-      <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:10,marginBottom:14}}>
-        {tiles6.map((k,i)=>(<div key={i} onClick={k.nav?()=>onNavigate&&onNavigate({kind:'view',view:k.nav}):undefined} style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--r-lg)',padding:'14px 16px',boxShadow:'var(--shadow-xs)',cursor:k.nav?'pointer':undefined}}>
-          <div style={{fontSize:10,fontWeight:600,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',marginBottom:6}}>{k.label}{k.nav?' →':''}</div>
-          <div style={{fontSize:26,fontWeight:800,color:k.color,fontFamily:'var(--mono)',lineHeight:1}}>{k.val}</div>
-          <div style={{fontSize:10,color:'var(--muted)',marginTop:4}}>{k.sub}</div>
-        </div>))}
-      </div>
-      {cvEingang}
-      <CockpitMarketingTile team={team} employees={employees} mobile={false} onNavigate={onNavigate}/>
-      {projekteBlock}
-      {wblock('quote_woche', <Widget_KrankUrlaubQuote employees={employees} projects={projects}/>)}
-      {abwesendBlock}
-      {wblock('ma_per_project', <Widget_MaPerProject employees={employees} projects={projects}/>)}
-      {vertraegeBlock}
-      {hasTraining && wblock('training_status', <Widget_TrainingStatus plans={plans}/>)}
-      <Widget_DailyReports employees={employees} projects={projects} team={team}/>
-      <CockpitProjectKpis projects={projects} team={team} mobile={false}/>
+      {mgmtEdit&&<div style={{fontSize:12,color:'var(--muted)',marginBottom:10,padding:'8px 12px',background:'var(--surface-2)',border:'1px solid var(--border)',borderRadius:'var(--r)'}}>Block am Griff <b>⠿</b> ziehen zum Umsortieren · <b>Ausblenden</b> versteckt ihn auf deinem Cockpit. Nur für dich.</div>}
+      {order.map(k=>{ const node=blockNodes[k]; const hid=hiddenSet.has(k);
+        if(!mgmtEdit) return (hid||!node)?null:<React.Fragment key={k}>{node}</React.Fragment>;
+        return <div key={k} draggable onDragStart={()=>setMgmtDrag(k)} onDragOver={e=>e.preventDefault()} onDrop={()=>onDropBlk(k)} style={{border:'1px dashed '+(mgmtDrag===k?'#f59e0b':'var(--border)'),borderRadius:'var(--r)',marginBottom:10,padding:8,opacity:hid?0.5:1,background:mgmtDrag===k?'#fffbeb':'transparent'}}>
+          <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:node?8:0,fontSize:12,fontWeight:700,color:'var(--muted)'}}>
+            <span style={{cursor:'grab',fontSize:15}}>⠿</span><span style={{flex:1}}>{BLOCK_LABELS[k]||k}</span>
+            <button className="btn btn-sm" onClick={()=>toggleHide(k)} style={{padding:'2px 10px'}}>{hid?'Einblenden':'Ausblenden'}</button>
+          </div>
+          {node || <div style={{fontSize:12,color:'var(--muted)',padding:'6px 2px'}}>Derzeit keine Daten für diesen Block.</div>}
+        </div>;
+      })}
     </React.Fragment>);
   }
 
