@@ -34495,10 +34495,30 @@ function PresentationsView({projects, employees, team, showToast}){
       .sort((a,b)=>(b.avg||0)-(a.avg||0));
     upd(n=>{ n.teams[t].csat={weeks, rows, _src:'imported'}; }); }
   // FTE-Folie (2): Besetzungsliste je MA aus report_fte-Standard (fehlt → 1,0). Namen eingefroren.
-  function applyFteList(t){ const members=membersFor(t);
+  async function applyFteList(t){ const members=membersFor(t);
     const rows=members.map(e=>({id:e.id,name:empName(e),fte:(fteStd[e.id]!=null?fteStd[e.id]:1)}));
     const total=Math.round(rows.reduce((s,r)=>s+(Number(r.fte)||0),0)*100)/100;
-    upd(n=>{ n.teams[t].fteList={rows,total,_src:'imported'}; if(!n.teams[t].fte) n.teams[t].fte=String(total).replace('.',','); }); }
+    // Organigramm-Zweig des Skills aus org_nodes einfrieren (öffentliche Seite hat keine org_nodes). Struktur wie
+    // im Organigramm-Tab; Mitglieder = Skill-Leute + Overhead (Führung), Vorfahren bis zur Wurzel, FTE aus report_fte.
+    let org=null;
+    try{ const {data:on}=await sb.from('org_nodes').select('id,parent_id,title,subtitle,employees,seq').eq('project_id',selProj.id);
+      if(on&&on.length){
+        const byId={}; on.forEach(r=>{ byId[r.id]={id:r.id,title:r.title||'',subtitle:r.subtitle||'',employees:Array.isArray(r.employees)?r.employees:[],parent:r.parent_id||null,seq:r.seq||0}; });
+        const rootRow=on.find(r=>!r.parent_id); const rootId=rootRow?rootRow.id:on[0].id;
+        const empById={}; (employees||[]).forEach(e=>{ if(e) empById[e.id]=e; });
+        const skillPeople=new Set(); (employees||[]).forEach(e=>{ if(!e) return; const os=String(e.project_skill||'').toLowerCase()===t || empAssignments(e).some(a=>a.project_id===selProj.id&&String(a.skill||'').toLowerCase()===t); if(os) skillPeople.add(e.id); });
+        const keep=id=>{ const e=empById[id]; return !!(e&&(skillPeople.has(id)||isOverheadEmp(e))); };
+        const inc=new Set([rootId]); Object.keys(byId).forEach(id=>{ if((byId[id].employees||[]).some(keep)) inc.add(id); });
+        [...inc].forEach(id=>{ let cur=byId[id],g=0; while(cur&&cur.parent&&g<20){ inc.add(cur.parent); cur=byId[cur.parent]; g++; } });
+        const depthOf=id=>{ let d=0,cur=byId[id],g=0; while(cur&&cur.parent&&g<20){ d++; cur=byId[cur.parent]; g++; } return d; };
+        const onodes=[...inc].map(id=>byId[id]).filter(Boolean).map(nd=>({ id:nd.id, title:nd.title, subtitle:nd.subtitle, depth:depthOf(nd.id), seq:nd.seq,
+          members:(nd.employees||[]).filter(keep).map(eid=>({name:empName(empById[eid]),fte:(fteStd[eid]!=null?fteStd[eid]:null)})) }))
+          .filter(nd=>nd.members.length||nd.id===rootId)
+          .sort((a,b)=>a.depth-b.depth||a.seq-b.seq);
+        if(onodes.length) org={rootId,nodes:onodes};
+      }
+    }catch(e){}
+    upd(n=>{ n.teams[t].fteList={rows,total,org,_src:'imported'}; if(!n.teams[t].fte) n.teams[t].fte=String(total).replace('.',','); }); }
   // CR + Buchungen (5d): je MA/KW aus kpi_entries. CR = (Offene + OSL) ÷ Sales Calls × 100. MTD = Berichtsmonats-Wochen.
   const MONTHS_DE=['Januar','Februar','März','April','Mai','Juni','Juli','August','September','Oktober','November','Dezember'];
   function applyImportCr(t){ const ws=windowWeeks(); const members=membersFor(t); const win=stores.kpiWin||[];
