@@ -34486,7 +34486,7 @@ function PresentationsView({projects, employees, team, showToast}){
   function applyImportCsat(t){ const ws=windowWeeks(); const members=membersFor(t); const win=stores.gaugesWin||[];
     const byEmp={}; win.forEach(r=>{ if(!ws.some(w=>w.yr===r.year&&w.kw===r.kw)) return; const wk=r.year+'-'+r.kw;
       (byEmp[r.employee_id]=byEmp[r.employee_id]||{})[wk]={v:(r.csat==null?null:Number(r.csat)), n:(r.anzahl==null?null:Number(r.anzahl))}; });
-    const ids=[...new Set([...members.map(e=>e.id), ...Object.keys(byEmp)])];
+    const ids=members.map(e=>e.id);   // NUR Skill-Mitglieder (CSAT nach Skill filtern, wie Stunden/Calls) — nicht alle Gauges-MA
     const nameOf=id=>{ const e=(employees||[]).find(x=>x&&x.id===id); return e?empName(e):'—'; };
     const weeks=ws.map(w=>({kw:w.kw,key:w.yr+'-'+w.kw}));
     const rows=ids.map(id=>{ const cells={}; let sv=0,sn=0; weeks.forEach(wk=>{ const c=(byEmp[id]||{})[wk.key]; if(c&&c.v!=null){ cells[wk.key]={v:c.v,n:c.n}; const n=(c.n||0)||1; sv+=c.v*n; sn+=n; } });
@@ -34495,13 +34495,16 @@ function PresentationsView({projects, employees, team, showToast}){
       .sort((a,b)=>(b.avg||0)-(a.avg||0));
     upd(n=>{ n.teams[t].csat={weeks, rows, _src:'imported'}; }); }
   // FTE-Folie (2): Besetzungsliste je MA aus report_fte-Standard (fehlt → 1,0). Namen eingefroren.
-  async function applyFteList(t){ const members=membersFor(t);
+  // Namensliste SOFORT setzen (sync) — unabhängig vom Organigramm. So erscheint die Folie garantiert, sobald
+  // übernommen wurde (klare Trennung „nicht übernommen" vs. „kein Organigramm"). Der Org-Zweig wird danach
+  // asynchron aus org_nodes nachgeladen und nur gemergt, wenn er tatsächlich Mitglieder enthält.
+  function applyFteList(t){ const members=membersFor(t);
     const rows=members.map(e=>({id:e.id,name:empName(e),fte:(fteStd[e.id]!=null?fteStd[e.id]:1)}));
     const total=Math.round(rows.reduce((s,r)=>s+(Number(r.fte)||0),0)*100)/100;
-    // Organigramm-Zweig des Skills aus org_nodes einfrieren (öffentliche Seite hat keine org_nodes). Struktur wie
-    // im Organigramm-Tab; Mitglieder = Skill-Leute + Overhead (Führung), Vorfahren bis zur Wurzel, FTE aus report_fte.
-    let org=null;
-    try{ const {data:on}=await sb.from('org_nodes').select('id,parent_id,title,subtitle,employees,seq').eq('project_id',selProj.id);
+    upd(n=>{ const prevOrg=(n.teams[t].fteList&&n.teams[t].fteList.org)||null; n.teams[t].fteList={rows,total,org:prevOrg,_src:'imported'}; if(!n.teams[t].fte) n.teams[t].fte=String(total).replace('.',','); });
+    (async()=>{ try{
+      const {data:on}=await sb.from('org_nodes').select('id,parent_id,title,subtitle,employees,seq').eq('project_id',selProj.id);
+      let org=null;
       if(on&&on.length){
         const byId={}; on.forEach(r=>{ byId[r.id]={id:r.id,title:r.title||'',subtitle:r.subtitle||'',employees:Array.isArray(r.employees)?r.employees:[],parent:r.parent_id||null,seq:r.seq||0}; });
         const rootRow=on.find(r=>!r.parent_id); const rootId=rootRow?rootRow.id:on[0].id;
@@ -34515,10 +34518,10 @@ function PresentationsView({projects, employees, team, showToast}){
           members:(nd.employees||[]).filter(keep).map(eid=>({name:empName(empById[eid]),fte:(fteStd[eid]!=null?fteStd[eid]:null)})) }))
           .filter(nd=>nd.members.length||nd.id===rootId)
           .sort((a,b)=>a.depth-b.depth||a.seq-b.seq);
-        if(onodes.length) org={rootId,nodes:onodes};
+        if(onodes.length && onodes.reduce((s,nd)=>s+nd.members.length,0)>0) org={rootId,nodes:onodes};
       }
-    }catch(e){}
-    upd(n=>{ n.teams[t].fteList={rows,total,org,_src:'imported'}; if(!n.teams[t].fte) n.teams[t].fte=String(total).replace('.',','); }); }
+      if(org) upd(n=>{ if(n.teams[t]&&n.teams[t].fteList) n.teams[t].fteList.org=org; });
+    }catch(e){} })(); }
   // CR + Buchungen (5d): je MA/KW aus kpi_entries. CR = (Offene + OSL) ÷ Sales Calls × 100. MTD = Berichtsmonats-Wochen.
   const MONTHS_DE=['Januar','Februar','März','April','Mai','Juni','Juli','August','September','Oktober','November','Dezember'];
   function applyImportCr(t){ const ws=windowWeeks(); const members=membersFor(t); const win=stores.kpiWin||[];

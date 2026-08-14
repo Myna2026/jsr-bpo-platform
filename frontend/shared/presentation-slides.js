@@ -24,12 +24,13 @@
   function sumCol(rows,key){ var s=0; (rows||[]).forEach(function(r){ s+=numOr(r&&r[key],0); }); return s; }
   // Gespreizte Skala: bei eng beieinanderliegenden Werten NICHT bei 0 beginnen, sonst sehen alle
   // Balken gleich lang aus. Basis = min - span*pad (≥0). Exakte Werte stehen zusätzlich am Balken.
-  function zoomDomain(vals,pad){ pad=(pad==null)?0.55:pad;
+  function zoomDomain(vals,pad){ pad=(pad==null)?0.3:pad;
     var xs=(vals||[]).map(function(v){ return numOr(v,NaN); }).filter(function(v){ return !isNaN(v); });
     if(!xs.length) return {lo:0,hi:1,zoomed:false};
     var mn=Math.min.apply(null,xs), mx=Math.max.apply(null,xs), span=mx-mn;
     if(span<=0) return {lo:0,hi:mx||1,zoomed:false};
-    return {lo:Math.max(0,mn-span*pad), hi:mx, zoomed:true};
+    var lo=Math.max(0, mn-span*pad);
+    return {lo:lo, hi:mx, zoomed: lo>0};   // „gespreizt" nur behaupten, wenn der Boden wirklich > 0 ist
   }
   function frac(v,dom){ var d=dom.hi-dom.lo; if(d<=0) return 1; return Math.max(0,Math.min(1,(numOr(v,0)-dom.lo)/d)); }
 
@@ -153,7 +154,7 @@
   // Verbindungslinien), FTE an den Karten. Ohne org: Namensliste als Fallback.
   function Fte(ctx, tk){ var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk);
     var fl=td.fteList||{}; var rows=fl.rows||[]; var org=fl.org; var total=(fl.total!=null)?fl.total:numOr(td.fte,null);
-    var hasOrg=!!(org&&org.nodes&&org.nodes.length);
+    var hasOrg=!!(org&&org.nodes&&org.nodes.length&&org.nodes.some(function(nd){ return nd.members&&nd.members.length; }));
     var head=fondHead(P, lbl, 'Besetzung & FTE', rows.length?(rows.length+' Mitarbeiter'):'');
     if(!rows.length && !hasOrg){ return Slide(ctx,[head, panel(P, h('div',{style:{flex:1,display:'flex',alignItems:'center',justifyContent:'center',textAlign:'center'}}, h('div',{},[
       h('div',{key:'t',style:{fontSize:'2.4cqw',fontWeight:800,color:P.ink}},'Keine Besetzung übernommen'),
@@ -237,6 +238,7 @@
     var members=(ctx.membersOf(tk)||[]).filter(function(m){ return ((td.members||[]).length===0)||(td.members||[]).indexOf(m.id)>=0; });
     var cur=(td.calls&&td.calls[period])||{};
     if(!Object.keys(cur).length) return emptyPanel(ctx, fondHead(P, lbl+' · '+eyebrow, 'Call-Kennzahlen'), P, 'Keine Call-Kennzahlen in diesem Zeitraum.');
+    members=members.filter(function(m){ return cur[m.id]; });   // nur MA mit Call-Zeile im Import (kein 0-Answered-Auffüllen)
     var rows=members.map(function(m){ var c=cur[m.id]||{}; return Object.assign({},c,{answered:c.answered}); });
     var ans=members.map(function(m){ return {m:m,n:numOr((cur[m.id]||{}).answered,0)}; }).sort(function(a,b){ return b.n-a.n; });
     var dom=zoomDomain(ans.map(function(a){ return a.n; }));   // gespreizte Skala: nahe Werte sichtbar unterscheiden
