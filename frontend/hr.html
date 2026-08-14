@@ -34392,8 +34392,9 @@ function PresentationsView({projects, employees, team, showToast}){
   const selProj=projList.find(p=>p.id===selProjId)||null;
   const skills=(selProj&&Array.isArray(selProj.skills)&&selProj.skills.length)?selProj.skills.map(s=>({key:String((s&&s.key)||s).toLowerCase(),label:(s&&s.label)||(s&&s.key)||s})):[{key:'all',label:'Team'}];
   const now=new Date(); const cw=getISOWeek(now);
-  const [pYear,setPYear]=useState(cw.year);
-  const [pNo,setPNo]=useState(cw.kw);
+  const lastFull=(()=>{ const d=new Date(now); d.setDate(d.getDate()-7); return getISOWeek(d); })();   // letzte VOLLE Woche = Auswertungs-Normalfall
+  const [pYear,setPYear]=useState(lastFull.year);
+  const [pNo,setPNo]=useState(lastFull.kw);
   const [mode,setMode]=useState('edit');        // edit | show | settings
   const [tab,setTab]=useState('');              // aktiver Skill-Tab (Eingabe)
   const [deck,setDeck]=useState(hcEmptyDeck());
@@ -34410,6 +34411,8 @@ function PresentationsView({projects, employees, team, showToast}){
   const [tplId,setTplId]=useState(null);
   const [stores,setStores]=useState({hours:{},scByEmp:{},callsByEmp:{},callsWin:[],callsCount:0,gaugesCount:0,gaugesWin:[],kpiWin:[],loaded:false});   // Schnitt 4/5: Live-Ablagen (5-Wochen-Fenster)
   const [fteStd,setFteStd]=useState({});   // report_fte: employee_id -> Standard-FTE
+  const dirtyRef=useRef(false);            // ungespeicherte Änderungen seit letztem Laden/Speichern
+  const periodRef=useRef({pNo:lastFull.kw,pYear:lastFull.year,projId:selProjId});   // vorheriger Zeitraum (für Auto-Save beim Wechsel)
   const accent=theme.accent||(selProj&&selProj.color)||'#2563eb';
   const fontFam=theme.font||'inherit';
   const emptyDeckFor=keys=>{ const teams={}; (keys||[]).forEach(k=>{teams[k]=hcEmptyTeam();}); return {titel:{untertitel:'',datum:'',ansprech:''},teams}; };
@@ -34419,7 +34422,12 @@ function PresentationsView({projects, employees, team, showToast}){
   const empName=e=>((e.first_name||'')+' '+(e.last_name||'')).trim();
   const callColsFor=t=>HC_CALL_COLS[t]||HC_CALL_COLS.sales;
 
-  const kwOptions=[]; for(let i=0;i<16;i++){ let kw=cw.kw-i,yr=cw.year; if(kw<=0){kw+=52;yr--;} kwOptions.push({kw,yr}); }
+  const kwOptions=[]; { const base=isoWeekMonday(lastFull.year,lastFull.kw); for(let i=0;i<16;i++){ const d=new Date(base); d.setDate(base.getDate()-i*7); const w=getISOWeek(d); kwOptions.push({kw:w.kw,yr:w.year}); } }
+  const MONTHS_FULL_DE=['Januar','Februar','März','April','Mai','Juni','Juli','August','September','Oktober','November','Dezember'];
+  const MONTHS_ABBR_DE=['Jan.','Feb.','März','Apr.','Mai','Juni','Juli','Aug.','Sep.','Okt.','Nov.','Dez.'];
+  const weekSpan=(kw,yr)=>{ const mon=isoWeekMonday(yr,kw); const sun=new Date(mon); sun.setDate(mon.getDate()+6);
+    return mon.getMonth()===sun.getMonth() ? (mon.getDate()+'. – '+sun.getDate()+'. '+MONTHS_FULL_DE[sun.getMonth()]+' '+sun.getFullYear())
+      : (mon.getDate()+'. '+MONTHS_ABBR_DE[mon.getMonth()]+' – '+sun.getDate()+'. '+MONTHS_ABBR_DE[sun.getMonth()]+' '+sun.getFullYear()); };
   useEffect(()=>{ if(skills.length && !skills.some(s=>s.key===tab)) setTab(skills[0].key); },[selProjId]);
 
   async function loadDeck(no,yr){ if(!selProj){ setLoading(false); return; } setLoading(true);
@@ -34431,7 +34439,21 @@ function PresentationsView({projects, employees, team, showToast}){
     }catch(e){ setRowId(null); setPublished(false); setToken(''); setDeck(base); }
     setLoading(false);
   }
-  useEffect(()=>{ setDummy(false); if(selProj){ const rv=reviewWeek(); loadDeck(rv.kw,rv.yr); } else setLoading(false); },[pNo,pYear,selProjId]);
+  // Persistiert einen Deck-Stand explizit unter (projId,kw,year) — für Auto-Save des VORHERIGEN Zeitraums.
+  async function persistDeck(dk, projId, kw, year, rid){
+    const proj=(projects||[]).find(p=>p.id===projId); const title=(proj?proj.name:projId)+' · KW '+kw+'/'+year;
+    const by=(typeof CURRENT_USER!=='undefined'&&CURRENT_USER)?(CURRENT_USER.name||CURRENT_USER.id):null;
+    try{ if(rid){ const {error}=await sb.from('presentations').update({data:dk,title,kind:'weekly',updated_at:new Date().toISOString()}).eq('id',rid); if(error) throw error; }
+      else { const {error}=await sb.from('presentations').insert({project_id:projId,period_type:'kw',period_year:year,period_no:kw,title,data:dk,kind:'weekly',created_by:by}); if(error) throw error; } }
+    catch(e){ return false; } return true; }
+  // Wechsel von Woche/Projekt: ungespeicherten VORHERIGEN Stand automatisch sichern (nicht still!), dann neu laden.
+  useEffect(()=>{ const prev=periodRef.current; const changed=prev.pNo!==pNo||prev.pYear!==pYear||prev.projId!==selProjId;
+    (async()=>{
+      if(changed && dirtyRef.current && !dummy){ const ok=await persistDeck(deck, prev.projId, prev.pNo, prev.pYear, rowId); if(ok) showToast&&showToast('Vorheriger Stand automatisch gespeichert (KW '+prev.pNo+'/'+prev.pYear+')','success'); }
+      dirtyRef.current=false; periodRef.current={pNo,pYear,projId:selProjId};
+      setDummy(false); if(selProj) loadDeck(pNo,pYear); else setLoading(false);
+    })();
+  },[pNo,pYear,selProjId]);
 
   // Look&Feel je Projekt (presentation_templates) + unser Logo (global, app_config).
   useEffect(()=>{ if(!selProj){ return; } let alive=true; (async()=>{
@@ -34443,8 +34465,9 @@ function PresentationsView({projects, employees, team, showToast}){
   // ── Schnitt 4: Bericht = presentations kind='weekly'. Import-Ablagen als LIVE-Datenquelle (5-Wochen-Fenster). ──
   // Berichts-KW (pNo) = Produktionswoche; ausgewertet wird die VORWOCHE (Review = pNo − 1). Alle Fenster/Anzeige/
   // Persistenz hängen an reviewWeek. Datum-basiert (robust über Jahresgrenzen), nie pNo direkt fürs Datenfenster.
-  const reviewMonday=()=>{ const m=isoWeekMonday(pYear,pNo); m.setDate(m.getDate()-7); return m; };
-  const reviewWeek=()=>{ const w=getISOWeek(reviewMonday()); return {kw:w.kw,yr:w.year}; };
+  // pNo/pYear = Auswertungswoche (die besprochene Woche); Default = letzte volle Woche. Alle Fenster enden hier.
+  const reviewMonday=()=>isoWeekMonday(pYear,pNo);
+  const reviewWeek=()=>({kw:pNo,yr:pYear});
   const windowWeeks=()=>{ const base=reviewMonday(); const arr=[]; for(let i=4;i>=0;i--){ const d=new Date(base); d.setDate(base.getDate()-i*7); const w=getISOWeek(d); arr.push({kw:w.kw,yr:w.year}); } return arr; };
   useEffect(()=>{ if(!selProj){ return; } let alive=true; (async()=>{
     const ws=windowWeeks(); const years=[...new Set(ws.map(w=>w.yr))]; const kws=[...new Set(ws.map(w=>w.kw))];
@@ -34579,11 +34602,11 @@ function PresentationsView({projects, employees, team, showToast}){
     try{
       if(rowId){ const {error}=await sb.from('presentations').update({data:deck,title,kind:'weekly',updated_at:new Date().toISOString()}).eq('id',rowId); if(error) throw error; }
       else { const {data,error}=await sb.from('presentations').insert({project_id:selProj.id,period_type:'kw',period_year:rev.yr,period_no:rev.kw,title,data:deck,kind:'weekly',created_by:by}).select('id').single(); if(error) throw error; setRowId(data.id); }
-      setSaved(true); setTimeout(()=>setSaved(false),2000);
+      dirtyRef.current=false; setSaved(true); setTimeout(()=>setSaved(false),2000);
     }catch(e){ showToast&&showToast('Speichern fehlgeschlagen: '+(e.message||''),'error'); }
     setBusy(false);
   }
-  const upd=fn=>setDeck(d=>{ const n=JSON.parse(JSON.stringify(d)); fn(n); return n; });
+  const upd=fn=>{ dirtyRef.current=true; setDeck(d=>{ const n=JSON.parse(JSON.stringify(d)); fn(n); return n; }); };
 
   function genToken(){ const c='abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'; let s=''; const a=new Uint8Array(24); try{ crypto.getRandomValues(a); }catch(e){} for(let i=0;i<24;i++){ s+=c[(a[i]|| (i*7+3))%62]; } return s; }
   // Veröffentlichen: Namen einfrieren (öffentlicher Renderer hat keine employees), Token setzen, published=true.
@@ -34600,7 +34623,7 @@ function PresentationsView({projects, employees, team, showToast}){
     try{
       if(rowId){ const {error}=await sb.from('presentations').update({data:snap,title,published:true,public_token:tok,kind:'weekly',updated_at:new Date().toISOString()}).eq('id',rowId); if(error) throw error; }
       else { const {data,error}=await sb.from('presentations').insert({project_id:selProj.id,period_type:'kw',period_year:rev.yr,period_no:rev.kw,title,data:snap,published:true,public_token:tok,kind:'weekly',created_by:by}).select('id').single(); if(error) throw error; setRowId(data.id); }
-      setPublished(true); setToken(tok); showToast&&showToast('Veröffentlicht','success');
+      dirtyRef.current=false; setPublished(true); setToken(tok); showToast&&showToast('Veröffentlicht','success');
     }catch(e){ showToast&&showToast('Veröffentlichen fehlgeschlagen: '+(e.message||''),'error'); }
     setBusy(false);
   }
@@ -34924,10 +34947,22 @@ function PresentationsView({projects, employees, team, showToast}){
       <select className="form-select" style={{width:'auto',fontWeight:700}} value={selProjId} onChange={e=>setSelProjId(e.target.value)}>
         {projList.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
       </select>
-      <select className="form-select" style={{width:'auto'}} value={pNo+'-'+pYear} onChange={e=>{const [k,y]=e.target.value.split('-');setPNo(parseInt(k));setPYear(parseInt(y));}}>
-        {kwOptions.map(({kw,yr})=><option key={kw+'-'+yr} value={kw+'-'+yr}>Produktion KW {kw}/{yr}</option>)}
-      </select>
-      <span style={{fontSize:12,color:'var(--muted)',fontWeight:700}} title="Ausgewertet wird die Vorwoche der gewählten Produktionswoche">→ Auswertung: KW {reviewWeek().kw}/{reviewWeek().yr}</span>
+      {(()=>{ const isLF=(pNo===lastFull.kw&&pYear===lastFull.year);
+        const hasData = Object.keys(stores.hours||{}).some(k=>k.endsWith('|'+pYear+'|'+pNo)) || Object.keys(stores.callsByEmp||{}).length>0 || (stores.gaugesWin||[]).some(g=>g.kw===pNo&&g.year===pYear) || (stores.kpiWin||[]).some(x=>x.kw===pNo&&x.year===pYear);
+        return <React.Fragment>
+          <div style={{display:'flex',flexDirection:'column',gap:1,padding:'5px 12px',border:'1px solid '+(isLF?'var(--border)':'#fde68a'),borderRadius:10,background:isLF?'var(--surface-2)':'#fffbeb'}}>
+            <span style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',color:'var(--muted)'}}>Auswertungswoche</span>
+            <span style={{fontSize:16,fontWeight:800,lineHeight:1.1}}>KW {pNo} · {weekSpan(pNo,pYear)}</span>
+          </div>
+          <select className="form-select" style={{width:'auto'}} value={pNo+'-'+pYear} onChange={e=>{const [k,y]=e.target.value.split('-');setPNo(parseInt(k));setPYear(parseInt(y));}} title="Auswertungswoche wechseln">
+            {kwOptions.map(({kw,yr})=><option key={kw+'-'+yr} value={kw+'-'+yr}>KW {kw} · {weekSpan(kw,yr)}{(kw===lastFull.kw&&yr===lastFull.year)?' — letzte volle Woche':''}</option>)}
+          </select>
+          {isLF
+            ? <span style={{fontSize:11,fontWeight:700,color:'#15803d',background:'#f0fdf4',border:'1px solid #bbf7d0',borderRadius:20,padding:'3px 10px'}}>✓ Letzte volle Woche</span>
+            : <span style={{fontSize:11,fontWeight:800,color:'#b45309',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:20,padding:'3px 10px'}} title={'Normalfall ist die letzte volle Woche (KW '+lastFull.kw+'). Diese Auswahl weicht ab.'}>⚠ Abweichend von der letzten vollen Woche</span>}
+          {stores.loaded && !hasData && <span style={{fontSize:11,fontWeight:800,color:'#b91c1c',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:20,padding:'3px 10px'}}>⛔ Keine Importdaten für diese Woche</span>}
+        </React.Fragment>;
+      })()}
       <div style={{flex:1}}/>
       {saved&&<span style={{color:'var(--green)',fontWeight:700,fontSize:13}}>✓ Gespeichert</span>}
       <div style={{display:'flex',border:'1px solid var(--border)',borderRadius:10,overflow:'hidden'}}>
