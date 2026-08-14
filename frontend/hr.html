@@ -33309,6 +33309,77 @@ function PivotImport({projId, employees, source, fields, table, accept, hint, on
   </div>;
 }
 
+// ══ Recruiting Marketing (Windsor.ai: Meta Ads + Instagram organisch) — management-only ══
+// Werte kommen als TEXT an → robust parsen. '' bleibt null (Unterschied fehlt vs. 0!). US-Format
+// (Komma = Tausender, Punkt = Dezimal, wie Windsor liefert). Datum ISO 'YYYY-MM-DD' → lokales Date.
+function wmNum(v){ if(v==null) return null; const s=String(v).trim(); if(s===''||s==='-') return null; const n=Number(s.replace(/,/g,'')); return isNaN(n)?null:n; }
+function wmDate(v){ return cqDate(v); }
+const WM_LEVELS=[['today','Heute'],['week','Diese Woche'],['month','Dieser Monat'],['all','Gesamt seit Start']];
+// Zeitebene → [from,to] (laufende Teilperiode bis heute). Vorperiode = GLEICH LANGER Ausschnitt (fairer Vergleich).
+function wmRange(level, today){ const d0=new Date(today); d0.setHours(0,0,0,0);
+  if(level==='today') return {from:new Date(d0), to:new Date(d0)};
+  if(level==='week'){ const w=getISOWeek(d0); return {from:isoWeekMonday(w.year,w.kw), to:new Date(d0)}; }
+  if(level==='month') return {from:new Date(d0.getFullYear(),d0.getMonth(),1), to:new Date(d0)};
+  return {from:null, to:new Date(d0)};   // all = gesamt seit Start
+}
+function wmPrevRange(level, cur){ if(level==='all'||!cur.from) return null;
+  const shift=(dt,days)=>{ const d=new Date(dt); d.setDate(d.getDate()-days); return d; };
+  if(level==='today') return {from:shift(cur.from,1), to:shift(cur.to,1)};
+  if(level==='week')  return {from:shift(cur.from,7), to:shift(cur.to,7)};
+  if(level==='month'){ const pf=new Date(cur.from.getFullYear(),cur.from.getMonth()-1,1);
+    const dim=new Date(pf.getFullYear(),pf.getMonth()+1,0).getDate();
+    return {from:pf, to:new Date(pf.getFullYear(),pf.getMonth(),Math.min(cur.to.getDate(),dim))}; }
+  return null;
+}
+function RecruitingMarketingView(){
+  const [rows,setRows]=useState(null);   // null=lädt, []=leer/Fehler, [...]=Daten
+  const [err,setErr]=useState('');
+  const [level,setLevel]=useState('month');
+  const today=new Date();
+  useEffect(()=>{ let alive=true; (async()=>{
+    try{ const {data,error}=await sb.from('windsor_marketing').select('*'); if(error) throw error;
+      const parsed=(data||[]).map(r=>({ date:wmDate(r.date), datasource:String(r.datasource||'').toLowerCase(), account_name:r.account_name, source:r.source, campaign:String(r.campaign||'').trim(),
+        spend:wmNum(r.spend), impressions:wmNum(r.impressions), clicks:wmNum(r.clicks), reach:wmNum(r.reach), followers_count:wmNum(r.followers_count) })).filter(x=>x.date);
+      parsed.sort((a,b)=>a.date-b.date);
+      if(alive) setRows(parsed);
+    }catch(e){ if(alive){ setErr(e.message||'Ladefehler'); setRows([]); } }
+  })(); return ()=>{alive=false;}; },[]);
+  const cur=wmRange(level,today);
+  const inRange=(d,r)=>!!(r && (!r.from||d>=r.from) && (!r.to||d<=r.to));
+  const rowsCur=(rows||[]).filter(x=>inRange(x.date,cur));
+  const meta=rowsCur.filter(x=>x.datasource==='facebook');
+  const insta=rowsCur.filter(x=>x.datasource==='instagram');
+  const sum=(a,k)=>a.reduce((s,x)=>s+(x[k]||0),0);
+  const fmtD=d=>d?d.toLocaleDateString('de-DE',{day:'numeric',month:'short'}):'';
+  const eur=n=>n==null?'—':n.toLocaleString('de-DE',{minimumFractionDigits:2,maximumFractionDigits:2})+' €';
+  const int=n=>n==null?'—':Math.round(n).toLocaleString('de-DE');
+  const rangeLabel = level==='all' ? ((rows&&rows.length)?('seit '+fmtD(rows[0].date)):'') : level==='today' ? fmtD(cur.to) : (fmtD(cur.from)+' – '+fmtD(cur.to));
+  const box=(bg,bd,col,txt)=><div style={{padding:'12px 16px',borderRadius:10,background:bg,border:'1px solid '+bd,color:col,fontSize:13,fontWeight:700}}>{txt}</div>;
+  const stat=(label,val,sub)=><div style={{flex:1,minWidth:150,border:'1px solid var(--border)',borderRadius:12,padding:'12px 16px',background:'var(--card)'}}>
+    <div style={{fontSize:11,fontWeight:800,letterSpacing:'.06em',textTransform:'uppercase',color:'var(--muted)'}}>{label}</div>
+    <div style={{fontSize:24,fontWeight:800,lineHeight:1.2,marginTop:2}}>{val}</div>
+    {sub?<div style={{fontSize:11,color:'var(--muted)',marginTop:2}}>{sub}</div>:null}
+  </div>;
+  return <div style={{maxWidth:1040}}>
+    <div style={{fontSize:20,fontWeight:800,marginBottom:2}}>📣 Recruiting Marketing</div>
+    <div style={{fontSize:13,color:'var(--muted)',marginBottom:14}}>Wo wir bei der Bewerbergewinnung stehen — Meta-Anzeigen und Instagram organisch.</div>
+    <div style={{display:'flex',gap:6,marginBottom:6,flexWrap:'wrap'}}>
+      {WM_LEVELS.map(([k,l])=><button key={k} className="btn btn-sm" onClick={()=>setLevel(k)} style={{fontWeight:700,background:level===k?'var(--accent,#2563eb)':'transparent',color:level===k?'#fff':'var(--text)',border:'1px solid '+(level===k?'var(--accent,#2563eb)':'var(--border)')}}>{l}</button>)}
+    </div>
+    <div style={{fontSize:12,color:'var(--muted)',marginBottom:16}}>{rangeLabel}</div>
+    {rows===null ? <div className="sp-empty">Lädt…</div>
+      : err ? box('#fef2f2','#fecaca','#b91c1c','Marketingdaten konnten nicht geladen werden: '+err)
+      : !rowsCur.length ? box('var(--surface-2)','var(--border)','var(--muted)', level==='today' ? 'Für heute liegen noch keine Daten vor — Windsor schreibt den Vortag um 00:00 UTC.' : 'Keine Marketingdaten für diesen Zeitraum.')
+      : <div>
+          <div style={{display:'flex',gap:12,flexWrap:'wrap'}}>
+            {stat('Ausgaben (Meta)', eur(sum(meta,'spend')), meta.length+' Tage')}
+            {stat('Meta-Reichweite', int(sum(meta,'reach')), 'bezahlt · Tages-Summe')}
+            {stat('Instagram-Reichweite', int(sum(insta,'reach')), 'organisch · Tages-Summe')}
+          </div>
+          <div style={{fontSize:11,color:'var(--muted)',marginTop:10}}>Reichweite ist die Summe der Tageswerte (nicht deduplizierte Unique-Reichweite). Meta (bezahlt) und Instagram (organisch) werden bewusst getrennt geführt. Bewerbungen, Kosten je Bewerbung und der Vorperioden-Vergleich folgen als Nächstes.</div>
+        </div>}
+  </div>;
+}
 // Pausen-Gegencheck (Schnitt 6): Auftraggeber-Pausen aus dem Import (weekly_hours.pause_hours = DH+DI) je
 // Skill × KW. „Unsere gestempelten" Pausen + Differenz erscheinen, sobald die Zeiterfassung Daten liefert
 // (Vergleichsbetrieb). NICHT in der Kundenpräsentation — interner Gegencheck. Sichtbar nur bei Pausendaten.
@@ -35644,6 +35715,7 @@ function App(){
       {key:'profitability',label:'Wirtschaftlichkeit',icon:'💹'},
       ...((team&&(team.role_keys||[]).some(r=>r==='management')) ? [{key:'praesentation',label:'Präsentationen',icon:'📊'}] : []),   // Management-only
       ...((team&&(team.role_keys||[]).some(r=>r==='management')) ? [{key:'dataimport',label:'Datenimport',icon:'📥'}] : []),   // Management-only
+      ...((team&&(team.role_keys||[]).some(r=>r==='management')) ? [{key:'recmkt',label:'Recruiting Marketing',icon:'📣'}] : []),   // Management-only
     ]},
     {sec:'System', items:[
       {key:'superadmin',label:'System / Konfiguration',icon:'⚙️'},
@@ -35712,6 +35784,7 @@ function App(){
       'profitability':'<path fill-rule="evenodd" d="M12 2.25c-5.385 0-9.75 4.365-9.75 9.75s4.365 9.75 9.75 9.75 9.75-4.365 9.75-9.75S17.385 2.25 12 2.25Zm-1.902 7.098a3.75 3.75 0 0 1 3.903-.884.75.75 0 1 0 .498-1.415A5.25 5.25 0 0 0 8.005 9.75H7.5a.75.75 0 0 0 0 1.5h.054a5.281 5.281 0 0 0 0 1.5H7.5a.75.75 0 0 0 0 1.5h.505a5.25 5.25 0 0 0 6.494 2.701.75.75 0 1 0-.498-1.415 3.75 3.75 0 0 1-4.252-1.286h3.001a.75.75 0 0 0 0-1.5H9.075a3.77 3.77 0 0 1 0-1.5h3.675a.75.75 0 0 0 0-1.5h-3c.105-.14.221-.274.348-.402Z" clip-rule="evenodd"/>',
       'praesentation':'<path fill-rule="evenodd" d="M2.25 2.25a.75.75 0 0 0 0 1.5H3v10.5a3 3 0 0 0 3 3h1.21l-1.172 3.513a.75.75 0 0 0 1.424.474l.329-.987h8.418l.33.987a.75.75 0 0 0 1.422-.474l-1.17-3.513H18a3 3 0 0 0 3-3V3.75h.75a.75.75 0 0 0 0-1.5H2.25Zm6.54 15h6.42l.5 1.5H8.29l.5-1.5Zm8.085-8.995a.75.75 0 1 0-.75-1.299 12.81 12.81 0 0 0-3.558 3.05L11.03 8.47a.75.75 0 0 0-1.06 0l-2.25 2.25a.75.75 0 1 0 1.06 1.06l1.72-1.72 1.774 1.775a.75.75 0 0 0 1.174-.144 11.31 11.31 0 0 1 3.477-3.146Z" clip-rule="evenodd"/>',
       'dataimport':'<path fill-rule="evenodd" d="M12 2.25a.75.75 0 0 1 .75.75v11.69l3.22-3.22a.75.75 0 1 1 1.06 1.06l-4.5 4.5a.75.75 0 0 1-1.06 0l-4.5-4.5a.75.75 0 1 1 1.06-1.06l3.22 3.22V3a.75.75 0 0 1 .75-.75Zm-9 13.5a.75.75 0 0 1 .75.75v2.25a1.5 1.5 0 0 0 1.5 1.5h13.5a1.5 1.5 0 0 0 1.5-1.5V16.5a.75.75 0 0 1 1.5 0v2.25a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3V16.5a.75.75 0 0 1 .75-.75Z" clip-rule="evenodd"/>',
+      'recmkt':'<path d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 0 1 3 19.875v-6.75ZM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V8.625ZM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V4.125Z"/>',
       'superadmin':'<path fill-rule="evenodd" d="M11.078 2.25c-.917 0-1.699.663-1.85 1.567L9.05 4.889c-.02.12-.115.26-.297.348a7.493 7.493 0 0 0-.986.57c-.166.115-.334.126-.45.083L6.3 5.508a1.875 1.875 0 0 0-2.282.819l-.922 1.597a1.875 1.875 0 0 0 .432 2.385l.84.692c.095.078.17.229.154.43a7.598 7.598 0 0 0 0 1.139c.015.2-.059.352-.153.43l-.841.692a1.875 1.875 0 0 0-.432 2.385l.922 1.597a1.875 1.875 0 0 0 2.282.818l1.019-.382c.115-.043.283-.031.45.082.312.214.641.405.985.57.182.088.277.228.297.35l.178 1.071c.151.904.933 1.567 1.85 1.567h1.844c.916 0 1.699-.663 1.85-1.567l.178-1.072c.02-.12.114-.26.297-.349.344-.165.673-.356.985-.57.167-.114.335-.125.45-.082l1.02.382a1.875 1.875 0 0 0 2.28-.819l.923-1.597a1.875 1.875 0 0 0-.432-2.385l-.84-.692c-.095-.078-.17-.229-.154-.43a7.614 7.614 0 0 0 0-1.139c-.016-.2.059-.352.153-.43l.84-.692c.708-.582.891-1.59.433-2.385l-.922-1.597a1.875 1.875 0 0 0-2.282-.818l-1.02.382c-.114.043-.282.031-.449-.083a7.49 7.49 0 0 0-.985-.57c-.183-.087-.277-.227-.297-.348l-.179-1.072a1.875 1.875 0 0 0-1.85-1.567h-1.843ZM12 15.75a3.75 3.75 0 1 0 0-7.5 3.75 3.75 0 0 0 0 7.5Z" clip-rule="evenodd"/>',
       'skillmatrix':'<path fill-rule="evenodd" d="M1.5 5.625c0-1.036.84-1.875 1.875-1.875h17.25c1.035 0 1.875.84 1.875 1.875v12.75c0 1.035-.84 1.875-1.875 1.875H3.375A1.875 1.875 0 0 1 1.5 18.375V5.625ZM21 9.375A.375.375 0 0 0 20.625 9h-7.5a.375.375 0 0 0-.375.375v1.5c0 .207.168.375.375.375h7.5a.375.375 0 0 0 .375-.375v-1.5Zm0 3.75a.375.375 0 0 0-.375-.375h-7.5a.375.375 0 0 0-.375.375v1.5c0 .207.168.375.375.375h7.5a.375.375 0 0 0 .375-.375v-1.5Zm0 3.75a.375.375 0 0 0-.375-.375h-7.5a.375.375 0 0 0-.375.375v1.5c0 .207.168.375.375.375h7.5a.375.375 0 0 0 .375-.375v-1.5ZM10.875 18.75a.375.375 0 0 0 .375-.375v-1.5a.375.375 0 0 0-.375-.375h-7.5a.375.375 0 0 0-.375.375v1.5c0 .207.168.375.375.375h7.5ZM3.375 15h7.5a.375.375 0 0 0 .375-.375v-1.5a.375.375 0 0 0-.375-.375h-7.5a.375.375 0 0 0-.375.375v1.5c0 .207.168.375.375.375Zm0-3.75h7.5a.375.375 0 0 0 .375-.375v-1.5A.375.375 0 0 0 10.875 9h-7.5A.375.375 0 0 0 3 9.375v1.5c0 .207.168.375.375.375Z" clip-rule="evenodd"/>',
       'elearning':'<path d="M11.7 2.805a.75.75 0 0 1 .6 0A60.65 60.65 0 0 1 22.83 8.72a.75.75 0 0 1-.231 1.337 49.948 49.948 0 0 0-9.902 3.912l-.003.002c-.114.06-.227.119-.34.18a.75.75 0 0 1-.707 0A50.88 50.88 0 0 0 7.5 12.173v-.224c0-.131.067-.248.172-.311a54.615 54.615 0 0 1 4.653-2.52.75.75 0 0 0-.65-1.352 56.123 56.123 0 0 0-4.78 2.589 1.858 1.858 0 0 0-.859 1.228 49.803 49.803 0 0 0-4.634-1.527.75.75 0 0 1-.231-1.337A60.653 60.653 0 0 1 11.7 2.805Z"/> <path d="M13.06 15.473a48.45 48.45 0 0 1 7.666-3.282c.134 1.414.22 2.843.255 4.284a.75.75 0 0 1-.46.711 47.87 47.87 0 0 0-8.105 4.342.75.75 0 0 1-.832 0 47.87 47.87 0 0 0-8.104-4.342.75.75 0 0 1-.461-.71c.035-1.442.121-2.87.255-4.286.921.304 1.83.634 2.726.99v1.27a1.5 1.5 0 0 0-.14 2.508c-.09.38-.222.753-.397 1.11.452.213.901.434 1.346.66a6.727 6.727 0 0 0 .551-1.607 1.5 1.5 0 0 0 .14-2.67v-.645a48.549 48.549 0 0 1 3.44 1.667 2.25 2.25 0 0 0 2.12 0Z"/> <path d="M4.462 19.462c.42-.419.753-.89 1-1.395.453.214.902.435 1.347.662a6.742 6.742 0 0 1-1.286 1.794.75.75 0 0 1-1.06-1.06Z"/>',
@@ -35757,7 +35830,7 @@ function App(){
     if(!ff && ['profitability','productivity','locations','payroll'].includes(view)) setView('cockpit'); },[view]);
   // Präsentationen sind Management-only (nicht HR): Direktaufruf abfangen.
   useEffect(()=>{ const mgmt=(team&&(team.role_keys||[]).some(r=>r==='management'));
-    if(!mgmt && (view==='praesentation'||view==='dataimport')) setView('cockpit'); },[view]);
+    if(!mgmt && (view==='praesentation'||view==='dataimport'||view==='recmkt')) setView('cockpit'); },[view]);
   const allNavSections = isEmpUser
     ? [{sec:'Mein Bereich', items:[{key:'mein-plan',label:'Mein Schichtplan',icon:'📋'}]}, ...navSections]
     : navSections;
@@ -35951,6 +36024,7 @@ function App(){
           {view==='orgchart'&&<OrgChart projects={projects} employees={employees} orgCharts={orgCharts} setOrgCharts={setOrgCharts}/>}
           {view==='praesentation'&&<PresentationsView projects={projects} employees={employees} team={team} showToast={showToast}/>}
           {view==='dataimport'&&<DataImportView projects={projects} employees={employees}/>}
+          {view==='recmkt'&&<RecruitingMarketingView/>}
           {view==='callqa'&&<CallQaView projects={projects} employees={employees} showToast={showToast}/>}
           {view==='skillmatrix'&&<SkillMatrix employees={employees} projects={projects}/>}
           {view==='kanban'&&<RecruitingKanban employees={employees} setEmployees={setEmployees} cvList={cvList} setCvList={setCvList} projects={projects} onPromoteToEmployee={promoteToEmployee} showToast={showToast}/>}
