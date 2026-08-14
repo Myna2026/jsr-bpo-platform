@@ -8297,6 +8297,9 @@ function MarginRing({pct, size=62, stroke=8}){
 function HoverChart({data, labels, color, kind='area', h=48, fmt}){
   const [hi,setHi]=useState(null);
   const idRef=useRef(null); if(!idRef.current) idRef.current='hc'+(SPARK_SEQ++);
+  const wrapRef=useRef(null);
+  // Touch: Antippen/Wischen zeigt den Wert (Hover gibt es am Telefon nicht). Nächster Datenpunkt zum Finger.
+  const touchIdx=e=>{ const el=wrapRef.current, t=e.touches&&e.touches[0]; if(!el||!t) return; const r=el.getBoundingClientRect(); if(!r.width) return; const idx=Math.max(0,Math.min((data||[]).length-1,Math.floor((t.clientX-r.left)/r.width*(data||[]).length))); setHi(idx); };
   const vals=(data||[]).map(v=>+v||0); const n=vals.length;
   const f=fmt||(v=>String(v));
   if(!n) return <div style={{height:h}}/>;
@@ -8315,7 +8318,7 @@ function HoverChart({data, labels, color, kind='area', h=48, fmt}){
     const area=line+' L'+xL(n-1).toFixed(2)+' '+(h-padY)+' L'+xL(0).toFixed(2)+' '+(h-padY)+' Z';
     inner=[<path key="a" d={area} fill={'url(#'+idRef.current+')'}/>, <path key="l" d={line} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke"/>];
   }
-  return <div style={{position:'relative'}} onMouseLeave={()=>setHi(null)}>
+  return <div ref={wrapRef} style={{position:'relative',touchAction:'pan-y'}} onMouseLeave={()=>setHi(null)} onTouchStart={touchIdx} onTouchMove={touchIdx} onTouchEnd={()=>setTimeout(()=>setHi(null),1400)}>
     <svg width="100%" height={h} viewBox={'0 0 '+W+' '+h} preserveAspectRatio="none" style={{display:'block'}}>
       {kind!=='bar'&&<defs><linearGradient id={idRef.current} x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor={color} stopOpacity="0.24"/><stop offset="1" stopColor={color} stopOpacity="0"/></linearGradient></defs>}
       {inner}
@@ -8649,6 +8652,28 @@ function Widget_DailyReports({employees, projects, team}){
     </div>
   );
 }
+// Monatsmetriken + Tagesverläufe fürs Cockpit (Desktop wie Mobile identisch). Krank/Urlaub = laufender Monat
+// (Werktags-Personentage je Tag), Kündigungen = termination_date im Monat, Bewerbungen = cv_date/cv_received_at (30 Tage).
+function cockpitMonthMetrics(employees, cvsDb){
+  const MON=['Jan','Feb','Mär','Apr','Mai','Jun','Jul','Aug','Sep','Okt','Nov','Dez'];
+  const now=new Date(), year=now.getFullYear(), todayM=now.getMonth();
+  const isWD=d=>{ const w=d.getDay(); return w>=1&&w<=5; };
+  const covers=(a,d)=>{ if(!a||!a.from) return false; const f=new Date(a.from+'T00:00:00'), t=new Date((a.to||a.from)+'T00:00:00'); return d>=f&&d<=t; };
+  const sameDay=(x,d)=>x.getFullYear()===d.getFullYear()&&x.getMonth()===d.getMonth()&&x.getDate()===d.getDate();
+  const cvDates=[].concat((cvsDb||[]).map(c=>c.cv_date),(employees||[]).filter(e=>e&&e.source==='cv').map(e=>e.cv_received_at)).map(x=>x?new Date(x):null).filter(d=>d&&!isNaN(d));
+  const lastDom=new Date(year,todayM+1,0).getDate(); const monDays=[]; for(let dd=1;dd<=lastDom;dd++) monDays.push(new Date(year,todayM,dd));
+  const monLabels=monDays.map(d=>d.getDate()+'. '+MON[d.getMonth()]);
+  const dSick=monDays.map(d=>isWD(d)?(employees||[]).filter(e=>(e.absences||[]).some(a=>a&&a.type==='sick'&&covers(a,d))).length:0);
+  const dVac=monDays.map(d=>isWD(d)?(employees||[]).filter(e=>(e.absences||[]).some(a=>a&&a.type==='vacation'&&covers(a,d))).length:0);
+  const dKuend=monDays.map(d=>(employees||[]).filter(e=>{ const td=e&&e.termination_date; return td&&sameDay(new Date(td),d); }).length);
+  const days30=[]; { const b=new Date(); b.setHours(0,0,0,0); for(let i=29;i>=0;i--){ const d=new Date(b); d.setDate(b.getDate()-i); days30.push(d); } }
+  const labels30=days30.map(d=>d.getDate()+'. '+MON[d.getMonth()]);
+  const dCv=days30.map(d=>cvDates.filter(x=>sameDay(x,d)).length);
+  const absMon=a=>{ if(!a||!a.from) return 0; const from=new Date(a.from+'T00:00:00'), to=new Date((a.to||a.from)+'T00:00:00'); const ms=new Date(year,todayM,1), me=new Date(year,todayM+1,0); let s=from<ms?ms:from, e=to>me?me:to; if(s>e) return 0; let n=0,g=0,d=new Date(s.getFullYear(),s.getMonth(),s.getDate()); const end=new Date(e.getFullYear(),e.getMonth(),e.getDate()); while(d<=end&&g<400){ const dw=d.getDay(); if(dw>=1&&dw<=5)n++; d.setDate(d.getDate()+1); g++; } return n; };
+  let krankM=0,urlaubM=0; (employees||[]).forEach(e=>{ (e.absences||[]).forEach(a=>{ if(a&&a.type==='sick')krankM+=absMon(a); else if(a&&a.type==='vacation')urlaubM+=absMon(a); }); });
+  const kuendM=(employees||[]).filter(e=>{ const td=e&&e.termination_date; if(!td) return false; const d=new Date(td); return d.getFullYear()===year&&d.getMonth()===todayM; }).length;
+  return {monLabels,dSick,dVac,dKuend,labels30,dCv,krankM,urlaubM,kuendM};
+}
 function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence, cvsDb, payslipsDb, feedbackTodayDb, setEmployees, showToast}){
   const isFullFin=(team&&(team.role_keys||[]).some(r=>r==='management'||r==='finance'));   // Personalkosten/Marge nur Management/Finance
   const now=new Date();
@@ -8656,13 +8681,10 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
   const ym=todayStr.slice(0,7);
   const _fxInfoMob=fxInfoFor(employees, ym);   // {mode:'ok'|'stale'|'missing', note}
   const fmtDe=s=>{ if(!s) return ''; const p=String(s).slice(0,10).split('-'); return p.length===3?(p[2]+'.'+p[1]+'.'):s; };
-  const nav=v=>onNavigate&&onNavigate({kind:'view',view:v});
 
   const active=employees.filter(e=>e&&e.status==='active');
   const inTraining=employees.filter(e=>e&&e.status==='training');
   const inbox=(cvsDb||[]).filter(c=>c&&c.status==='cv_inbound');   // Posteingang: ungesichtet, Arbeitsliste
-  const todaySick=employees.filter(e=>(e.absences||[]).some(a=>a.type==='sick'&&absCoversDay(a,todayStr)));
-  const todayVac=employees.filter(e=>(e.absences||[]).some(a=>a.type==='vacation'&&absCoversDay(a,todayStr)));
 
   // Offene Urlaubsanträge (pending) + Realtime; decide() genehmigt/lehnt inline über den kanonischen Pfad.
   const [pending,setPending]=useState([]);
@@ -8727,37 +8749,35 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
   const cvMonth=(cvsDb||[]).filter(c=>{const d=_cvd(c);return d&&d.slice(0,7)===_cvT.slice(0,7);}).length;
   const shortName=e=>e.first_name+' '+String(e.last_name||'').charAt(0)+'.';
 
-  const tiles=[
-    {val:active.length,label:'Aktiv',sub:'Mitarbeiter',color:'#0F5661'},
-    {val:inTraining.length,label:'Schulung',sub:'Mitarbeiter',color:'#7c3aed'},    {val:inbox.length,label:'Bewerbungen',sub:'nicht gesichtet',color:'#6366f1',nav:'kanban'},
-    {val:todayVac.length+todaySick.length,label:'Heute frei',sub:todayVac.length+' Urlaub · '+todaySick.length+' krank',color:'#d97706'},
-  ];
+  const M=cockpitMonthMetrics(employees, cvsDb);
 
   return (
     <div className="ckm">
       {/* Termine heute — ganz oben, noch vor den Kennzahlen. Was heute ansteht, sieht man zuerst. */}
       <CockpitTodayEvents mobile={true} onNavigate={onNavigate}/>
 
-      {/* 1) KPI-Kacheln */}
-      <div className="ckm-tiles">
-        {tiles.map((k,i)=>(
-          <div key={i} className="ckm-tile" onClick={k.nav?()=>nav(k.nav):undefined} style={k.nav?{cursor:'pointer'}:undefined} title={k.nav?'Zu den Bewerbungen':undefined}>
-            <div className="ckm-tile-lbl">{k.label}{k.nav?' →':''}</div>
-            <div className="ckm-tile-val" style={{color:k.color}}>{k.val}</div>
-            <div className="ckm-tile-sub">{k.sub}</div>
-          </div>
-        ))}
+      {/* Kennzahlen: zwei kompakte Kacheln + gestapelte Verlaufs-Kacheln. Auf schmalem Screen untereinander,
+          damit die Verläufe volle Breite bekommen; Werte per Antippen (kein Hover am Telefon). Gleiche Optik wie Desktop. */}
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
+        <TrendTile label="Aktiv" value={active.length} sub="Mitarbeiter" color="#0F5661"/>
+        <TrendTile label="Schulung" value={inTraining.length} sub="Mitarbeiter" color="#7c3aed"/>
       </div>
+      <TrendTile label="Krankheitstage" value={M.krankM} sub="laufender Monat" color="#dc2626" chart={<HoverChart data={M.dSick} labels={M.monLabels} color="#dc2626" kind="area" h={46} fmt={v=>v+(v===1?' Person':' Personen')}/>}/>
+      <TrendTile label="Urlaubstage" value={M.urlaubM} sub="laufender Monat" color="#d97706" chart={<HoverChart data={M.dVac} labels={M.monLabels} color="#d97706" kind="area" h={46} fmt={v=>v+(v===1?' Person':' Personen')}/>}/>
+      <TrendTile label="Bewerbungen" value={inbox.length} sub="nicht gesichtet" color="#6366f1" nav="kanban" onNavigate={onNavigate} chart={<HoverChart data={M.dCv} labels={M.labels30} color="#6366f1" kind="area" h={46} fmt={v=>v+(v===1?' Bewerbung':' Bewerbungen')}/>}/>
 
-      {/* CV-Eingang — nach oben, hochwertiger: heute/gestern/7 Tage/Monat (cv_date), Klick → Bewerbungen */}
-      <div className="ckm-card ckm-clik" style={{borderLeft:'4px solid #6366f1'}} onClick={()=>onNavigate&&onNavigate({kind:'view',view:'cvs',navFilter:{type:'cv_inbox',label:'Bewerbungen'}})}>
-        <div className="ckm-h" style={{color:'#4f46e5'}}>📥 CV-Eingang <span className="ckm-arrow">→</span></div>
-        <div className="ckm-cv">
-          <div><span className="ckm-cv-n" style={{color:'#4f46e5'}}>{cvToday}</span><span className="ckm-cv-l">heute</span></div>
-          <div><span className="ckm-cv-n">{cvYesterday}</span><span className="ckm-cv-l">gestern</span></div>
-          <div><span className="ckm-cv-n">{cv7}</span><span className="ckm-cv-l">7 Tage</span></div>
-          <div><span className="ckm-cv-n">{cvMonth}</span><span className="ckm-cv-l">Monat</span></div>
+      {/* CV-Eingang: Kennzahl-Kästen + 30-Tage-Balken (Antippen zeigt den Tag) */}
+      <div className="ckm-clik" style={{background:'var(--surface)',border:'1px solid var(--border)',borderLeft:'4px solid #6366f1',borderRadius:16,padding:'14px 16px'}} onClick={()=>onNavigate&&onNavigate({kind:'view',view:'cvs',navFilter:{type:'cv_inbox',label:'Bewerbungen'}})}>
+        <div style={{fontSize:13,fontWeight:800,color:'#4f46e5',marginBottom:12}}>📥 CV-Eingang <span style={{color:'#6366f1'}}>→</span></div>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:8,marginBottom:14}}>
+          {[['heute',cvToday,'#6366f1'],['gestern',cvYesterday],['7 Tage',cv7],['Monat',cvMonth]].map((s,i)=>(
+            <div key={i} style={{background:'var(--surface-2)',border:'1px solid var(--border)',borderRadius:12,padding:'9px 6px',textAlign:'center'}}>
+              <div style={{fontSize:22,fontWeight:800,fontFamily:'var(--mono)',color:s[2]||'var(--text)',lineHeight:1}}>{s[1]}</div>
+              <div style={{fontSize:9.5,color:'var(--muted)',marginTop:4,textTransform:'uppercase',letterSpacing:'.04em',fontWeight:600}}>{s[0]}</div>
+            </div>))}
         </div>
+        <HoverChart data={M.dCv} labels={M.labels30} color="#6366f1" kind="bar" h={52} fmt={v=>v+(v===1?' Bewerbung':' Bewerbungen')}/>
+        <div style={{fontSize:10,color:'var(--muted)',marginTop:6,textAlign:'right'}}>Eingang je Tag · letzte 30 Tage</div>
       </div>
 
       {/* Leistung je Projekt · Skill — nach oben, hochwertiger */}
@@ -8785,7 +8805,7 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
       {/* KPIs je Projekt·Skill — bei den projektbezogenen Blöcken, direkt unter „Leistung je Skill".
           Automatisch für Management/HR, sobald KPIs konfiguriert sind (sonst null). */}
       <CockpitProjectKpis projects={projects} team={team} mobile={true}/>
-      <CockpitMarketingTile team={team} employees={employees} mobile={true}/>
+      <CockpitMarketingTile team={team} employees={employees} mobile={true} onNavigate={onNavigate}/>
       <CockpitPresentationComments projects={projects} team={team} mobile={true}/>
 
       {/* Kranken- & Urlaubsquote je Projekt·Skill (Vorwoche vs. laufend). Eigene Karten-Optik, da das
@@ -8841,7 +8861,6 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
             const _ac=projectAutoCostsForMonth(p.id, ym, employees, projects);   // Vollkosten inkl. Umlagen
             const _wf=projectDbWaterfall(_ac, rev);
             const mg=_wf.mgIV;
-            const mgc=mg==null?'var(--muted)':mg>=20?'#059669':mg>=10?'#d97706':'#dc2626';
             const _lekP=(employees||[]).some(e=>e&&['active','training'].includes(e.status)&&e.project_id===p.id&&salaryCurrency(e)==='ALL');
             const _lekMiss=_lekP&&_fxInfoMob.mode==='missing'; const _lekStale=_lekP&&_fxInfoMob.mode==='stale';
             return (
@@ -8853,7 +8872,7 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
                   </div>
                   {isFullFin&&(_lekMiss
                     ? <span className="ckm-marge" style={{background:'var(--red-bg)',color:'var(--red)'}} title="EUR/LEK-Kurs fehlt">Marge — · Kurs fehlt</span>
-                    : <span className="ckm-marge" style={{background:_lekStale?'#fffbeb':mgc+'1f',color:_lekStale?'#b45309':mgc}} title={_lekStale?_fxInfoMob.note:undefined}>{mg==null?'Marge —':'Marge '+mg+'%'}{_lekStale&&' ⚠'}</span>)}
+                    : <div style={{display:'flex',flexDirection:'column',alignItems:'center',gap:2,flexShrink:0}} title={_lekStale?_fxInfoMob.note:undefined}><MarginRing pct={mg} size={50}/>{_lekStale?<span style={{fontSize:9,color:'#b45309',fontWeight:700}}>⚠ Kurs</span>:<span style={{fontSize:9,color:'var(--muted)',fontWeight:700,textTransform:'uppercase',letterSpacing:'.04em'}}>Marge</span>}</div>)}
                 </div>
                 {isFullFin&&rev>0&&!_lekMiss&&<div className="ckm-db">DB I {_wf.mgI}% · II {_wf.mgII}% · III {_wf.mgIII}% · IV <b>{_wf.mgIV}%</b>{_lekStale&&' · Kurs '+(_fxInfoMob.from?fxMonthLabel(_fxInfoMob.from):'Standard')}</div>}
                 {Object.keys(bySkill).length>0 && <div className="ckm-projrow-skills">
@@ -9453,6 +9472,8 @@ function fnCats(){ const parse=k=>{ try{ const r=JSON.parse(localStorage.getItem
   const overhead=parse('jsr_overhead_positions_v1'); if(!overhead.size) ['projektleiter','trainer','teamleiter','qm','supervisor','coach','ansprechpartner'].forEach(x=>overhead.add(x)); return {overhead}; }
 function fnCategory(position,cats){ const p=String(position||'').toLowerCase().trim(); if(!p) return {cat:'neutral',label:'—'}; if(p==='projektleiter') return {cat:'pl',label:'Projektleiter'}; if(cats&&cats.overhead.has(p)) return {cat:'overhead',label:position,key:p}; if(p.indexOf('agent')>=0||p==='asp') return {cat:'agent',label:'Agent'}; return {cat:'neutral',label:position}; }
 function fnColor(position,cats){ const c=fnCategory(position,cats); return c.cat==='pl'?FN_PL:c.cat==='overhead'?fnOverheadColor(c.key):c.cat==='agent'?FN_AGENT:FN_NEUTRAL; }
+// BAND ≠ Farbe: Supervisor arbeitet am Telefon → Agenten-Band (behält aber die eigene Violett-Farbe via fnColor/Overhead-Map).
+function fnBand(position,cats){ const p=String(position||'').toLowerCase().trim(); if(p==='projektleiter') return 'pl'; if(p==='supervisor'||p.indexOf('agent')>=0||p==='asp') return 'agent'; if(cats&&cats.overhead.has(p)) return 'overhead'; return 'neutral'; }
 // Signatur der Organigramm-Bau-EINGABEN je Projekt-MA: id → {name, position, tier, skills}. NICHT die
 // Knoten-Anordnung → manuelles Verschieben ändert die Signatur nicht (kein Fehlalarm). Ausscheiden/
 // Projektwechsel fallen automatisch raus, weil die Liste schon active/training + Zuweisung-auf-Projekt ist.
@@ -35117,14 +35138,14 @@ function PresentationsView({projects, employees, team, showToast}){
     // → öffentliche Seite/PDF brauchen KEINE Farb-/Kategorie-Logik. Kein Baum, keine Skalierung.
     const cats=fnCats();
     const onSkill=e=>String(e.project_skill||'').toLowerCase()===t || empAssignments(e).some(a=>a.project_id===selProj.id&&String(a.skill||'').toLowerCase()===t);
-    const isPL=e=>fnCategory(e.position,cats).cat==='pl';
+    const isPL=e=>fnBand(e.position,cats)==='pl';
     const projEmp=(employees||[]).filter(e=>e&&['active','training'].includes(e.status)&&empAssignments(e).some(a=>a.project_id===selProj.id));
     const people=projEmp.filter(e=>onSkill(e)||isPL(e));
-    const mk=e=>{ const col=fnColor(e.position,cats); const ci=fnCategory(e.position,cats);
+    const mk=e=>{ const col=fnColor(e.position,cats); const b=fnBand(e.position,cats);
       return {id:e.id,name:empName(e),fte:(fteStd[e.id]!=null?fteStd[e.id]:1),color:col,txt:yiqText(col),
-        role:(ci.cat==='pl'?'Projektleiter':ci.cat==='overhead'?(e.position||'Overhead'):ci.cat==='agent'?'Agent':(e.position||''))}; };
+        role:(b==='pl'?'Projektleiter':b==='overhead'?(e.position||'Overhead'):(e.position||'Agent'))}; };
     const bd={pl:[],overhead:[],agent:[]};
-    people.forEach(e=>{ const cat=fnCategory(e.position,cats).cat; const key=cat==='pl'?'pl':cat==='agent'?'agent':'overhead'; bd[key].push(mk(e)); });
+    people.forEach(e=>{ const b=fnBand(e.position,cats); const key=b==='pl'?'pl':b==='agent'?'agent':'overhead'; bd[key].push(mk(e)); });
     Object.keys(bd).forEach(k=>bd[k].sort((a,b)=>a.name.localeCompare(b.name,'de')));
     const bands=[{key:'pl',label:'Projektleitung',people:bd.pl},{key:'overhead',label:'Overhead',people:bd.overhead},{key:'agent',label:'Agenten',people:bd.agent}].filter(b=>b.people.length);
     upd(n=>{ n.teams[t].fteList={rows,total,bands,_src:'imported'}; if(!n.teams[t].fte) n.teams[t].fte=String(total).replace('.',','); }); }
