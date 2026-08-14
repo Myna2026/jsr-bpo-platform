@@ -7089,20 +7089,19 @@ function Widget_MaPerProject({employees, projects}){
   // (CEO/HR/…). Damit die Summe der Zeilen wieder dem Headcount entspricht.
   const noProj=active.filter(e=>!e.project_id||!projIds.has(e.project_id));
   const noProjBy={}; noProj.forEach(e=>{const s=e.position||'—';noProjBy[s]=(noProjBy[s]||0)+1;});
-  if(!rows.length && !noProj.length) return <div className="w-empty">Keine Zuordnungen.</div>;
-  return <div>
-    {rows.map((r,i)=>(
-      <div key={i} style={{marginBottom:8}}>
-        <div className="widget-row" style={{borderBottom:'none',padding:'2px 0'}}><span>{r.name}</span><span className="num">{r.count}</span></div>
-        <div className="widget-sub" style={{marginTop:0}}>{Object.keys(r.bySkill).map(s=>s+': '+r.bySkill[s]).join(' · ')}</div>
+  const all=(projects||[]).map(p=>{ const emps=active.filter(e=>e.project_id===p.id); if(!emps.length) return null; const bySkill={}; emps.forEach(e=>{const s=e.project_skill||e.primary_skill||'—';bySkill[s]=(bySkill[s]||0)+1;}); return {name:p.name,color:p.color||'#0F5661',count:emps.length,bySkill}; }).filter(Boolean);
+  if(noProj.length) all.push({name:'Ohne Projekt',color:'#94a3b8',count:noProj.length,bySkill:noProjBy});
+  if(!all.length) return <div className="w-empty">Keine Zuordnungen.</div>;
+  const max=Math.max(...all.map(r=>r.count),1);
+  return <div style={{display:'flex',flexDirection:'column',gap:12}}>
+    {all.map((r,i)=>(<div key={i}>
+      <div style={{display:'flex',alignItems:'baseline',justifyContent:'space-between',gap:8,marginBottom:3}}>
+        <span style={{fontSize:13,fontWeight:700}}>{r.name}</span>
+        <span style={{fontFamily:'var(--mono)',fontSize:17,fontWeight:800,color:r.color}}>{r.count}</span>
       </div>
-    ))}
-    {noProj.length>0&&(
-      <div style={{marginBottom:8}}>
-        <div className="widget-row" style={{borderBottom:'none',padding:'2px 0',color:'var(--muted)'}}><span>Ohne Projekt</span><span className="num">{noProj.length}</span></div>
-        <div className="widget-sub" style={{marginTop:0}}>{Object.keys(noProjBy).map(s=>s+': '+noProjBy[s]).join(' · ')}</div>
-      </div>
-    )}
+      <div style={{height:8,background:'var(--surface-2)',borderRadius:5,overflow:'hidden'}}><div style={{width:Math.max(4,r.count/max*100)+'%',height:'100%',background:r.color,borderRadius:5}}/></div>
+      <div style={{display:'flex',gap:6,flexWrap:'wrap',marginTop:5}}>{Object.keys(r.bySkill).map(s=><span key={s} style={{fontSize:10.5,fontWeight:600,color:'var(--muted)',background:'var(--surface-2)',border:'1px solid var(--border)',borderRadius:20,padding:'1px 8px'}}>{s} · {r.bySkill[s]}</span>)}</div>
+    </div>))}
   </div>;
 }
 function Widget_TrainingStatus({plans}){
@@ -8238,6 +8237,42 @@ function CockpitTodayEvents({mobile, onNavigate}){
     ? <div className="ckm-card" style={{borderLeft:'4px solid #0F5661'}}>{head}<div style={{padding:'2px 14px 10px'}}>{body}</div></div>
     : <div className="card" style={{marginBottom:12,borderLeft:'4px solid #0F5661'}}><div style={{padding:'12px 14px'}}>{head}{body}</div></div>;
 }
+// ── Kalender-Monatsübersicht im Cockpit: aktuelle + 3 kommende Wochen (rollierend), aus calendar_events. ──
+// Data-gated: keine Termine im Fenster → Block entfällt. Klick auf einen Tag mit Terminen → Kalender.
+function CockpitCalendar4Weeks({onNavigate}){
+  const [ev,setEv]=useState(null); const [hidden,setHidden]=useState({});
+  const monday=(()=>{ const d=new Date(); const x=new Date(d.getFullYear(),d.getMonth(),d.getDate()); x.setDate(x.getDate()-((x.getDay()+6)%7)); return x; })();
+  useEffect(()=>{ let alive=true; (async()=>{
+    try{ const e=await sb.from('calendar_events').select('*');
+      const end=new Date(monday); end.setDate(monday.getDate()+27);
+      const ov=await sb.from('calendar_overrides').select('event_id,occurrence_date,hidden').gte('occurrence_date',isoLocal(monday)).lte('occurrence_date',isoLocal(end));
+      const hid={}; (ov.data||[]).forEach(o=>{ if(o.hidden) hid[o.event_id+'|'+String(o.occurrence_date).slice(0,10)]=true; });
+      if(alive){ setEv(e.data||[]); setHidden(hid); }
+    }catch(err){ if(alive) setEv([]); }
+  })(); return ()=>{alive=false;}; },[]);
+  if(ev===null) return null;
+  const days=[]; for(let i=0;i<28;i++){ const d=new Date(monday); d.setDate(monday.getDate()+i); days.push(d); }
+  const evByDay={}; let total=0; days.forEach(d=>{ const ds=isoLocal(d); const list=[]; (ev||[]).forEach(e=>{ if(hidden[e.id+'|'+ds]) return; if(calOccurrences(e,d,d).length) list.push(e); }); list.sort((a,b)=>String(a.start_time||'99').localeCompare(String(b.start_time||'99'))); evByDay[ds]=list; total+=list.length; });
+  if(!total) return null;   // data-gated
+  const today=isoLocal(new Date()); const DOW=['Mo','Di','Mi','Do','Fr','Sa','So'];
+  return <div className="card" style={{marginBottom:14,overflow:'hidden'}}>
+    <div style={{padding:'10px 14px',borderBottom:'1px solid var(--border)',fontSize:12,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em',display:'flex',justifyContent:'space-between'}}>
+      <span>📆 Kalender · nächste 4 Wochen</span>{onNavigate&&<span onClick={()=>onNavigate({kind:'view',view:'calendar'})} style={{cursor:'pointer'}}>→</span>}
+    </div>
+    <div style={{padding:12}}>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:6,marginBottom:4}}>{DOW.map(d=><div key={d} style={{fontSize:10,fontWeight:700,color:'var(--muted)',textAlign:'center'}}>{d}</div>)}</div>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:6}}>
+        {days.map((d,i)=>{ const ds=isoLocal(d); const list=evByDay[ds]||[]; const isToday=ds===today; const wknd=d.getDay()===0||d.getDay()===6;
+          return <div key={i} onClick={list.length&&onNavigate?()=>onNavigate({kind:'view',view:'calendar',calTarget:{date:ds}}):undefined} style={{minHeight:58,border:'1px solid '+(isToday?'#0F5661':'var(--border)'),borderRadius:8,padding:'4px 5px',background:isToday?'rgba(15,86,97,.08)':wknd?'var(--surface-2)':'var(--surface)',cursor:list.length&&onNavigate?'pointer':'default',overflow:'hidden'}}>
+            <div style={{fontSize:10,fontWeight:isToday?800:600,color:isToday?'#0F5661':'var(--muted)'}}>{d.getDate()}.{d.getMonth()+1}.</div>
+            {list.slice(0,3).map((e,j)=><div key={j} style={{fontSize:9.5,marginTop:2,padding:'1px 3px',borderRadius:3,background:e.important?'#fffbeb':'var(--card)',border:'1px solid '+(e.important?'#f59e0b55':'var(--border)'),whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',fontWeight:e.important?700:500}}>{e.important?'⭐':''}{e.start_time?String(e.start_time).slice(0,5)+' ':''}{e.title}</div>)}
+            {list.length>3&&<div style={{fontSize:9,color:'var(--muted)',marginTop:1}}>+{list.length-3}</div>}
+          </div>;
+        })}
+      </div>
+    </div>
+  </div>;
+}
 // ── KPIs je Projekt·Skill im Cockpit (Desktop + mobil), automatisch für Management/HR ──
 // Sichtbar, sobald KPIs konfiguriert sind (wie die Tagesberichte). Geteilte Definitionen (kpi_config),
 // Werte aus kpi_project_entries (manueller Kundenwert, NICHT abgeleitet). Laufende Woche + Vorwoche,
@@ -8315,12 +8350,12 @@ function CockpitProjectKpis({projects, team, mobile}){
 // Kommt ein neuer Bericht, zeigt das Cockpit dessen Kommentare — die alten bleiben am jeweiligen Bericht.
 // Cockpit-Kachel Recruiting Marketing (management-only): Ausgaben + Kosten je Bewerbung, Dieser Monat.
 // Leer/kein Import → Hinweis, nie 0 (FX-Muster). Nutzt die geteilten wm*-Helfer.
-function CockpitMarketingTile({team, employees, mobile}){
+function CockpitMarketingTile({team, employees, mobile, onNavigate}){
   const isMgmt=((team&&team.role_keys)||[]).some(r=>r==='management');
   const [rows,setRows]=useState(null); const [cvs,setCvs]=useState([]);
   useEffect(()=>{ if(!isMgmt){ setRows([]); return; } let alive=true; (async()=>{
-    try{ const {data}=await sb.from('windsor_marketing').select('date,datasource,spend');
-      const parsed=(data||[]).map(r=>({date:wmDate(r.date),datasource:String(r.datasource||'').toLowerCase(),spend:wmNum(r.spend)})).filter(x=>x.date);
+    try{ const {data}=await sb.from('windsor_marketing').select('date,datasource,spend,reach');
+      const parsed=(data||[]).map(r=>({date:wmDate(r.date),datasource:String(r.datasource||'').toLowerCase(),spend:wmNum(r.spend),reach:wmNum(r.reach)})).filter(x=>x.date);
       if(alive) setRows(parsed);
     }catch(e){ if(alive) setRows([]); }
     try{ const {data:cv}=await sb.from('cvs').select('id,cv_date'); if(alive) setCvs(cv||[]); }catch(e){}
@@ -8329,15 +8364,27 @@ function CockpitMarketingTile({team, employees, mobile}){
   const cur=wmRange('month', new Date());
   const inR=(dt,r)=>!!(dt&&r&&(!r.from||dt>=r.from)&&(!r.to||dt<=r.to));
   const meta=(rows||[]).filter(x=>x.datasource==='facebook'&&inR(x.date,cur));
-  const spend=meta.reduce((s,x)=>s+(x.spend||0),0);
+  const insta=(rows||[]).filter(x=>x.datasource==='instagram'&&inR(x.date,cur));
+  const sum=(a,k)=>a.reduce((s,x)=>s+(x[k]||0),0);
+  const spend=sum(meta,'spend'), metaReach=sum(meta,'reach'), igReach=sum(insta,'reach');
   const apps=(cvs||[]).filter(c=>inR(wmDate(c.cv_date),cur)).length + (employees||[]).filter(e=>e&&e.source==='cv'&&inR(wmDate(e.cv_received_at),cur)).length;
-  const hasData=meta.length>0; const eur=n=>n.toLocaleString('de-DE',{minimumFractionDigits:2,maximumFractionDigits:2})+' €';
-  return <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--r-lg)',padding:mobile?'12px 14px':'14px 18px',boxShadow:'var(--shadow-xs)',marginBottom:12}}>
-    <div style={{fontSize:13,fontWeight:800,marginBottom:8,display:'flex',alignItems:'center',gap:8}}>📣 Recruiting Marketing <span style={{fontSize:11,fontWeight:600,color:'var(--muted)'}}>· Dieser Monat</span></div>
+  const hasData=(rows||[]).some(x=>inR(x.date,cur));
+  const eur=n=>n==null?'—':n.toLocaleString('de-DE',{minimumFractionDigits:2,maximumFractionDigits:2})+' €';
+  const int=n=>n==null?'—':Math.round(n).toLocaleString('de-DE');
+  const go=()=>{ if(onNavigate) onNavigate({kind:'view',view:'recmkt'}); else if(window.dispatchEvent) window.dispatchEvent(new CustomEvent('navigate',{detail:'recmkt'})); };
+  const stat=(label,val,accent)=><div style={{flex:'1 1 130px',minWidth:118,border:'1px solid var(--border)',borderRadius:'var(--r)',padding:'10px 14px',background:'var(--card)'}}>
+    <div style={{fontSize:10,fontWeight:700,textTransform:'uppercase',letterSpacing:'.05em',color:'var(--muted)'}}>{label}</div>
+    <div style={{fontSize:20,fontWeight:800,marginTop:3,color:accent||'var(--text)',fontFamily:'var(--mono)'}}>{val}</div>
+  </div>;
+  return <div onClick={go} style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--r-lg)',padding:mobile?'12px 14px':'14px 18px',boxShadow:'var(--shadow-xs)',marginBottom:14,cursor:'pointer'}}>
+    <div style={{fontSize:13,fontWeight:800,marginBottom:10,display:'flex',alignItems:'center',gap:8}}>📣 Recruiting Marketing <span style={{fontSize:11,fontWeight:600,color:'var(--muted)'}}>· Dieser Monat →</span></div>
     {!hasData ? <div style={{fontSize:12,color:'var(--muted)'}}>Keine Marketingdaten für diesen Monat.</div>
-      : <div style={{display:'flex',gap:24,flexWrap:'wrap'}}>
-          <div><div style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>Ausgaben (Meta)</div><div style={{fontSize:22,fontWeight:800}}>{eur(spend)}</div></div>
-          <div><div style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>Kosten je Bewerbung</div><div style={{fontSize:22,fontWeight:800}}>{apps>0?eur(spend/apps):'—'}</div><div style={{fontSize:10,color:'var(--muted)'}}>{apps} Bewerbungen · Näherung</div></div>
+      : <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
+          {stat('Ausgaben (Meta)', eur(spend))}
+          {stat('Meta-Reichweite', int(metaReach))}
+          {stat('Instagram-Reichw.', int(igReach))}
+          {stat('Bewerbungen', int(apps))}
+          {stat('Kosten je Bewerbung', apps>0?eur(spend/apps):'—', 'var(--accent,#2563eb)')}
         </div>}
   </div>;
 }
@@ -8947,6 +8994,18 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
       <div style={{padding:'0 14px 10px'}}>{_expiring.map(emp=>{ const ce=emp.contract?.end||emp.contract_end; const end=new Date(ce); const days=Math.round((end-new Date())/(864e5)); return(<div key={emp.id} style={{display:'flex',justifyContent:'space-between',fontSize:12,padding:'4px 0',borderTop:'1px solid rgba(239,68,68,.12)'}}><span>{emp.first_name} {emp.last_name} · {emp.position}</span><span style={{color:'var(--red)',fontWeight:600}}>{days<=0?'Abgelaufen':days+'d'} · {new Date(ce).toLocaleDateString('de-DE')}</span></div>);})}</div>
     </details>) : null;
     const _today2=isoLocal(new Date()); const hasTraining=(plans||[]).some(p=>p&&p.start_date&&p.start_date>=_today2);
+    // S2: 6 Kacheln (2×3). Krankheit/Urlaub = Absence-Werktage im laufenden Monat; Kündigungen = termination_date im Monat.
+    const _absDaysInMonth=(a)=>{ if(!a||!a.from) return 0; const from=new Date(a.from+'T00:00:00'); const to=new Date((a.to||a.from)+'T00:00:00'); const ms=new Date(year,todayM,1), me=new Date(year,todayM+1,0); let s=from<ms?ms:from, e=to>me?me:to; if(s>e) return 0; let n=0,g=0,d=new Date(s); while(d<=e&&g<400){ const dw=d.getDay(); if(dw>=1&&dw<=5)n++; d.setDate(d.getDate()+1); g++; } return n; };
+    let _krankM=0,_urlaubM=0; (employees||[]).forEach(e=>{ (e.absences||[]).forEach(a=>{ if(a&&a.type==='sick')_krankM+=_absDaysInMonth(a); else if(a&&a.type==='vacation')_urlaubM+=_absDaysInMonth(a); }); });
+    const _kuendM=(employees||[]).filter(e=>{ const td=e&&e.termination_date; if(!td) return false; const d=new Date(td); return d.getFullYear()===year&&d.getMonth()===todayM; }).length;
+    const tiles6=[
+      {val:active.length,label:'Aktiv',sub:'Mitarbeiter',color:'#0F5661'},
+      {val:inTraining.length,label:'Schulung',sub:'Mitarbeiter',color:'#7c3aed'},
+      {val:_krankM,label:'Krankheitstage',sub:'laufender Monat',color:'#dc2626'},
+      {val:_urlaubM,label:'Urlaubstage',sub:'laufender Monat',color:'#d97706'},
+      {val:_kuendM,label:'Kündigungen',sub:'laufender Monat',color:'#b91c1c'},
+      {val:inbox.length,label:'Bewerbungen',sub:'ungesichtet',color:'#6366f1',nav:'kanban'},
+    ];
     return(<React.Fragment>
       <CockpitTodayEvents mobile={false} onNavigate={onNavigate}/>
       <div style={{display:'flex',justifyContent:'flex-end',gap:8,marginBottom:10}}>
@@ -8954,16 +9013,18 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
         <button className="btn btn-sm" onClick={()=>setSelfEdit(true)} title="Widgets deines Cockpits auswählen und ordnen">⚙ Cockpit anpassen</button>
       </div>
       {selfEdit && <CockpitEditor roleDef={{label:'dein Cockpit'}} current={resolveMyCockpit(team, employees)} onSave={(widgets)=>{ const uid=team&&team.user_id; if(uid){ saveUserCockpits({...loadUserCockpits(), [uid]:widgets}); } setSelfEdit(false); }} onClose={()=>setSelfEdit(false)}/>}
-      {/* 3) Kacheln (S2: auf 6 erweitern — Aktiv/Schulung/Krankheit/Urlaub/Kündigungen/Bewerbungen) */}
-      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(160px,1fr))',gap:10,marginBottom:14}}>
-        {kpis.map((k,i)=>(<div key={i} onClick={k.nav?()=>onNavigate&&onNavigate({kind:'view',view:k.nav}):undefined} style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--r-lg)',padding:'14px 16px',boxShadow:'var(--shadow-xs)',cursor:k.nav?'pointer':undefined}}>
+      {/* 2) Kalender-Monatsübersicht (aktuelle + 3 kommende Wochen) */}
+      <CockpitCalendar4Weeks onNavigate={onNavigate}/>
+      {/* 3) Sechs Kacheln, zwei Reihen zu dritt */}
+      <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:10,marginBottom:14}}>
+        {tiles6.map((k,i)=>(<div key={i} onClick={k.nav?()=>onNavigate&&onNavigate({kind:'view',view:k.nav}):undefined} style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--r-lg)',padding:'14px 16px',boxShadow:'var(--shadow-xs)',cursor:k.nav?'pointer':undefined}}>
           <div style={{fontSize:10,fontWeight:600,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',marginBottom:6}}>{k.label}{k.nav?' →':''}</div>
-          <div style={{fontSize:24,fontWeight:800,color:k.color,fontFamily:'var(--mono)',lineHeight:1}}>{k.val}</div>
+          <div style={{fontSize:26,fontWeight:800,color:k.color,fontFamily:'var(--mono)',lineHeight:1}}>{k.val}</div>
           <div style={{fontSize:10,color:'var(--muted)',marginTop:4}}>{k.sub}</div>
         </div>))}
       </div>
       {cvEingang}
-      <CockpitMarketingTile team={team} employees={employees} mobile={false}/>
+      <CockpitMarketingTile team={team} employees={employees} mobile={false} onNavigate={onNavigate}/>
       {projekteBlock}
       {wblock('quote_woche', <Widget_KrankUrlaubQuote employees={employees} projects={projects}/>)}
       {abwesendBlock}
