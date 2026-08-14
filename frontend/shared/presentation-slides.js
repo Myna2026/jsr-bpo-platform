@@ -109,6 +109,7 @@
 
   function Stunden(ctx, tk){ var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk);
     var rows=(td.stunden||[]).filter(function(r){ return r.kw!==''||r.plan!==''||r.geliefert!==''; });
+    if(!rows.length) return emptyPanel(ctx, fondHead(P, lbl, 'Gelieferte Stunden', 'Plan · Rückmeldung · Geliefert'), P, 'Keine Stundendaten in diesem Zeitraum.');
     var vals=[]; rows.forEach(function(r){ ['plan','rueck','geliefert'].forEach(function(k){ if(r[k]!==''&&r[k]!=null) vals.push(numOr(r[k],0)); }); });
     var dom=zoomDomain(vals);
     var bar3=[{k:'plan',c:'#d5dde3',tc:'#94a3b8',l:'Plan'},{k:'rueck',c:rgba(P.onLight,.42),tc:P.onLight,l:'Rückmeldung'},{k:'geliefert',c:P.onLight,tc:P.onLightTxt,l:'Geliefert'}];
@@ -214,6 +215,7 @@
   function CallsView(ctx, tk, period, eyebrow){ var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk); var cols=callCols(tk);
     var members=(ctx.membersOf(tk)||[]).filter(function(m){ return ((td.members||[]).length===0)||(td.members||[]).indexOf(m.id)>=0; });
     var cur=(td.calls&&td.calls[period])||{};
+    if(!Object.keys(cur).length) return emptyPanel(ctx, fondHead(P, lbl+' · '+eyebrow, 'Call-Kennzahlen'), P, 'Keine Call-Kennzahlen in diesem Zeitraum.');
     var rows=members.map(function(m){ var c=cur[m.id]||{}; return Object.assign({},c,{answered:c.answered}); });
     var ans=members.map(function(m){ return {m:m,n:numOr((cur[m.id]||{}).answered,0)}; }).sort(function(a,b){ return b.n-a.n; });
     var dom=zoomDomain(ans.map(function(a){ return a.n; }));   // gespreizte Skala: nahe Werte sichtbar unterscheiden
@@ -514,32 +516,47 @@
   function hasCallsMtd(ctx,k){ var td=(ctx.deck.teams||{})[k]||{}; return !!(td.calls&&td.calls.monat&&Object.keys(td.calls.monat).length); }
   function hasMassnahmen(ctx,k){ var td=(ctx.deck.teams||{})[k]||{}; return !!((td.massnahmen||'').trim()); }
   function hasFehlzeiten(ctx,k){ var td=(ctx.deck.teams||{})[k]||{}; return !!(td.fehlzeiten&&td.fehlzeiten.weeks&&td.fehlzeiten.weeks.length); }
-  function deckSlides(ctx){ var out=[Title(ctx)]; (ctx.skills||[]).forEach(function(s){ var k=s.key;
-    if(hasFte(ctx,k)) out.push(Fte(ctx,k));
-    if(hasStd(ctx,k)) out.push(StundenTable(ctx,k));
-    out.push(Stunden(ctx,k));
-    if(hasFehlzeiten(ctx,k)) out.push(Fehlzeiten(ctx,k));
-    if(hasLangzeit(ctx,k)) out.push(Langzeit(ctx,k));
-    if(hasCr(ctx,k)){ out.push(CrTable(ctx,k)); out.push(CrChart(ctx,k)); out.push(AgentCr(ctx,k)); out.push(AgentCrTrend(ctx,k)); out.push(Mtd(ctx,k)); }
-    out.push(Calls(ctx,k));
-    if(hasCallsMtd(ctx,k)) out.push(CallsMtd(ctx,k));
-    if(deckShowCalls(ctx)) out.push(CallScores(ctx,k));
-    if(hasCsat(ctx,k)) out.push(Csat(ctx,k));
-    if(hasMassnahmen(ctx,k)) out.push(Massnahmen(ctx,k));
+  // Ein Skill kommt in den Bericht, wenn er IRGENDWELCHE Daten hat (verhindert leere Fremd-Skill-Folien, z. B.
+  // "Support", wenn nur Sales gepflegt ist). Innerhalb eines aktiven Skills erscheinen ALLE 14 Kern-Folien in fester
+  // Reihenfolge — fehlende Daten blenden eine Folie NICHT aus, sie zeigt einen ruhigen Hinweis. Skill kommt aus der
+  // Schleife (skillLabel), nie handgetippt. Ist gar nichts gepflegt: erster Skill mit Hinweisen (leerer Rohbericht).
+  function skillActive(ctx,k){ var td=(ctx.deck.teams||{})[k]||{};
+    return hasFte(ctx,k)||hasStd(ctx,k)||hasCr(ctx,k)||hasCsat(ctx,k)||hasMassnahmen(ctx,k)||hasLangzeit(ctx,k)||hasFehlzeiten(ctx,k)||hasCallsMtd(ctx,k)||!!(td.calls&&td.calls.vorwoche&&Object.keys(td.calls.vorwoche).length); }
+  function activeSkills(ctx){ var a=(ctx.skills||[]).filter(function(s){ return skillActive(ctx,s.key); }); return a.length?a:(ctx.skills||[]).slice(0,1); }
+  function deckSlides(ctx){ var out=[Title(ctx)]; activeSkills(ctx).forEach(function(s){ var k=s.key;
+    out.push(Fte(ctx,k));            // 2
+    out.push(StundenTable(ctx,k));   // 3
+    out.push(Stunden(ctx,k));        // 4
+    if(hasFehlzeiten(ctx,k)) out.push(Fehlzeiten(ctx,k));   // Zusatz
+    out.push(Langzeit(ctx,k));       // 5
+    out.push(CrTable(ctx,k));        // 6
+    out.push(CrChart(ctx,k));        // 7
+    out.push(AgentCr(ctx,k));        // 8
+    out.push(AgentCrTrend(ctx,k));   // 9
+    out.push(Mtd(ctx,k));            // 10
+    out.push(Calls(ctx,k));          // 11
+    out.push(CallsMtd(ctx,k));       // 12
+    if(deckShowCalls(ctx)) out.push(CallScores(ctx,k));    // Zusatz (Call-Stichproben)
+    out.push(Csat(ctx,k));           // 13
+    out.push(Massnahmen(ctx,k));     // 14
   }); return out; }
   // Folien-Identität (für Kommentar-Anker) — dieselbe Reihenfolge wie deckSlides.
-  function deckSlideKeys(ctx){ var out=[{key:'title',label:'Titel'}]; (ctx.skills||[]).forEach(function(s){ var k=s.key, L=skillLabel(ctx,k);
-    if(hasFte(ctx,k)) out.push({key:k+':fte',label:L+' · FTE'});
-    if(hasStd(ctx,k)) out.push({key:k+':stundentab',label:L+' · Stunden (Tabelle)'});
+  function deckSlideKeys(ctx){ var out=[{key:'title',label:'Titel'}]; activeSkills(ctx).forEach(function(s){ var k=s.key, L=skillLabel(ctx,k);
+    out.push({key:k+':fte',label:L+' · FTE'});
+    out.push({key:k+':stundentab',label:L+' · Stunden (Tabelle)'});
     out.push({key:k+':stunden',label:L+' · Stunden'});
     if(hasFehlzeiten(ctx,k)) out.push({key:k+':fehlzeiten',label:L+' · Fehlzeiten'});
-    if(hasLangzeit(ctx,k)) out.push({key:k+':langzeit',label:L+' · Langzeit'});
-    if(hasCr(ctx,k)){ out.push({key:k+':crtab',label:L+' · CR (Tabelle)'}); out.push({key:k+':crchart',label:L+' · CR (Verlauf)'}); out.push({key:k+':agentcr',label:L+' · CR je Agent'}); out.push({key:k+':agentcrtrend',label:L+' · CR-Verlauf je Agent'}); out.push({key:k+':mtd',label:L+' · MTD'}); }
+    out.push({key:k+':langzeit',label:L+' · Langzeit'});
+    out.push({key:k+':crtab',label:L+' · CR (Tabelle)'});
+    out.push({key:k+':crchart',label:L+' · CR (Verlauf)'});
+    out.push({key:k+':agentcr',label:L+' · CR je Agent'});
+    out.push({key:k+':agentcrtrend',label:L+' · CR-Verlauf je Agent'});
+    out.push({key:k+':mtd',label:L+' · MTD'});
     out.push({key:k+':calls',label:L+' · Calls'});
-    if(hasCallsMtd(ctx,k)) out.push({key:k+':callsmtd',label:L+' · Calls (MTD)'});
+    out.push({key:k+':callsmtd',label:L+' · Calls (MTD)'});
     if(deckShowCalls(ctx)) out.push({key:k+':callscores',label:L+' · Call-Qualität'});
-    if(hasCsat(ctx,k)) out.push({key:k+':csat',label:L+' · CSAT'});
-    if(hasMassnahmen(ctx,k)) out.push({key:k+':massnahmen',label:L+' · Maßnahmen'});
+    out.push({key:k+':csat',label:L+' · CSAT'});
+    out.push({key:k+':massnahmen',label:L+' · Maßnahmen'});
   }); return out; }
 
   window.PRES = { deckSlides:deckSlides, deckSlideKeys:deckSlideKeys, Title:Title, Fte:Fte, StundenTable:StundenTable, Stunden:Stunden, Fehlzeiten:Fehlzeiten, Langzeit:Langzeit, CrTable:CrTable, CrChart:CrChart, AgentCr:AgentCr, AgentCrTrend:AgentCrTrend, Mtd:Mtd, Calls:Calls, CallsMtd:CallsMtd, Massnahmen:Massnahmen, CallScores:CallScores, Csat:Csat, callCols:callCols, pal:pal,
