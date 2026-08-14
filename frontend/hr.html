@@ -34697,9 +34697,18 @@ function PresentationsView({projects, employees, team, showToast}){
     catch(e){ showToast&&showToast('FTE speichern fehlgeschlagen: '+(e.message||''),'error'); } }
   const teamFteSum=t=>membersFor(t).reduce((s,e)=>s+(fteStd[e.id]!=null?fteStd[e.id]:0),0);
   // „Gelieferte Stunden" je Skill aus weekly_hours übernehmen → geliefert + KW, Provenance 'imported'.
-  function applyImportHours(t){ const ws=windowWeeks(); upd(n=>{ const rows=n.teams[t].stunden;
-    ws.forEach((w,i)=>{ if(!rows[i]) rows[i]=hcEmptyRow(); rows[i].kw=''+w.kw; const h=stores.hours[t+'|'+w.yr+'|'+w.kw];
-      if(h!=null){ rows[i].geliefert=String(Math.round(h*10)/10).replace('.',','); rows[i].gsrc='imported'; } }); }); }
+  function applyImportHours(t){ const ws=windowWeeks(); const members=membersFor(t);
+    // Rückmeldung automatisch mit-rechnen: Team-FTE = gesetztes td.fte ODER Summe der report_fte-Standards.
+    const fte = numOr(deck.teams[t].fte, null)!=null ? numOr(deck.teams[t].fte,null) : (members.some(e=>fteStd[e.id]!=null)? teamFteSum(t) : null);
+    const locCount={}; members.forEach(e=>{ const l=(e.location||e.city||''); locCount[l]=(locCount[l]||0)+1; });
+    const domLoc=Object.keys(locCount).sort((a,b)=>locCount[b]-locCount[a])[0]||'';
+    const holSet=holidayDatesForLocation(domLoc);
+    const workdays=(kw,yr)=>{ const mon=isoWeekMonday(yr,kw); let n=0; for(let i=0;i<5;i++){ const d=new Date(mon); d.setDate(mon.getDate()+i); if(!holSet.has(isoLocal(d))) n++; } return n; };
+    upd(n=>{ const rows=n.teams[t].stunden;
+      ws.forEach((w,i)=>{ if(!rows[i]) rows[i]=hcEmptyRow(); rows[i].kw=''+w.kw;
+        const h=stores.hours[t+'|'+w.yr+'|'+w.kw]; if(h!=null){ rows[i].geliefert=String(Math.round(h*10)/10).replace('.',','); rows[i].gsrc='imported'; }
+        if(fte!=null && rows[i].rsrc!=='manual'){ const wd=workdays(w.kw,w.yr); rows[i].rueck=String(Math.round(fte*7.5*wd*10)/10).replace('.',','); rows[i].rsrc='system'; }
+      }); }); }
   // Call-Kennzahlen Vorwoche (Berichts-KW) aus weekly_calls je Mitarbeiter übernehmen. Sekunden → mm:ss.
   const secToMmss=s=>{ if(s==null||s==='') return ''; const x=Math.round(Number(s)||0); return Math.floor(x/60)+':'+String(x%60).padStart(2,'0'); };
   function applyImportCalls(t){ const members=membersFor(t); upd(n=>{ const cur=n.teams[t].calls.vorwoche={...(n.teams[t].calls.vorwoche||{})};
@@ -34741,10 +34750,9 @@ function PresentationsView({projects, employees, team, showToast}){
         const inc=new Set([rootId]); Object.keys(byId).forEach(id=>{ if((byId[id].employees||[]).some(keep)) inc.add(id); });
         [...inc].forEach(id=>{ let cur=byId[id],g=0; while(cur&&cur.parent&&g<20){ inc.add(cur.parent); cur=byId[cur.parent]; g++; } });
         const depthOf=id=>{ let d=0,cur=byId[id],g=0; while(cur&&cur.parent&&g<20){ d++; cur=byId[cur.parent]; g++; } return d; };
-        const onodes=[...inc].map(id=>byId[id]).filter(Boolean).map(nd=>({ id:nd.id, title:nd.title, subtitle:nd.subtitle, depth:depthOf(nd.id), seq:nd.seq,
+        const onodes=[...inc].map(id=>byId[id]).filter(Boolean).map(nd=>({ id:nd.id, title:nd.title, subtitle:nd.subtitle, depth:depthOf(nd.id), seq:nd.seq, parent:(inc.has(nd.parent)?nd.parent:null),
           members:(nd.employees||[]).filter(keep).map(eid=>({name:empName(empById[eid]),fte:(fteStd[eid]!=null?fteStd[eid]:null)})) }))
-          .filter(nd=>nd.members.length||nd.id===rootId)
-          .sort((a,b)=>a.depth-b.depth||a.seq-b.seq);
+          .sort((a,b)=>a.depth-b.depth||a.seq-b.seq);   // Struktur-Knoten (auch leere Vorfahren) behalten, sonst reißt der Baum
         if(onodes.length && onodes.reduce((s,nd)=>s+nd.members.length,0)>0) org={rootId,nodes:onodes};
       }
       if(org) upd(n=>{ if(n.teams[t]&&n.teams[t].fteList) n.teams[t].fteList.org=org; });
