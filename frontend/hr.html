@@ -34759,8 +34759,8 @@ function PresentationsView({projects, employees, team, showToast}){
     }catch(e){} })(); }
   // CR + Buchungen (5d): je MA/KW aus kpi_entries. CR = (Offene + OSL) ÷ Sales Calls × 100. MTD = Berichtsmonats-Wochen.
   const MONTHS_DE=['Januar','Februar','März','April','Mai','Juni','Juli','August','September','Oktober','November','Dezember'];
-  function applyImportCr(t){ const ws=windowWeeks(); const members=membersFor(t); const win=stores.kpiWin||[];
-    const KID={kpi_hc_open_bookings:'open',kpi_hc_osl:'osl'};   // Buchungen aus KPI (manuell); Sales Calls aus Import (scByEmp)
+  async function applyImportCr(t){ const ws=windowWeeks(); const members=membersFor(t); const win=stores.kpiWin||[];
+    const KID={kpi_hc_open_bookings:'open',kpi_hc_osl:'osl'};   // Buchungen aus KPI (Performance-Tab); Sales Calls aus Import (scByEmp)
     const val={}; win.forEach(r=>{ if(!ws.some(w=>w.yr===r.year&&w.kw===r.kw)) return; const m=KID[r.kpi_id]; if(!m) return; const key=r.year+'-'+r.kw;
       ((val[r.emp_id]=val[r.emp_id]||{})[key]=val[r.emp_id][key]||{})[m]=Number(r.value)||0; });
     const sc=stores.scByEmp||{};
@@ -34771,11 +34771,21 @@ function PresentationsView({projects, employees, team, showToast}){
         if(v.open!=null||v.osl!=null||c!=null){ const o=v.open||0,os=v.osl||0,cc=c||0; byWeek[wk.key]={open:o,osl:os,calls:cc,cr:crOf(o,os,cc)}; to+=o;tos+=os;tc+=cc; } });
       return {id:e.id,name:empName(e),byWeek,tot:{open:to,osl:tos,calls:tc,cr:crOf(to,tos,tc)}}; })
       .filter(a=>Object.keys(a.byWeek).length).sort((a,b)=>(b.tot.cr||0)-(a.tot.cr||0));
-    const team={}; weeks.forEach(wk=>{ let o=0,os=0,c=0,any=false; agents.forEach(a=>{ const v=a.byWeek[wk.key]; if(v){any=true;o+=v.open;os+=v.osl;c+=v.calls;} }); team[wk.key]=any?{open:o,osl:os,calls:c,cr:crOf(o,os,c)}:null; });
-    const rv=ws[ws.length-1]; const rm=isoWeekMonth(rv.yr,rv.kw); const mtdWeeks=weeks.filter(wk=>{ const p=wk.key.split('-').map(Number); const m=isoWeekMonth(p[0],p[1]); return m.y===rm.y&&m.m===rm.m; });
+    const rv=ws[ws.length-1]; const rm=isoWeekMonth(rv.yr,rv.kw);
+    // Gepflegter Team-CR aus kpi_project_entries (CR-KPI je Projekt+Skill via kpi_config Name „CR"): Wochen + Monatswert.
+    let crByKey={}, crMonth=null;
+    try{ const {data:cfg}=await sb.from('kpi_config').select('id,project_id,skill,name');
+      const crCfg=(cfg||[]).find(k=>k&&(!k.project_id||k.project_id===selProj.id)&&String(k.skill||'').toLowerCase()===t&&/^\s*cr\s*$/i.test(String(k.name||'')));
+      if(crCfg){ const {data:pe}=await sb.from('kpi_project_entries').select('year,kw,month,value').eq('project_id',selProj.id).eq('skill',t).eq('kpi_id',crCfg.id);
+        (pe||[]).forEach(r=>{ if(r.kw!=null){ const k=r.year+'-'+r.kw; if(weeks.some(w=>w.key===k)) crByKey[k]=Number(r.value); }
+          if(r.month!=null && r.year===rm.y && r.month===rm.m+1) crMonth=Number(r.value); }); }
+    }catch(e){}
+    const team={}; weeks.forEach(wk=>{ let o=0,os=0,c=0,any=false; agents.forEach(a=>{ const v=a.byWeek[wk.key]; if(v){any=true;o+=v.open;os+=v.osl;c+=v.calls;} });
+      const maint=crByKey[wk.key]; if(any||maint!=null){ team[wk.key]={open:o,osl:os,calls:c,cr:(maint!=null?maint:crOf(o,os,c)),crSrc:(maint!=null?'maintained':'computed')}; } else team[wk.key]=null; });
+    const mtdWeeks=weeks.filter(wk=>{ const p=wk.key.split('-').map(Number); const m=isoWeekMonth(p[0],p[1]); return m.y===rm.y&&m.m===rm.m; });
     const mtdAgents=agents.map(a=>{ let o=0,os=0,c=0; mtdWeeks.forEach(wk=>{ const v=a.byWeek[wk.key]; if(v){o+=v.open;os+=v.osl;c+=v.calls;} }); return {id:a.id,name:a.name,open:o,osl:os,calls:c,cr:crOf(o,os,c)}; }).filter(a=>a.calls||a.open||a.osl);
     let mo=0,mos=0,mc=0; mtdAgents.forEach(a=>{mo+=a.open;mos+=a.osl;mc+=a.calls;});
-    const mtd={ label:MONTHS_DE[rm.m]+' '+rm.y, weekKws:mtdWeeks.map(w=>w.kw), agents:mtdAgents, team:{open:mo,osl:mos,calls:mc,cr:crOf(mo,mos,mc)} };
+    const mtd={ label:MONTHS_DE[rm.m]+' '+rm.y, weekKws:mtdWeeks.map(w=>w.kw), agents:mtdAgents, team:{open:mo,osl:mos,calls:mc,cr:(crMonth!=null?crMonth:crOf(mo,mos,mc))} };
     upd(n=>{ n.teams[t].cr={weeks,reportKey:rv.yr+'-'+rv.kw,team,agents,mtd,_src:'imported'}; }); }
   // Rückmeldung je KW = Team-FTE × 7,5 h × Werktage der KW (Mo–Fr minus Feiertage der dominanten Location). Überschreibbar.
   function applyRueckmeldung(t){ const ws=windowWeeks(); const members=membersFor(t); const fte=numOr(deck.teams[t].fte, null);
@@ -35088,9 +35098,9 @@ function PresentationsView({projects, employees, team, showToast}){
       </Section>
       <Section title="CR & Buchungen">
         <div style={{marginBottom:6,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
-          <button className="btn btn-sm btn-primary" disabled={!(stores.kpiWin||[]).length && !Object.keys(stores.scByEmp||{}).length} onClick={()=>applyImportCr(t)}>CR zusammenstellen</button>
+          <button className="btn btn-sm btn-primary" onClick={()=>applyImportCr(t)}>CR zusammenstellen</button>
           {td.cr&&td.cr._src==='imported'&&<span style={{fontSize:11,color:'#2563eb',fontWeight:700}}>● {(td.cr.agents||[]).length} Agenten</span>}
-          <span style={{fontSize:11,color:'var(--muted)'}}>CR = (Offene + OSL) ÷ Sales Calls × 100. Sales Calls aus Import ({Object.keys(stores.scByEmp||{}).length} MA), Buchungen aus KPI-Tab ({(stores.kpiWin||[]).length} Werte). Ohne Buchungen zeigt CR 0 %.</span>
+          <span style={{fontSize:11,color:'var(--muted)'}}>Team-CR aus kpi_project_entries (gepflegte Kennzahl „CR", Wochen + Monat). Agenten-CR = (Offene + OSL) ÷ Sales Calls je MA — Buchungen aus dem Performance-Tab, Sales Calls aus dem Import ({Object.keys(stores.scByEmp||{}).length} MA); leer bis Buchungen gepflegt.</span>
         </div>
         {td.cr&&td.cr.weeks? (
           <div style={{overflowX:'auto'}}><table style={{borderCollapse:'collapse',fontSize:12}}>
