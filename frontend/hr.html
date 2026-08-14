@@ -8309,6 +8309,34 @@ function CockpitProjectKpis({projects, team, mobile}){
 }
 // ── Kunden-Kommentare zum AKTUELLSTEN veröffentlichten Bericht je Projekt (Management-only, Desktop+mobil) ──
 // Kommt ein neuer Bericht, zeigt das Cockpit dessen Kommentare — die alten bleiben am jeweiligen Bericht.
+// Cockpit-Kachel Recruiting Marketing (management-only): Ausgaben + Kosten je Bewerbung, Dieser Monat.
+// Leer/kein Import → Hinweis, nie 0 (FX-Muster). Nutzt die geteilten wm*-Helfer.
+function CockpitMarketingTile({team, employees, mobile}){
+  const isMgmt=((team&&team.role_keys)||[]).some(r=>r==='management');
+  const [rows,setRows]=useState(null); const [cvs,setCvs]=useState([]);
+  useEffect(()=>{ if(!isMgmt){ setRows([]); return; } let alive=true; (async()=>{
+    try{ const {data}=await sb.from('windsor_marketing').select('date,datasource,spend');
+      const parsed=(data||[]).map(r=>({date:wmDate(r.date),datasource:String(r.datasource||'').toLowerCase(),spend:wmNum(r.spend)})).filter(x=>x.date);
+      if(alive) setRows(parsed);
+    }catch(e){ if(alive) setRows([]); }
+    try{ const {data:cv}=await sb.from('cvs').select('id,cv_date'); if(alive) setCvs(cv||[]); }catch(e){}
+  })(); return ()=>{alive=false;}; },[isMgmt]);
+  if(!isMgmt || rows===null) return null;
+  const cur=wmRange('month', new Date());
+  const inR=(dt,r)=>!!(dt&&r&&(!r.from||dt>=r.from)&&(!r.to||dt<=r.to));
+  const meta=(rows||[]).filter(x=>x.datasource==='facebook'&&inR(x.date,cur));
+  const spend=meta.reduce((s,x)=>s+(x.spend||0),0);
+  const apps=(cvs||[]).filter(c=>inR(wmDate(c.cv_date),cur)).length + (employees||[]).filter(e=>e&&e.source==='cv'&&inR(wmDate(e.cv_received_at),cur)).length;
+  const hasData=meta.length>0; const eur=n=>n.toLocaleString('de-DE',{minimumFractionDigits:2,maximumFractionDigits:2})+' €';
+  return <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--r-lg)',padding:mobile?'12px 14px':'14px 18px',boxShadow:'var(--shadow-xs)',marginBottom:12}}>
+    <div style={{fontSize:13,fontWeight:800,marginBottom:8,display:'flex',alignItems:'center',gap:8}}>📣 Recruiting Marketing <span style={{fontSize:11,fontWeight:600,color:'var(--muted)'}}>· Dieser Monat</span></div>
+    {!hasData ? <div style={{fontSize:12,color:'var(--muted)'}}>Keine Marketingdaten für diesen Monat.</div>
+      : <div style={{display:'flex',gap:24,flexWrap:'wrap'}}>
+          <div><div style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>Ausgaben (Meta)</div><div style={{fontSize:22,fontWeight:800}}>{eur(spend)}</div></div>
+          <div><div style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>Kosten je Bewerbung</div><div style={{fontSize:22,fontWeight:800}}>{apps>0?eur(spend/apps):'—'}</div><div style={{fontSize:10,color:'var(--muted)'}}>{apps} Bewerbungen · Näherung</div></div>
+        </div>}
+  </div>;
+}
 function CockpitPresentationComments({projects, team, mobile}){
   const roles=(team&&team.role_keys)||[]; const isMgmt=roles.some(r=>r==='management');
   const [items,setItems]=useState(null);
@@ -8567,6 +8595,7 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
       {/* KPIs je Projekt·Skill — bei den projektbezogenen Blöcken, direkt unter „Leistung je Skill".
           Automatisch für Management/HR, sobald KPIs konfiguriert sind (sonst null). */}
       <CockpitProjectKpis projects={projects} team={team} mobile={true}/>
+      <CockpitMarketingTile team={team} employees={employees} mobile={true}/>
       <CockpitPresentationComments projects={projects} team={team} mobile={true}/>
 
       {/* Kranken- & Urlaubsquote je Projekt·Skill (Vorwoche vs. laufend). Eigene Karten-Optik, da das
@@ -8953,6 +8982,7 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
 
       {/* KPIs je Projekt·Skill — fester Abschnitt für Management/HR, automatisch bei konfigurierten KPIs */}
       <CockpitProjectKpis projects={projects} team={team} mobile={false}/>
+      <CockpitMarketingTile team={team} employees={employees} mobile={false}/>
       <CockpitPresentationComments projects={projects} team={team} mobile={false}/>
 
       {/* Tagesberichte (Reporting-Projekte, nur Management/HR) — eigener Abschnitt, Gestern|Heute */}
@@ -33390,6 +33420,10 @@ function RecruitingMarketingView({employees}){
   const igMax=igDays.reduce((m,d)=>Math.max(m,d.reach||0),0)||1;
   let igDrop=null; for(let i=1;i<igDays.length;i++){ const p=igDays[i-1].reach, c2=igDays[i].reach; if(p>0&&c2!=null){ const pct=(c2-p)/p*100; if(pct<0&&(!igDrop||pct<igDrop.pct)) igDrop={pct,day:igDays[i].date,from:p,to:c2}; } }
   const igFoll=igDays.filter(d=>d.followers_count!=null);
+  // Kosten je Bewerbung: transparente Aufschlüsselung (offene CVs + übernommene).
+  const appsOpen=(cvs||[]).filter(c=>inR(wmDate(c.cv_date),cur)).length;
+  const appsProm=(employees||[]).filter(e=>e&&e.source==='cv'&&inR(wmDate(e.cv_received_at),cur)).length;
+  const appsTot=appsOpen+appsProm; const spendCur=sum(metaIn(cur),'spend'); const cpaCur=appsTot>0?spendCur/appsTot:null;
   const box=(bg,bd,col,txt)=><div style={{padding:'12px 16px',borderRadius:10,background:bg,border:'1px solid '+bd,color:col,fontSize:13,fontWeight:700}}>{txt}</div>;
 
   return <div style={{maxWidth:1100}}>
@@ -33453,6 +33487,17 @@ function RecruitingMarketingView({employees}){
             </div>
             <div style={{fontSize:11,color:'var(--muted)',marginTop:6}}>Tägliche organische Reichweite. Rot = Tagesrückgang von 30 % oder mehr gegenüber dem Vortag.</div>
           </div>}
+          <div style={{marginTop:22}}>
+            <div style={{fontSize:14,fontWeight:800,marginBottom:8}}>Kosten je Bewerbung</div>
+            <div style={{display:'flex',alignItems:'center',gap:18,flexWrap:'wrap',padding:'14px 18px',border:'1px solid var(--border)',borderRadius:12,background:'var(--card)'}}>
+              <div><div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)'}}>Meta-Ausgaben</div><div style={{fontSize:22,fontWeight:800}}>{eur(spendCur)}</div></div>
+              <div style={{fontSize:20,fontWeight:800,color:'var(--muted)'}}>÷</div>
+              <div><div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)'}}>Bewerbungen</div><div style={{fontSize:22,fontWeight:800}}>{int(appsTot)}</div><div style={{fontSize:11,color:'var(--muted)'}}>{appsOpen} offen + {appsProm} übernommen</div></div>
+              <div style={{fontSize:20,fontWeight:800,color:'var(--muted)'}}>=</div>
+              <div><div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)'}}>Kosten je Bewerbung</div><div style={{fontSize:26,fontWeight:800,color:'var(--accent,#2563eb)'}}>{cpaCur==null?'—':eur(cpaCur)}</div></div>
+            </div>
+            <div style={{fontSize:11,color:'var(--muted)',marginTop:8,lineHeight:1.6}}><b>Näherung.</b> Es gibt keine Verbindung zwischen einzelner Bewerbung und Kampagne — die Anzeige führt über ein Google-Sheet ohne Herkunftskennzeichnung ins System. Solange nur eine Kampagne läuft, ist die Zahl belastbar; bei mehreren gleichzeitig nicht mehr.{nCamp>1?(' Aktuell liefen '+nCamp+' Kampagnen im Zeitraum — die Zahl ist entsprechend grob.'):''}{cpaCur==null?' (Keine Bewerbungen im Zeitraum → keine Angabe.)':''}</div>
+          </div>
           <div style={{fontSize:11,color:'var(--muted)',marginTop:12,lineHeight:1.6}}>
             Reichweite = Summe der Tageswerte (nicht deduplizierte Unique-Reichweite); Meta (bezahlt) und Instagram (organisch) getrennt.
             Bewerbungen = CV-Eingänge im Zeitraum (offene CVs + bereits übernommene Bewerber).
