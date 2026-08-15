@@ -33382,6 +33382,14 @@ const GAUGES_FIELDS=[
   {key:'csat',      label:'CSAT',      req:false, kind:'num',  cand:['csat','zufriedenheit','satisfaction']},
 ];
 
+// Booking-Excel je Agent (Table_Booking_KPIs.xlsx). Kein Datum -> KW beim Upload. username = Kuerzel.
+const BOOKING_A_FIELDS=[
+  {key:'name',        label:'Agent (username)',   req:true, kind:'name', cand:['username','user name','user','agent','kuerzel','name']},
+  {key:'conversions', label:'Conversion (Dezimal)',req:true, kind:'num',  cand:['conversions','conversion','cvr','cr']},
+  {key:'open',        label:'Offene Buchungen',    req:true, kind:'num',  cand:['sum_offline_bookings','offline_bookings','offline bookings','offene buchungen','offline']},
+  {key:'osl',         label:'OSL-Buchungen',       req:true, kind:'num',  cand:['sum_osl_bookings','osl_bookings','osl bookings','osl buchungen','osl']},
+  {key:'sales_calls', label:'Sales Calls',         req:true, kind:'int',  cand:['salescalls_daily','sales_calls','salescalls','sales calls','calls']},
+];
 function RohdatenImport({projId, projName, employees, onSaved}){
   const [file,setFile]=useState(null); const [fileHash,setFileHash]=useState('');
   const [sheets,setSheets]=useState(null);     // [{name,headers,rows}]
@@ -33699,6 +33707,204 @@ function PivotImport({projId, employees, source, fields, table, accept, hint, on
   </div>;
 }
 
+// Booking-Import A: Agent-Excel -> kpi_entries (Conversion=CR, Offene, OSL, Sales Calls) je Agent/KW.
+// Kein Datum -> KW beim Upload. Kuerzel via import_aliases (Unbekannte melden). Fehlende KPI-Konfig ->
+// abbrechen+melden. source='import'. Re-Import ueberschreibt (auch Handwerte) und listet ersetzte manuelle Werte.
+// Drift-Check gegen Rohdaten-Sales-Calls (weekly_hours): zwei Quellen fuer dieselbe Groesse sollten stimmen.
+function BookingImportAgent({projId, employees, onSaved}){
+  const nowW=getISOWeek(new Date());
+  const [kw,setKw]=useState(nowW.kw); const [year,setYear]=useState(nowW.year);
+  const [file,setFile]=useState(null); const [fileHash,setFileHash]=useState('');
+  const [sheets,setSheets]=useState(null); const [sheetIdx,setSheetIdx]=useState(0);
+  const [map,setMap]=useState({}); const [step,setStep]=useState('upload');
+  const [result,setResult]=useState(null);
+  const [busy,setBusy]=useState(false); const [saved,setSaved]=useState(false); const [err,setErr]=useState('');
+  const [kpiIds,setKpiIds]=useState(null);   // {cr,open,osl,calls} | {error:[...]} | null(laedt)
+  const cfgKey='jsr_import_map_booking_a_'+projId;
+  const fields=BOOKING_A_FIELDS;
+  const sheet=sheets?sheets[sheetIdx]:null;
+
+  // Ziel-KPIs aufloesen (fehlt eine -> abbrechen+melden, nicht still ueberspringen).
+  useEffect(()=>{ let alive=true; (async()=>{
+    try{ const {data}=await sb.from('kpi_config').select('id,name,skill,level');
+      const rows=data||[];
+      const cr=rows.find(k=>/^\s*cr\s*$/i.test(k.name||'')&&String(k.skill||'').toLowerCase()==='sales');
+      const sc=rows.find(k=>/^\s*sales\s*calls\s*$/i.test(k.name||'')&&String(k.skill||'').toLowerCase()==='sales'&&k.level!=='team');
+      const miss=[]; if(!cr) miss.push('CR (Conversion)'); if(!sc) miss.push('Sales Calls');
+      if(alive) setKpiIds(miss.length?{error:miss}:{cr:cr.id, calls:sc.id, open:'kpi_hc_open_bookings', osl:'kpi_hc_osl'});
+    }catch(e){ if(alive) setKpiIds({error:['KPI-Konfiguration nicht ladbar']}); }
+  })(); return ()=>{alive=false;}; },[projId]);
+
+  function onFile(f){ if(!f) return; setErr(''); setSaved(false); setResult(null);
+    const rd=new FileReader();
+    rd.onload=async ev=>{ try{
+      const bytes=new Uint8Array(ev.target.result);
+      const wb=XLSX.read(bytes,{type:'array',cellDates:true,raw:false});
+      const sh=wb.SheetNames.map(nm=>{ const aoa=XLSX.utils.sheet_to_json(wb.Sheets[nm],{header:1,defval:''});
+        return {name:nm, headers:(aoa[0]||[]).map(x=>String(x==null?'':x)), rows:aoa.slice(1)}; });
+      setFile(f); setFileHash('sz'+bytes.length); setSheets(sh);
+      let pick=0,best=-1; sh.forEach((s,i)=>{ const m=cqAutoMap(s.headers,fields); const hit=fields.filter(fl=>m[fl.key]>=0).length; if(hit>best){best=hit;pick=i;} });
+      setSheetIdx(pick);
+      let savedMap=null; try{ savedMap=await loadConfigFromDB(cfgKey); }catch(e){}
+      const auto=cqAutoMap(sh[pick].headers,fields);
+      setMap(savedMap&&typeof savedMap==='object'?{...auto,...savedMap}:auto); setStep('map');
+    }catch(e){ setErr('Datei nicht lesbar: '+(e.message||'')); } };
+    rd.readAsArrayBuffer(f);
+  }
+  function reMapSheet(i){ setSheetIdx(i); setMap(cqAutoMap(sheets[i].headers,fields)); }
+  const missingReq=fields.filter(f=>f.req && (map[f.key]==null||map[f.key]<0));
+
+  async function process(){ if(missingReq.length||!sheet||!kpiIds||kpiIds.error) return; setBusy(true); setErr('');
+    try{ await saveConfigToDB(cfgKey, map); }catch(e){}
+    const {data:aliasRows}=await sb.from('import_aliases').select('alias_name,employee_id').eq('project_id',projId);
+    const aliasMap={}, ignoredSet={}; (aliasRows||[]).forEach(a=>{ const k=cqNormName(a.alias_name); if(a.employee_id) aliasMap[k]=a.employee_id; else ignoredSet[k]=true; });
+    const emps=(employees||[]).filter(e=>e&&e.project_id===projId);
+    const empById={}, byName={}; emps.forEach(e=>{ empById[e.id]=e; byName[cqNormName((e.first_name||'')+' '+(e.last_name||''))]=e; });
+    const resolve=nm=>{ const n=cqNormName(nm); if(aliasMap[n]) return empById[aliasMap[n]]||null; return byName[n]||null; };
+    const seen={}, facts=[], unmatched={}, dups=[]; let ignoredCount=0;
+    (sheet.rows||[]).forEach(r=>{ const nm=String(r[map.name]==null?'':r[map.name]).trim(); if(!nm) return;
+      if(ignoredSet[cqNormName(nm)]){ ignoredCount++; return; }
+      const emp=resolve(nm);
+      if(!emp){ (unmatched[nm]=unmatched[nm]||{name:nm,rows:0}).rows++; return; }
+      if(seen[emp.id]){ dups.push(nm); return; } seen[emp.id]=true;
+      const conv=cqParse('num', r[map.conversions]); const open=cqParse('num', r[map.open]); const osl=cqParse('num', r[map.osl]); const sc=cqParse('int', r[map.sales_calls]);
+      facts.push({ employee_id:emp.id, name:((emp.first_name||'')+' '+(emp.last_name||'')).trim(), kuerzel:nm,
+        cr:(conv==null?null:Math.round(conv*100*100)/100), open, osl, sales_calls:sc });
+    });
+    facts.sort((a,b)=>a.name.localeCompare(b.name,'de'));
+    const unmatchedList=Object.values(unmatched).sort((a,b)=>b.rows-a.rows);
+    const empIds=facts.map(f=>f.employee_id);
+    // Herkunft: welche von Hand geaenderten Werte wuerden ueberschrieben?
+    let replacedManual=[];
+    if(empIds.length){ try{ const {data:ex}=await sb.from('kpi_entries').select('emp_id,kpi_id,source').eq('kw',Number(kw)).eq('year',Number(year)).in('kpi_id',[kpiIds.cr,kpiIds.open,kpiIds.osl,kpiIds.calls]).in('emp_id',empIds);
+      const byId={}; facts.forEach(f=>byId[f.employee_id]=f.name);
+      replacedManual=(ex||[]).filter(x=>x.source==='manual').map(x=>byId[x.emp_id]||x.emp_id);
+      replacedManual=[...new Set(replacedManual)];
+    }catch(e){} }
+    // Drift-Check: Sales Calls aus Rohdaten (weekly_hours) je Agent/KW vs. importierte salescalls_daily.
+    let drift=[];
+    try{ const {data:wh}=await sb.from('weekly_hours').select('employee_id,sales_calls').eq('project_id',projId).eq('kw',Number(kw)).eq('year',Number(year));
+      const rd={}; (wh||[]).forEach(w=>{ rd[w.employee_id]=Number(w.sales_calls); });
+      facts.forEach(f=>{ const roh=rd[f.employee_id]; if(roh!=null&&f.sales_calls!=null&&Math.abs(roh-f.sales_calls)>0){ drift.push(f.name+': Booking '+f.sales_calls+' / Rohdaten '+roh); } });
+    }catch(e){}
+    const warnings=[];
+    if(unmatchedList.length) warnings.push({type:'unmatched',message:unmatchedList.length+' nicht zuordenbare Kuerzel (nicht importiert)',details:unmatchedList.map(u=>u.name+' ('+u.rows+')')});
+    if(dups.length) warnings.push({type:'duplicate',message:dups.length+' doppelte Kuerzel (nur erste Zeile)',details:dups});
+    if(replacedManual.length) warnings.push({type:'manual',message:replacedManual.length+' von Hand geaenderte Werte werden vom Import ersetzt',details:replacedManual});
+    if(drift.length) warnings.push({type:'drift',message:drift.length+' MA: Sales Calls weichen von den Rohdaten ab',details:drift});
+    setResult({facts,unmatched:unmatchedList,warnings,ignoredCount}); setBusy(false); setStep('preview');
+  }
+  async function assignAlias(nm, empId){ if(!empId) return; setBusy(true); await sb.from('import_aliases').insert({project_id:projId, alias_name:nm, employee_id:empId}); await process(); }
+  async function ignoreAlias(nm){ setBusy(true); await sb.from('import_aliases').insert({project_id:projId, alias_name:nm, employee_id:null}); await process(); }
+
+  async function save(){ if(!result||busy||!kpiIds||kpiIds.error) return; setBusy(true); setErr('');
+    const ts=isoLocal(new Date())+'_'+fileHash; const path=projId+'/booking_a/'+ts+'_'+(file.name||'booking.xlsx');
+    let storagePath=null; try{ const up=await sb.storage.from('weekly-imports').upload(path,file,{upsert:true,contentType:file.type||'application/octet-stream'}); if(!up.error) storagePath=path; }catch(e){}
+    let uid=null,uname=null; try{ const u=await sb.auth.getUser(); uid=u&&u.data&&u.data.user&&u.data.user.id||null; if(uid){ const nr=await sb.from('app_users').select('full_name').eq('user_id',uid).single(); uname=nr&&nr.data&&nr.data.full_name||null; } }catch(e){}
+    const status=result.unmatched.length?'partial':'ok';
+    const {error:ie}=await sb.from('data_imports').insert({ project_id:projId, source_type:'booking_a', kw:Number(kw), year:Number(year), file_name:file.name, file_hash:fileHash, storage_path:storagePath, status, warnings:result.warnings, row_count:(sheet.rows||[]).length, matched_count:result.facts.length, unmatched_count:result.unmatched.length, uploaded_by:uid, uploaded_by_name:uname });
+    if(ie){ setBusy(false); setErr('Import-Protokoll nicht gespeichert: '+(ie.message||'')); return; }
+    const empIds=result.facts.map(f=>f.employee_id); const allK=[kpiIds.cr,kpiIds.open,kpiIds.osl,kpiIds.calls];
+    // Ueberschreiben: gezielt nur diese kpi_ids/Woche/Agenten (AHT/CSAT/QM u.a. bleiben unberuehrt).
+    const {error:de}=await sb.from('kpi_entries').delete().eq('kw',Number(kw)).eq('year',Number(year)).in('kpi_id',allK).in('emp_id',empIds);
+    if(de){ setBusy(false); setErr('Alte Werte nicht ersetzbar: '+(de.message||'')); return; }
+    const rows=[]; result.facts.forEach(f=>{
+      const put=(kpi_id,value)=>{ if(value!=null&&!isNaN(value)) rows.push({emp_id:f.employee_id, kpi_id, value, kw:Number(kw), year:Number(year), source:'import', entered_by:uname}); };
+      put(kpiIds.cr, f.cr); put(kpiIds.open, f.open); put(kpiIds.osl, f.osl); put(kpiIds.calls, f.sales_calls);
+    });
+    if(rows.length){ const {error:fe}=await sb.from('kpi_entries').insert(rows); if(fe){ setBusy(false); setErr('Werte nicht gespeichert: '+(fe.message||'')); return; } }
+    setBusy(false); setSaved(true); setStep('upload'); setSheets(null); setFile(null); setResult(null); onSaved&&onSaved();
+  }
+
+  const WARN_C={unmatched:'#dc2626',duplicate:'#d97706',manual:'#b45309',drift:'#b45309'};
+  return <div>
+    {err && <div style={{padding:'8px 12px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:8,color:'#dc2626',fontSize:12,marginBottom:12}}>{err}</div>}
+    {saved && <div style={{padding:'8px 12px',background:'#ecfdf5',border:'1px solid #a7f3d0',borderRadius:8,color:'#059669',fontSize:12,marginBottom:12,fontWeight:700}}>✓ Booking-Import KW {kw}/{year} gespeichert (Conversion, Offene/OSL, Sales Calls je Agent).</div>}
+    {kpiIds && kpiIds.error && <div style={{padding:'10px 12px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:8,color:'#dc2626',fontSize:12,marginBottom:12,fontWeight:700}}>Import nicht moeglich - fehlende KPI-Konfiguration: {kpiIds.error.join(', ')}. Erst im KPI-Editor (bzw. Migration) anlegen.</div>}
+
+    <div style={{display:'flex',gap:10,alignItems:'center',marginBottom:12,flexWrap:'wrap'}}>
+      <span style={{fontSize:12,fontWeight:700}}>Woche:</span>
+      <span style={{fontSize:12}}>KW <input type="number" min={1} max={53} value={kw} onChange={e=>setKw(e.target.value)} style={{width:64,padding:'4px 6px',border:'1px solid var(--border)',borderRadius:6}}/></span>
+      <span style={{fontSize:12}}>Jahr <input type="number" min={2024} max={2100} value={year} onChange={e=>setYear(e.target.value)} style={{width:80,padding:'4px 6px',border:'1px solid var(--border)',borderRadius:6}}/></span>
+      <span style={{fontSize:11,color:'var(--muted)'}}>Die Booking-Excel enthält kein Datum - diese Datei zählt für die gewählte Woche.</span>
+    </div>
+
+    {step==='upload' && <label style={{display:'inline-flex',alignItems:'center',gap:8,padding:'10px 16px',border:'1px dashed var(--border)',borderRadius:10,cursor:(kpiIds&&kpiIds.error)?'not-allowed':'pointer',fontWeight:700,opacity:(kpiIds&&kpiIds.error)?0.5:1}}>
+      ⬆ Booking-Excel wählen
+      <input type="file" accept=".xlsx,.xls,.csv" disabled={!!(kpiIds&&kpiIds.error)} style={{display:'none'}} onChange={e=>{ const f=e.target.files&&e.target.files[0]; e.target.value=''; onFile(f); }}/>
+    </label>}
+
+    {step==='map' && sheet && <div>
+      <div style={{fontSize:13,fontWeight:700,marginBottom:8}}>Spalten zuordnen <span style={{fontWeight:400,color:'var(--muted)'}}>— Datei „{file&&file.name}"</span></div>
+      {sheets.length>1 && <div style={{marginBottom:10,fontSize:12}}>Blatt: <select className="form-select" style={{width:'auto'}} value={sheetIdx} onChange={e=>reMapSheet(Number(e.target.value))}>{sheets.map((s,i)=><option key={i} value={i}>{s.name} ({s.headers.length})</option>)}</select></div>}
+      <div style={{fontSize:11,color:'var(--muted)',marginBottom:8}}>Erkennung am Inhalt. username = Agenten-Kürzel. Zuordnung wird je Projekt gespeichert.</div>
+      <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}><tbody>
+        {fields.map(f=>{ const bad=f.req && (map[f.key]==null||map[f.key]<0); return <tr key={f.key} style={{borderBottom:'1px solid var(--border)'}}>
+          <td style={{padding:'6px 8px',fontWeight:600,whiteSpace:'nowrap'}}>{f.label}{f.req&&<span style={{color:'#dc2626'}}> *</span>}</td>
+          <td style={{padding:'6px 8px'}}>
+            <select className="form-select" style={{width:'100%',borderColor:bad?'#dc2626':undefined}} value={map[f.key]==null?-1:map[f.key]} onChange={e=>setMap(m=>({...m,[f.key]:Number(e.target.value)}))}>
+              <option value={-1}>— bitte wählen —</option>
+              {sheet.headers.map((h,i)=><option key={i} value={i}>{h||('Spalte '+(i+1))}</option>)}
+            </select>
+          </td>
+        </tr>; })}
+      </tbody></table>
+      {missingReq.length>0 && <div style={{fontSize:11,color:'#dc2626',marginTop:8}}>Fehlende Pflichtspalten: {missingReq.map(f=>f.label).join(', ')}.</div>}
+      <div style={{display:'flex',gap:8,marginTop:12}}>
+        <button className="btn btn-sm" onClick={()=>{ setStep('upload'); setSheets(null); setFile(null); }}>Abbrechen</button>
+        <button className="btn btn-sm btn-primary" disabled={missingReq.length>0||busy} onClick={process}>Verarbeiten (Vorschau)</button>
+      </div>
+    </div>}
+
+    {step==='preview' && result && <div>
+      <div style={{display:'flex',gap:20,flexWrap:'wrap',marginBottom:12}}>
+        <div><div style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>Zugeordnet</div><div style={{fontSize:22,fontWeight:800}}>{result.facts.length}</div></div>
+        <div><div style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>Nicht zuordenbar</div><div style={{fontSize:22,fontWeight:800,color:result.unmatched.length?'#dc2626':'#059669'}}>{result.unmatched.length}</div></div>
+        <div><div style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>Woche</div><div style={{fontSize:22,fontWeight:800}}>KW {kw}/{year}</div></div>
+        {result.ignoredCount>0 && <div><div style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>Ignoriert</div><div style={{fontSize:22,fontWeight:800,color:'var(--muted)'}}>{result.ignoredCount}</div></div>}
+      </div>
+      {result.unmatched.length>0 && <div style={{border:'1px solid #fecaca',background:'#fef2f2',borderRadius:10,padding:'10px 12px',marginBottom:12}}>
+        <div style={{fontSize:12,fontWeight:800,color:'#dc2626',marginBottom:6}}>Nicht zuordenbare Kürzel — zuordnen oder dauerhaft ignorieren:</div>
+        {result.unmatched.map((u,i)=><div key={i} style={{display:'flex',alignItems:'center',gap:8,padding:'3px 0',flexWrap:'wrap'}}>
+          <span style={{fontWeight:600,minWidth:140}}>{u.name} <span style={{color:'var(--muted)',fontWeight:400}}>({u.rows}×)</span></span>
+          <select className="form-select" style={{width:'auto',fontSize:12}} defaultValue="" onChange={e=>{ if(e.target.value) assignAlias(u.name, e.target.value); }}>
+            <option value="">→ Mitarbeiter wählen…</option>
+            {(employees||[]).filter(e=>e&&e.project_id===projId).slice().sort((a,b)=>((a.first_name||'')+a.last_name).localeCompare((b.first_name||'')+b.last_name,'de')).map(e=><option key={e.id} value={e.id}>{e.first_name} {e.last_name}{e.project_skill?' · '+e.project_skill:''}</option>)}
+          </select>
+          <button className="btn btn-sm" disabled={busy} onClick={()=>ignoreAlias(u.name)} title="Dieses Kürzel dauerhaft ausschließen">Ignorieren</button>
+        </div>)}
+      </div>}
+      {result.warnings.filter(w=>w.type==='manual'||w.type==='drift').map((w,i)=><div key={i} style={{border:'1px solid #fde68a',background:'#fffbeb',borderRadius:10,padding:'10px 12px',marginBottom:12}}>
+        <div style={{fontSize:12,fontWeight:800,color:WARN_C[w.type]||'#b45309',marginBottom:4}}>{w.type==='manual'?'⚠ ':'⚖ '}{w.message}</div>
+        <div style={{fontSize:11,color:'var(--muted)',lineHeight:1.5}}>{w.details.join(' · ')}</div>
+      </div>)}
+      <div style={{maxHeight:300,overflow:'auto',border:'1px solid var(--border)',borderRadius:8,marginBottom:12}}>
+        <table style={{width:'100%',borderCollapse:'collapse',fontSize:12,whiteSpace:'nowrap'}}>
+          <thead><tr style={{position:'sticky',top:0,background:'var(--surface-2)'}}>
+            <th style={{textAlign:'left',padding:'6px 8px',fontSize:11,color:'var(--muted)'}}>Mitarbeiter</th>
+            <th style={{textAlign:'right',padding:'6px 8px',fontSize:11,color:'var(--muted)'}}>Conversion</th>
+            <th style={{textAlign:'right',padding:'6px 8px',fontSize:11,color:'var(--muted)'}}>Offene</th>
+            <th style={{textAlign:'right',padding:'6px 8px',fontSize:11,color:'var(--muted)'}}>OSL</th>
+            <th style={{textAlign:'right',padding:'6px 8px',fontSize:11,color:'var(--muted)'}}>Sales Calls</th>
+          </tr></thead>
+          <tbody>{result.facts.map((f,i)=><tr key={i} style={{borderTop:'1px solid var(--border)'}}>
+            <td style={{padding:'5px 8px'}}>{f.name}</td>
+            <td style={{padding:'5px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{f.cr==null?'—':f.cr.toLocaleString('de-DE',{maximumFractionDigits:2})+' %'}</td>
+            <td style={{padding:'5px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{f.open==null?'—':f.open.toLocaleString('de-DE')}</td>
+            <td style={{padding:'5px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{f.osl==null?'—':f.osl.toLocaleString('de-DE')}</td>
+            <td style={{padding:'5px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{f.sales_calls==null?'—':f.sales_calls.toLocaleString('de-DE')}</td>
+          </tr>)}</tbody>
+        </table>
+      </div>
+      <div style={{display:'flex',gap:8}}>
+        <button className="btn btn-sm" onClick={()=>setStep('map')}>Zurück zur Zuordnung</button>
+        <button className="btn btn-sm btn-primary" disabled={busy||result.facts.length===0} onClick={save}>💾 Import speichern ({result.facts.length} Agenten)</button>
+      </div>
+      <div style={{fontSize:11,color:'var(--muted)',marginTop:8}}>Conversion wird als Prozent gespeichert (0,5144 → 51,44 %). Re-Import derselben Woche ersetzt die Werte, auch von Hand geänderte (oben gelistet).</div>
+    </div>}
+  </div>;
+}
+
 // ══ Recruiting Marketing (Windsor.ai: Meta Ads + Instagram organisch) — management-only ══
 // Werte kommen als TEXT an → robust parsen. '' bleibt null (Unterschied fehlt vs. 0!). US-Format
 // (Komma = Tausender, Punkt = Dezimal, wie Windsor liefert). Datum ISO 'YYYY-MM-DD' → lokales Date.
@@ -33911,7 +34117,7 @@ function DataImportView({projects, employees}){
   useEffect(()=>{ let alive=true; (async()=>{ if(!projId){ setImports([]); return; }
     const {data}=await sb.from('data_imports').select('*').eq('project_id',projId).eq('source_type',source).order('created_at',{ascending:false}).limit(12);
     if(alive) setImports(data||[]); })(); return ()=>{alive=false;}; },[projId,source,tick]);
-  const SOURCES=[{key:'rohdaten',label:'Rohdaten-Excel',sub:'Stunden je Skill (agent_qm)'},{key:'calls',label:'Call-CSV',sub:'Answered, AHT, Outbound …'},{key:'gauges',label:'Gauges-Excel',sub:'Gesamt%, NPS, CSAT'}];
+  const SOURCES=[{key:'rohdaten',label:'Rohdaten-Excel',sub:'Stunden je Skill (agent_qm)'},{key:'calls',label:'Call-CSV',sub:'Answered, AHT, Outbound …'},{key:'gauges',label:'Gauges-Excel',sub:'Gesamt%, NPS, CSAT'},{key:'booking_a',label:'Booking-Excel (Agent)',sub:'Conversion, Buchungen, Sales Calls'}];
   return <div style={{maxWidth:1000}}>
     <div style={{fontSize:20,fontWeight:700,marginBottom:4}}>📥 Datenimport</div>
     <div style={{fontSize:13,color:'var(--muted)',marginBottom:14}}>Wöchentliche Rohdaten getrennt vom Bericht. Erkennung am Inhalt; nicht zuordenbare Namen werden gemeldet, nie still verworfen.</div>
@@ -33927,6 +34133,7 @@ function DataImportView({projects, employees}){
       {source==='rohdaten' && <RohdatenImport projId={projId} projName={selProj.name} employees={employees} onSaved={()=>setTick(t=>t+1)}/>}
       {source==='calls' && <PivotImport projId={projId} employees={employees} source="calls" fields={CALLS_FIELDS} table="weekly_calls" accept=".csv,.xlsx,.xls" hint="Call-CSV wählen" onSaved={()=>setTick(t=>t+1)}/>}
       {source==='gauges' && <PivotImport projId={projId} employees={employees} source="gauges" fields={GAUGES_FIELDS} table="weekly_gauges" accept=".xlsx,.xls,.csv" hint="Gauges-Excel wählen" onSaved={()=>setTick(t=>t+1)}/>}
+      {source==='booking_a' && <BookingImportAgent projId={projId} employees={employees} onSaved={()=>setTick(t=>t+1)}/>}
     </div>}
     <div style={{fontSize:13,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em',marginBottom:8}}>Letzte Importe</div>
     {imports===null ? <div className="sp-empty">Lädt…</div> : imports.length===0 ? <div className="sp-empty">Noch keine Importe für dieses Projekt.</div> :
