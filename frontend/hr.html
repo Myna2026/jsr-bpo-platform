@@ -33390,6 +33390,32 @@ const BOOKING_A_FIELDS=[
   {key:'osl',         label:'OSL-Buchungen',       req:true, kind:'num',  cand:['sum_osl_bookings','osl_bookings','osl bookings','osl buchungen','osl']},
   {key:'sales_calls', label:'Sales Calls',         req:true, kind:'int',  cand:['salescalls_daily','sales_calls','salescalls','sales calls','calls']},
 ];
+// Team-Dateien B/C: UTF-16/UTF-8/xlsx robust einlesen -> {headers, rows}. Trenner Tab/;/, erkannt.
+function importDecode(bytes){
+  if(bytes[0]===0x50&&bytes[1]===0x4B){ const wb=XLSX.read(bytes,{type:'array',cellDates:true,raw:false}); const nm=wb.SheetNames[0]; const aoa=XLSX.utils.sheet_to_json(wb.Sheets[nm],{header:1,defval:''}); return {headers:(aoa[0]||[]).map(x=>String(x==null?'':x)), rows:aoa.slice(1)}; }
+  let text;
+  if(bytes.length>=2 && ((bytes[0]===0xFF&&bytes[1]===0xFE)||(bytes[0]===0xFE&&bytes[1]===0xFF))){ const enc=(bytes[0]===0xFE)?'utf-16be':'utf-16le'; text=new TextDecoder(enc).decode(bytes); }
+  else { text=new TextDecoder('utf-8').decode(bytes); }
+  text=text.replace(/^﻿/,'').replace(/\r\n/g,'\n').replace(/\r/g,'\n');
+  const lines=text.split('\n').filter(l=>l.length>0); if(!lines.length) return {headers:[],rows:[]};
+  const delim = lines[0].indexOf('\t')>=0?'\t':(lines[0].indexOf(';')>=0?';':',');
+  const sp=l=>l.split(delim).map(c=>String(c==null?'':c).trim());
+  return {headers:sp(lines[0]), rows:lines.slice(1).map(sp)};
+}
+// Monatsname (de/en) -> 1..12 per Präfix (August->8, März/maerz->3, October->10).
+function importMonthNum(s){ let x=String(s||'').toLowerCase().trim().replace(/ä/g,'ae').replace(/ö/g,'oe').replace(/ü/g,'ue');
+  const DE=['jan','feb','mae','apr','mai','jun','jul','aug','sep','okt','nov','dez'], EN=['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+  for(let i=0;i<12;i++){ if(x.startsWith(DE[i])||x.startsWith(EN[i])) return i+1; } return null; }
+// Periode: Zahl 1..53 = KW; Name = Monat. Kein Raten sonst.
+function importPeriod(v){ const s=String(v==null?'':v).trim(); if(!s) return null; const mn=importMonthNum(s); if(mn) return {mode:'month',n:mn}; const n=parseInt(s.replace(/[^\d]/g,''),10); if(!isNaN(n)&&n>=1&&n<=53) return {mode:'kw',n}; return null; }
+const BOOKING_TEAM_FIELDS=[
+  {key:'year',        label:'Jahr',                req:true, kind:'int', cand:['year of date','year','jahr','datum jahr']},
+  {key:'period',      label:'KW / Monat',          req:true, kind:'raw', cand:['iso_weeks','iso_week','iso weeks','kw','iso_month','iso month','month','monat','monatsname']},
+  {key:'conversions', label:'Conversion (Dezimal)',req:true, kind:'num', cand:['conversions','conversion','cvr','cr']},
+  {key:'open',        label:'Offene Buchungen',    req:true, kind:'num', cand:['sum_offline_bookings','offline_bookings','offline bookings','offline']},
+  {key:'osl',         label:'OSL-Buchungen',       req:true, kind:'num', cand:['sum_osl_bookings','osl_bookings','osl bookings','osl']},
+  {key:'calls',       label:'Sales Calls (unique)',req:true, kind:'int', cand:['unique_sales_calls_by_date','unique_sales_calls','unique sales calls','sales calls','calls']},
+];
 function RohdatenImport({projId, projName, employees, onSaved}){
   const [file,setFile]=useState(null); const [fileHash,setFileHash]=useState('');
   const [sheets,setSheets]=useState(null);     // [{name,headers,rows}]
@@ -33914,6 +33940,160 @@ function BookingImportAgent({projId, employees, onSaved}){
   </div>;
 }
 
+// Booking-Import B/C: Wochen-/Monatsdatei (UTF-16 Tab) -> kpi_project_entries (Team). Woche vs. Monat am INHALT
+// erkannt (Periode numerisch=KW, Name=Monat). CR (conversions x100), Buchungen (offline+osl -> kpi_bookings_team),
+// Sales Calls (unique -> kpi_sales_calls_team). Fehlende Team-KPIs -> Sperre. source='import'. Schreiben verifiziert.
+function BookingImportTeam({projId, onSaved}){
+  const [file,setFile]=useState(null); const [fileHash,setFileHash]=useState('');
+  const [sheet,setSheet]=useState(null); const [map,setMap]=useState({}); const [step,setStep]=useState('upload');
+  const [result,setResult]=useState(null);
+  const [busy,setBusy]=useState(false); const [saved,setSaved]=useState(false); const [err,setErr]=useState('');
+  const [kpiIds,setKpiIds]=useState(null);
+  const cfgKey='jsr_import_map_booking_team_'+projId;
+  const fields=BOOKING_TEAM_FIELDS;
+
+  useEffect(()=>{ let alive=true; (async()=>{
+    try{ const {data}=await sb.from('kpi_config').select('id,name,skill,level'); const rows=data||[]; const low=s=>String(s||'').toLowerCase();
+      const cr=rows.find(k=>/^\s*cr\s*$/i.test(k.name||'')&&low(k.skill)==='sales');
+      const buch=rows.find(k=>k.id==='kpi_bookings_team')||rows.find(k=>/^\s*buchungen\s*$/i.test(k.name||'')&&k.level==='team'&&low(k.skill)==='sales');
+      const calls=rows.find(k=>k.id==='kpi_sales_calls_team')||rows.find(k=>/^\s*sales\s*calls\s*$/i.test(k.name||'')&&k.level==='team'&&low(k.skill)==='sales');
+      const miss=[]; if(!cr) miss.push('CR (Conversion)'); if(!buch) miss.push('Buchungen (Team)'); if(!calls) miss.push('Sales Calls (Team)');
+      if(alive) setKpiIds(miss.length?{error:miss}:{cr:cr.id, buchungen:buch.id, calls:calls.id, skill:(cr.skill||'sales')});
+    }catch(e){ if(alive) setKpiIds({error:['KPI-Konfiguration nicht ladbar']}); }
+  })(); return ()=>{alive=false;}; },[projId]);
+
+  function onFile(f){ if(!f) return; setErr(''); setSaved(false); setResult(null);
+    const rd=new FileReader();
+    rd.onload=async ev=>{ try{
+      const bytes=new Uint8Array(ev.target.result); const sh=importDecode(bytes);
+      setFile(f); setFileHash('sz'+bytes.length); setSheet(sh);
+      let savedMap=null; try{ savedMap=await loadConfigFromDB(cfgKey); }catch(e){}
+      const auto=cqAutoMap(sh.headers, fields);
+      setMap(savedMap&&typeof savedMap==='object'?{...auto,...savedMap}:auto); setStep('map');
+    }catch(e){ setErr('Datei nicht lesbar: '+(e.message||'')); } };
+    rd.readAsArrayBuffer(f);
+  }
+  const missingReq=fields.filter(f=>f.req && (map[f.key]==null||map[f.key]<0));
+
+  async function process(){ if(missingReq.length||!sheet||!kpiIds||kpiIds.error) return; setBusy(true); setErr('');
+    try{ await saveConfigToDB(cfgKey, map); }catch(e){}
+    const facts={}; let invalid=0, dup=0;
+    (sheet.rows||[]).forEach(r=>{
+      const year=cqInt(r[map.year]); const p=importPeriod(r[map.period]);
+      if(!year||!p){ invalid++; return; }
+      const conv=cqNumV(r[map.conversions]); const open=cqNumV(r[map.open]); const osl=cqNumV(r[map.osl]); const calls=cqInt(r[map.calls]);
+      const key=year+'|'+p.mode+'|'+p.n; if(facts[key]) dup++;
+      facts[key]={year, mode:p.mode, n:p.n, cr:(conv==null?null:Math.round(conv*100*100)/100),
+        buchungen:((open==null&&osl==null)?null:((open||0)+(osl||0))), calls};
+    });
+    const list=Object.values(facts).sort((a,b)=>a.year-b.year||a.n-b.n);
+    const modes=[...new Set(list.map(f=>f.mode))];
+    const teamKpis=[kpiIds.cr,kpiIds.buchungen,kpiIds.calls];
+    let replacedManual=0;
+    try{ const kws=list.filter(f=>f.mode==='kw'), mos=list.filter(f=>f.mode==='month');
+      if(kws.length){ const {data}=await sb.from('kpi_project_entries').select('source').eq('project_id',projId).eq('skill',kpiIds.skill).in('kpi_id',teamKpis).in('year',[...new Set(kws.map(f=>f.year))]).in('kw',[...new Set(kws.map(f=>f.n))]); (data||[]).forEach(x=>{ if(x.source!=='import') replacedManual++; }); }
+      if(mos.length){ const {data}=await sb.from('kpi_project_entries').select('source').eq('project_id',projId).eq('skill',kpiIds.skill).in('kpi_id',teamKpis).in('year',[...new Set(mos.map(f=>f.year))]).in('month',[...new Set(mos.map(f=>f.n))]); (data||[]).forEach(x=>{ if(x.source!=='import') replacedManual++; }); }
+    }catch(e){}
+    const warnings=[];
+    if(invalid) warnings.push({type:'invalid',message:invalid+' Zeilen ohne gültige Woche/Monat oder Jahr (übersprungen)'});
+    if(dup) warnings.push({type:'dup',message:dup+' doppelte Perioden (jeweils letzte Zeile gilt)'});
+    if(modes.length>1) warnings.push({type:'mixed',message:'Datei enthält Wochen UND Monate gemischt - bitte prüfen'});
+    if(replacedManual) warnings.push({type:'manual',message:replacedManual+' von Hand gepflegte Team-Werte werden ersetzt'});
+    setResult({facts:list, mode:modes[0]||'kw', warnings}); setBusy(false); setStep('preview');
+  }
+
+  async function save(){ if(!result||busy||!kpiIds||kpiIds.error) return; setBusy(true); setErr('');
+    try{
+      let uid=null,uname=null; try{ const u=await sb.auth.getUser(); uid=u&&u.data&&u.data.user&&u.data.user.id||null; if(uid){ const nr=await sb.from('app_users').select('full_name').eq('user_id',uid).single(); uname=nr&&nr.data&&nr.data.full_name||null; } }catch(e){}
+      const skill=kpiIds.skill; const teamKpis=[kpiIds.cr,kpiIds.buchungen,kpiIds.calls];
+      const rows=[]; const byYearKw={}, byYearMonth={};
+      result.facts.forEach(f=>{ const periodCol=f.mode==='kw'?{kw:f.n}:{month:f.n};
+        const put=(kpi_id,value)=>{ if(value!=null&&!isNaN(value)) rows.push({project_id:projId, skill, year:f.year, ...periodCol, kpi_id, value, source:'import', entered_by:uname}); };
+        put(kpiIds.cr,f.cr); put(kpiIds.buchungen,f.buchungen); put(kpiIds.calls,f.calls);
+        if(f.mode==='kw'){ (byYearKw[f.year]=byYearKw[f.year]||new Set()).add(f.n); } else { (byYearMonth[f.year]=byYearMonth[f.year]||new Set()).add(f.n); }
+      });
+      if(!rows.length) throw new Error('Keine Werte zum Speichern.');
+      // Alte Werte gezielt entfernen (je Jahr, nur diese Perioden + Team-KPIs). Fehler MUSS auffallen.
+      for(const y of Object.keys(byYearKw)){ const del=await sb.from('kpi_project_entries').delete().eq('project_id',projId).eq('skill',skill).eq('year',Number(y)).in('kw',[...byYearKw[y]]).in('kpi_id',teamKpis); if(del.error) throw new Error('Alte Wochenwerte nicht ersetzbar: '+(del.error.message||del.error)); }
+      for(const y of Object.keys(byYearMonth)){ const del=await sb.from('kpi_project_entries').delete().eq('project_id',projId).eq('skill',skill).eq('year',Number(y)).in('month',[...byYearMonth[y]]).in('kpi_id',teamKpis); if(del.error) throw new Error('Alte Monatswerte nicht ersetzbar: '+(del.error.message||del.error)); }
+      // Schreiben UND verifizieren.
+      const ins=await sb.from('kpi_project_entries').insert(rows).select('id'); if(ins.error) throw new Error('Werte nicht gespeichert: '+(ins.error.message||ins.error));
+      const wrote=(ins.data||[]).length; if(wrote!==rows.length) throw new Error('Nur '+wrote+' von '+rows.length+' Team-Werten geschrieben - abgebrochen (Rechte/Policy prüfen).');
+      // Rohdatei + Protokoll erst nach verifiziertem Schreiben.
+      const ts=isoLocal(new Date())+'_'+fileHash; const path=projId+'/booking_team/'+ts+'_'+(file.name||'booking_team.csv');
+      let storagePath=null; try{ const up=await sb.storage.from('weekly-imports').upload(path,file,{upsert:true,contentType:file.type||'text/csv'}); if(!up.error) storagePath=path; }catch(e){}
+      const f0=result.facts[0]||{}; const status=result.warnings.some(w=>w.type==='invalid'||w.type==='mixed')?'partial':'ok';
+      try{ await sb.from('data_imports').insert({project_id:projId, source_type:'booking_team', kw:(result.mode==='kw'?(f0.n||null):null), year:(f0.year||null), file_name:file.name, file_hash:fileHash, storage_path:storagePath, status, warnings:result.warnings, row_count:(sheet.rows||[]).length, matched_count:result.facts.length, unmatched_count:0, uploaded_by:uid, uploaded_by_name:uname}); }catch(e){}
+      setBusy(false); setSaved(true); setStep('upload'); setSheet(null); setFile(null); setResult(null); onSaved&&onSaved();
+    }catch(e){ setBusy(false); setErr(String((e&&e.message)||e)); }
+  }
+
+  const perLbl=f=>f.mode==='kw'?('KW '+f.n):('Monat '+String(f.n).padStart(2,'0'));
+  return <div>
+    {err && <div style={{padding:'8px 12px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:8,color:'#dc2626',fontSize:12,marginBottom:12}}>{err}</div>}
+    {saved && <div style={{padding:'8px 12px',background:'#ecfdf5',border:'1px solid #a7f3d0',borderRadius:8,color:'#059669',fontSize:12,marginBottom:12,fontWeight:700}}>✓ Team-Werte gespeichert (Conversion, Buchungen, Sales Calls je Periode).</div>}
+    {kpiIds && kpiIds.error && <div style={{padding:'10px 12px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:8,color:'#dc2626',fontSize:12,marginBottom:12,fontWeight:700}}>Import nicht möglich - fehlende KPI-Konfiguration: {kpiIds.error.join(', ')}.</div>}
+    <div style={{fontSize:11,color:'var(--muted)',marginBottom:12}}>Wochen- oder Monatsdatei (UTF-16, Tab). Woche vs. Monat wird am Inhalt erkannt; die Periode steht in der Datei.</div>
+
+    {step==='upload' && <label style={{display:'inline-flex',alignItems:'center',gap:8,padding:'10px 16px',border:'1px dashed var(--border)',borderRadius:10,cursor:(kpiIds&&kpiIds.error)?'not-allowed':'pointer',fontWeight:700,opacity:(kpiIds&&kpiIds.error)?0.5:1}}>
+      ⬆ Wochen-/Monatsdatei wählen
+      <input type="file" accept=".csv,.tsv,.txt,.xlsx,.xls" disabled={!!(kpiIds&&kpiIds.error)} style={{display:'none'}} onChange={e=>{ const f=e.target.files&&e.target.files[0]; e.target.value=''; onFile(f); }}/>
+    </label>}
+
+    {step==='map' && sheet && <div>
+      <div style={{fontSize:13,fontWeight:700,marginBottom:8}}>Spalten zuordnen <span style={{fontWeight:400,color:'var(--muted)'}}>— Datei „{file&&file.name}"</span></div>
+      <div style={{fontSize:11,color:'var(--muted)',marginBottom:8}}>Erkennung am Inhalt. „KW / Monat" = die Perioden-Spalte (iso_weeks bzw. Monatsname).</div>
+      <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}><tbody>
+        {fields.map(f=>{ const bad=f.req && (map[f.key]==null||map[f.key]<0); return <tr key={f.key} style={{borderBottom:'1px solid var(--border)'}}>
+          <td style={{padding:'6px 8px',fontWeight:600,whiteSpace:'nowrap'}}>{f.label}{f.req&&<span style={{color:'#dc2626'}}> *</span>}</td>
+          <td style={{padding:'6px 8px'}}>
+            <select className="form-select" style={{width:'100%',borderColor:bad?'#dc2626':undefined}} value={map[f.key]==null?-1:map[f.key]} onChange={e=>setMap(m=>({...m,[f.key]:Number(e.target.value)}))}>
+              <option value={-1}>— bitte wählen —</option>
+              {sheet.headers.map((h,i)=><option key={i} value={i}>{h||('Spalte '+(i+1))}</option>)}
+            </select>
+          </td>
+        </tr>; })}
+      </tbody></table>
+      {missingReq.length>0 && <div style={{fontSize:11,color:'#dc2626',marginTop:8}}>Fehlende Pflichtspalten: {missingReq.map(f=>f.label).join(', ')}.</div>}
+      <div style={{display:'flex',gap:8,marginTop:12}}>
+        <button className="btn btn-sm" onClick={()=>{ setStep('upload'); setSheet(null); setFile(null); }}>Abbrechen</button>
+        <button className="btn btn-sm btn-primary" disabled={missingReq.length>0||busy} onClick={process}>Verarbeiten (Vorschau)</button>
+      </div>
+    </div>}
+
+    {step==='preview' && result && <div>
+      <div style={{display:'flex',gap:20,flexWrap:'wrap',marginBottom:12}}>
+        <div><div style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>Perioden</div><div style={{fontSize:22,fontWeight:800}}>{result.facts.length}</div></div>
+        <div><div style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>Typ</div><div style={{fontSize:22,fontWeight:800}}>{result.mode==='kw'?'Wochen':'Monate'}</div></div>
+      </div>
+      {result.warnings.map((w,i)=><div key={i} style={{border:'1px solid #fde68a',background:'#fffbeb',borderRadius:10,padding:'8px 12px',marginBottom:8,fontSize:12,fontWeight:700,color:w.type==='mixed'?'#dc2626':'#b45309'}}>{w.type==='manual'?'⚠ ':'ℹ '}{w.message}</div>)}
+      <div style={{maxHeight:300,overflow:'auto',border:'1px solid var(--border)',borderRadius:8,marginBottom:12}}>
+        <table style={{width:'100%',borderCollapse:'collapse',fontSize:12,whiteSpace:'nowrap'}}>
+          <thead><tr style={{position:'sticky',top:0,background:'var(--surface-2)'}}>
+            <th style={{textAlign:'left',padding:'6px 8px',fontSize:11,color:'var(--muted)'}}>Periode</th>
+            <th style={{textAlign:'right',padding:'6px 8px',fontSize:11,color:'var(--muted)'}}>Jahr</th>
+            <th style={{textAlign:'right',padding:'6px 8px',fontSize:11,color:'var(--muted)'}}>Conversion</th>
+            <th style={{textAlign:'right',padding:'6px 8px',fontSize:11,color:'var(--muted)'}}>Buchungen</th>
+            <th style={{textAlign:'right',padding:'6px 8px',fontSize:11,color:'var(--muted)'}}>Sales Calls</th>
+          </tr></thead>
+          <tbody>{result.facts.map((f,i)=><tr key={i} style={{borderTop:'1px solid var(--border)'}}>
+            <td style={{padding:'5px 8px',fontWeight:600}}>{perLbl(f)}</td>
+            <td style={{padding:'5px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{f.year}</td>
+            <td style={{padding:'5px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{f.cr==null?'—':f.cr.toLocaleString('de-DE',{maximumFractionDigits:2})+' %'}</td>
+            <td style={{padding:'5px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{f.buchungen==null?'—':f.buchungen.toLocaleString('de-DE')}</td>
+            <td style={{padding:'5px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{f.calls==null?'—':f.calls.toLocaleString('de-DE')}</td>
+          </tr>)}</tbody>
+        </table>
+      </div>
+      <div style={{display:'flex',gap:8}}>
+        <button className="btn btn-sm" onClick={()=>setStep('map')}>Zurück zur Zuordnung</button>
+        <button className="btn btn-sm btn-primary" disabled={busy||result.facts.length===0} onClick={save}>💾 Team-Werte speichern ({result.facts.length} Perioden)</button>
+      </div>
+      <div style={{fontSize:11,color:'var(--muted)',marginTop:8}}>Conversion als Prozent (×100). Buchungen = Offene + OSL. Re-Import ersetzt die Perioden, auch von Hand gepflegte.</div>
+    </div>}
+  </div>;
+}
+
 // ══ Recruiting Marketing (Windsor.ai: Meta Ads + Instagram organisch) — management-only ══
 // Werte kommen als TEXT an → robust parsen. '' bleibt null (Unterschied fehlt vs. 0!). US-Format
 // (Komma = Tausender, Punkt = Dezimal, wie Windsor liefert). Datum ISO 'YYYY-MM-DD' → lokales Date.
@@ -34126,7 +34306,7 @@ function DataImportView({projects, employees}){
   useEffect(()=>{ let alive=true; (async()=>{ if(!projId){ setImports([]); return; }
     const {data}=await sb.from('data_imports').select('*').eq('project_id',projId).eq('source_type',source).order('created_at',{ascending:false}).limit(12);
     if(alive) setImports(data||[]); })(); return ()=>{alive=false;}; },[projId,source,tick]);
-  const SOURCES=[{key:'rohdaten',label:'Rohdaten-Excel',sub:'Stunden je Skill (agent_qm)'},{key:'calls',label:'Call-CSV',sub:'Answered, AHT, Outbound …'},{key:'gauges',label:'Gauges-Excel',sub:'Gesamt%, NPS, CSAT'},{key:'booking_a',label:'Booking-Excel (Agent)',sub:'Conversion, Buchungen, Sales Calls'}];
+  const SOURCES=[{key:'rohdaten',label:'Rohdaten-Excel',sub:'Stunden je Skill (agent_qm)'},{key:'calls',label:'Call-CSV',sub:'Answered, AHT, Outbound …'},{key:'gauges',label:'Gauges-Excel',sub:'Gesamt%, NPS, CSAT'},{key:'booking_a',label:'Booking-Excel (Agent)',sub:'Conversion, Buchungen, Sales Calls'},{key:'booking_team',label:'Booking-Team (Woche/Monat)',sub:'CR, Buchungen, Sales Calls je KW/Monat'}];
   return <div style={{maxWidth:1000}}>
     <div style={{fontSize:20,fontWeight:700,marginBottom:4}}>📥 Datenimport</div>
     <div style={{fontSize:13,color:'var(--muted)',marginBottom:14}}>Wöchentliche Rohdaten getrennt vom Bericht. Erkennung am Inhalt; nicht zuordenbare Namen werden gemeldet, nie still verworfen.</div>
@@ -34143,6 +34323,7 @@ function DataImportView({projects, employees}){
       {source==='calls' && <PivotImport projId={projId} employees={employees} source="calls" fields={CALLS_FIELDS} table="weekly_calls" accept=".csv,.xlsx,.xls" hint="Call-CSV wählen" onSaved={()=>setTick(t=>t+1)}/>}
       {source==='gauges' && <PivotImport projId={projId} employees={employees} source="gauges" fields={GAUGES_FIELDS} table="weekly_gauges" accept=".xlsx,.xls,.csv" hint="Gauges-Excel wählen" onSaved={()=>setTick(t=>t+1)}/>}
       {source==='booking_a' && <BookingImportAgent projId={projId} employees={employees} onSaved={()=>setTick(t=>t+1)}/>}
+      {source==='booking_team' && <BookingImportTeam projId={projId} onSaved={()=>setTick(t=>t+1)}/>}
     </div>}
     <div style={{fontSize:13,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em',marginBottom:8}}>Letzte Importe</div>
     {imports===null ? <div className="sp-empty">Lädt…</div> : imports.length===0 ? <div className="sp-empty">Noch keine Importe für dieses Projekt.</div> :
