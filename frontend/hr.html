@@ -1669,11 +1669,18 @@ function kpiFmt(value, unit){
 }
 
 // Get KPIs relevant for an employee (by project + skills)
+// Herkunfts-Chip für Performance-Werte: importiert (blau) vs. von Hand geändert (grau). null = keiner (unbekannt/Altbestand).
+function perfSrcChip(source){
+  if(source==='import') return <span title="Aus Import übernommen" style={{fontSize:8.5,fontWeight:800,letterSpacing:'.04em',color:'#2563eb',background:'#eff6ff',border:'1px solid #bfdbfe',borderRadius:5,padding:'0 4px',textTransform:'uppercase'}}>Import</span>;
+  if(source==='manual') return <span title="Von Hand geändert" style={{fontSize:8.5,fontWeight:800,letterSpacing:'.04em',color:'#6b7280',background:'var(--surface-2)',border:'1px solid var(--border)',borderRadius:5,padding:'0 4px',textTransform:'uppercase'}}>Hand</span>;
+  return null;
+}
 function getEmpKpis(emp){
   if(emp && emp.kpi_exempt) return [];   // 2c: MA von KPI-Auswertung ausgenommen
   const cfg = getKpiCfg();
   const projSkill = emp.project_skill||emp.primary_skill||'';
   return cfg.filter(k=>{
+    if(k.level==='team') return false;   // reine Team-KPIs (Booking-Team) NICHT je Agent zeigen
     // Strict match: KPI must match employee's project AND skill
     // If KPI has no project restriction → show for all (legacy/global KPIs)
     const projOk = !k.project_id || k.project_id===emp.project_id;
@@ -1872,6 +1879,7 @@ function PerformanceCard({emp, compact=false, showRank=false, allEmps=[], projec
             </div>
             <div style={{fontSize:10,color:t.color,fontWeight:700,textAlign:'center'}}>{kpi.name}</div>
             <div style={{fontSize:9,color:t.color,opacity:.8,textAlign:'center',marginTop:1}}>{t.label}</div>
+            {entry.source&&<div style={{marginTop:3}}>{perfSrcChip(entry.source)}</div>}
           </div>
         ))}
       </div>
@@ -1949,28 +1957,27 @@ function PerformanceView({employees, projects}){
     const vals = {};
     // Minuten-KPIs: DB-Dezimal → mm:ss-String für die Eingabe (intern bleibt dezimal).
     existing.forEach(e=>{ const k=kpiById[e.kpi_id]; vals[e.kpi_id]=(k&&k.unit==='min')?decToMmss(e.value):e.value; });
-    setEditEmp({emp, vals});
+    setEditEmp({emp, vals, orig:{...vals}});   // orig = geladene Werte, damit saveEntry nur Geändertes anfasst
   }
 
   function saveEntry(){
     if(!editEmp) return;
-    const {emp, vals} = editEmp;
+    const {emp, vals, orig} = editEmp;
     const data = getPerfData();
     if(!data[emp.id]) data[emp.id]=[];
-    // Remove old entries for this week
-    data[emp.id] = data[emp.id].filter(e=>!(e.kw===selKw&&e.year===selYear));
-    // Add new entries
     const empKpis = getEmpKpis(emp); // uses emp.project_skill as KEY
+    const by=(typeof CURRENT_USER!=='undefined'&&CURRENT_USER)?(CURRENT_USER.name||CURRENT_USER.id):null;
+    const changes=[];
     empKpis.forEach(kpi=>{
-      const v = vals[kpi.id];
-      if(v!==undefined&&v!==''){
-        const dec = kpi.unit==='min' ? mmssToDec(v) : parseFloat(v);   // Minuten: mm:ss → Dezimal
-        if(!isNaN(dec)) data[emp.id].push({kpi_id:kpi.id, value:dec, kw:selKw, year:selYear, ts:Date.now(), entered_by:(typeof CURRENT_USER!=='undefined'&&CURRENT_USER)?(CURRENT_USER.name||CURRENT_USER.id):null});
-      }
+      const nStr=String(vals[kpi.id]==null?'':vals[kpi.id]).trim(), oStr=String((orig||{})[kpi.id]==null?'':(orig||{})[kpi.id]).trim();
+      if(nStr===oStr) return;   // unverändert → nicht anfassen (Herkunft/importiert bleibt)
+      let dec=null; if(nStr!==''){ const d = kpi.unit==='min' ? mmssToDec(nStr) : parseFloat(nStr); if(!isNaN(d)) dec=d; }
+      changes.push({kpi_id:kpi.id, value:dec, entered_by:by});
+      data[emp.id]=data[emp.id].filter(e=>!(e.kw===selKw&&e.year===selYear&&e.kpi_id===kpi.id));   // nur DIESE KPI ersetzen
+      if(dec!=null) data[emp.id].push({kpi_id:kpi.id, value:dec, kw:selKw, year:selYear, ts:Date.now(), entered_by:by, source:'manual'});
     });
     savePerfData(data);
-    // Etappe P2: dieselbe MA-Woche zusaetzlich nach Supabase (delete-then-insert)
-    savePerfEntryToDB(emp.id, selKw, selYear, (data[emp.id]||[]).filter(e=>e.kw===selKw&&e.year===selYear));
+    if(changes.length) savePerfEntryToDB(emp.id, selKw, selYear, changes);   // gezielt je geänderter KPI, source='manual'
     // Reload
     const weekEntries = {};
     activeEmps.forEach(e=>{
@@ -2299,8 +2306,8 @@ function PerformanceView({employees, projects}){
         const wkMap = new Map();
         all.forEach(e=>{
           const key = e.year+'-'+String(e.kw).padStart(2,'0');
-          if(!wkMap.has(key)) wkMap.set(key,{year:e.year, kw:e.kw, byKpi:{}});
-          wkMap.get(key).byKpi[e.kpi_id]=e.value;
+          if(!wkMap.has(key)) wkMap.set(key,{year:e.year, kw:e.kw, byKpi:{}, bySrc:{}});
+          wkMap.get(key).byKpi[e.kpi_id]=e.value; wkMap.get(key).bySrc[e.kpi_id]=e.source;
         });
         const weeks = Array.from(wkMap.values()).sort((a,b)=> b.year-a.year || b.kw-a.kw);
         return(
@@ -2342,6 +2349,7 @@ function PerformanceView({employees, projects}){
                                   <div style={{display:'flex',flexDirection:'column',alignItems:'center',gap:3}}>
                                     <span style={{fontWeight:700}}>{kpiFmt(v, kpi.unit)}</span>
                                     {BADGE(kpi, v)}
+                                    {w.bySrc&&w.bySrc[kpi.id]&&perfSrcChip(w.bySrc[kpi.id])}
                                   </div>
                                 )}
                               </td>
@@ -29082,7 +29090,7 @@ async function loadPerfDataFromDB(){
     const out={};
     (data||[]).forEach(r=>{
       (out[r.emp_id]=out[r.emp_id]||[]).push({
-        kw:r.kw, year:r.year, kpi_id:r.kpi_id, value:r.value, entered_by:r.entered_by, ts:r.ts,
+        kw:r.kw, year:r.year, kpi_id:r.kpi_id, value:r.value, entered_by:r.entered_by, ts:r.ts, source:r.source,
       });
     });
     return out;
@@ -29104,15 +29112,16 @@ async function saveKpiConfigToDB(cfg){
   }catch(e){ console.error('[perf] saveKpiConfigToDB prune', e); }
   return true;
 }
-async function savePerfEntryToDB(empId, kw, year, entries){
+// GEZIELT je geänderter KPI (nicht mehr die ganze Woche loeschen): so bleiben importierte/unveraenderte Werte
+// UND Nicht-Modal-KPIs (Buchungen offen/OSL) erhalten. Eine Handaenderung setzt source='manual'; leerer Wert loescht.
+// changes = [{kpi_id, value|null, entered_by}].
+async function savePerfEntryToDB(empId, kw, year, changes){
   const uuidRx=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   if(!uuidRx.test(String(empId||''))){ console.warn('[perf] savePerfEntryToDB: emp_id kein uuid, DB-Write uebersprungen:', empId); visibleWarn('⚠ Performance-Wert NICHT in der Datenbank gespeichert: Mitarbeiter-ID „'+empId+'“ ist keine gültige DB-ID (uuid). Bitte den echten Mitarbeiter-Datensatz verwenden.'); return false; }
-  const del=await sb.from('kpi_entries').delete().eq('emp_id',empId).eq('kw',kw).eq('year',year);
-  if(del.error){ console.error('[perf] savePerfEntryToDB delete', del.error); return false; }
-  const rows=(entries||[]).map(e=>({emp_id:empId, kw, year, kpi_id:e.kpi_id, value:e.value, entered_by:e.entered_by??null}));
-  if(rows.length){
-    const ins=await sb.from('kpi_entries').insert(rows);
-    if(ins.error){ console.error('[perf] savePerfEntryToDB insert', ins.error); return false; }
+  for(const ch of (changes||[])){
+    const del=await sb.from('kpi_entries').delete().eq('emp_id',empId).eq('kpi_id',ch.kpi_id).eq('kw',kw).eq('year',year);
+    if(del.error){ console.error('[perf] savePerfEntryToDB delete', del.error); return false; }
+    if(ch.value!=null){ const ins=await sb.from('kpi_entries').insert({emp_id:empId, kpi_id:ch.kpi_id, value:ch.value, kw, year, source:'manual', entered_by:ch.entered_by??null}); if(ins.error){ console.error('[perf] savePerfEntryToDB insert', ins.error); return false; } }
   }
   return true;
 }
@@ -35423,44 +35432,7 @@ function hcEmptyRow(){ return {kw:'',plan:'',rueck:'',geliefert:'',erkl:''}; }
 function hcEmptyTeam(){ return {fte:'',members:[],stunden:[hcEmptyRow(),hcEmptyRow(),hcEmptyRow(),hcEmptyRow(),hcEmptyRow()],calls:{vorwoche:{},monat:{}},massnahmen:''}; }
 function hcEmptyDeck(){ return {titel:{untertitel:'',datum:'',ansprech:''},teams:{sales:hcEmptyTeam(),support:hcEmptyTeam()}}; }
 
-// Buchungs-Erfassung je Agent (Wochenraster): Offene + OSL je KW → kpi_entries (kpi_hc_open_bookings/kpi_hc_osl).
-// Auto-Speichern je Zelle (gezieltes delete+insert nur dieser kpi_id — andere KPIs der Woche bleiben unberührt).
-function BookingGrid({projId, skill, members, weeks, kpiWin, onChanged}){
-  const seed=()=>{ const m={}; (kpiWin||[]).forEach(r=>{ const met=r.kpi_id==='kpi_hc_open_bookings'?'open':(r.kpi_id==='kpi_hc_osl'?'osl':null); if(!met) return; const k=r.year+'-'+r.kw; const em=(m[r.emp_id]=m[r.emp_id]||{}); (em[k]=em[k]||{})[met]=r.value; }); return m; };
-  const [vals,setVals]=useState(seed);
-  const [flash,setFlash]=useState('');
-  useEffect(()=>{ setVals(seed()); },[projId,skill,(kpiWin||[]).length]);   // eslint-disable-line
-  if(!members.length) return <div style={{fontSize:11,color:'var(--muted)'}}>Keine aktiven Mitarbeiter dieses Skills auf dem Projekt.</div>;
-  const nm=e=>((e.first_name||'')+' '+(e.last_name||'')).trim()||'—';
-  const setCell=(empId,key,met,raw)=>{ setVals(v=>{ const n={...v}; const em={...(n[empId]||{})}; const cell={...(em[key]||{})}; cell[met]=raw; em[key]=cell; n[empId]=em; return n; }); };
-  const saveCell=async(empId,w,met,raw)=>{ const kpiId=met==='open'?'kpi_hc_open_bookings':'kpi_hc_osl';
-    const s=String(raw==null?'':raw).trim().replace(',','.'); const num=s===''?null:Number(s);
-    if(s!==''&&(isNaN(num)||num<0)) return;   // ungültig → nicht speichern, Eingabe bleibt sichtbar
-    try{ await sb.from('kpi_entries').delete().eq('emp_id',empId).eq('kpi_id',kpiId).eq('kw',w.kw).eq('year',w.yr);
-      if(num!=null) await sb.from('kpi_entries').insert({emp_id:empId,kpi_id:kpiId,value:num,kw:w.kw,year:w.yr});
-      setFlash(empId+'|'+w.key+'|'+met); setTimeout(()=>setFlash(''),700);
-      if(onChanged) onChanged(empId,w,met,num);
-    }catch(err){ /* Eingabe bleibt im Feld sichtbar */ }
-  };
-  const inp=(empId,w,met)=>{ const cur=((vals[empId]||{})[w.key]||{})[met]; const fk=empId+'|'+w.key+'|'+met;
-    return <input value={cur==null?'':cur} onChange={e=>setCell(empId,w.key,met,e.target.value)} onBlur={e=>saveCell(empId,w,met,e.target.value)} inputMode="numeric" placeholder="–"
-      style={{width:44,textAlign:'center',fontFamily:'var(--mono)',fontSize:12,padding:'2px 3px',border:'1px solid '+(flash===fk?'#059669':'var(--border)'),borderRadius:5,background:flash===fk?'#ecfdf5':'var(--surface)'}}/>;
-  };
-  return <div style={{overflowX:'auto',marginTop:8}}>
-    <table style={{borderCollapse:'collapse',fontSize:12}}>
-      <thead>
-        <tr style={{color:'var(--muted)'}}><th rowSpan={2} style={{textAlign:'left',padding:'3px 8px',fontWeight:700,position:'sticky',left:0,background:'var(--surface)',zIndex:1}}>Agent</th>{weeks.map(w=><th key={w.key} colSpan={2} style={{padding:'2px 6px',fontWeight:700,textAlign:'center',borderLeft:'1px solid var(--border)'}}>KW {w.kw}</th>)}</tr>
-        <tr style={{color:'var(--muted)'}}>{weeks.map(w=>[<th key={w.key+'o'} style={{padding:'1px 4px',fontWeight:600,fontSize:10,borderLeft:'1px solid var(--border)'}}>Offen</th>,<th key={w.key+'s'} style={{padding:'1px 4px',fontWeight:600,fontSize:10}}>OSL</th>])}</tr>
-      </thead>
-      <tbody>
-        {members.map(e=><tr key={e.id} style={{borderTop:'1px solid var(--border)'}}>
-          <td style={{padding:'3px 8px',whiteSpace:'nowrap',position:'sticky',left:0,background:'var(--surface)',zIndex:1}}>{nm(e)}</td>
-          {weeks.map(w=>[<td key={w.key+'o'} style={{padding:'2px 4px',borderLeft:'1px solid var(--border)'}}>{inp(e.id,w,'open')}</td>,<td key={w.key+'s'} style={{padding:'2px 4px'}}>{inp(e.id,w,'osl')}</td>])}
-        </tr>)}
-      </tbody>
-    </table>
-  </div>;
-}
+// (BookingGrid entfernt 2026-08-15: Buchungen kommen jetzt über den Booking-Import (kpi_entries), s. [[booking-import]].)
 function PresentationsView({projects, employees, team, showToast}){
   const projList=(projects||[]).filter(p=>p&&p.id).slice().sort((a,b)=>String(a.name).localeCompare(String(b.name),'de'));
   const [selProjId,setSelProjId]=useState(()=>{ const hc=projList.find(p=>/holiday.?check/i.test(p.name||'')); return hc?hc.id:(projList[0]?projList[0].id:''); });
@@ -35545,9 +35517,6 @@ function PresentationsView({projects, employees, team, showToast}){
   const reviewMonday=()=>isoWeekMonday(pYear,pNo);
   const reviewWeek=()=>({kw:pNo,yr:pYear});
   const windowWeeks=()=>{ const base=reviewMonday(); const arr=[]; for(let i=4;i>=0;i--){ const d=new Date(base); d.setDate(base.getDate()-i*7); const w=getISOWeek(d); arr.push({kw:w.kw,yr:w.year}); } return arr; };
-  // Buchungs-Raster hat eine Zelle gespeichert → stores.kpiWin live nachziehen, damit „CR zusammenstellen" die neuen Werte nutzt.
-  const onBookingChanged=(empId,w,met,num)=>{ const kpiId=met==='open'?'kpi_hc_open_bookings':'kpi_hc_osl';
-    setStores(s=>{ const kw=(s.kpiWin||[]).filter(r=>!(r.emp_id===empId&&r.kpi_id===kpiId&&r.kw===w.kw&&r.year===w.yr)); if(num!=null) kw.push({emp_id:empId,kpi_id:kpiId,kw:w.kw,year:w.yr,value:num}); return {...s,kpiWin:kw}; }); };
   useEffect(()=>{ if(!selProj){ return; } let alive=true; (async()=>{
     const ws=windowWeeks(); const years=[...new Set(ws.map(w=>w.yr))]; const kws=[...new Set(ws.map(w=>w.kw))];
     try{
@@ -35972,13 +35941,8 @@ function PresentationsView({projects, employees, team, showToast}){
         <div style={{marginBottom:6,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
           <button className="btn btn-sm btn-primary" onClick={()=>applyImportCr(t)}>CR zusammenstellen</button>
           {td.cr&&td.cr._src==='imported'&&<span style={{fontSize:11,color:'#2563eb',fontWeight:700}}>● {(td.cr.agents||[]).length} Agenten</span>}
-          <span style={{fontSize:11,color:'var(--muted)'}}>Team-CR aus kpi_project_entries (gepflegte Kennzahl „CR", Wochen + Monat). Agenten-CR = (Offene + OSL) ÷ Sales Calls je MA — Buchungen unten je Agent erfassen, Sales Calls aus dem Import ({Object.keys(stores.scByEmp||{}).length} MA).</span>
+          <span style={{fontSize:11,color:'var(--muted)'}}>Team-CR aus kpi_project_entries (gepflegte Kennzahl „CR", Wochen + Monat). Agenten-CR = (Offene + OSL) ÷ Sales Calls je MA — Buchungen und Sales Calls kommen aus dem Booking-Import (📥 Datenimport), keine Handerfassung mehr.</span>
         </div>
-        <details style={{marginBottom:8}} open>
-          <summary style={{cursor:'pointer',fontSize:12,fontWeight:700}}>Buchungen je Agent erfassen (Offene + OSL, je KW)</summary>
-          <div style={{fontSize:11,color:'var(--muted)',margin:'4px 0'}}>Direkt eintragen, wird automatisch gespeichert. Danach oben „CR zusammenstellen".</div>
-          <BookingGrid projId={selProj.id} skill={t} members={membersFor(t)} weeks={windowWeeks().map(w=>({...w,key:w.yr+'-'+w.kw}))} kpiWin={stores.kpiWin} onChanged={onBookingChanged}/>
-        </details>
         {td.cr&&td.cr.weeks? (
           <div style={{overflowX:'auto'}}><table style={{borderCollapse:'collapse',fontSize:12}}>
             <thead><tr style={{color:'var(--muted)'}}><th style={{textAlign:'left',padding:'3px 8px',fontWeight:700}}>Team je KW</th>{td.cr.weeks.map(w=><th key={w.key} style={{padding:'3px 10px',fontWeight:700}}>KW {w.kw}</th>)}</tr></thead>
