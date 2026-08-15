@@ -33778,7 +33778,8 @@ function BookingImportAgent({projId, employees, onSaved}){
     let replacedManual=[];
     if(empIds.length){ try{ const {data:ex}=await sb.from('kpi_entries').select('emp_id,kpi_id,source').eq('kw',Number(kw)).eq('year',Number(year)).in('kpi_id',[kpiIds.cr,kpiIds.open,kpiIds.osl,kpiIds.calls]).in('emp_id',empIds);
       const byId={}; facts.forEach(f=>byId[f.employee_id]=f.name);
-      replacedManual=(ex||[]).filter(x=>x.source==='manual').map(x=>byId[x.emp_id]||x.emp_id);
+      // source!=='import' = von Hand gepflegt: 'manual' ODER null (Alt-Bestand vor Einfuehrung der Spalte).
+      replacedManual=(ex||[]).filter(x=>x.source!=='import').map(x=>byId[x.emp_id]||x.emp_id);
       replacedManual=[...new Set(replacedManual)];
     }catch(e){} }
     // Drift-Check: Sales Calls aus Rohdaten (weekly_hours) je Agent/KW vs. importierte salescalls_daily.
@@ -33798,22 +33799,30 @@ function BookingImportAgent({projId, employees, onSaved}){
   async function ignoreAlias(nm){ setBusy(true); await sb.from('import_aliases').insert({project_id:projId, alias_name:nm, employee_id:null}); await process(); }
 
   async function save(){ if(!result||busy||!kpiIds||kpiIds.error) return; setBusy(true); setErr('');
-    const ts=isoLocal(new Date())+'_'+fileHash; const path=projId+'/booking_a/'+ts+'_'+(file.name||'booking.xlsx');
-    let storagePath=null; try{ const up=await sb.storage.from('weekly-imports').upload(path,file,{upsert:true,contentType:file.type||'application/octet-stream'}); if(!up.error) storagePath=path; }catch(e){}
-    let uid=null,uname=null; try{ const u=await sb.auth.getUser(); uid=u&&u.data&&u.data.user&&u.data.user.id||null; if(uid){ const nr=await sb.from('app_users').select('full_name').eq('user_id',uid).single(); uname=nr&&nr.data&&nr.data.full_name||null; } }catch(e){}
-    const status=result.unmatched.length?'partial':'ok';
-    const {error:ie}=await sb.from('data_imports').insert({ project_id:projId, source_type:'booking_a', kw:Number(kw), year:Number(year), file_name:file.name, file_hash:fileHash, storage_path:storagePath, status, warnings:result.warnings, row_count:(sheet.rows||[]).length, matched_count:result.facts.length, unmatched_count:result.unmatched.length, uploaded_by:uid, uploaded_by_name:uname });
-    if(ie){ setBusy(false); setErr('Import-Protokoll nicht gespeichert: '+(ie.message||'')); return; }
-    const empIds=result.facts.map(f=>f.employee_id); const allK=[kpiIds.cr,kpiIds.open,kpiIds.osl,kpiIds.calls];
-    // Ueberschreiben: gezielt nur diese kpi_ids/Woche/Agenten (AHT/CSAT/QM u.a. bleiben unberuehrt).
-    const {error:de}=await sb.from('kpi_entries').delete().eq('kw',Number(kw)).eq('year',Number(year)).in('kpi_id',allK).in('emp_id',empIds);
-    if(de){ setBusy(false); setErr('Alte Werte nicht ersetzbar: '+(de.message||'')); return; }
-    const rows=[]; result.facts.forEach(f=>{
-      const put=(kpi_id,value)=>{ if(value!=null&&!isNaN(value)) rows.push({emp_id:f.employee_id, kpi_id, value, kw:Number(kw), year:Number(year), source:'import', entered_by:uname}); };
-      put(kpiIds.cr, f.cr); put(kpiIds.open, f.open); put(kpiIds.osl, f.osl); put(kpiIds.calls, f.sales_calls);
-    });
-    if(rows.length){ const {error:fe}=await sb.from('kpi_entries').insert(rows); if(fe){ setBusy(false); setErr('Werte nicht gespeichert: '+(fe.message||'')); return; } }
-    setBusy(false); setSaved(true); setStep('upload'); setSheets(null); setFile(null); setResult(null); onSaved&&onSaved();
+    try{
+      const empIds=result.facts.map(f=>f.employee_id); const allK=[kpiIds.cr,kpiIds.open,kpiIds.osl,kpiIds.calls];
+      let uid=null,uname=null; try{ const u=await sb.auth.getUser(); uid=u&&u.data&&u.data.user&&u.data.user.id||null; if(uid){ const nr=await sb.from('app_users').select('full_name').eq('user_id',uid).single(); uname=nr&&nr.data&&nr.data.full_name||null; } }catch(e){}
+      const rows=[]; result.facts.forEach(f=>{
+        const put=(kpi_id,value)=>{ if(value!=null&&!isNaN(value)) rows.push({emp_id:f.employee_id, kpi_id, value, kw:Number(kw), year:Number(year), source:'import', entered_by:uname}); };
+        put(kpiIds.cr, f.cr); put(kpiIds.open, f.open); put(kpiIds.osl, f.osl); put(kpiIds.calls, f.sales_calls);
+      });
+      if(!rows.length) throw new Error('Keine Werte zum Speichern (alle Felder leer?).');
+      // 1) Alte Werte gezielt entfernen (nur diese kpi_ids/Woche/Agenten). Fehler MUSS auffallen.
+      const del=await sb.from('kpi_entries').delete().eq('kw',Number(kw)).eq('year',Number(year)).in('kpi_id',allK).in('emp_id',empIds);
+      if(del.error) throw new Error('Alte Werte nicht ersetzbar: '+(del.error.message||del.error));
+      // 2) Schreiben UND VERIFIZIEREN: .select() gibt die tatsaechlich geschriebenen Zeilen zurueck.
+      //    Kommt weniger als erwartet zurueck (z.B. RLS/Policy), ist das ein FEHLER, kein Erfolg.
+      const ins=await sb.from('kpi_entries').insert(rows).select('id');
+      if(ins.error) throw new Error('Werte nicht gespeichert: '+(ins.error.message||ins.error));
+      const wrote=(ins.data||[]).length;
+      if(wrote!==rows.length) throw new Error('Nur '+wrote+' von '+rows.length+' Werten geschrieben - Import abgebrochen (bitte Rechte/Policy prüfen).');
+      // 3) Rohdatei + Protokoll ERST nach verifiziertem Schreiben. Ein Log-Fehler ist dann nur Beiwerk.
+      const ts=isoLocal(new Date())+'_'+fileHash; const path=projId+'/booking_a/'+ts+'_'+(file.name||'booking.xlsx');
+      let storagePath=null; try{ const up=await sb.storage.from('weekly-imports').upload(path,file,{upsert:true,contentType:file.type||'application/octet-stream'}); if(!up.error) storagePath=path; }catch(e){}
+      const status=result.unmatched.length?'partial':'ok';
+      try{ await sb.from('data_imports').insert({ project_id:projId, source_type:'booking_a', kw:Number(kw), year:Number(year), file_name:file.name, file_hash:fileHash, storage_path:storagePath, status, warnings:result.warnings, row_count:(sheet.rows||[]).length, matched_count:result.facts.length, unmatched_count:result.unmatched.length, uploaded_by:uid, uploaded_by_name:uname }); }catch(e){}
+      setBusy(false); setSaved(true); setStep('upload'); setSheets(null); setFile(null); setResult(null); onSaved&&onSaved();
+    }catch(e){ setBusy(false); setErr(String((e&&e.message)||e)); }
   }
 
   const WARN_C={unmatched:'#dc2626',duplicate:'#d97706',manual:'#b45309',drift:'#b45309'};
