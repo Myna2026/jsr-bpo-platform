@@ -33408,6 +33408,16 @@ function importMonthNum(s){ let x=String(s||'').toLowerCase().trim().replace(/ä
   for(let i=0;i<12;i++){ if(x.startsWith(DE[i])||x.startsWith(EN[i])) return i+1; } return null; }
 // Periode: Zahl 1..53 = KW; Name = Monat. Kein Raten sonst.
 function importPeriod(v){ const s=String(v==null?'':v).trim(); if(!s) return null; const mn=importMonthNum(s); if(mn) return {mode:'month',n:mn}; const n=parseInt(s.replace(/[^\d]/g,''),10); if(!isNaN(n)&&n>=1&&n<=53) return {mode:'kw',n}; return null; }
+// Schnitt 4: zusaetzlich je Agent nach kpi_entries. Ziel-KPI wird je Agent nach seinem Skill aufgeloest
+// (Sales: AHT kpi_1784715166903, ACW kpi_1784715510384, CSAT kpi_1784715642800; Support spaeter). fn transformiert
+// den Rohwert (AHT/ACW aus Sekunden -> Minuten dezimal, passt zu unit min + mm:ss).
+const CALLS_KPI_TARGETS=[
+  {field:'avg_handle_sec', name:'AHT', fn:v=>Math.round(v/60*100)/100},
+  {field:'avg_acw_sec',    name:'ACW', fn:v=>Math.round(v/60*100)/100},
+];
+const GAUGES_KPI_TARGETS=[
+  {field:'csat', name:'CSAT', fn:v=>v},
+];
 const BOOKING_TEAM_FIELDS=[
   {key:'year',        label:'Jahr',                req:true, kind:'int', cand:['year of date','year','jahr','datum jahr']},
   {key:'period',      label:'KW / Monat',          req:true, kind:'raw', cand:['iso_weeks','iso_week','iso weeks','kw','iso_month','iso month','month','monat','monatsname']},
@@ -33580,9 +33590,13 @@ function RohdatenImport({projId, projName, employees, onSaved}){
 // Generischer Wochen-Pivot-Import (Import B Call-CSV, Import C Gauges-Excel).
 // Eine Datei = eine Woche (KW manuell gewählt, keine Datumsspalte). Eine Zeile je Agent/Name.
 // Feld-getrieben (fields), Zieltabelle (table); Feld-keys = Spaltennamen der Tabelle.
-function PivotImport({projId, employees, source, fields, table, accept, hint, onSaved}){
+function PivotImport({projId, employees, source, fields, table, accept, hint, onSaved, kpiTargets}){
   const nowW=getISOWeek(new Date());
   const [kw,setKw]=useState(nowW.kw); const [year,setYear]=useState(nowW.year);
+  // Schnitt 4: kpi_config einmal laden, Ziel-KPI je (Name, Agenten-Skill) aufloesen (agent-level).
+  const [kpiCfgAll,setKpiCfgAll]=useState(null);
+  useEffect(()=>{ if(!kpiTargets||!kpiTargets.length){ setKpiCfgAll([]); return; } let alive=true; (async()=>{ try{ const {data}=await sb.from('kpi_config').select('id,name,skill,level'); if(alive) setKpiCfgAll(data||[]); }catch(e){ if(alive) setKpiCfgAll([]); } })(); return ()=>{alive=false;}; },[kpiTargets]);
+  const kpiFor=(name,skill)=>{ if(!kpiCfgAll) return null; const nm=String(name).toLowerCase(), sk=String(skill||'').toLowerCase(); const hit=kpiCfgAll.find(k=>String(k.name||'').toLowerCase()===nm && String(k.skill||'').toLowerCase()===sk && k.level!=='team'); return hit?hit.id:null; };
   const [file,setFile]=useState(null); const [fileHash,setFileHash]=useState('');
   const [sheets,setSheets]=useState(null); const [sheetIdx,setSheetIdx]=useState(0);
   const [map,setMap]=useState({}); const [step,setStep]=useState('upload');
@@ -33654,9 +33668,22 @@ function PivotImport({projId, employees, source, fields, table, accept, hint, on
     await sb.from(table).delete().eq('project_id',projId).eq('kw',Number(kw)).eq('year',Number(year));
     const rows=result.facts.map(f=>({ import_id:imp.id, project_id:projId, employee_id:f.employee_id, kw:Number(kw), year:Number(year), ...f.vals, raw:f.raw }));
     const {error:fe}=await sb.from(table).insert(rows);
-    setBusy(false);
-    if(fe){ setErr('Fakten nicht gespeichert: '+(fe.message||'')); return; }
-    setSaved(true); setStep('upload'); setSheets(null); setFile(null); setResult(null); onSaved&&onSaved();
+    if(fe){ setBusy(false); setErr('Fakten nicht gespeichert: '+(fe.message||'')); return; }
+    // Schnitt 4: zusaetzlich konfigurierte KPIs je Agent -> kpi_entries (verifiziert). Ziel-KPI je Agenten-Skill.
+    if(kpiTargets&&kpiTargets.length){
+      const empSkill={}; (employees||[]).forEach(e=>{ if(e) empSkill[e.id]=(e.project_skill||e.primary_skill||''); });
+      const kRows=[]; const usedIds=new Set(); const empIds=result.facts.map(f=>f.employee_id);
+      result.facts.forEach(f=>{ const sk=empSkill[f.employee_id];
+        kpiTargets.forEach(t=>{ const raw=f.vals[t.field]; if(raw==null) return; const kid=kpiFor(t.name,sk); if(!kid) return; const val=t.fn?t.fn(raw):raw; if(val==null||isNaN(val)) return; kRows.push({emp_id:f.employee_id, kpi_id:kid, value:val, kw:Number(kw), year:Number(year), source:'import', entered_by:uname}); usedIds.add(kid); }); });
+      if(kRows.length){
+        const kd=await sb.from('kpi_entries').delete().eq('kw',Number(kw)).eq('year',Number(year)).in('kpi_id',[...usedIds]).in('emp_id',empIds);
+        if(kd.error){ setBusy(false); setErr('KPI-Werte: alte nicht ersetzbar: '+(kd.error.message||kd.error)); return; }
+        const ki=await sb.from('kpi_entries').insert(kRows).select('id');
+        if(ki.error){ setBusy(false); setErr('KPI-Werte nicht gespeichert: '+(ki.error.message||ki.error)); return; }
+        if((ki.data||[]).length!==kRows.length){ setBusy(false); setErr('KPI-Werte: nur '+((ki.data||[]).length)+' von '+kRows.length+' geschrieben.'); return; }
+      }
+    }
+    setBusy(false); setSaved(true); setStep('upload'); setSheets(null); setFile(null); setResult(null); onSaved&&onSaved();
   }
   const fmtVal=(f,v)=> v==null?'—' : f.kind==='dur'?fmtDur(v) : f.kind==='pct'?(v.toLocaleString('de-DE',{maximumFractionDigits:1})+' %') : f.kind==='int'?v.toLocaleString('de-DE') : v.toLocaleString('de-DE',{maximumFractionDigits:2});
 
@@ -34320,8 +34347,8 @@ function DataImportView({projects, employees}){
     </div>
     {selProj && <div style={{border:'1px solid var(--border)',borderRadius:12,padding:16,marginBottom:18,background:'var(--card)'}}>
       {source==='rohdaten' && <RohdatenImport projId={projId} projName={selProj.name} employees={employees} onSaved={()=>setTick(t=>t+1)}/>}
-      {source==='calls' && <PivotImport projId={projId} employees={employees} source="calls" fields={CALLS_FIELDS} table="weekly_calls" accept=".csv,.xlsx,.xls" hint="Call-CSV wählen" onSaved={()=>setTick(t=>t+1)}/>}
-      {source==='gauges' && <PivotImport projId={projId} employees={employees} source="gauges" fields={GAUGES_FIELDS} table="weekly_gauges" accept=".xlsx,.xls,.csv" hint="Gauges-Excel wählen" onSaved={()=>setTick(t=>t+1)}/>}
+      {source==='calls' && <PivotImport projId={projId} employees={employees} source="calls" fields={CALLS_FIELDS} table="weekly_calls" accept=".csv,.xlsx,.xls" hint="Call-CSV wählen" kpiTargets={CALLS_KPI_TARGETS} onSaved={()=>setTick(t=>t+1)}/>}
+      {source==='gauges' && <PivotImport projId={projId} employees={employees} source="gauges" fields={GAUGES_FIELDS} table="weekly_gauges" accept=".xlsx,.xls,.csv" hint="Gauges-Excel wählen" kpiTargets={GAUGES_KPI_TARGETS} onSaved={()=>setTick(t=>t+1)}/>}
       {source==='booking_a' && <BookingImportAgent projId={projId} employees={employees} onSaved={()=>setTick(t=>t+1)}/>}
       {source==='booking_team' && <BookingImportTeam projId={projId} onSaved={()=>setTick(t=>t+1)}/>}
     </div>}
