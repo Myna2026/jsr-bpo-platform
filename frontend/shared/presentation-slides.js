@@ -513,25 +513,11 @@
       h('div',{key:'note',style:{fontSize:'1cqw',color:P.muted,marginTop:'1cqw',textAlign:'right'}}, (dom.zoomed?('Balkenskala ab '+fmtNum(dom.lo,1)+'% · '):'')+'CR = (Offene+OSL)÷Calls, Ø über 5 Wochen')
     ])]);
   }
-  function AgentCrTrend(ctx, tk){ var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk);
-    var cr=td.cr||{}; var agents=cr.agents||[]; var weeks=cr.weeks||[];
-    var head=fondHead(P, lbl, 'CR-Verlauf je Agent', 'Kleine Vielfache · 5 Wochen');
-    if(!agents.length) return emptyPanel(ctx,head,P,'Keine KPI-Daten je Agent.');
-    var all=[]; agents.forEach(function(a){ weeks.forEach(function(w){ var c=a.byWeek[w.key]; if(c&&c.cr!=null) all.push(c.cr); }); });
-    var dom=zoomDomain(all,0.4); var perRow=agents.length<=8?4:5;
-    function mini(a){ return h('div',{key:a.id,style:{border:'1px solid #eef2f4',borderRadius:'1cqw',padding:'.9cqw 1cqw',display:'flex',flexDirection:'column',minWidth:0}},[
-      h('div',{key:'n',style:{fontSize:'1.1cqw',fontWeight:700,color:P.ink,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',marginBottom:'.4cqw'}},a.name),
-      h('div',{key:'b',style:{display:'flex',alignItems:'flex-end',gap:'.4cqw',height:'6.5cqw'}}, weeks.map(function(w){ var c=a.byWeek[w.key]; var has=c&&c.cr!=null; var ht=has?Math.max(6,frac(c.cr,dom)*100):0;
-        return h('div',{key:w.key,style:{flex:1,display:'flex',flexDirection:'column',justifyContent:'flex-end',alignItems:'center',height:'100%'}},
-          has? h('div',{style:{width:'100%',height:ht+'%',background:P.onLight,borderRadius:'.3cqw .3cqw 0 0'}})
-             : h('div',{style:{width:'100%',height:'100%',display:'flex',alignItems:'center',justifyContent:'center'}}, h('div',{style:{width:'70%',borderTop:'2px dotted #cbd5e1'}}))); })),
-      h('div',{key:'x',style:{display:'flex',gap:'.4cqw',marginTop:'.25cqw'}}, weeks.map(function(w){ return h('div',{key:w.key,style:{flex:1,textAlign:'center',fontFamily:MONO,fontSize:'.75cqw',color:P.muted}}, w.kw); })),
-      h('div',{key:'avg',style:{marginTop:'.35cqw',fontFamily:MONO,fontSize:'1.05cqw',fontWeight:700,color:P.onLightTxt}}, 'Ø '+(a.tot.cr==null?'—':fmtNum(a.tot.cr,1)+'%'))
-    ]); }
-    return Slide(ctx,[head, panel(P,[
-      h('div',{key:'g',style:{flex:1,minHeight:0,display:'grid',gridTemplateColumns:'repeat('+perRow+',1fr)',gap:'1.2cqw',overflow:'hidden',alignContent:'start'}}, agents.map(mini)),
-      h('div',{key:'ft',style:{fontSize:'1cqw',color:P.muted,marginTop:'.8cqw'}}, 'Balken = CR je Woche'+(dom.zoomed?(', Skala ab '+fmtNum(dom.lo,1)+'%'):'')+' · gepunktet = keine Daten (Urlaub/krank)')
-    ])]);
+  function AgentCrTrend(ctx, tk, page){ var td=(ctx.deck.teams||{})[tk]||{}; var cr=td.cr||{};
+    return AgentMultiples(ctx, tk, page, { agents:cr.agents, weeks:cr.weeks, title:'CR-Verlauf je Agent',
+      value:function(a,w){ var c=a.byWeek&&a.byWeek[w.key]; return (c&&c.cr!=null)?c.cr:null; },
+      fmtAvg:function(a){ return (a.tot&&a.tot.cr!=null)?(fmtNum(a.tot.cr,1)+'%'):'—'; }, foot:'Balken = CR je Woche',
+      emptyTitle:'Keine KPI-Daten je Agent.', emptySub:'' });
   }
   function Mtd(ctx, tk){ var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk);
     var mtd=(td.cr&&td.cr.mtd)||{}; var agents=mtd.agents||[]; var tm=mtd.team||{};
@@ -640,6 +626,42 @@
   function skillActive(ctx,k){ var td=(ctx.deck.teams||{})[k]||{};
     return hasFte(ctx,k)||hasStd(ctx,k)||hasCr(ctx,k)||hasCsat(ctx,k)||hasMassnahmen(ctx,k)||hasLangzeit(ctx,k)||hasFehlzeiten(ctx,k)||hasCallsMtd(ctx,k)||!!(td.calls&&td.calls.vorwoche&&Object.keys(td.calls.vorwoche).length); }
   function activeSkills(ctx){ var a=(ctx.skills||[]).filter(function(s){ return skillActive(ctx,s.key); }); return a.length?a:(ctx.skills||[]).slice(0,1); }
+  // Agenten-Grafiken brechen bei zu vielen Personen automatisch auf Folgeseiten um (Folienzahl ergibt sich selbst,
+  // nicht fest verdrahtet). Gleichmäßige Aufteilung: 17 Agenten → 2 Seiten à 9/8, nicht 15/2.
+  var AGENT_PER_PAGE=15;
+  function agentPages(list){ list=list||[]; var n=list.length; if(n<=AGENT_PER_PAGE) return [list]; var pages=Math.ceil(n/AGENT_PER_PAGE); var per=Math.ceil(n/pages); var out=[]; for(var i=0;i<n;i+=per) out.push(list.slice(i,i+per)); return out; }
+  // Mini-Verlauf je Agent (kleine Vielfache) — geteilt von AHT (Support) und CR (Sales). value(a,w)=Balkenwert,
+  // fmtAvg(a)=Ø-Text. head nur auf Seite 0 (Folgeseiten ohne Titel, wie in der Kundenvorlage).
+  function AgentMultiples(ctx, tk, page, cfg){ page=page||0; var P=pal(ctx.accent); var lbl=skillLabel(ctx,tk);
+    var agents=cfg.agents||[]; var weeks=cfg.weeks||[];
+    if(!agents.length) return Slide(ctx,[ fondHead(P, lbl, cfg.title, cfg.eyebrow||''), pendingBody(ctx,P,cfg.emptyTitle||'Keine Daten',cfg.emptySub||'') ]);
+    var pages=agentPages(agents); var pa=pages[page]||[];
+    var all=[]; agents.forEach(function(a){ weeks.forEach(function(w){ var v=cfg.value(a,w); if(v!=null) all.push(v); }); });
+    var dom=zoomDomain(all,0.4); var perRow=pa.length<=8?4:5;
+    function mini(a){ return h('div',{key:a.id,style:{border:'1px solid #eef2f4',borderRadius:'1cqw',padding:'.9cqw 1cqw',display:'flex',flexDirection:'column',minWidth:0}},[
+      h('div',{key:'n',style:{display:'flex',alignItems:'center',gap:'.4cqw',marginBottom:'.4cqw'}},[
+        h('span',{key:'nm',style:{flex:1,fontSize:'1.1cqw',fontWeight:700,color:P.ink,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},a.name),
+        a.newbie?h('span',{key:'nb',style:{fontSize:'.72cqw',fontWeight:800,letterSpacing:'.06em',color:'#fff',background:P.onLight,borderRadius:'.4cqw',padding:'.05cqw .45cqw',flexShrink:0}},'NEU'):null
+      ]),
+      h('div',{key:'b',style:{display:'flex',alignItems:'flex-end',gap:'.4cqw',height:'6.5cqw'}}, weeks.map(function(w){ var v=cfg.value(a,w); var has=v!=null; var ht=has?Math.max(6,frac(v,dom)*100):0;
+        return h('div',{key:w.key,style:{flex:1,display:'flex',flexDirection:'column',justifyContent:'flex-end',alignItems:'center',height:'100%'}},
+          has? h('div',{style:{width:'100%',height:ht+'%',background:P.onLight,borderRadius:'.3cqw .3cqw 0 0'}})
+             : h('div',{style:{width:'100%',height:'100%',display:'flex',alignItems:'center',justifyContent:'center'}}, h('div',{style:{width:'70%',borderTop:'2px dotted #cbd5e1'}}))); })),
+      h('div',{key:'x',style:{display:'flex',gap:'.4cqw',marginTop:'.25cqw'}}, weeks.map(function(w){ return h('div',{key:w.key,style:{flex:1,textAlign:'center',fontFamily:MONO,fontSize:'.75cqw',color:P.muted}}, w.kw); })),
+      h('div',{key:'avg',style:{marginTop:'.35cqw',fontFamily:MONO,fontSize:'1.05cqw',fontWeight:700,color:P.onLightTxt}}, 'Ø '+cfg.fmtAvg(a))
+    ]); }
+    var head=page===0?fondHead(P, lbl, cfg.title, (agents.length+' Agenten'+(pages.length>1?(' · '+pages.length+' Seiten'):''))):null;
+    var body=[ h('div',{key:'g',style:{flex:1,minHeight:0,display:'grid',gridTemplateColumns:'repeat('+perRow+',1fr)',gap:'1.2cqw',overflow:'hidden',alignContent:'start'}}, pa.map(mini)),
+      h('div',{key:'ft',style:{fontSize:'1cqw',color:P.muted,marginTop:'.8cqw'}}, cfg.foot+(pages.length>1?(' · Seite '+(page+1)+'/'+pages.length):'')+' · gepunktet = keine Daten') ];
+    return Slide(ctx, [head, panel(P, body)].filter(Boolean));
+  }
+  function ahtMmss(s){ if(s==null) return '—'; s=Math.round(s); return Math.floor(s/60)+':'+(String(s%60).length<2?'0':'')+(s%60); }
+  function CallAgentAht(ctx, tk, page){ var td=(ctx.deck.teams||{})[tk]||{}; var d=td.callaht||{};
+    return AgentMultiples(ctx, tk, page, { agents:d.agents, weeks:d.weeks, title:'AHT je Agent · 5 Wochen',
+      value:function(a,w){ var c=a.byWeek&&a.byWeek[w.key]; return (c&&c.aht!=null)?c.aht:null; },
+      fmtAvg:function(a){ return ahtMmss(a.tot&&a.tot.aht); }, foot:'Balken = AHT je Woche (mm:ss)',
+      emptyTitle:'AHT-Verlauf je Agent folgt', emptySub:'Wird mit „Aus Import übernehmen" (Calls) angebunden; bricht bei vielen Agenten automatisch um.' });
+  }
   // ── Trennfolie je Bereich (z. B. „Support") + Abschluss „Thank you" ──
   function SectionDivider(ctx, label){ var P=pal(ctx.accent);
     return Slide(ctx, h('div',{style:{flex:1,display:'flex',flexDirection:'column',justifyContent:'center'}},[
@@ -664,11 +686,6 @@
     return Slide(ctx,[ fondHead(P, lbl+' · '+(mode==='monat'?'Monat (MTD)':'Vorwoche'), 'Mail-Kennzahlen'),
       pendingBody(ctx, P, 'Mail-Kennzahlen folgen', 'Die Mail-Daten werden noch angebunden. Neue Mitarbeiter (Start ≤ 8 Wochen) werden hier gekennzeichnet.') ]);
   }
-  // AHT je Agent über 5 Wochen (Support-Leistungsgröße am Telefon) — Daten + Auto-Umbruch folgen in Schnitt 2.
-  function CallAgentAht(ctx, tk){ var P=pal(ctx.accent); var lbl=skillLabel(ctx,tk);
-    return Slide(ctx,[ fondHead(P, lbl, 'AHT je Agent · 5 Wochen'),
-      pendingBody(ctx, P, 'AHT-Verlauf je Agent folgt', 'Wird mit den Call-Daten angebunden und bricht bei vielen Agenten automatisch auf weitere Folien um.') ]);
-  }
   function MailAgentTrend(ctx, tk){ var P=pal(ctx.accent); var lbl=skillLabel(ctx,tk);
     return Slide(ctx,[ fondHead(P, lbl, 'Mail je Agent · 5 Wochen'),
       pendingBody(ctx, P, 'Mail-Verlauf je Agent folgt', 'Folgt mit den Mail-Daten; bricht bei vielen Agenten automatisch um.') ]);
@@ -685,14 +702,14 @@
       add('crtab','CR (Tabelle)',function(){return CrTable(ctx,k);});
       add('crchart','CR (Verlauf)',function(){return CrChart(ctx,k);});
       add('agentcr','CR je Agent',function(){return AgentCr(ctx,k);});
-      add('agentcrtrend','CR-Verlauf je Agent',function(){return AgentCrTrend(ctx,k);});
+      agentPages((((ctx.deck.teams||{})[k]||{}).cr||{}).agents||[]).forEach(function(pg,pi){ add('agentcrtrend'+(pi?':'+pi:''),'CR-Verlauf je Agent'+(pi?' (Forts.)':''),function(){ return AgentCrTrend(ctx,k,pi); }); });
       add('mtd','MTD',function(){return Mtd(ctx,k);});
       add('calls','Calls (Vorwoche)',function(){return Calls(ctx,k);});
       add('callsmtd','Calls (Monat)',function(){return CallsMtd(ctx,k);});
     } else {
       add('calls','Calls (Vorwoche)',function(){return Calls(ctx,k);});
       add('callsmtd','Calls (Monat)',function(){return CallsMtd(ctx,k);});
-      add('callaht','AHT je Agent',function(){return CallAgentAht(ctx,k);});
+      agentPages((((ctx.deck.teams||{})[k]||{}).callaht||{}).agents||[]).forEach(function(pg,pi){ add('callaht'+(pi?':'+pi:''),'AHT je Agent'+(pi?' (Forts.)':''),function(){ return CallAgentAht(ctx,k,pi); }); });
       add('mailvorwoche','Mail (Vorwoche)',function(){return MailKpis(ctx,k,'vorwoche');});
       add('mailmonat','Mail (Monat)',function(){return MailKpis(ctx,k,'monat');});
       add('mailagent','Mail je Agent',function(){return MailAgentTrend(ctx,k);});

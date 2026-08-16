@@ -35863,6 +35863,7 @@ function PresentationsView({projects, employees, team, showToast}){
   const [mode,setMode]=useState('edit');        // edit | show | settings
   const [tab,setTab]=useState('');              // aktiver Skill-Tab (Eingabe)
   const [viewSkill,setViewSkill]=useState('all'); // Anzeige-Umschalter: 'all'=Gesamt | skill-key. Nur Vorschau; Publish/PDF immer alle.
+  const [newbieWeeks,setNewbieWeeks]=useState(8);  // Newbie-Grenze: Start ≤ N Wochen vor Berichtswoche. Admin-änderbar (jsr_report_newbie_weeks).
   const [deck,setDeck]=useState(hcEmptyDeck());
   const [rowId,setRowId]=useState(null);
   const [busy,setBusy]=useState(false);
@@ -35927,6 +35928,7 @@ function PresentationsView({projects, employees, team, showToast}){
     try{ const {data}=await sb.from('presentation_templates').select('*').eq('project_id',selProj.id).limit(1); const t=data&&data[0];
       if(alive){ setTplId(t?t.id:null); setTheme({accent:(t&&t.slots&&t.slots.accent)||'',font:(t&&t.slots&&t.slots.font)||'',customerLogo:(t&&t.customer_logo_path)||''}); } }catch(e){}
     try{ const v=await loadConfigFromDB('jsr_presentation_our_logo'); if(alive&&typeof v==='string') setOurLogo(v); }catch(e){}
+    try{ const nw=await loadConfigFromDB('jsr_report_newbie_weeks'); if(alive&&nw!=null&&!isNaN(Number(nw))&&Number(nw)>0) setNewbieWeeks(Number(nw)); }catch(e){}
   })(); return ()=>{alive=false;}; },[selProjId]);
 
   // ── Schnitt 4: Bericht = presentations kind='weekly'. Import-Ablagen als LIVE-Datenquelle (5-Wochen-Fenster). ──
@@ -35983,7 +35985,7 @@ function PresentationsView({projects, employees, team, showToast}){
     members.forEach(e=>{ const r=(stores.callsByEmp||{})[e.id]; if(!r) return;
       cur[e.id]={ no_answer:r.no_answer!=null?String(r.no_answer):'', answered:r.answered!=null?String(r.answered):'', outbound:r.outbound!=null?String(r.outbound):'',
         avg_talk:secToMmss(r.avg_talk_sec), avg_acw:secToMmss(r.avg_acw_sec), avg_handle:secToMmss(r.avg_handle_sec), avg_hold:secToMmss(r.avg_hold_sec) }; });
-    (n.teams[t].calls=n.teams[t].calls||{})._vwsrc='imported'; }); }
+    (n.teams[t].calls=n.teams[t].calls||{})._vwsrc='imported'; }); applyImportCallAht(t); }
   // CSAT je MA über das 5-Wochen-Fenster aus weekly_gauges. Ø gewichtet nach Anzahl (n). Namen eingefroren.
   function applyImportCsat(t){ const ws=windowWeeks(); const members=membersFor(t); const win=stores.gaugesWin||[];
     const byEmp={}; win.forEach(r=>{ if(!ws.some(w=>w.yr===r.year&&w.kw===r.kw)) return; const wk=r.year+'-'+r.kw;
@@ -35996,6 +35998,21 @@ function PresentationsView({projects, employees, team, showToast}){
       .filter(r=>Object.keys(r.cells).length)
       .sort((a,b)=>(b.avg||0)-(a.avg||0));
     upd(n=>{ n.teams[t].csat={weeks, rows, _src:'imported'}; }); }
+  // Support-Folie: AHT je Agent über das 5-Wochen-Fenster (weekly_calls avg_handle_sec, gewichtet nach Answered).
+  // Nur MA mit echter Call-Zeile (Overhead fällt raus). Newbie = Start ≤ newbieWeeks vor der Berichtswoche.
+  function applyImportCallAht(t){ const ws=windowWeeks(); const members=membersFor(t); const win=stores.callsWin||[];
+    const memberSet={}; members.forEach(e=>{ memberSet[e.id]=e; });
+    const byEmp={}; win.forEach(r=>{ if(!memberSet[r.employee_id]) return; if(!ws.some(w=>w.yr===r.year&&w.kw===r.kw)) return; const wk=r.year+'-'+r.kw;
+      (byEmp[r.employee_id]=byEmp[r.employee_id]||{})[wk]={aht:(r.avg_handle_sec==null?null:Number(r.avg_handle_sec)), answered:(r.answered==null?0:Number(r.answered))}; });
+    const weeks=ws.map(w=>({kw:w.kw,key:w.yr+'-'+w.kw}));
+    const revMon=reviewMonday(); const cutoff=new Date(revMon); cutoff.setDate(revMon.getDate()-newbieWeeks*7);
+    const isNewbie=e=>{ const s=(e.contract&&e.contract.start)||e.contract_start||e.hire_date; if(!s) return false; const d=new Date(String(s).slice(0,10)+'T12:00:00'); return !isNaN(d.getTime())&&d>=cutoff; };
+    const agents=members.map(e=>{ const bw=byEmp[e.id]||{}; const byWeek={}; let ts=0,tw=0;
+        weeks.forEach(wk=>{ const c=bw[wk.key]; if(c&&c.aht!=null){ byWeek[wk.key]={aht:c.aht}; const w=(c.answered||0)||1; ts+=c.aht*w; tw+=w; } });
+        return {id:e.id, name:empName(e), byWeek, tot:{aht: tw? Math.round(ts/tw) : null}, newbie:isNewbie(e)}; })
+      .filter(a=>Object.keys(a.byWeek).length)
+      .sort((a,b)=>a.name.localeCompare(b.name,'de'));
+    upd(n=>{ n.teams[t].callaht={weeks, agents, _src:'imported'}; }); }
   // FTE-Folie (2): Besetzungsliste je MA aus report_fte-Standard (fehlt → 1,0). Namen eingefroren.
   // Namensliste SOFORT setzen (sync) — unabhängig vom Organigramm. So erscheint die Folie garantiert, sobald
   // übernommen wurde (klare Trennung „nicht übernommen" vs. „kein Organigramm"). Der Org-Zweig wird danach
@@ -36487,6 +36504,7 @@ function PresentationsView({projects, employees, team, showToast}){
       <label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,fontWeight:700,color:'var(--text)',cursor:'pointer',border:'1px solid var(--border)',borderRadius:8,padding:'5px 10px'}} title="Call-Reviews-Folie je Skill in diesen Bericht aufnehmen. Aus = Folie entfällt (Kommentare bleiben erhalten).">
         <input type="checkbox" checked={deck.callReviews!==false} onChange={e=>setDeck(d=>({...d,callReviews:e.target.checked}))}/>Call-Reviews
       </label>
+      <label style={{display:'flex',alignItems:'center',gap:5,fontSize:12,fontWeight:700,color:'var(--text)',border:'1px solid var(--border)',borderRadius:8,padding:'5px 10px'}} title="Newbie-Grenze: Start bis N Wochen vor der Berichtswoche wird als NEU markiert (Mail-KPIs und AHT je Agent). Beim nächsten Import-Übernehmen wirksam.">Newbie ≤ <input type="number" min="1" max="52" value={newbieWeeks} onChange={e=>{ const v=Math.max(1,Number(e.target.value)||8); setNewbieWeeks(v); saveConfigToDB('jsr_report_newbie_weeks',v); }} style={{width:44,padding:'2px 4px',border:'1px solid var(--border)',borderRadius:6,fontSize:12}}/> Wo.</label>
       <button className="btn btn-sm" onClick={dummy?discardDummy:fillDummy} style={{border:'1px solid '+(dummy?'#dc2626':'var(--border)'),color:dummy?'#dc2626':'var(--text)',fontWeight:700}}>{dummy?'Beispiel verwerfen':'Beispiel füllen'}</button>
       <button className="btn btn-primary btn-sm" disabled={busy||dummy} title={dummy?'Beispieldaten werden nicht gespeichert':''} onClick={save}>💾 Speichern</button>
       <button className="btn btn-sm" disabled={busy||dummy} onClick={publish} style={{background:published?'transparent':'#059669',color:published?'#059669':'#fff',border:'1px solid #059669',fontWeight:700}} title="Für das Kundenportal freigeben (nur veröffentlichte Berichte sind für den Kunden sichtbar)">{published?'✓ Veröffentlicht — aktualisieren':'🌐 Veröffentlichen'}</button>
