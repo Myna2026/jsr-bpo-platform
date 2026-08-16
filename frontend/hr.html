@@ -1311,7 +1311,7 @@ const MENU_BADGE_MAIN_ITEMS = [
   {key:'payroll',label:'Löhne'},{key:'orgchart',label:'Organigramm'},{key:'absences',label:'Abwesenheiten'},{key:'calendar',label:'Kalender'},
   {key:'urlaubantraege',label:'Urlaubsanträge'},{key:'feedback',label:'Feedbackgespräche'},{key:'kanban',label:'Recruiting'},{key:'funnel',label:'Bewerber-Trichter'},{key:'onboarding',label:'Onboarding'},
   {key:'cvs',label:'CVs & Bewerber'},{key:'showcase',label:'Showcases'},{key:'training_plans',label:'Schulungsplanung'},
-  {key:'timeline',label:'Timeline'},{key:'projects',label:'Projekte'},{key:'forecast',label:'Forecast'},
+  {key:'timeline',label:'Timeline'},{key:'projects',label:'Projekte'},{key:'forecast',label:'Forecast'},{key:'fcist',label:'Forecast vs. Ist'},
   {key:'profitability',label:'Wirtschaftlichkeit'},{key:'praesentation',label:'Präsentationen'},{key:'dataimport',label:'Datenimport'},{key:'recmkt',label:'Recruiting Marketing'},
   {key:'superadmin',label:'System / Konfiguration'},{key:'tabperms',label:'Portal-Tabs'},
   {key:'aisettings',label:'KI-Einstellungen'},{key:'aiendpoint',label:'KI-Anbindung'},{key:'cvsync',label:'CV-Sync'},
@@ -8307,7 +8307,7 @@ function MarginRing({pct, size=62, stroke=8}){
 }
 // Interaktives Tages-Diagramm (Fläche oder Balken), responsiv. Hover zeigt Tag + Wert.
 // data=number[], labels=string[] (gleiche Länge), fmt=(v)=>string.
-function HoverChart({data, labels, color, kind='area', h=48, fmt}){
+function HoverChart({data, labels, color, kind='area', h=48, fmt, tips}){
   const [hi,setHi]=useState(null);
   const idRef=useRef(null); if(!idRef.current) idRef.current='hc'+(SPARK_SEQ++);
   const wrapRef=useRef(null);
@@ -8340,7 +8340,7 @@ function HoverChart({data, labels, color, kind='area', h=48, fmt}){
     {hi!=null&&kind!=='bar'&&<div style={{position:'absolute',left:tipX+'%',top:yV(vals[hi])+'px',width:8,height:8,borderRadius:'50%',background:color,border:'2px solid var(--surface)',transform:'translate(-50%,-50%)',pointerEvents:'none'}}/>}
     <div style={{position:'absolute',inset:0,display:'flex'}}>{vals.map((v,i)=><div key={i} style={{flex:1}} onMouseEnter={()=>setHi(i)}/>)}</div>
     {hi!=null&&<div style={{position:'absolute',bottom:(h+5)+'px',left:Math.max(6,Math.min(94,tipX))+'%',transform:'translateX(-50%)',background:'#0f172a',color:'#fff',fontSize:10.5,fontWeight:700,padding:'3px 7px',borderRadius:6,whiteSpace:'nowrap',pointerEvents:'none',zIndex:5,boxShadow:'0 3px 10px rgba(0,0,0,.22)'}}>
-      {labels&&labels[hi]?<span style={{opacity:.7,fontWeight:600}}>{labels[hi]} · </span>:null}{f(vals[hi])}
+      {tips&&tips[hi]!=null ? tips[hi] : <React.Fragment>{labels&&labels[hi]?<span style={{opacity:.7,fontWeight:600}}>{labels[hi]} · </span>:null}{f(vals[hi])}</React.Fragment>}
     </div>}
   </div>;
 }
@@ -8492,6 +8492,91 @@ function CockpitProjectKpis({projects, team, mobile}){
   return mobile
     ? <div className="ckm-card" style={{borderLeft:'4px solid #0d9488'}}><div className="ckm-h" style={{color:'#0d9488'}}>📊 KPIs je Projekt·Skill</div>{inner}</div>
     : <div className="card" style={{marginBottom:12}}><div style={{padding:'12px 14px 0',fontSize:14,fontWeight:800}}>📊 KPIs je Projekt·Skill</div>{deckGrid}</div>;
+}
+// ── Forecast vs. Ist je Projekt·Skill (Management-only, Cockpit) ──
+// Gelieferte Stunden (weekly_hours) gegen Auftraggeber-Forecast (report_forecast), letzte 8 Wochen.
+// Aussage = die Abweichung (Lücke%); Farbe nach Größe, Werte per Hover. Ohne Forecast: raus + Vermerk.
+function CockpitForecastIst({projects, team, mobile}){
+  const isMgmt=((team&&team.role_keys)||[]).some(r=>r==='management');
+  const [data,setData]=useState(null);
+  const now=new Date();
+  const mondayOf=d=>{ const x=new Date(d.getFullYear(),d.getMonth(),d.getDate()); x.setDate(x.getDate()-((x.getDay()+6)%7)); return x; };
+  const thisMon=mondayOf(now); const lastMon=new Date(thisMon); lastMon.setDate(thisMon.getDate()-7);
+  // 8 VOLLSTÄNDIGE Wochen bis zur letzten abgeschlossenen Woche (Hauptwert). Die laufende Woche ist
+  // unvollständig (Ist noch nicht komplett) -> nur als Hinweis, nie als Hauptwert (wie Krank-/Urlaubsquote).
+  const weeks=(()=>{ const a=[]; for(let i=7;i>=0;i--){ const d=new Date(lastMon); d.setDate(lastMon.getDate()-i*7); a.push(getISOWeek(d)); } return a; })();
+  const runWeek=getISOWeek(thisMon);
+  const wkey=w=>w.year+'-'+w.kw;
+  useEffect(()=>{ if(!isMgmt){ setData({combos:[],noFc:[]}); return; } let alive=true;
+    const load=async()=>{
+      try{
+        const orC=weeks.concat([runWeek]).map(w=>`and(year.eq.${w.year},kw.eq.${w.kw})`).join(',');
+        const fcR=await sb.from('report_forecast').select('project_id,skill,kw,year,fc_hours').or(orC);
+        const whR=await sb.from('weekly_hours').select('project_id,skill,kw,year,hours').or(orC);
+        if(!alive) return;
+        const fc={}, ist={};
+        (fcR.data||[]).forEach(r=>{ fc[r.project_id+'|'+String(r.skill||'').toLowerCase()+'|'+r.year+'-'+r.kw]=(r.fc_hours==null?null:Number(r.fc_hours)); });
+        (whR.data||[]).forEach(r=>{ const k=r.project_id+'|'+String(r.skill||'').toLowerCase()+'|'+r.year+'-'+r.kw; ist[k]=(ist[k]||0)+Number(r.hours||0); });
+        const comboSet={}; (fcR.data||[]).forEach(r=>{ comboSet[r.project_id+'|'+String(r.skill||'').toLowerCase()]=true; });
+        const combos=Object.keys(comboSet).map(key=>{ const pid=key.split('|')[0], skill=key.split('|')[1];
+          const series=weeks.map(w=>{ const kk=key+'|'+wkey(w); const f=fc[kk]; const s=ist[kk]; const both=(f!=null&&f>0&&s!=null);
+            return {kw:w.kw, fc:(f==null?null:Math.round(f*10)/10), ist:(s==null?null:Math.round(s*10)/10), gap: both?Math.round((f-s)/f*1000)/10:null, both}; });
+          const rk=key+'|'+wkey(runWeek); const rf=fc[rk], rs=ist[rk];
+          const running=(rf!=null||rs!=null)?{fc:(rf==null?null:Math.round(rf*10)/10), ist:(rs==null?null:Math.round(rs*10)/10)}:null;
+          return {pid, skill, series, running};
+        });
+        const fcPids=new Set(Object.keys(comboSet).map(k=>k.split('|')[0]));
+        const noFc=[...new Set((whR.data||[]).map(r=>r.project_id))].filter(p=>!fcPids.has(p));
+        if(alive) setData({combos, noFc});
+      }catch(e){ if(alive) setData({combos:[],noFc:[]}); }
+    };
+    load();
+    const ch=sb.channel('cockpit-fc-ist').on('postgres_changes',{event:'*',schema:'public',table:'report_forecast'},load).subscribe();
+    return ()=>{ alive=false; try{ sb.removeChannel(ch); }catch(e){} };
+  },[isMgmt]);
+  if(!isMgmt || data===null) return null;
+  const combos=data.combos||[]; if(!combos.length) return null;   // kein Forecast = kein Vergleichsblock
+  const projName=id=>{ const p=(projects||[]).find(x=>x&&x.id===id); return p?p.name:id; };
+  const projColor=id=>{ const p=(projects||[]).find(x=>x&&x.id===id); return (p&&p.color)||'#0F5661'; };
+  const skLabel=s=> s==='sales'?'Sales':s==='support'?'Support':(s||'');
+  combos.sort((a,b)=>projName(a.pid).localeCompare(projName(b.pid),'de')||String(a.skill).localeCompare(String(b.skill),'de'));
+  const sev=g=> g<=10?{c:'#059669',bg:'#ecfdf5'}:g<=25?{c:'#d97706',bg:'#fffbeb'}:{c:'#dc2626',bg:'#fef2f2'};
+  const gapTxt=g=> g>0?fmtNum(g,1)+' % Lücke':g<0?fmtNum(-g,1)+' % über Plan':'auf Plan';
+  const ACC='#7c3aed';
+  const card=(c)=>{ const both=c.series.filter(s=>s.both); const head=both[both.length-1]||null; const s=head?sev(Math.max(0,head.gap)):null;
+    return <div key={c.pid+'|'+c.skill} style={{border:'1px solid var(--border)',borderRadius:12,padding:'11px 13px',background:'var(--card)'}}>
+      <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:8}}>
+        <span style={{width:8,height:8,borderRadius:3,background:projColor(c.pid),flexShrink:0}}/>
+        <span style={{fontSize:12.5,fontWeight:700,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{projName(c.pid)}<span style={{color:'var(--muted)',fontWeight:600}}> · {skLabel(c.skill)}</span></span>
+      </div>
+      {head ? <React.Fragment>
+        <div style={{display:'flex',alignItems:'flex-end',gap:12,flexWrap:'wrap'}}>
+          <div>
+            <div style={{fontSize:8.5,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.04em'}}>KW {head.kw}</div>
+            <div style={{fontSize:12,color:'var(--muted)'}}>FC <b style={{color:'var(--text)',fontFamily:'var(--mono)'}}>{fmtNum(head.fc)}</b> · Ist <b style={{color:'var(--text)',fontFamily:'var(--mono)'}}>{fmtNum(head.ist)}</b> h</div>
+          </div>
+          <div style={{marginLeft:'auto',textAlign:'right'}}>
+            <div style={{fontSize:19,fontWeight:800,fontFamily:'var(--mono)',lineHeight:1.05,color:s.c,padding:'1px 7px',borderRadius:6,background:s.bg,display:'inline-block'}}>{head.gap>0?'−':head.gap<0?'+':''}{fmtNum(Math.abs(head.ist-head.fc))} h</div>
+            <div style={{fontSize:11,fontWeight:700,color:s.c,marginTop:2}}>{gapTxt(head.gap)}</div>
+          </div>
+        </div>
+        {both.length>=2&&<div style={{marginTop:7}}><HoverChart data={both.map(x=>x.gap)} labels={both.map(x=>'KW '+x.kw)} color={s.c} kind="area" h={38} fmt={v=>fmtNum(v,1)+' %'} tips={both.map(x=>'KW '+x.kw+' · FC '+fmtNum(x.fc)+' / Ist '+fmtNum(x.ist)+' · '+gapTxt(x.gap))}/></div>}
+      </React.Fragment> : <div style={{fontSize:11.5,color:'var(--muted)',padding:'4px 0'}}>Forecast vorhanden, noch keine Ist-Stunden im Fenster.{c.series.some(x=>x.fc!=null)&&<span> Zuletzt erwartet: <b style={{color:'var(--text)',fontFamily:'var(--mono)'}}>{fmtNum(([...c.series].reverse().find(x=>x.fc!=null)||{}).fc)}</b> h.</span>}</div>}
+      {c.running && c.running.ist!=null && <div style={{fontSize:10.5,color:'var(--muted)',marginTop:6,borderTop:'1px dashed var(--border)',paddingTop:5}}>Laufende KW {runWeek.kw}: <b style={{fontFamily:'var(--mono)',color:'var(--text)'}}>{fmtNum(c.running.ist)}</b>{c.running.fc!=null?<span> von {fmtNum(c.running.fc)}</span>:null} h · Woche läuft noch</div>}
+    </div>;
+  };
+  const grid=(
+    <div style={{padding:mobile?'2px 0 4px':14}}>
+      <div style={mobile?{display:'flex',flexDirection:'column',gap:10}:{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:12}}>{combos.map(c=>card(c))}</div>
+      <div style={{fontSize:10,color:'var(--muted)',marginTop:mobile?8:10,lineHeight:1.5}}>
+        Ist (weekly_hours) gegen Auftraggeber-Forecast (report_forecast), letzte 8 Wochen. Lücke = (FC − Ist) ÷ FC. Farbe nach Größe der Abweichung, Werte beim Darüberfahren.
+        {(data.noFc||[]).length>0 && <span> Ohne Forecast (nur Ist, hier nicht verglichen): <b>{data.noFc.map(projName).join(', ')}</b>.</span>}
+      </div>
+    </div>
+  );
+  return mobile
+    ? <div className="ckm-card" style={{borderLeft:'4px solid '+ACC}}><div className="ckm-h" style={{color:ACC}}>🔮 Forecast vs. Ist</div>{grid}</div>
+    : <div className="card" style={{marginBottom:12}}><div style={{padding:'12px 14px 0',fontSize:14,fontWeight:800}}>🔮 Forecast vs. Ist</div>{grid}</div>;
 }
 // ── Kunden-Kommentare zum AKTUELLSTEN veröffentlichten Bericht je Projekt (Management-only, Desktop+mobil) ──
 // Kommt ein neuer Bericht, zeigt das Cockpit dessen Kommentare — die alten bleiben am jeweiligen Bericht.
@@ -8818,6 +8903,7 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
       {/* KPIs je Projekt·Skill — bei den projektbezogenen Blöcken, direkt unter „Leistung je Skill".
           Automatisch für Management/HR, sobald KPIs konfiguriert sind (sonst null). */}
       <CockpitProjectKpis projects={projects} team={team} mobile={true}/>
+      <CockpitForecastIst projects={projects} team={team} mobile={true}/>
       <CockpitMarketingTile team={team} employees={employees} mobile={true} onNavigate={onNavigate}/>
       <CockpitPresentationComments projects={projects} team={team} mobile={true}/>
 
@@ -9226,9 +9312,10 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
       training: hasTraining ? wblock('training_status', <Widget_TrainingStatus plans={plans}/>) : null,
       fabletics: <Widget_DailyReports employees={employees} projects={projects} team={team}/>,
       kpis: <CockpitProjectKpis projects={projects} team={team} mobile={false}/>,
+      forecast_ist: <CockpitForecastIst projects={projects} team={team} mobile={false}/>,
     };
-    const BLOCK_LABELS={kalender:'Kalender · 4 Wochen',tiles:'Kennzahlen-Kacheln',cveingang:'CV-Eingang',marketing:'Recruiting Marketing',projekte:'Projekte',quote:'Krank-/Urlaubsquote',abwesend:'Abwesenheiten heute',ma:'MA je Projekt·Skill',vertraege:'Vertrags-Auslauf',training:'Schulungen',fabletics:'Fabletics-Berichte',kpis:'KPIs je Projekt·Skill'};
-    const DEF_ORDER=['kalender','tiles','cveingang','marketing','projekte','quote','abwesend','ma','vertraege','training','fabletics','kpis'];
+    const BLOCK_LABELS={kalender:'Kalender · 4 Wochen',tiles:'Kennzahlen-Kacheln',cveingang:'CV-Eingang',marketing:'Recruiting Marketing',projekte:'Projekte',quote:'Krank-/Urlaubsquote',abwesend:'Abwesenheiten heute',ma:'MA je Projekt·Skill',vertraege:'Vertrags-Auslauf',training:'Schulungen',fabletics:'Fabletics-Berichte',kpis:'KPIs je Projekt·Skill',forecast_ist:'Forecast vs. Ist'};
+    const DEF_ORDER=['kalender','tiles','cveingang','marketing','projekte','quote','abwesend','ma','vertraege','training','fabletics','kpis','forecast_ist'];
     const _ck=mgmtCk||{order:null,hidden:[]};
     const _ord=(Array.isArray(_ck.order)?_ck.order:DEF_ORDER).filter(k=>DEF_ORDER.includes(k));
     const order=_ord.concat(DEF_ORDER.filter(k=>!_ord.includes(k)));   // neue Blöcke ans Ende
@@ -34396,6 +34483,172 @@ function PausenGegencheck({projId}){
   </div>;
 }
 
+// ── Forecast vs. Ist — ausführliche Ansicht (Menüpunkt, Management-only) ──
+// FC-Linie (solid = Vergangenheit, gestrichelt = erwartet) + Ist-Balken, Hover mit KW/FC/Ist/Lücke.
+function FcIstChart({rows, color}){
+  const [hi,setHi]=useState(null);
+  const n=(rows||[]).length; if(!n) return null;
+  const W=100,H=140,padT=8,padB=4,ih=H-padT-padB;
+  const vals=[]; rows.forEach(r=>{ if(r.fc!=null)vals.push(r.fc); if(r.ist!=null)vals.push(r.ist); });
+  const max=Math.max(1,...vals);
+  const xL=i=> n===1?W/2:(i/(n-1))*W;
+  const yV=v=> padT+ih-(v/max)*ih;
+  const bw=Math.max(0.7,(W/n)*0.6);
+  const firstFuture=rows.findIndex(r=>r.phase==='future');
+  const idxFc=rows.map((r,i)=> r.fc!=null?{i,x:xL(i),y:yV(r.fc)}:null).filter(Boolean);
+  const pastLine=idxFc.filter(p=> firstFuture<0||p.i<firstFuture);
+  let futLine=firstFuture<0?[]:idxFc.filter(p=>p.i>=firstFuture);
+  if(firstFuture>=0 && pastLine.length && futLine.length) futLine=[pastLine[pastLine.length-1]].concat(futLine);
+  const toPath=arr=>arr.map((p,k)=>(k?'L':'M')+p.x.toFixed(2)+' '+p.y.toFixed(2)).join(' ');
+  const divX = firstFuture>0 ? (xL(firstFuture-1)+xL(firstFuture))/2 : null;
+  const gapTxt=g=> g>0?fmtNum(g,1)+' % Lücke':g<0?fmtNum(-g,1)+' % über Plan':'auf Plan';
+  return <div style={{position:'relative'}} onMouseLeave={()=>setHi(null)}>
+    <svg width="100%" height={H} viewBox={'0 0 '+W+' '+H} preserveAspectRatio="none" style={{display:'block'}}>
+      {rows.map((r,i)=> r.ist!=null? <rect key={'b'+i} x={xL(i)-bw/2} y={yV(r.ist)} width={bw} height={Math.max(0,(padT+ih)-yV(r.ist))} rx="0.4" fill={color} opacity={hi===i?0.85:0.22}/>:null)}
+      {divX!=null && <line x1={divX} y1={padT} x2={divX} y2={padT+ih} stroke="#94a3b8" strokeWidth="1" strokeDasharray="2 2" vectorEffect="non-scaling-stroke"/>}
+      {pastLine.length>1 && <path d={toPath(pastLine)} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" vectorEffect="non-scaling-stroke"/>}
+      {futLine.length>1 && <path d={toPath(futLine)} fill="none" stroke={color} strokeWidth="2" strokeDasharray="3 2" opacity="0.65" strokeLinejoin="round" vectorEffect="non-scaling-stroke"/>}
+      {hi!=null && rows[hi].fc!=null && <circle cx={xL(hi)} cy={yV(rows[hi].fc)} r="1.8" fill={color} stroke="#fff" strokeWidth="0.6"/>}
+    </svg>
+    <div style={{position:'absolute',inset:0,display:'flex'}}>{rows.map((r,i)=><div key={i} style={{flex:1}} onMouseEnter={()=>setHi(i)}/>)}</div>
+    {hi!=null && <div style={{position:'absolute',top:0,left:Math.max(8,Math.min(92,xL(hi)))+'%',transform:'translateX(-50%)',background:'#0f172a',color:'#fff',fontSize:10.5,fontWeight:700,padding:'3px 7px',borderRadius:6,whiteSpace:'nowrap',pointerEvents:'none',zIndex:5,boxShadow:'0 3px 10px rgba(0,0,0,.22)'}}>
+      KW {rows[hi].kw} · FC {rows[hi].fc==null?'—':fmtNum(rows[hi].fc)}{rows[hi].ist!=null?' / Ist '+fmtNum(rows[hi].ist):''} h{rows[hi].phase==='future'?' · erwartet':rows[hi].gap!=null?' · '+gapTxt(rows[hi].gap):rows[hi].phase==='running'?' · läuft':''}
+    </div>}
+  </div>;
+}
+function ForecastVsIstView({projects}){
+  const [combos,setCombos]=useState(null);
+  const [sel,setSel]=useState('');
+  const [detail,setDetail]=useState(null);
+  const [period,setPeriod]=useState('month');
+  const now=new Date();
+  const mondayOf=d=>{ const x=new Date(d.getFullYear(),d.getMonth(),d.getDate()); x.setDate(x.getDate()-((x.getDay()+6)%7)); return x; };
+  const thisMon=mondayOf(now);
+  const projName=id=>{ const p=(projects||[]).find(x=>x&&x.id===id); return p?p.name:id; };
+  const skLabel=s=> s==='sales'?'Sales':s==='support'?'Support':(s||'');
+  useEffect(()=>{ let alive=true; (async()=>{
+    try{ const {data}=await sb.from('report_forecast').select('project_id,skill'); if(!alive) return;
+      const seen={}, list=[]; (data||[]).forEach(r=>{ const sk=String(r.skill||'').toLowerCase(); const k=r.project_id+'|'+sk; if(!seen[k]){ seen[k]=1; list.push({pid:r.project_id,skill:sk}); } });
+      list.sort((a,b)=>projName(a.pid).localeCompare(projName(b.pid),'de')||a.skill.localeCompare(b.skill,'de'));
+      setCombos(list); if(list.length) setSel(s=>s||(list[0].pid+'|'+list[0].skill));
+    }catch(e){ if(alive) setCombos([]); }
+  })(); return ()=>{alive=false;}; },[]);
+  useEffect(()=>{ if(!sel){ setDetail(null); return; } let alive=true; const pid=sel.split('|')[0], skill=sel.split('|')[1]; setDetail(null);
+    (async()=>{ try{
+      const fcR=await sb.from('report_forecast').select('year,kw,fc_hours').eq('project_id',pid).eq('skill',skill);
+      const whR=await sb.from('weekly_hours').select('skill,year,kw,hours').eq('project_id',pid);
+      if(!alive) return;
+      const fc={}, ist={};
+      (fcR.data||[]).forEach(r=>{ fc[r.year+'-'+r.kw]=(r.fc_hours==null?null:Number(r.fc_hours)); });
+      (whR.data||[]).forEach(r=>{ if(String(r.skill||'').toLowerCase()!==skill) return; const k=r.year+'-'+r.kw; ist[k]=(ist[k]||0)+Number(r.hours||0); });
+      const keys=[...new Set(Object.keys(fc).concat(Object.keys(ist)))].map(k=>{ const p=k.split('-'); return {year:+p[0],kw:+p[1],k}; });
+      keys.sort((a,b)=> a.year-b.year || a.kw-b.kw);
+      const tds=isoLocal(thisMon);
+      const rows=keys.map(({year,kw,k})=>{ const f=fc[k], s=(ist[k]==null?null:Math.round(ist[k]*10)/10);
+        const ds=isoLocal(isoWeekMonday(year,kw)); const ph=ds<tds?'past':ds===tds?'running':'future';
+        const both=(f!=null&&f>0&&s!=null&&ph==='past');
+        return {year,kw,fc:(f==null?null:Math.round(f*10)/10),ist:s,gap:both?Math.round((f-s)/f*1000)/10:null,phase:ph}; });
+      setDetail({rows});
+    }catch(e){ if(alive) setDetail({rows:[]}); } })(); return ()=>{alive=false;}; },[sel]);
+
+  if(combos===null) return <div className="sp-empty">Lädt…</div>;
+  if(!combos.length) return <div style={{maxWidth:900}}><div style={{fontSize:20,fontWeight:700,marginBottom:8}}>🔮 Forecast vs. Ist</div><div className="sp-empty">Noch kein Forecast importiert. Unter „📥 Datenimport" die Auftraggeber-Datei hochladen.</div></div>;
+  const rows=(detail&&detail.rows)||[];
+  const pastBoth=rows.filter(r=>r.phase==='past'&&r.gap!=null);
+  const cur=pastBoth[pastBoth.length-1]||null;
+  const running=rows.find(r=>r.phase==='running')||null;
+  const future=rows.filter(r=>r.phase==='future'&&r.fc!=null);
+  const peak=future.reduce((m,r)=>(!m||r.fc>m.fc)?r:m,null);
+  const sev=g=> g<=10?{c:'#059669',bg:'#ecfdf5'}:g<=25?{c:'#d97706',bg:'#fffbeb'}:{c:'#dc2626',bg:'#fef2f2'};
+  const gapTxt=g=> g>0?fmtNum(g,1)+' % Lücke':g<0?fmtNum(-g,1)+' % über Plan':'auf Plan';
+  const ACC='#7c3aed'; const cs=cur?sev(Math.max(0,cur.gap)):null;
+  const sums=(gran)=>{ const g={},ord=[]; pastBoth.forEach(r=>{ const mo=isoWeekMonth(r.kw,r.year).m; let key,label;
+      if(gran==='month'){ key=r.year+'-'+mo; label=(CAL_MONTHS[mo]||('M'+(mo+1)))+' '+r.year; }
+      else if(gran==='quarter'){ const q=Math.floor(mo/3)+1; key=r.year+'-Q'+q; label='Q'+q+' '+r.year; }
+      else { key=''+r.year; label=''+r.year; }
+      if(!g[key]){ g[key]={label,fc:0,ist:0}; ord.push(key); } g[key].fc+=r.fc; g[key].ist+=r.ist; });
+    return ord.map(k=>{ const e=g[k]; const gap=e.fc>0?Math.round((e.fc-e.ist)/e.fc*1000)/10:null; return {label:e.label,fc:Math.round(e.fc*10)/10,ist:Math.round(e.ist*10)/10,gap}; }); };
+  const sumRows=sums(period);
+
+  return <div style={{maxWidth:1000}}>
+    <div style={{fontSize:20,fontWeight:700,marginBottom:2}}>🔮 Forecast vs. Ist</div>
+    <div style={{fontSize:13,color:'var(--muted)',marginBottom:14}}>Gelieferte Stunden gegen den Auftraggeber-Forecast, je Projekt·Skill über alle importierten Wochen. Vergangenheit mit Ist, kommende Wochen als erwarteter Forecast.</div>
+    <div style={{marginBottom:16}}>
+      <select className="form-select" style={{width:'auto',fontWeight:700}} value={sel} onChange={e=>setSel(e.target.value)}>
+        {combos.map(c=><option key={c.pid+'|'+c.skill} value={c.pid+'|'+c.skill}>{projName(c.pid)} · {skLabel(c.skill)}</option>)}
+      </select>
+    </div>
+    {detail===null ? <div className="sp-empty">Lädt…</div> : rows.length===0 ? <div className="sp-empty">Keine Daten für diese Kombination.</div> : <React.Fragment>
+      <div style={{display:'flex',gap:14,flexWrap:'wrap',marginBottom:18}}>
+        <div style={{flex:'1 1 200px',border:'1px solid var(--border)',borderRadius:12,padding:'14px 16px',background:'var(--card)'}}>
+          <div style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>Letzte volle Woche{cur?' · KW '+cur.kw:''}</div>
+          {cur? <React.Fragment><div style={{fontSize:26,fontWeight:800,color:cs.c,fontFamily:'var(--mono)'}}>{cur.gap>0?'−':cur.gap<0?'+':''}{fmtNum(Math.abs(cur.ist-cur.fc))} h</div>
+            <div style={{fontSize:12,fontWeight:700,color:cs.c}}>{gapTxt(cur.gap)}</div>
+            <div style={{fontSize:11,color:'var(--muted)',marginTop:2}}>FC {fmtNum(cur.fc)} · Ist {fmtNum(cur.ist)} h</div></React.Fragment>
+          : <div style={{fontSize:13,color:'var(--muted)',marginTop:6}}>Noch keine vollständige Woche mit Ist.</div>}
+        </div>
+        <div style={{flex:'1 1 200px',border:'1px solid var(--border)',borderRadius:12,padding:'14px 16px',background:'var(--card)'}}>
+          <div style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>Laufende Woche{running?' · KW '+running.kw:''}</div>
+          {running&&running.ist!=null? <React.Fragment><div style={{fontSize:26,fontWeight:800,fontFamily:'var(--mono)'}}>{fmtNum(running.ist)} h</div>
+            <div style={{fontSize:12,color:'var(--muted)'}}>{running.fc!=null?'von '+fmtNum(running.fc)+' h erwartet · ':''}läuft noch</div></React.Fragment>
+          : <div style={{fontSize:13,color:'var(--muted)',marginTop:6}}>Noch keine Ist-Stunden.</div>}
+        </div>
+        <div style={{flex:'1 1 200px',border:'1px solid '+ACC+'55',borderRadius:12,padding:'14px 16px',background:'var(--card)'}}>
+          <div style={{fontSize:11,color:ACC,fontWeight:700}}>Nächster Peak (erwartet)</div>
+          {peak? <React.Fragment><div style={{fontSize:26,fontWeight:800,color:ACC,fontFamily:'var(--mono)'}}>{fmtNum(peak.fc)} h</div>
+            <div style={{fontSize:12,color:'var(--muted)'}}>KW {peak.kw} · höchster Forecast der kommenden Wochen</div></React.Fragment>
+          : <div style={{fontSize:13,color:'var(--muted)',marginTop:6}}>Kein Forecast für kommende Wochen.</div>}
+        </div>
+      </div>
+      <div style={{border:'1px solid var(--border)',borderRadius:12,padding:'14px 16px',background:'var(--card)',marginBottom:16}}>
+        <div style={{display:'flex',alignItems:'center',gap:14,marginBottom:8,flexWrap:'wrap'}}>
+          <div style={{fontSize:13,fontWeight:800}}>Verlauf über alle Wochen</div>
+          <span style={{fontSize:11,color:'var(--muted)',display:'flex',alignItems:'center',gap:5}}><span style={{width:16,height:3,background:ACC,display:'inline-block',borderRadius:2}}/>Forecast</span>
+          <span style={{fontSize:11,color:'var(--muted)',display:'flex',alignItems:'center',gap:5}}><span style={{width:10,height:10,background:ACC,opacity:.3,display:'inline-block',borderRadius:2}}/>Ist</span>
+          <span style={{fontSize:11,color:'var(--muted)'}}>gestrichelt = erwartet (kommende Wochen)</span>
+        </div>
+        <FcIstChart rows={rows} color={ACC}/>
+      </div>
+      {pastBoth.length>=2 && <div style={{border:'1px solid var(--border)',borderRadius:12,padding:'14px 16px',background:'var(--card)',marginBottom:16}}>
+        <div style={{fontSize:13,fontWeight:800,marginBottom:8}}>Abweichung über die Zeit <span style={{fontWeight:600,color:'var(--muted)'}}>— wächst oder schrumpft die Lücke?</span></div>
+        <HoverChart data={pastBoth.map(r=>r.gap)} labels={pastBoth.map(r=>'KW '+r.kw)} color={sev(Math.max(0,cur?cur.gap:0)).c} kind="area" h={54} fmt={v=>fmtNum(v,1)+' %'} tips={pastBoth.map(r=>'KW '+r.kw+' · FC '+fmtNum(r.fc)+' / Ist '+fmtNum(r.ist)+' · '+gapTxt(r.gap))}/>
+      </div>}
+      <div style={{border:'1px solid var(--border)',borderRadius:12,padding:'14px 16px',background:'var(--card)',marginBottom:16}}>
+        <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10,flexWrap:'wrap'}}>
+          <div style={{fontSize:13,fontWeight:800}}>Summen je Zeitraum</div>
+          <div style={{display:'flex',border:'1px solid var(--border)',borderRadius:8,overflow:'hidden'}}>
+            {[['month','Monat'],['quarter','Quartal'],['year','Jahr']].map(([k,l])=><button key={k} className="btn btn-sm" style={{border:'none',borderRadius:0,background:period===k?ACC:'transparent',color:period===k?'#fff':'var(--text)',fontWeight:700}} onClick={()=>setPeriod(k)}>{l}</button>)}
+          </div>
+          <span style={{fontSize:11,color:'var(--muted)'}}>nur abgeschlossene Wochen mit Ist</span>
+        </div>
+        {sumRows.length===0? <div style={{fontSize:12,color:'var(--muted)'}}>Noch keine abgeschlossenen Wochen.</div> :
+        <div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:12,minWidth:460}}>
+          <thead><tr style={{color:'var(--muted)'}}>{['Zeitraum','Σ FC','Σ Ist','Diff','Lücke'].map((h,i)=><th key={i} style={{padding:'4px 8px',fontWeight:700,textAlign:i===0?'left':'right'}}>{h}</th>)}</tr></thead>
+          <tbody>{sumRows.map((r,i)=>{ const s=sev(Math.max(0,r.gap==null?0:r.gap)); return <tr key={i} style={{borderTop:'1px solid var(--border)'}}>
+            <td style={{padding:'4px 8px',fontWeight:700}}>{r.label}</td>
+            <td style={{padding:'4px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{fmtNum(r.fc)}</td>
+            <td style={{padding:'4px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{fmtNum(r.ist)}</td>
+            <td style={{padding:'4px 8px',textAlign:'right',fontFamily:'var(--mono)',color:s.c}}>{r.ist-r.fc>0?'+':''}{fmtNum(r.ist-r.fc)}</td>
+            <td style={{padding:'4px 8px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:700,color:s.c}}>{r.gap==null?'—':gapTxt(r.gap)}</td>
+          </tr>; })}</tbody>
+        </table></div>}
+      </div>
+      <div style={{border:'1px solid '+ACC+'55',borderRadius:12,padding:'14px 16px',background:'var(--card)'}}>
+        <div style={{fontSize:13,fontWeight:800,marginBottom:2}}>Blick nach vorn <span style={{fontWeight:600,color:'var(--muted)'}}>— erwarteter Forecast der kommenden Wochen</span></div>
+        <div style={{fontSize:11,color:'var(--muted)',marginBottom:10}}>Der Forecast liegt im Voraus vor, geliefert wird laufend. Danach lässt sich Personal planen.</div>
+        {future.length===0? <div style={{fontSize:12,color:'var(--muted)'}}>Kein Forecast für kommende Wochen importiert.</div> :
+        <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>{future.slice(0,16).map((r,i)=>{ const isPeak=peak&&r.kw===peak.kw&&r.year===peak.year;
+          return <div key={i} style={{border:'1px solid '+(isPeak?ACC:'var(--border)'),borderRadius:10,padding:'8px 12px',minWidth:74,textAlign:'center',background:isPeak?ACC+'11':'transparent'}}>
+            <div style={{fontSize:10.5,color:'var(--muted)',fontWeight:700}}>KW {r.kw}</div>
+            <div style={{fontSize:16,fontWeight:800,fontFamily:'var(--mono)',color:isPeak?ACC:'var(--text)'}}>{fmtNum(r.fc)}</div>
+            <div style={{fontSize:9,color:'var(--muted)'}}>h{isPeak?' · Peak':''}</div>
+          </div>; })}
+          {future.length>16&&<div style={{fontSize:11,color:'var(--muted)',alignSelf:'center'}}>… +{future.length-16} Wochen</div>}
+        </div>}
+      </div>
+    </React.Fragment>}
+  </div>;
+}
 // Forecast-Import (Blatt 5 "Planung+Rueckmeldung KW"): je KW die FC-Stunden -> report_forecast.
 // Erkennung am Inhalt: Blatt mit "KW"-Spalte + Titel der mit "FC" beginnt, OHNE Tages-/Intervall-
 // Marker (datum/wochentag/intervall) und mit EINDEUTIGER KW-Spalte (nur das Wochenblatt aggregiert
@@ -36914,6 +37167,7 @@ function App(){
     {sec:'Business', items:[
       {key:'projects',label:'Projekte',icon:'📁'},
       {key:'forecast',label:'Forecast',icon:'📈'},
+      ...((team&&(team.role_keys||[]).some(r=>r==='management')) ? [{key:'fcist',label:'Forecast vs. Ist',icon:'🔮'}] : []),   // Management-only
       {key:'profitability',label:'Wirtschaftlichkeit',icon:'💹'},
       ...((team&&((team.role_keys||[]).some(r=>r==='management')||isLeadOnlyRoles(team.role_keys))) ? [{key:'praesentation',label:'Präsentationen',icon:'📊'}] : []),   // Management + Projektleiter (projektbezogen)
       ...((team&&((team.role_keys||[]).some(r=>r==='management')||isLeadOnlyRoles(team.role_keys))) ? [{key:'dataimport',label:'Datenimport',icon:'📥'}] : []),   // Management + Projektleiter (projektbezogen)
@@ -36983,6 +37237,7 @@ function App(){
       'knowledge':'<path d="M12 .75a8.25 8.25 0 0 0-4.135 15.39c.686.398 1.115 1.008 1.134 1.623a.75.75 0 0 0 .577.706c.352.083.71.148 1.074.195.323.041.6-.218.6-.544v-4.661a6.714 6.714 0 0 1-.937-.171.75.75 0 1 1 .374-1.453 5.261 5.261 0 0 0 2.626 0 .75.75 0 1 1 .374 1.452 6.712 6.712 0 0 1-.937.172v4.66c0 .327.277.586.6.545.364-.047.722-.112 1.074-.195a.75.75 0 0 0 .577-.706c.02-.615.448-1.225 1.134-1.623A8.25 8.25 0 0 0 12 .75Z"/> <path fill-rule="evenodd" d="M9.013 19.9a.75.75 0 0 1 .877-.597 11.319 11.319 0 0 0 4.22 0 .75.75 0 1 1 .28 1.473 12.819 12.819 0 0 1-4.78 0 .75.75 0 0 1-.597-.876ZM9.754 22.344a.75.75 0 0 1 .824-.668 13.682 13.682 0 0 0 2.844 0 .75.75 0 1 1 .156 1.492 15.156 15.156 0 0 1-3.156 0 .75.75 0 0 1-.668-.824Z" clip-rule="evenodd"/>',
       'projects':'<path d="M19.5 21a3 3 0 0 0 3-3v-4.5a3 3 0 0 0-3-3h-15a3 3 0 0 0-3 3V18a3 3 0 0 0 3 3h15ZM1.5 10.146V6a3 3 0 0 1 3-3h5.379a2.25 2.25 0 0 1 1.59.659l2.122 2.121c.14.141.331.22.53.22H19.5a3 3 0 0 1 3 3v1.146A4.483 4.483 0 0 0 19.5 9h-15a4.483 4.483 0 0 0-3 1.146Z"/>',
       'forecast':'<path d="M18.375 2.25c-1.035 0-1.875.84-1.875 1.875v15.75c0 1.035.84 1.875 1.875 1.875h.75c1.035 0 1.875-.84 1.875-1.875V4.125c0-1.036-.84-1.875-1.875-1.875h-.75ZM9.75 8.625c0-1.036.84-1.875 1.875-1.875h.75c1.036 0 1.875.84 1.875 1.875v11.25c0 1.035-.84 1.875-1.875 1.875h-.75a1.875 1.875 0 0 1-1.875-1.875V8.625ZM3 13.125c0-1.036.84-1.875 1.875-1.875h.75c1.036 0 1.875.84 1.875 1.875v6.75c0 1.035-.84 1.875-1.875 1.875h-.75A1.875 1.875 0 0 1 3 19.875v-6.75Z"/>',
+      'fcist':'<path fill-rule="evenodd" d="M15.22 6.268a.75.75 0 0 1 .968-.432l5.942 2.28a.75.75 0 0 1 .431.97l-2.28 5.941a.75.75 0 1 1-1.4-.537l1.63-4.251-1.086.483a11.2 11.2 0 0 0-5.45 5.174.75.75 0 0 1-1.199.19L9 12.31l-6.22 6.22a.75.75 0 1 1-1.06-1.06l6.75-6.75a.75.75 0 0 1 1.06 0l3.606 3.605a12.694 12.694 0 0 1 5.68-4.973l1.086-.483-4.251-1.632a.75.75 0 0 1-.432-.97Z" clip-rule="evenodd"/>',
       'profitability':'<path fill-rule="evenodd" d="M12 2.25c-5.385 0-9.75 4.365-9.75 9.75s4.365 9.75 9.75 9.75 9.75-4.365 9.75-9.75S17.385 2.25 12 2.25Zm-1.902 7.098a3.75 3.75 0 0 1 3.903-.884.75.75 0 1 0 .498-1.415A5.25 5.25 0 0 0 8.005 9.75H7.5a.75.75 0 0 0 0 1.5h.054a5.281 5.281 0 0 0 0 1.5H7.5a.75.75 0 0 0 0 1.5h.505a5.25 5.25 0 0 0 6.494 2.701.75.75 0 1 0-.498-1.415 3.75 3.75 0 0 1-4.252-1.286h3.001a.75.75 0 0 0 0-1.5H9.075a3.77 3.77 0 0 1 0-1.5h3.675a.75.75 0 0 0 0-1.5h-3c.105-.14.221-.274.348-.402Z" clip-rule="evenodd"/>',
       'praesentation':'<path fill-rule="evenodd" d="M2.25 2.25a.75.75 0 0 0 0 1.5H3v10.5a3 3 0 0 0 3 3h1.21l-1.172 3.513a.75.75 0 0 0 1.424.474l.329-.987h8.418l.33.987a.75.75 0 0 0 1.422-.474l-1.17-3.513H18a3 3 0 0 0 3-3V3.75h.75a.75.75 0 0 0 0-1.5H2.25Zm6.54 15h6.42l.5 1.5H8.29l.5-1.5Zm8.085-8.995a.75.75 0 1 0-.75-1.299 12.81 12.81 0 0 0-3.558 3.05L11.03 8.47a.75.75 0 0 0-1.06 0l-2.25 2.25a.75.75 0 1 0 1.06 1.06l1.72-1.72 1.774 1.775a.75.75 0 0 0 1.174-.144 11.31 11.31 0 0 1 3.477-3.146Z" clip-rule="evenodd"/>',
       'dataimport':'<path fill-rule="evenodd" d="M12 2.25a.75.75 0 0 1 .75.75v11.69l3.22-3.22a.75.75 0 1 1 1.06 1.06l-4.5 4.5a.75.75 0 0 1-1.06 0l-4.5-4.5a.75.75 0 1 1 1.06-1.06l3.22 3.22V3a.75.75 0 0 1 .75-.75Zm-9 13.5a.75.75 0 0 1 .75.75v2.25a1.5 1.5 0 0 0 1.5 1.5h13.5a1.5 1.5 0 0 0 1.5-1.5V16.5a.75.75 0 0 1 1.5 0v2.25a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3V16.5a.75.75 0 0 1 .75-.75Z" clip-rule="evenodd"/>',
@@ -37034,7 +37289,7 @@ function App(){
   useEffect(()=>{ const mgmt=(team&&(team.role_keys||[]).some(r=>r==='management'));
     const lead=(team&&isLeadOnlyRoles(team.role_keys));
     if(!mgmt && !lead && (view==='praesentation'||view==='dataimport')) setView('cockpit');
-    if(!mgmt && view==='recmkt') setView('cockpit'); },[view]);
+    if(!mgmt && (view==='recmkt'||view==='fcist')) setView('cockpit'); },[view]);
   const allNavSections = isEmpUser
     ? [{sec:'Mein Bereich', items:[{key:'mein-plan',label:'Mein Schichtplan',icon:'📋'}]}, ...navSections]
     : navSections;
@@ -37229,6 +37484,7 @@ function App(){
           {view==='praesentation'&&<PresentationsView projects={projects} employees={employees} team={team} showToast={showToast}/>}
           {view==='dataimport'&&<DataImportView projects={projects} employees={employees}/>}
           {view==='recmkt'&&<RecruitingMarketingView employees={employees}/>}
+          {view==='fcist'&&<ForecastVsIstView projects={projects}/>}
           {view==='callqa'&&<CallQaView projects={projects} employees={employees} showToast={showToast}/>}
           {view==='skillmatrix'&&<SkillMatrix employees={employees} projects={projects}/>}
           {view==='kanban'&&<RecruitingKanban employees={employees} setEmployees={setEmployees} cvList={cvList} setCvList={setCvList} projects={projects} onPromoteToEmployee={promoteToEmployee} showToast={showToast}/>}
