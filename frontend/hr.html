@@ -34652,6 +34652,53 @@ function ForecastVsIstView({projects}){
     </React.Fragment>}
   </div>;
 }
+// Langzeit-Import (Long_Term_Capacity…xlsx): Blätter „Sales"/„Support", Zeilen = Kapazitätsmodell,
+// 12 Monatsspalten ab start_month/start_year -> report_longterm. Eine Datei, beide Skills.
+const LONGTERM_MONTHS=['Jan','Feb','Mär','Apr','Mai','Jun','Jul','Aug','Sep','Okt','Nov','Dez'];
+function LongtermImport({projId, initYear, onSaved}){
+  const [file,setFile]=useState(null); const [fileHash,setFileHash]=useState('');
+  const [year,setYear]=useState(initYear||2026); const [startMonth,setStartMonth]=useState(7);
+  const [sheetsData,setSheetsData]=useState(null);   // {sales:[{label,m:[12]}], support:[...]}
+  const [err,setErr]=useState(''); const [busy,setBusy]=useState(false); const [saved,setSaved]=useState(false);
+  function onFile(f){ if(!f) return; setErr(''); setSaved(false); setSheetsData(null);
+    const rd=new FileReader();
+    rd.onload=ev=>{ try{
+      const bytes=new Uint8Array(ev.target.result); const wb=XLSX.read(bytes,{type:'array',cellDates:false});
+      const out={}; const norm=s=>String(s||'').trim().toLowerCase();
+      wb.SheetNames.forEach(nm=>{ const key=norm(nm).indexOf('sales')>=0?'sales':norm(nm).indexOf('support')>=0?'support':null; if(!key) return;
+        const aoa=XLSX.utils.sheet_to_json(wb.Sheets[nm],{header:1,defval:''});
+        const rows=aoa.slice(1).map(r=>({label:String(r[0]==null?'':r[0]).trim(), m:Array.from({length:12},(_,i)=>{ const v=r[i+1]; return (v==null||v==='')?'':(typeof v==='number'?Math.round(v*100)/100:String(v).trim()); })}))
+          .filter(r=>r.label && r.m.some(v=>v!==''));
+        if(rows.length) out[key]=rows; });
+      if(!Object.keys(out).length){ setErr('Keine Blätter „Sales"/„Support" mit Daten gefunden. Blätter: '+wb.SheetNames.join(', ')); return; }
+      setFile(f); setFileHash('sz'+bytes.length); setSheetsData(out);
+    }catch(e){ setErr('Datei nicht lesbar: '+(e.message||'')); } };
+    rd.readAsArrayBuffer(f);
+  }
+  async function save(){ if(!sheetsData||busy) return; setBusy(true); setErr('');
+    let uid=null; try{ const u=await sb.auth.getUser(); uid=u&&u.data&&u.data.user&&u.data.user.id||null; }catch(e){}
+    const recs=Object.keys(sheetsData).map(sk=>({project_id:projId, skill:sk, start_year:Number(year), start_month:Number(startMonth), rows:sheetsData[sk], file_name:file&&file.name||null, updated_by:uid, updated_at:new Date().toISOString()}));
+    const up=await sb.from('report_longterm').upsert(recs,{onConflict:'project_id,skill'});
+    if(up.error){ setBusy(false); setErr('Nicht gespeichert: '+(up.error.message||up.error)); return; }
+    try{ const ts=isoLocal(new Date())+'_'+fileHash; await sb.storage.from('weekly-imports').upload(projId+'/longterm/'+ts+'_'+(file.name||'longterm.xlsx'),file,{upsert:true,contentType:file.type||'application/octet-stream'}); }catch(e){}
+    setBusy(false); setSaved(true); setSheetsData(null); setFile(null); onSaved&&onSaved();
+  }
+  return <div style={{fontSize:13}}>
+    <div style={{fontSize:12,color:'var(--muted)',marginBottom:8}}>Langzeit-Kapazitätsmodell (12 Monate, beide Blätter Sales/Support). Zeilen = Kennzahlen, 12 Monatsspalten. Start = Monat/Jahr der ersten Spalte.</div>
+    <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap',marginBottom:8}}>
+      <label style={{fontSize:12}}>Start <select value={startMonth} onChange={e=>setStartMonth(Number(e.target.value))} style={{padding:'4px 6px',border:'1px solid var(--border)',borderRadius:6}}>{LONGTERM_MONTHS.map((m,i)=><option key={i} value={i+1}>{m}</option>)}</select></label>
+      <label style={{fontSize:12}}>Jahr <input type="number" min={2024} max={2100} value={year} onChange={e=>setYear(e.target.value)} style={{width:80,padding:'4px 6px',border:'1px solid var(--border)',borderRadius:6}}/></label>
+      <input type="file" accept=".xlsx,.xls" onChange={e=>onFile(e.target.files&&e.target.files[0])}/>
+    </div>
+    {err && <div style={{padding:'8px 10px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:8,color:'#b91c1c',fontSize:12,marginBottom:8}}>{err}</div>}
+    {saved && <div style={{padding:'8px 10px',background:'#ecfdf5',border:'1px solid #a7f3d0',borderRadius:8,color:'#059669',fontSize:12,fontWeight:700,marginBottom:8}}>✓ Langzeit-Modell gespeichert. Erscheint auf Folie 4, sobald der Bericht neu geladen ist.</div>}
+    {sheetsData && <React.Fragment>
+      <div style={{fontSize:11,color:'var(--muted)',marginBottom:6}}>{Object.keys(sheetsData).map(sk=>sk+': '+sheetsData[sk].length+' Zeilen').join(' · ')} · Start {LONGTERM_MONTHS[startMonth-1]} {year}</div>
+      <button className="btn btn-sm btn-primary" disabled={busy} onClick={save}>💾 Langzeit-Modell speichern</button>
+    </React.Fragment>}
+  </div>;
+}
+
 // Forecast-Import (Blatt 5 "Planung+Rueckmeldung KW"): je KW die FC-Stunden -> report_forecast.
 // Erkennung am Inhalt: Blatt mit "KW"-Spalte + Titel der mit "FC" beginnt, OHNE Tages-/Intervall-
 // Marker (datum/wochentag/intervall) und mit EINDEUTIGER KW-Spalte (nur das Wochenblatt aggregiert
@@ -34677,11 +34724,12 @@ function ForecastImport({projId, skill, initYear, onSaved}){
       sheets.forEach(s=>{ const norm=s.headers.map(cqNormHead);
         const kwCol=norm.findIndex(h=>h==='kw');
         const fcCol=norm.findIndex(h=>h.indexOf('fc')===0);
+        const plCol=norm.findIndex(h=>h.indexOf('geplante')===0);   // „geplante Stunden" = unsere Rückmeldung
         const perDay=norm.some(h=>h.indexOf('datum')===0||h.indexOf('wochentag')===0||h.indexOf('intervall')===0);
         if(kwCol>=0 && fcCol>=0 && !perDay){
           const kws=s.rows.map(r=>parseInt(String(r[kwCol]).replace(/[^\d]/g,''),10)).filter(n=>n>=1&&n<=53);
           const uniq=kws.length>0 && new Set(kws).size===kws.length;
-          cand.push({s,kwCol,fcCol,fcTitle:s.headers[fcCol],uniq,n:kws.length});
+          cand.push({s,kwCol,fcCol,plCol,fcTitle:s.headers[fcCol],uniq,n:kws.length});
         }
       });
       const pick=cand.filter(c=>c.uniq).sort((a,b)=>a.n-b.n)[0];
@@ -34692,9 +34740,10 @@ function ForecastImport({projId, skill, initYear, onSaved}){
         if(!(kw>=1&&kw<=53)){ return; }
         const fc=cqNumV(r[pick.fcCol]);
         if(fc==null){ skipped++; return; }
-        if(seen[kw]!=null){ dupes++; } seen[kw]=Math.round(fc*10)/10;
+        const planned=pick.plCol>=0?cqNumV(r[pick.plCol]):null;
+        if(seen[kw]!=null){ dupes++; } seen[kw]={fc:Math.round(fc*10)/10, planned:(planned==null?null:Math.round(planned*10)/10)};
       });
-      Object.keys(seen).map(Number).sort((a,b)=>a-b).forEach(kw=>out.push({kw, fc:seen[kw]}));
+      Object.keys(seen).map(Number).sort((a,b)=>a-b).forEach(kw=>out.push({kw, fc:seen[kw].fc, planned:seen[kw].planned}));
       const ws=[];
       if(skipped) ws.push(skipped+' Zeile(n) ohne FC-Wert übersprungen');
       if(dupes) ws.push(dupes+' doppelte KW (jeweils letzte Zeile gilt)');
@@ -34712,13 +34761,13 @@ function ForecastImport({projId, skill, initYear, onSaved}){
   function setFc(kw,v){ setRows(rs=>rs.map(r=>r.kw===kw?{...r,fc:v}:r)); }
 
   async function save(){ if(!rows||!rows.length||busy) return; setBusy(true); setErr('');
-    const clean=rows.map(r=>({kw:r.kw, fc:cqNumV(r.fc)})).filter(r=>r.fc!=null);
+    const clean=rows.map(r=>({kw:r.kw, fc:cqNumV(r.fc), planned:(r.planned==null||r.planned===''?null:cqNumV(r.planned))})).filter(r=>r.fc!=null);
     if(!clean.length){ setBusy(false); setErr('Keine gültigen Werte zum Speichern.'); return; }
     let uid=null,uname=null; try{ const u=await sb.auth.getUser(); uid=u&&u.data&&u.data.user&&u.data.user.id||null; if(uid){ const nr=await sb.from('app_users').select('full_name').eq('user_id',uid).single(); uname=nr&&nr.data&&nr.data.full_name||null; } }catch(e){}
     const Y=Number(year); const kws=clean.map(r=>r.kw);
     const del=await sb.from('report_forecast').delete().eq('project_id',projId).eq('skill',skill).eq('year',Y).in('kw',kws);
     if(del.error){ setBusy(false); setErr('Alte Werte nicht ersetzbar: '+(del.error.message||del.error)); return; }
-    const insRows=clean.map(r=>({project_id:projId, skill, year:Y, kw:r.kw, fc_hours:r.fc, file_name:file&&file.name||null, updated_by:uid}));
+    const insRows=clean.map(r=>({project_id:projId, skill, year:Y, kw:r.kw, fc_hours:r.fc, planned_hours:r.planned, file_name:file&&file.name||null, updated_by:uid}));
     const ins=await sb.from('report_forecast').insert(insRows).select('id');
     if(ins.error){ setBusy(false); setErr('Nicht gespeichert: '+(ins.error.message||ins.error)); return; }
     if((ins.data||[]).length!==insRows.length){ setBusy(false); setErr('Nur '+((ins.data||[]).length)+' von '+insRows.length+' Werten geschrieben (Rechte/Policy prüfen).'); return; }
@@ -34741,10 +34790,11 @@ function ForecastImport({projId, skill, initYear, onSaved}){
       <div style={{fontSize:11,color:'var(--muted)',marginBottom:6}}>Erkanntes Blatt: <b>{meta&&meta.sheet}</b> · FC-Spalte: <b>{meta&&meta.fcTitle}</b> · {rows.length} KW</div>
       {warn.map((w,i)=><div key={i} style={{padding:'6px 10px',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:8,color:'#92400e',fontSize:11,marginBottom:6}}>{w}</div>)}
       <div style={{overflowX:'auto'}}><table style={{borderCollapse:'collapse',fontSize:12}}>
-        <thead><tr style={{color:'var(--muted)'}}><th style={{padding:'4px 10px',textAlign:'left'}}>KW</th><th style={{padding:'4px 10px',textAlign:'right'}}>FC-Stunden</th></tr></thead>
+        <thead><tr style={{color:'var(--muted)'}}><th style={{padding:'4px 10px',textAlign:'left'}}>KW</th><th style={{padding:'4px 10px',textAlign:'right'}}>FC-Stunden</th><th style={{padding:'4px 10px',textAlign:'right'}}>Geplant (Rückm.)</th></tr></thead>
         <tbody>{rows.map(r=><tr key={r.kw} style={{borderTop:'1px solid var(--border)'}}>
           <td style={{padding:'3px 10px',fontWeight:700}}>KW {r.kw}/{year}</td>
           <td style={{padding:'3px 10px',textAlign:'right'}}><input value={r.fc==null?'':r.fc} onChange={e=>setFc(r.kw,e.target.value)} style={{width:90,padding:'4px 6px',border:'1px solid var(--border)',borderRadius:6,textAlign:'right',fontFamily:'var(--mono)'}}/></td>
+          <td style={{padding:'3px 10px',textAlign:'right',fontFamily:'var(--mono)',color:r.planned==null?'var(--muted)':'var(--text)'}}>{r.planned==null?'—':fmtNum(r.planned,1)}</td>
         </tr>)}</tbody>
       </table></div>
       <div style={{fontSize:11,color:'var(--muted)',margin:'6px 0'}}>Werte vor dem Speichern korrigierbar. Ersetzt bestehende Forecast-Werte dieser KWs/{skLabel}.</div>
@@ -34771,6 +34821,7 @@ function DataImportView({projects, employees}){
     {key:'booking_month',label:'Booking-Team Monat',   sub:'CR, Buchungen, Sales Calls je Monat',      period:'month'},
     {key:'forecast_sales',  label:'Forecast Woche · Sales',   sub:'FC-Stunden je KW (Auftraggeber, Blatt 5)', period:'week'},
     {key:'forecast_support',label:'Forecast Woche · Support', sub:'FC-Stunden je KW (Auftraggeber, Blatt 5)', period:'week'},
+    {key:'longterm',        label:'Langzeit-Kapazität',       sub:'12-Monats-Modell (Blätter Sales + Support)', period:'week'},
   ];
   const srcLabel={}; SOURCES.forEach(s=>srcLabel[s.key]=s.label); srcLabel.booking_team='Booking-Team';
   // Letzte Importe (alle Quellen dieses Projekts).
@@ -34790,6 +34841,7 @@ function DataImportView({projects, employees}){
     s.booking_month=await ex(()=>sb.from('kpi_project_entries').select('*',{count:'exact',head:true}).eq('project_id',projId).eq('month',mnum).eq('year',Y).eq('source','import'));
     s.forecast_sales  =await ex(()=>sb.from('report_forecast').select('*',{count:'exact',head:true}).eq('project_id',projId).eq('skill','sales').eq('kw',K).eq('year',Y));
     s.forecast_support=await ex(()=>sb.from('report_forecast').select('*',{count:'exact',head:true}).eq('project_id',projId).eq('skill','support').eq('kw',K).eq('year',Y));
+    s.longterm        =await ex(()=>sb.from('report_longterm').select('*',{count:'exact',head:true}).eq('project_id',projId));
     if(alive) setStatus(s);
   })(); return ()=>{alive=false;}; },[projId,kw,year,tick]);
   const onSaved=()=>setTick(t=>t+1);
@@ -34828,6 +34880,7 @@ function DataImportView({projects, employees}){
             {s.key==='booking_month' && <BookingImportTeam projId={projId} expectMode="month" onSaved={onSaved}/>}
             {s.key==='forecast_sales' && <ForecastImport projId={projId} skill="sales" initYear={Number(year)} onSaved={onSaved}/>}
             {s.key==='forecast_support' && <ForecastImport projId={projId} skill="support" initYear={Number(year)} onSaved={onSaved}/>}
+            {s.key==='longterm' && <LongtermImport projId={projId} initYear={Number(year)} onSaved={onSaved}/>}
           </div>}
         </div>;
       })}
@@ -35953,10 +36006,19 @@ function PresentationsView({projects, employees, team, showToast}){
       const kpiWin=(ke||[]).filter(inWin);      // Buchungen (offen/OSL) je MA/KW — manuell im KPI-Tab; Sales Calls kommen aus scByEmp (Import)
       const {data:fte}=await sb.from('report_fte').select('employee_id,fte').eq('project_id',selProj.id);
       const fm={}; (fte||[]).forEach(x=>{ fm[x.employee_id]=Number(x.fte); });
-      const {data:rf}=await sb.from('report_forecast').select('skill,year,kw,fc_hours').eq('project_id',selProj.id).in('year',years).in('kw',kws);
-      const forecast={}; (rf||[]).forEach(r=>{ if(!inWin(r)) return; forecast[String(r.skill||'').toLowerCase()+'|'+r.year+'|'+r.kw]=(r.fc_hours==null?null:Number(r.fc_hours)); });
-      if(alive){ setStores({hours,scByEmp,callsByEmp,callsWin:wcWin,callsCount:wcWin.length,gaugesCount:gaugesWin.length,gaugesWin,kpiWin,forecast,loaded:true}); setFteStd(fm); }
-    }catch(e){ if(alive){ setStores({hours:{},scByEmp:{},callsByEmp:{},callsWin:[],callsCount:0,gaugesCount:0,gaugesWin:[],kpiWin:[],forecast:{},loaded:true}); } }
+      const {data:rf}=await sb.from('report_forecast').select('skill,year,kw,fc_hours,planned_hours').eq('project_id',selProj.id).in('year',years).in('kw',kws);
+      const forecast={}, forecastPlanned={}; (rf||[]).forEach(r=>{ if(!inWin(r)) return; const kk=String(r.skill||'').toLowerCase()+'|'+r.year+'|'+r.kw; forecast[kk]=(r.fc_hours==null?null:Number(r.fc_hours)); forecastPlanned[kk]=(r.planned_hours==null?null:Number(r.planned_hours)); });
+      if(alive){ setStores({hours,scByEmp,callsByEmp,callsWin:wcWin,callsCount:wcWin.length,gaugesCount:gaugesWin.length,gaugesWin,kpiWin,forecast,forecastPlanned,loaded:true}); setFteStd(fm); }
+    }catch(e){ if(alive){ setStores({hours:{},scByEmp:{},callsByEmp:{},callsWin:[],callsCount:0,gaugesCount:0,gaugesWin:[],kpiWin:[],forecast:{},forecastPlanned:{},loaded:true}); } }
+  })(); return ()=>{alive=false;}; },[selProjId,pNo,pYear]);
+  // Langzeit-Modell (report_longterm) in den Bericht ziehen, wenn für den Skill noch nichts gepflegt ist.
+  // setDeck (kein upd) → kein Dirty-Flag; unverändert lassen, wenn schon vorhanden.
+  useEffect(()=>{ if(!selProj) return; let alive=true; (async()=>{
+    try{ const {data}=await sb.from('report_longterm').select('skill,start_year,start_month,rows').eq('project_id',selProj.id);
+      if(!alive||!data||!data.length) return;
+      setDeck(d=>{ const n=JSON.parse(JSON.stringify(d)); let ch=false; data.forEach(r=>{ const sk=String(r.skill||'').toLowerCase(); if(!n.teams[sk]) return; const cur=n.teams[sk].langzeit;
+        if(!(cur&&cur.rows&&cur.rows.length)){ n.teams[sk].langzeit={startYear:r.start_year, startMonth:r.start_month, rows:r.rows||[], _src:'imported'}; ch=true; } }); return ch?n:d; });
+    }catch(e){}
   })(); return ()=>{alive=false;}; },[selProjId,pNo,pYear]);
 
   async function saveFteStd(empId,val){ const num=(val===''||val==null)?null:Number(String(val).replace(',','.'));
@@ -35976,7 +36038,9 @@ function PresentationsView({projects, employees, team, showToast}){
     upd(n=>{ const rows=n.teams[t].stunden;
       ws.forEach((w,i)=>{ if(!rows[i]) rows[i]=hcEmptyRow(); rows[i].kw=''+w.kw;
         const h=stores.hours[t+'|'+w.yr+'|'+w.kw]; if(h!=null){ rows[i].geliefert=String(Math.round(h*10)/10).replace('.',','); rows[i].gsrc='imported'; }
-        if(fte!=null && rows[i].rsrc!=='manual'){ const wd=workdays(w.kw,w.yr); rows[i].rueck=String(Math.round(fte*7.5*wd*10)/10).replace('.',','); rows[i].rsrc='system'; }
+        const plImp=(stores.forecastPlanned||{})[t+'|'+w.yr+'|'+w.kw];
+        if(plImp!=null && rows[i].rsrc!=='manual'){ rows[i].rueck=String(Math.round(plImp*10)/10).replace('.',','); rows[i].rsrc='imported'; }   // geplante Stunden aus Blatt 5 = unsere Rückmeldung
+        else if(fte!=null && rows[i].rsrc!=='manual'){ const wd=workdays(w.kw,w.yr); rows[i].rueck=String(Math.round(fte*7.5*wd*10)/10).replace('.',','); rows[i].rsrc='system'; }   // Rückfall: FTE × 7,5 × Werktage
         const p=(stores.forecast||{})[t+'|'+w.yr+'|'+w.kw]; if(p!=null && rows[i].psrc!=='manual'){ rows[i].plan=String(Math.round(p*10)/10).replace('.',','); rows[i].psrc='imported'; }
       }); }); }
   // Call-Kennzahlen Vorwoche (Berichts-KW) aus weekly_calls je Mitarbeiter übernehmen. Sekunden → mm:ss.
@@ -36042,11 +36106,21 @@ function PresentationsView({projects, employees, team, showToast}){
     const KID={kpi_hc_open_bookings:'open',kpi_hc_osl:'osl'};   // Buchungen aus KPI (Performance-Tab); Sales Calls aus Import (scByEmp)
     const val={}; win.forEach(r=>{ if(!ws.some(w=>w.yr===r.year&&w.kw===r.kw)) return; const m=KID[r.kpi_id]; if(!m) return; const key=r.year+'-'+r.kw;
       ((val[r.emp_id]=val[r.emp_id]||{})[key]=val[r.emp_id][key]||{})[m]=Number(r.value)||0; });
+    // Sales Calls je Agent = File A maßgeblich: aus kpi_entries (Booking-Import, KPI „Sales Calls" je Skill, agent-level),
+    // NICHT aus weekly_hours. Rückfall auf scByEmp (Rohdaten) nur, wenn kein KPI-Wert da ist.
+    const scKpi={};
+    try{ const {data:cfg0}=await sb.from('kpi_config').select('id,skill,name,level');
+      const scCfg=(cfg0||[]).find(k=>k&&/^\s*sales\s*calls\s*$/i.test(String(k.name||''))&&String(k.skill||'').toLowerCase()===t&&k.level!=='team');
+      if(scCfg){ const years=[...new Set(ws.map(w=>w.yr))], kws=[...new Set(ws.map(w=>w.kw))];
+        const {data:sce}=await sb.from('kpi_entries').select('emp_id,value,kw,year').eq('kpi_id',scCfg.id).in('year',years).in('kw',kws);
+        (sce||[]).forEach(r=>{ if(!ws.some(w=>w.yr===r.year&&w.kw===r.kw)) return; (scKpi[r.emp_id]=scKpi[r.emp_id]||{})[r.year+'-'+r.kw]=Number(r.value); }); }
+    }catch(e){}
     const sc=stores.scByEmp||{};
+    const callsOf=(id,key)=>{ const v=(scKpi[id]||{})[key]; if(v!=null) return v; const v2=(sc[id]||{})[key]; return v2!=null?v2:null; };
     const weeks=ws.map(w=>({kw:w.kw,key:w.yr+'-'+w.kw}));
     const crOf=(o,os,c)=> c>0 ? Math.round((o+os)/c*10000)/100 : null;
     const agents=members.map(e=>{ const byWeek={}; let to=0,tos=0,tc=0;
-      weeks.forEach(wk=>{ const v=(val[e.id]||{})[wk.key]||{}; const c=((sc[e.id]||{})[wk.key]);
+      weeks.forEach(wk=>{ const v=(val[e.id]||{})[wk.key]||{}; const c=callsOf(e.id,wk.key);
         if(v.open!=null||v.osl!=null||c!=null){ const o=v.open||0,os=v.osl||0,cc=c||0; byWeek[wk.key]={open:o,osl:os,calls:cc,cr:crOf(o,os,cc)}; to+=o;tos+=os;tc+=cc; } });
       return {id:e.id,name:empName(e),byWeek,tot:{open:to,osl:tos,calls:tc,cr:crOf(to,tos,tc)}}; })
       .filter(a=>Object.keys(a.byWeek).length).sort((a,b)=>(b.tot.cr||0)-(a.tot.cr||0));
@@ -36055,7 +36129,7 @@ function PresentationsView({projects, employees, team, showToast}){
     let crByKey={}, crMonth=null;
     try{ const {data:cfg}=await sb.from('kpi_config').select('id,project_id,skill,name');
       const crCfg=(cfg||[]).find(k=>k&&(!k.project_id||k.project_id===selProj.id)&&String(k.skill||'').toLowerCase()===t&&/^\s*cr\s*$/i.test(String(k.name||'')));
-      if(crCfg){ const {data:pe}=await sb.from('kpi_project_entries').select('year,kw,month,value').eq('project_id',selProj.id).eq('skill',t).eq('kpi_id',crCfg.id);
+      if(crCfg){ const {data:pe}=await sb.from('kpi_project_entries').select('year,kw,month,value').eq('project_id',selProj.id).eq('kpi_id',crCfg.id);
         (pe||[]).forEach(r=>{ if(r.kw!=null){ const k=r.year+'-'+r.kw; if(weeks.some(w=>w.key===k)) crByKey[k]=Number(r.value); }
           if(r.month!=null && r.year===rm.y && r.month===rm.m+1) crMonth=Number(r.value); }); }
     }catch(e){}
@@ -36262,6 +36336,7 @@ function PresentationsView({projects, employees, team, showToast}){
           </td>
           <td style={{padding:'3px 6px',width:110}}>
             {inp(r.rueck,v=>upd(n=>{n.teams[t].stunden[i].rueck=v;n.teams[t].stunden[i].rsrc='manual';}))}
+            {r.rsrc==='imported'&&<div style={{fontSize:9,color:'#2563eb',fontWeight:700,textAlign:'right',marginTop:1}}>● Import</div>}
             {r.rsrc==='system'&&<div style={{fontSize:9,color:'#0891b2',fontWeight:700,textAlign:'right',marginTop:1}}>● System</div>}
             {r.rsrc==='manual'&&<div style={{fontSize:9,color:'var(--muted)',fontWeight:700,textAlign:'right',marginTop:1}}>● manuell</div>}
           </td>

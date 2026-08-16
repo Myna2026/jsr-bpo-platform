@@ -601,9 +601,10 @@
   // Folie 5 — Langzeit-Entwicklung, 12 Monate (voll manuell). deck.teams[tk].langzeit={year, rows:[{label, m:[12]}]}.
   function Langzeit(ctx, tk){ var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk);
     var lz=td.langzeit||{}; var rows=lz.rows||[];
-    var head=fondHead(P, lbl, 'Langzeit-Entwicklung', lz.year?(''+lz.year):'12 Monate');
+    var sm=((lz.startMonth||1)-1); var yr=lz.startYear||lz.year;
+    var head=fondHead(P, lbl, 'Langzeit-Entwicklung', '12 Monate'+(yr?(' ab '+['Jan','Feb','Mär','Apr','Mai','Jun','Jul','Aug','Sep','Okt','Nov','Dez'][sm]+' '+yr):''));
     if(!rows.length) return emptyPanel(ctx,head,P,'Keine Langzeit-Daten hinterlegt.');
-    var M=['Jan','Feb','Mär','Apr','Mai','Jun','Jul','Aug','Sep','Okt','Nov','Dez']; var colName='24cqw';
+    var M0=['Jan','Feb','Mär','Apr','Mai','Jun','Jul','Aug','Sep','Okt','Nov','Dez']; var M=[]; for(var mi=0;mi<12;mi++) M.push(M0[(sm+mi)%12]); var colName='24cqw';
     var hdr=h('div',{key:'h',style:{display:'flex',alignItems:'flex-end',paddingBottom:'.5cqw',borderBottom:'1px solid #e6edef',fontSize:'1.05cqw',fontWeight:700,color:P.muted}},
       [h('div',{key:'n',style:{width:colName}},'')].concat(M.map(function(m,i){ return h('div',{key:i,style:{flex:1,textAlign:'center'}},m); })));
     function row(r,ri){ return h('div',{key:ri,style:{display:'flex',alignItems:'center',padding:'.3cqw 0',borderBottom:'1px solid #f6f8f9',fontSize:'1.15cqw',color:P.ink}},
