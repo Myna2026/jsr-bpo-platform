@@ -1312,7 +1312,7 @@ const MENU_BADGE_MAIN_ITEMS = [
   {key:'urlaubantraege',label:'Urlaubsanträge'},{key:'feedback',label:'Feedbackgespräche'},{key:'kanban',label:'Recruiting'},{key:'funnel',label:'Bewerber-Trichter'},{key:'onboarding',label:'Onboarding'},
   {key:'cvs',label:'CVs & Bewerber'},{key:'showcase',label:'Showcases'},{key:'training_plans',label:'Schulungsplanung'},
   {key:'timeline',label:'Timeline'},{key:'projects',label:'Projekte'},{key:'forecast',label:'Forecast'},{key:'fcist',label:'Forecast vs. Ist'},
-  {key:'profitability',label:'Wirtschaftlichkeit'},{key:'praesentation',label:'Präsentationen'},{key:'dataimport',label:'Datenimport'},{key:'recmkt',label:'Recruiting Marketing'},
+  {key:'profitability',label:'Wirtschaftlichkeit'},{key:'praesentation',label:'Präsentationen'},{key:'dataimport',label:'Datenimport'},{key:'recmkt',label:'Recruiting Marketing'},{key:'nlquery',label:'Datenabfrage'},
   {key:'superadmin',label:'System / Konfiguration'},{key:'tabperms',label:'Portal-Tabs'},
   {key:'aisettings',label:'KI-Einstellungen'},{key:'aiendpoint',label:'KI-Anbindung'},{key:'cvsync',label:'CV-Sync'},
   {key:'cockpits',label:'Cockpits'},{key:'hraccess',label:'HR-Zugriff'},{key:'appusers',label:'App-User'},
@@ -34803,6 +34803,86 @@ function ForecastImport({projId, skill, initYear, onSaved}){
   </div>;
 }
 
+// Datenabfrage per Sprache (Management-only). Ruft die Edge Function nlquery; die KI klärt in Schritten,
+// erzeugt ein SELECT (sichtbar), führt es erst auf Klick über die Read-only-Rolle aus. Ergebnis Tabelle/Diagramm/Excel.
+function NlQueryView({team}){
+  const isMgmt=((team&&team.role_keys)||[]).some(r=>r==='management');
+  const [msgs,setMsgs]=useState([]);            // API-Konversation
+  const [turns,setTurns]=useState([]);          // Anzeige-Verlauf
+  const [input,setInput]=useState('');
+  const [stage,setStage]=useState(null);        // {kind:'clarify',...} | {kind:'sql',...}
+  const [rows,setRows]=useState(null);
+  const [busy,setBusy]=useState(false); const [err,setErr]=useState('');
+  async function callFn(payload){ let tok=null; try{ const s=await sb.auth.getSession(); tok=s&&s.data&&s.data.session&&s.data.session.access_token; }catch(e){}
+    const r=await fetch(SB_URL+'/functions/v1/nlquery',{method:'POST',headers:{'Authorization':'Bearer '+tok,'apikey':SB_KEY,'content-type':'application/json'},body:JSON.stringify(payload)});
+    let j; try{ j=await r.json(); }catch(e){ j={error:'Antwort nicht lesbar ('+r.status+')'}; } if(!r.ok&&!j.error) j.error='Fehler '+r.status; return j; }
+  async function ask(text){ if(!text.trim()||busy) return; setErr(''); setRows(null);
+    const nm=[...msgs,{role:'user',content:text.trim()}]; setMsgs(nm); setTurns(t=>[...t,{who:'you',text:text.trim()}]); setInput(''); setStage(null); setBusy(true);
+    const res=await callFn({messages:nm}); setBusy(false);
+    if(res.error){ setErr(res.error); return; }
+    if(res.action==='clarify'){ setMsgs([...nm,{role:'assistant',content:'Rückfrage: '+res.question+'\nOptionen: '+(res.options||[]).join(' | ')}]); setStage({kind:'clarify',question:res.question,options:res.options||[]}); setTurns(t=>[...t,{who:'ai',text:res.question}]); }
+    else if(res.action==='sql'){ setStage({kind:'sql',sql:res.sql,explanation:res.explanation,chart:res.chart}); }
+  }
+  async function runSql(){ if(!stage||stage.kind!=='sql'||busy) return; setErr(''); setBusy(true);
+    const res=await callFn({execute:stage.sql}); setBusy(false);
+    if(res.error){ setErr(res.error); return; } setRows(res.rows||[]); }
+  function reset(){ setMsgs([]); setTurns([]); setStage(null); setRows(null); setErr(''); setInput(''); }
+  function exportXlsx(){ if(!rows||!rows.length) return; try{ const ws=XLSX.utils.json_to_sheet(rows); const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'Abfrage'); XLSX.writeFile(wb,'datenabfrage_'+isoLocal(new Date())+'.xlsx'); }catch(e){ setErr('Excel-Export fehlgeschlagen: '+(e.message||'')); } }
+  if(!isMgmt) return <div className="sp-empty">Nur für Management.</div>;
+  const cols = rows&&rows.length ? Object.keys(rows[0]) : [];
+  const chart = (stage&&stage.kind==='sql'&&stage.chart&&rows&&rows.length)? stage.chart : null;
+  const EX=['Wer hatte in den letzten drei Monaten mehr als fünf Krankheitstage?','Wie hat sich die Conversion je Agent über acht Wochen entwickelt?','Welche Bewerber kamen über Instagram und wurden eingestellt?'];
+  return <div style={{maxWidth:1200}}>
+    <div style={{fontSize:20,fontWeight:700,marginBottom:2}}>🔎 Datenabfrage</div>
+    <div style={{fontSize:13,color:'var(--muted)',marginBottom:14}}>Frag die Datenbank in Alltagssprache. Die KI klärt bei Bedarf in Schritten, zeigt die Abfrage, und führt sie erst auf Klick aus — ausschließlich lesend.</div>
+    <div style={{display:'flex',gap:16,flexWrap:'wrap',alignItems:'flex-start'}}>
+      {/* Links: Frage + Klärung */}
+      <div style={{flex:'1 1 380px',minWidth:320}}>
+        {turns.length===0 && <div style={{marginBottom:12}}>
+          <div style={{fontSize:12,fontWeight:700,color:'var(--muted)',marginBottom:6}}>Beispiele</div>
+          {EX.map((q,i)=><button key={i} className="btn btn-sm" style={{display:'block',textAlign:'left',width:'100%',marginBottom:6,whiteSpace:'normal'}} onClick={()=>ask(q)}>{q}</button>)}
+        </div>}
+        {turns.map((t,i)=><div key={i} style={{marginBottom:8,padding:'8px 12px',borderRadius:10,background:t.who==='you'?'var(--blue-bg,#eff6ff)':'var(--surface-2)',border:'1px solid var(--border)'}}>
+          <div style={{fontSize:10.5,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em'}}>{t.who==='you'?'Du':'KI'}</div>
+          <div style={{fontSize:13,marginTop:2}}>{t.text}</div>
+        </div>)}
+        {stage&&stage.kind==='clarify'&&<div style={{display:'flex',flexDirection:'column',gap:6,margin:'6px 0 12px'}}>
+          {stage.options.map((o,i)=><button key={i} className="btn btn-sm btn-primary" style={{textAlign:'left',whiteSpace:'normal'}} onClick={()=>ask(o)} disabled={busy}>{o}</button>)}
+        </div>}
+        <div style={{display:'flex',gap:6,marginTop:8}}>
+          <input className="form-input" style={{flex:1}} placeholder="Frage eingeben…" value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')ask(input);}}/>
+          <button className="btn btn-primary btn-sm" disabled={busy||!input.trim()} onClick={()=>ask(input)}>{busy?'…':'Fragen'}</button>
+          {turns.length>0&&<button className="btn btn-sm" onClick={reset} title="Neue Abfrage">↺</button>}
+        </div>
+        {err&&<div style={{marginTop:10,padding:'8px 10px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:8,color:'#b91c1c',fontSize:12}}>{err}</div>}
+      </div>
+      {/* Rechts: SQL + Ergebnis */}
+      <div style={{flex:'1 1 480px',minWidth:340}}>
+        {stage&&stage.kind==='sql'?<React.Fragment>
+          {stage.explanation&&<div style={{fontSize:12,color:'var(--muted)',marginBottom:6}}>{stage.explanation}</div>}
+          <pre style={{background:'#0f172a',color:'#e2e8f0',padding:'12px 14px',borderRadius:10,fontSize:12,overflowX:'auto',fontFamily:'var(--mono)',whiteSpace:'pre-wrap',margin:0}}>{stage.sql}</pre>
+          <div style={{display:'flex',gap:8,alignItems:'center',margin:'8px 0'}}>
+            <button className="btn btn-primary btn-sm" disabled={busy} onClick={runSql}>{busy?'Läuft…':'▶ Ausführen'}</button>
+            {rows&&<button className="btn btn-sm" onClick={exportXlsx} disabled={!rows.length}>⬇ Als Excel</button>}
+            {rows&&<span style={{fontSize:11,color:'var(--muted)'}}>{rows.length} Zeile{rows.length!==1?'n':''}{rows.length>=1000?' (max. 1000)':''}</span>}
+          </div>
+          {chart&&<div style={{border:'1px solid var(--border)',borderRadius:10,padding:'10px 12px',marginBottom:10,background:'var(--card)'}}>
+            <HoverChart data={rows.map(r=>Number(r[chart.y])||0)} labels={rows.map(r=>String(r[chart.x]))} color="#0F5661" kind={chart.type==='line'?'area':'bar'} h={120} fmt={v=>fmtNum(v,1)}/>
+            <div style={{fontSize:10.5,color:'var(--muted)',marginTop:4}}>{chart.y} über {chart.x}</div>
+          </div>}
+          {rows&&rows.length>0&&<div style={{overflow:'auto',maxHeight:460,border:'1px solid var(--border)',borderRadius:10}}>
+            <table style={{borderCollapse:'collapse',fontSize:12,width:'100%'}}>
+              <thead><tr>{cols.map(c=><th key={c} style={{position:'sticky',top:0,background:'var(--surface-2)',padding:'6px 10px',textAlign:'left',fontWeight:700,borderBottom:'1px solid var(--border)',whiteSpace:'nowrap'}}>{c}</th>)}</tr></thead>
+              <tbody>{rows.map((r,i)=><tr key={i} style={{borderTop:'1px solid var(--border)'}}>{cols.map(c=><td key={c} style={{padding:'5px 10px',whiteSpace:'nowrap',fontFamily:(typeof r[c]==='number')?'var(--mono)':'inherit'}}>{r[c]==null?'':(typeof r[c]==='object'?JSON.stringify(r[c]):String(r[c]))}</td>)}</tr>)}</tbody>
+            </table>
+          </div>}
+          {rows&&rows.length===0&&<div className="sp-empty">Kein Ergebnis.</div>}
+        </React.Fragment>:<div style={{fontSize:13,color:'var(--muted)',padding:'20px 0'}}>Die erzeugte Abfrage erscheint hier — sichtbar, bevor sie läuft.</div>}
+      </div>
+    </div>
+  </div>;
+}
+
 function DataImportView({projects, employees}){
   const projList=(projects||[]).filter(p=>p&&p.id).slice().sort((a,b)=>String(a.name).localeCompare(String(b.name),'de'));
   const [projId,setProjId]=useState(()=>{ const hc=projList.find(p=>/holiday.?check/i.test(p.name||'')); return hc?hc.id:(projList[0]?projList[0].id:''); });
@@ -37273,6 +37353,7 @@ function App(){
       ...((team&&((team.role_keys||[]).some(r=>r==='management')||isLeadOnlyRoles(team.role_keys))) ? [{key:'praesentation',label:'Präsentationen',icon:'📊'}] : []),   // Management + Projektleiter (projektbezogen)
       ...((team&&((team.role_keys||[]).some(r=>r==='management')||isLeadOnlyRoles(team.role_keys))) ? [{key:'dataimport',label:'Datenimport',icon:'📥'}] : []),   // Management + Projektleiter (projektbezogen)
       ...((team&&(team.role_keys||[]).some(r=>r==='management')) ? [{key:'recmkt',label:'Recruiting Marketing',icon:'📣'}] : []),   // Management-only
+      ...((team&&(team.role_keys||[]).some(r=>r==='management')) ? [{key:'nlquery',label:'Datenabfrage',icon:'🔎'}] : []),   // Management-only
     ]},
     {sec:'System', items:[
       {key:'superadmin',label:'System / Konfiguration',icon:'⚙️'},
@@ -37343,6 +37424,7 @@ function App(){
       'praesentation':'<path fill-rule="evenodd" d="M2.25 2.25a.75.75 0 0 0 0 1.5H3v10.5a3 3 0 0 0 3 3h1.21l-1.172 3.513a.75.75 0 0 0 1.424.474l.329-.987h8.418l.33.987a.75.75 0 0 0 1.422-.474l-1.17-3.513H18a3 3 0 0 0 3-3V3.75h.75a.75.75 0 0 0 0-1.5H2.25Zm6.54 15h6.42l.5 1.5H8.29l.5-1.5Zm8.085-8.995a.75.75 0 1 0-.75-1.299 12.81 12.81 0 0 0-3.558 3.05L11.03 8.47a.75.75 0 0 0-1.06 0l-2.25 2.25a.75.75 0 1 0 1.06 1.06l1.72-1.72 1.774 1.775a.75.75 0 0 0 1.174-.144 11.31 11.31 0 0 1 3.477-3.146Z" clip-rule="evenodd"/>',
       'dataimport':'<path fill-rule="evenodd" d="M12 2.25a.75.75 0 0 1 .75.75v11.69l3.22-3.22a.75.75 0 1 1 1.06 1.06l-4.5 4.5a.75.75 0 0 1-1.06 0l-4.5-4.5a.75.75 0 1 1 1.06-1.06l3.22 3.22V3a.75.75 0 0 1 .75-.75Zm-9 13.5a.75.75 0 0 1 .75.75v2.25a1.5 1.5 0 0 0 1.5 1.5h13.5a1.5 1.5 0 0 0 1.5-1.5V16.5a.75.75 0 0 1 1.5 0v2.25a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3V16.5a.75.75 0 0 1 .75-.75Z" clip-rule="evenodd"/>',
       'recmkt':'<path d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 0 1 3 19.875v-6.75ZM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V8.625ZM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V4.125Z"/>',
+      'nlquery':'<path fill-rule="evenodd" d="M10.5 3.75a6.75 6.75 0 1 0 0 13.5 6.75 6.75 0 0 0 0-13.5ZM2.25 10.5a8.25 8.25 0 1 1 14.59 5.28l4.69 4.69a.75.75 0 1 1-1.06 1.06l-4.69-4.69A8.25 8.25 0 0 1 2.25 10.5Z" clip-rule="evenodd"/>',
       'superadmin':'<path fill-rule="evenodd" d="M11.078 2.25c-.917 0-1.699.663-1.85 1.567L9.05 4.889c-.02.12-.115.26-.297.348a7.493 7.493 0 0 0-.986.57c-.166.115-.334.126-.45.083L6.3 5.508a1.875 1.875 0 0 0-2.282.819l-.922 1.597a1.875 1.875 0 0 0 .432 2.385l.84.692c.095.078.17.229.154.43a7.598 7.598 0 0 0 0 1.139c.015.2-.059.352-.153.43l-.841.692a1.875 1.875 0 0 0-.432 2.385l.922 1.597a1.875 1.875 0 0 0 2.282.818l1.019-.382c.115-.043.283-.031.45.082.312.214.641.405.985.57.182.088.277.228.297.35l.178 1.071c.151.904.933 1.567 1.85 1.567h1.844c.916 0 1.699-.663 1.85-1.567l.178-1.072c.02-.12.114-.26.297-.349.344-.165.673-.356.985-.57.167-.114.335-.125.45-.082l1.02.382a1.875 1.875 0 0 0 2.28-.819l.923-1.597a1.875 1.875 0 0 0-.432-2.385l-.84-.692c-.095-.078-.17-.229-.154-.43a7.614 7.614 0 0 0 0-1.139c-.016-.2.059-.352.153-.43l.84-.692c.708-.582.891-1.59.433-2.385l-.922-1.597a1.875 1.875 0 0 0-2.282-.818l-1.02.382c-.114.043-.282.031-.449-.083a7.49 7.49 0 0 0-.985-.57c-.183-.087-.277-.227-.297-.348l-.179-1.072a1.875 1.875 0 0 0-1.85-1.567h-1.843ZM12 15.75a3.75 3.75 0 1 0 0-7.5 3.75 3.75 0 0 0 0 7.5Z" clip-rule="evenodd"/>',
       'skillmatrix':'<path fill-rule="evenodd" d="M1.5 5.625c0-1.036.84-1.875 1.875-1.875h17.25c1.035 0 1.875.84 1.875 1.875v12.75c0 1.035-.84 1.875-1.875 1.875H3.375A1.875 1.875 0 0 1 1.5 18.375V5.625ZM21 9.375A.375.375 0 0 0 20.625 9h-7.5a.375.375 0 0 0-.375.375v1.5c0 .207.168.375.375.375h7.5a.375.375 0 0 0 .375-.375v-1.5Zm0 3.75a.375.375 0 0 0-.375-.375h-7.5a.375.375 0 0 0-.375.375v1.5c0 .207.168.375.375.375h7.5a.375.375 0 0 0 .375-.375v-1.5Zm0 3.75a.375.375 0 0 0-.375-.375h-7.5a.375.375 0 0 0-.375.375v1.5c0 .207.168.375.375.375h7.5a.375.375 0 0 0 .375-.375v-1.5ZM10.875 18.75a.375.375 0 0 0 .375-.375v-1.5a.375.375 0 0 0-.375-.375h-7.5a.375.375 0 0 0-.375.375v1.5c0 .207.168.375.375.375h7.5ZM3.375 15h7.5a.375.375 0 0 0 .375-.375v-1.5a.375.375 0 0 0-.375-.375h-7.5a.375.375 0 0 0-.375.375v1.5c0 .207.168.375.375.375Zm0-3.75h7.5a.375.375 0 0 0 .375-.375v-1.5A.375.375 0 0 0 10.875 9h-7.5A.375.375 0 0 0 3 9.375v1.5c0 .207.168.375.375.375Z" clip-rule="evenodd"/>',
       'elearning':'<path d="M11.7 2.805a.75.75 0 0 1 .6 0A60.65 60.65 0 0 1 22.83 8.72a.75.75 0 0 1-.231 1.337 49.948 49.948 0 0 0-9.902 3.912l-.003.002c-.114.06-.227.119-.34.18a.75.75 0 0 1-.707 0A50.88 50.88 0 0 0 7.5 12.173v-.224c0-.131.067-.248.172-.311a54.615 54.615 0 0 1 4.653-2.52.75.75 0 0 0-.65-1.352 56.123 56.123 0 0 0-4.78 2.589 1.858 1.858 0 0 0-.859 1.228 49.803 49.803 0 0 0-4.634-1.527.75.75 0 0 1-.231-1.337A60.653 60.653 0 0 1 11.7 2.805Z"/> <path d="M13.06 15.473a48.45 48.45 0 0 1 7.666-3.282c.134 1.414.22 2.843.255 4.284a.75.75 0 0 1-.46.711 47.87 47.87 0 0 0-8.105 4.342.75.75 0 0 1-.832 0 47.87 47.87 0 0 0-8.104-4.342.75.75 0 0 1-.461-.71c.035-1.442.121-2.87.255-4.286.921.304 1.83.634 2.726.99v1.27a1.5 1.5 0 0 0-.14 2.508c-.09.38-.222.753-.397 1.11.452.213.901.434 1.346.66a6.727 6.727 0 0 0 .551-1.607 1.5 1.5 0 0 0 .14-2.67v-.645a48.549 48.549 0 0 1 3.44 1.667 2.25 2.25 0 0 0 2.12 0Z"/> <path d="M4.462 19.462c.42-.419.753-.89 1-1.395.453.214.902.435 1.347.662a6.742 6.742 0 0 1-1.286 1.794.75.75 0 0 1-1.06-1.06Z"/>',
@@ -37390,7 +37472,7 @@ function App(){
   useEffect(()=>{ const mgmt=(team&&(team.role_keys||[]).some(r=>r==='management'));
     const lead=(team&&isLeadOnlyRoles(team.role_keys));
     if(!mgmt && !lead && (view==='praesentation'||view==='dataimport')) setView('cockpit');
-    if(!mgmt && (view==='recmkt'||view==='fcist')) setView('cockpit'); },[view]);
+    if(!mgmt && (view==='recmkt'||view==='fcist'||view==='nlquery')) setView('cockpit'); },[view]);
   const allNavSections = isEmpUser
     ? [{sec:'Mein Bereich', items:[{key:'mein-plan',label:'Mein Schichtplan',icon:'📋'}]}, ...navSections]
     : navSections;
@@ -37585,6 +37667,7 @@ function App(){
           {view==='praesentation'&&<PresentationsView projects={projects} employees={employees} team={team} showToast={showToast}/>}
           {view==='dataimport'&&<DataImportView projects={projects} employees={employees}/>}
           {view==='recmkt'&&<RecruitingMarketingView employees={employees}/>}
+          {view==='nlquery'&&<NlQueryView team={team}/>}
           {view==='fcist'&&<ForecastVsIstView projects={projects}/>}
           {view==='callqa'&&<CallQaView projects={projects} employees={employees} showToast={showToast}/>}
           {view==='skillmatrix'&&<SkillMatrix employees={employees} projects={projects}/>}
