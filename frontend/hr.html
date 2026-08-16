@@ -36193,7 +36193,7 @@ function PresentationsView({projects, employees, team, showToast}){
     const csClean={}; Object.keys(callScores||{}).forEach(k=>{ const r=callScores[k]||{}; const strip=e=>({name:e.name,pct:e.pct,points:e.points,color:e.color,label:e.label,breach:!!e.breach});
       csClean[k]={best:(r.best||[]).map(strip),worst:(r.worst||[]).map(strip),count:r.count,avg:r.avg,unit:r.unit,max:r.max,breaches:r.breaches||0,thresholds:r.thresholds}; });
     snap._callscores=csClean;
-    snap._measures=(measures||[]).map(m=>({id:m.id,text:m.text,status:m.status,comment:m.comment,created_kw:m.created_kw,created_year:m.created_year}));   // Maßnahmen-Stand einfrieren (Kunde read-only)
+    snap._measures={}; (skills||[]).forEach(s=>{ snap._measures[s.key]=(((measures||{})[s.key])||[]).map(m=>({id:m.id,text:m.text,status:m.status,comment:m.comment,created_kw:m.created_kw,created_year:m.created_year})); });   // Maßnahmen je Skill einfrieren (Kunde read-only)
     const rev=reviewWeek(); const tok=token||genToken(); const title=selProj.name+' · KW '+rev.kw+'/'+rev.yr;
     const by=(typeof CURRENT_USER!=='undefined'&&CURRENT_USER)?(CURRENT_USER.name||CURRENT_USER.id):null;
     try{
@@ -36528,22 +36528,25 @@ function PresentationsView({projects, employees, team, showToast}){
   // Maßnahmen-Nachverfolgung: report_measures je Projekt+Skill, Carry-over (offene wandern mit, in dieser Woche
   // erledigte noch sichtbar). Interaktiv in der Darstellung; beim Publish in den Snapshot eingefroren (read-only Kunde).
   const mSkill=()=>String((skills.find(x=>x.key===tab)||skills[0]||{}).key||'').toLowerCase();
-  const loadMeasures=async()=>{ if(!selProj){ setMeasures(null); return; } const rv=reviewWeek(); const sk=mSkill();
-    try{ const {data}=await sb.from('report_measures').select('*').eq('project_id',selProj.id).eq('skill',sk).order('seq',{ascending:true}).order('created_at',{ascending:true});
-      setMeasures((data||[]).filter(m=> m.status!=='done' || (m.done_year===rv.yr && m.done_kw===rv.kw))); }
-    catch(e){ setMeasures([]); } };
-  useEffect(()=>{ loadMeasures(); },[selProjId,tab,pNo,pYear]);   // eslint-disable-line
-  async function measureAction(a){ if(!selProj) return; const rv=reviewWeek(); const sk=mSkill();
+  // Maßnahmen JE SKILL getrennt (Sales = Verkauf, Support = Bearbeitung). measures = Map {skill:[...]}.
+  const loadMeasures=async()=>{ if(!selProj){ setMeasures(null); return; } const rv=reviewWeek();
+    try{ const {data}=await sb.from('report_measures').select('*').eq('project_id',selProj.id).order('seq',{ascending:true}).order('created_at',{ascending:true});
+      const vis=(data||[]).filter(m=> m.status!=='done' || (m.done_year===rv.yr && m.done_kw===rv.kw));
+      const map={}; (skills||[]).forEach(s=>{ map[s.key]=vis.filter(m=>String(m.skill||'').toLowerCase()===s.key); }); setMeasures(map); }
+    catch(e){ setMeasures({}); } };
+  // Alle Skills laden (nicht mehr an tab gebunden).
+  useEffect(()=>{ loadMeasures(); },[selProjId,pNo,pYear]);   // eslint-disable-line
+  async function measureAction(a){ if(!selProj) return; const rv=reviewWeek(); const sk=String(a._skill||mSkill()).toLowerCase();
     const by=(team&&(team.full_name||team.name))||null;
     try{
-      if(a.type==='add'){ if(!a.text) return; const seq=(measures||[]).length; const {error}=await sb.from('report_measures').insert({project_id:selProj.id,skill:sk,text:a.text,status:'open',created_year:rv.yr,created_kw:rv.kw,seq,created_by_name:by}); if(error) throw error; }
+      if(a.type==='add'){ if(!a.text) return; const seq=(((measures||{})[sk])||[]).length; const {error}=await sb.from('report_measures').insert({project_id:selProj.id,skill:sk,text:a.text,status:'open',created_year:rv.yr,created_kw:rv.kw,seq,created_by_name:by}); if(error) throw error; }
       else if(a.type==='status'){ const patch={status:a.status,updated_at:new Date().toISOString()}; if(a.status==='done'){patch.done_year=rv.yr;patch.done_kw=rv.kw;}else{patch.done_year=null;patch.done_kw=null;} const {error}=await sb.from('report_measures').update(patch).eq('id',a.id); if(error) throw error; }
       else if(a.type==='comment'){ const {error}=await sb.from('report_measures').update({comment:a.comment,updated_at:new Date().toISOString()}).eq('id',a.id); if(error) throw error; }
       else if(a.type==='delete'){ const {error}=await sb.from('report_measures').delete().eq('id',a.id); if(error) throw error; }
       await loadMeasures();
     }catch(e){ showToast&&showToast('Maßnahme speichern fehlgeschlagen: '+(e.message||''),'error'); } }
   // Bericht ist PER-SKILL: nur der gewählte Skill (tab) erscheint in der Darstellung/öffentlichen Seite — nie beide.
-  const slideCtx=()=>{ const rv=reviewWeek(); const viz=viewSkill==='all'?skills:skills.filter(s=>s.key===viewSkill); return ({ deck, accent, font:fontFam, projName:selProj.name, period:{no:rv.kw,year:rv.yr}, skills:(viz.length?viz:skills), dummy, ourLogo, customerLogo:theme.customerLogo, callScores, callReviews:deck.callReviews!==false, measures, onMeasure:measureAction, membersOf:tk2=>membersFor(tk2).map(e=>({id:e.id,name:empName(e)})) }); };
+  const slideCtx=()=>{ const rv=reviewWeek(); const viz=viewSkill==='all'?skills:skills.filter(s=>s.key===viewSkill); return ({ deck, accent, font:fontFam, projName:selProj.name, period:{no:rv.kw,year:rv.yr}, skills:(viz.length?viz:skills), dummy, ourLogo, customerLogo:theme.customerLogo, callScores, callReviews:deck.callReviews!==false, measuresFor:tk2=>((measures&&measures[tk2])||[]), onMeasure:measureAction, membersOf:tk2=>membersFor(tk2).map(e=>({id:e.id,name:empName(e)})) }); };
   const renderSlides=()=>{ if(!window.PRES) return React.createElement("div",{style:{color:"var(--muted)"}},"Renderer nicht geladen."); return window.PRES.deckSlides(slideCtx()).map((el,i)=>React.createElement(React.Fragment,{key:i},el)); };
 
   const FONTS=[['inherit','Standard'],["'Inter',sans-serif",'Inter'],["'Instrument Serif',serif",'Instrument Serif'],["'JetBrains Mono',monospace",'JetBrains Mono']];

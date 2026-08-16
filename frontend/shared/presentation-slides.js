@@ -565,7 +565,10 @@
   var MEAS_ST={open:{l:'Offen',c:'#dc2626',bg:'#fef2f2'},in_progress:{l:'In Arbeit',c:'#d97706',bg:'#fffbeb'},done:{l:'Erledigt',c:'#059669',bg:'#ecfdf5'}};
   function Massnahmen(ctx, tk){ return h(MassnahmenSlide,{ctx:ctx,tk:tk}); }
   function MassnahmenSlide(props){ var ctx=props.ctx, tk=props.tk; var P=pal(ctx.accent); var lbl=skillLabel(ctx,tk);
-    var measures=ctx.measures, onM=ctx.onMeasure;
+    // Maßnahmen je Skill getrennt (Sales = Verkauf, Support = Bearbeitung). measuresFor(tk) bevorzugt, sonst
+    // Alt-Kontrakt ctx.measures. onMeasure trägt den Skill (_skill), damit Add/Status/Delete am richtigen Skill landet.
+    var measures = ctx.measuresFor ? ctx.measuresFor(tk) : ctx.measures;
+    var onMraw=ctx.onMeasure; var onM = onMraw ? function(a){ return onMraw(Object.assign({},a,{_skill:tk})); } : null;
     var nt=R.useState(''); var newText=nt[0], setNewText=nt[1];
     var head=fondHead(P, lbl, 'Maßnahmen', measures?'Nachverfolgung':'');
     if(measures==null){ var td=(ctx.deck.teams||{})[tk]||{}; var txt=(td.massnahmen||'').trim();

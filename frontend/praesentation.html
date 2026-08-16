@@ -46,7 +46,7 @@
 
   // Deck mit Kommentaren je Folie (Folie+Anker). Kommentieren nur wenn eingeloggt (canComment) — Einweg.
   function Deck(props){
-    var ctx=props.ctx, presId=props.presId, projectId=props.projectId, uid=props.uid, authorName=props.authorName, canComment=props.canComment;
+    var ctx=props.ctx, presId=props.presId, projectId=props.projectId, uid=props.uid, authorName=props.authorName, canComment=props.canComment, mgmt=props.isMgmt;
     var cS=React.useState([]), comments=cS[0], setComments=cS[1];
     var oS=React.useState(null), openKey=oS[0], setOpenKey=oS[1];
     var dS=React.useState({severity:'black',body:'',anchor:''}), draft=dS[0], setDraft=dS[1];
@@ -56,6 +56,22 @@
       var ch=sb.channel('pc-'+presId).on('postgres_changes',{event:'*',schema:'public',table:'presentation_comments',filter:'presentation_id=eq.'+presId},load).subscribe();
       return function(){ alive=false; try{ sb.removeChannel(ch); }catch(e){} };
     },[presId]);
+    // Maßnahmen je Skill: Kunde liest Snapshot (_measures Map), Management (eingeloggt) editiert LIVE (report_measures).
+    var pk=ctx.period||{}; var mS=React.useState(null), meas=mS[0], setMeas=mS[1];
+    function loadMeas(){ if(!mgmt||!projectId) return;
+      sb.from('report_measures').select('*').eq('project_id',projectId).order('seq',{ascending:true}).order('created_at',{ascending:true}).then(function(r){ if(r.error) return;
+        var vis=(r.data||[]).filter(function(m){ return m.status!=='done' || (m.done_year===pk.year && m.done_kw===pk.no); });
+        var map={}; (ctx.skills||[]).forEach(function(s){ map[s.key]=vis.filter(function(m){ return String(m.skill||'').toLowerCase()===s.key; }); }); setMeas(map); }); }
+    React.useEffect(function(){ if(mgmt) loadMeas(); },[mgmt, projectId]);
+    var measMap = mgmt ? (meas||{}) : (ctx.deck._measures||{});
+    function onMeasure(a){ if(!mgmt) return; var sk=String(a._skill||'').toLowerCase(); var q;
+      if(a.type==='add'){ if(!a.text) return; var seq=((measMap[sk])||[]).length; q=sb.from('report_measures').insert({project_id:projectId,skill:sk,text:a.text,status:'open',created_year:pk.year,created_kw:pk.no,seq,created_by_name:authorName}); }
+      else if(a.type==='status'){ var patch={status:a.status}; if(a.status==='done'){patch.done_year=pk.year;patch.done_kw=pk.no;}else{patch.done_year=null;patch.done_kw=null;} q=sb.from('report_measures').update(patch).eq('id',a.id); }
+      else if(a.type==='comment'){ q=sb.from('report_measures').update({comment:a.comment}).eq('id',a.id); }
+      else if(a.type==='delete'){ q=sb.from('report_measures').delete().eq('id',a.id); }
+      else return;
+      q.then(function(r){ if(r.error){ alert('Maßnahme: '+(r.error.message||'')); return; } loadMeas(); }); }
+    var ctx2=Object.assign({}, ctx, { measuresFor:function(tk){ return (measMap&&measMap[tk])||[]; }, onMeasure: mgmt?onMeasure:null });
     function submit(k){ if(!draft.body.trim()) return;
       sb.from('presentation_comments').insert({presentation_id:presId,project_id:projectId,slide:k,anchor:draft.anchor||null,severity:draft.severity,body:draft.body.trim(),author_name:authorName,created_by:uid}).then(function(r){ if(r.error){ alert('Kommentar konnte nicht gespeichert werden: '+(r.error.message||'')); return; } setOpenKey(null); setDraft({severity:'black',body:'',anchor:''}); });
     }
@@ -77,7 +93,7 @@
         canComment?(openKey===k?formEl(k):h('button',{key:'add',className:'btn',style:{fontSize:12,padding:'6px 12px',marginTop:cs.length?6:0},onClick:function(){ setOpenKey(k); }},'💬 Kommentar hinzufügen')):null
       ]);
     }
-    var keys=window.PRES.deckSlideKeys(ctx); var slides=window.PRES.deckSlides(ctx);
+    var keys=window.PRES.deckSlideKeys(ctx2); var slides=window.PRES.deckSlides(ctx2);
     return h('div',{className:'deck'}, slides.map(function(el,i){ var kd=keys[i]||{key:'s'+i,label:'Folie '+(i+1)}; var cs=comments.filter(function(c){return c.slide===kd.key;});
       return h('div',{key:kd.key,style:{marginBottom:20}}, [ el, section(kd.key,kd.label,cs) ]); }));
   }
@@ -92,14 +108,14 @@
     setPage(res.orientation);
     document.title=(th.projName||'Bericht')+' · KW '+res.period_no+'/'+res.period_year;
     var root=ReactDOM.createRoot(document.getElementById('root'));
-    root.render(h(Deck,{ ctx:ctx, presId:res.id, projectId:res.project_id, uid:sess?sess.user.id:null, authorName:(sess&&sess._name)||(sess&&sess.user&&sess.user.email)||'Kunde', canComment:!!sess }));
+    root.render(h(Deck,{ ctx:ctx, presId:res.id, projectId:res.project_id, uid:sess?sess.user.id:null, authorName:(sess&&sess._name)||(sess&&sess.user&&sess.user.email)||'Kunde', canComment:!!sess, isMgmt:(sess&&sess._mgmt)||false }));
     if(new URLSearchParams(location.search).get('print')==='1'){ setTimeout(function(){ try{ window.print(); }catch(e){} }, 700); }
   }
   (async function(){
     if(!token){ show('Kein Bericht angegeben.'); return; }
     var sess=null;
     try{ var sr=await sb.auth.getSession(); sess=sr&&sr.data&&sr.data.session||null;
-      if(sess){ try{ var nr=await sb.from('app_users').select('full_name').eq('user_id',sess.user.id).single(); if(nr&&nr.data&&nr.data.full_name) sess._name=nr.data.full_name; }catch(e){} }
+      if(sess){ try{ var nr=await sb.from('app_users').select('full_name,role_keys').eq('user_id',sess.user.id).single(); if(nr&&nr.data){ if(nr.data.full_name) sess._name=nr.data.full_name; sess._mgmt=(nr.data.role_keys||[]).indexOf('management')>=0; } }catch(e){} }
     }catch(e){}
     try{ var r=await sb.rpc('get_public_presentation',{p_token:token});
       if(r.error || !r.data){ show('Dieser Bericht ist nicht (mehr) verfügbar.'); return; }
