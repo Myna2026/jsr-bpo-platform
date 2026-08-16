@@ -293,6 +293,9 @@
     ]) ]);
   }
 
+  // Kleiner "gerechnet"-Hinweis: Teamwerte auf Call-/CSAT-Folien sind gerechnet (gewichtetes
+  // Mittel der Agentenwerte), kein gepflegter Wert. Nur Kennzeichnung, keine zweite Speicherung.
+  function calcTag(P){ return h('span',{style:{fontSize:'.9cqw',fontWeight:700,letterSpacing:'.02em',color:P.muted,border:'.12cqw solid '+P.muted,borderRadius:'.5cqw',padding:'.05cqw .6cqw',marginLeft:'.7cqw',whiteSpace:'nowrap',opacity:.8}},'gerechnet'); }
   function Calls(ctx, tk){ return CallsView(ctx, tk, 'vorwoche', 'Vorwoche'); }
   function CallsMtd(ctx, tk){ return CallsView(ctx, tk, 'monat', 'Monat (MTD)'); }
   function CallsView(ctx, tk, period, eyebrow){ var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk); var cols=callCols(tk);
@@ -325,7 +328,7 @@
         return [
           h('div',{key:'big',style:{display:'flex',gap:'4.5cqw',alignItems:'baseline',flexWrap:'wrap',marginBottom:'2cqw',flexShrink:0}},[
             stat(fmtNum(sumCol(rows,'answered')),'Answered gesamt',P.onLightTxt),
-            stat(wavgTime(rows,htKey,'answered'),'Ø Handle (gew.)',P.ink)
+            stat(wavgTime(rows,htKey,'answered'),['Ø Handle',calcTag(P)],P.ink)
           ]),
           h('div',{key:'list',style:{flex:1,minHeight:0,display:'flex',gap:'4.5cqw',overflow:'hidden'}},
             ans.length===0 ? [h('div',{key:'e',style:{color:P.muted,fontSize:'1.4cqw'}},'Keine Mitarbeiter.')]
@@ -333,7 +336,8 @@
                 colRows.map(function(o,ri){ return rankRow(o, ci*half+ri+1); })
               ); })
           ),
-          dom.zoomed?h('div',{key:'scale',style:{fontFamily:MONO,fontSize:'1cqw',color:P.muted,opacity:.8,marginTop:'1cqw',textAlign:'right',flexShrink:0}},'Balkenskala ab '+fmtNum(dom.lo)+' (gespreizt) · exakte Werte am Balken'):null
+          h('div',{key:'foot',style:{fontSize:'1cqw',color:P.muted,marginTop:'.6cqw',flexShrink:0}},'Ø Handle ist gerechnet: gewichtetes Mittel der Agenten nach Answered, kein gepflegter Wert.'),
+          dom.zoomed?h('div',{key:'scale',style:{fontFamily:MONO,fontSize:'1cqw',color:P.muted,opacity:.8,marginTop:'.4cqw',textAlign:'right',flexShrink:0}},'Balkenskala ab '+fmtNum(dom.lo)+' (gespreizt) · exakte Werte am Balken'):null
         ];
       })())
     ]);
@@ -443,12 +447,12 @@
       .concat(weeks.map(function(w){ return valCell(r.cells[w.key]); }))
       .concat([h('div',{key:'avg',style:{flex:1,textAlign:'center',fontFamily:MONO,fontSize:'1.6cqw',fontWeight:800,color:P.onLightTxt}}, r.avg==null?'—':fmtNum(r.avg,1))])); });
     var teamRow=h('div',{key:'team',style:{display:'flex',alignItems:'center',gap:'1cqw',paddingTop:'.7cqw',marginTop:'.2cqw',borderTop:'2px solid '+P.onLight}},
-      [h('div',{key:'n',style:{width:colName,fontSize:'1.35cqw',fontWeight:800,color:P.ink}},'Team Ø')]
+      [h('div',{key:'n',style:{width:colName,fontSize:'1.35cqw',fontWeight:800,color:P.ink,display:'flex',alignItems:'center'}},['Team Ø',calcTag(P)])]
       .concat(weeks.map(function(w){ var v=teamWeek[w.key]; return h('div',{key:w.key,style:{flex:1,textAlign:'center',fontFamily:MONO,fontSize:'1.5cqw',fontWeight:800,color:P.ink}}, v==null?'—':fmtNum(v,1)); }))
       .concat([h('div',{key:'avg',style:{flex:1,textAlign:'center',fontFamily:MONO,fontSize:'1.7cqw',fontWeight:800,color:P.onLightTxt}}, teamAvg==null?'—':fmtNum(teamAvg,1))]));
     return Slide(ctx, [ head, panel(P, [
       h('div',{key:'tbl',style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',overflow:'hidden'}}, [headerRow].concat(body).concat([teamRow])),
-      h('div',{key:'ft',style:{fontSize:'1.1cqw',color:P.muted,marginTop:'1cqw'}},'CSAT je Mitarbeiter und Woche · n = Anzahl Bewertungen · Ø gewichtet nach n')
+      h('div',{key:'ft',style:{fontSize:'1.1cqw',color:P.muted,marginTop:'1cqw'}},'CSAT je Mitarbeiter und Woche · n = Anzahl Bewertungen · Team Ø gerechnet: gewichtetes Mittel nach n, kein gepflegter Wert')
     ]) ]);
   }
 
