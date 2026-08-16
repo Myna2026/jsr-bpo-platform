@@ -1983,6 +1983,11 @@ function cqAmpelC(pct,points,cfg){ var unit=cqUnitC(cfg); var val=unit==='points
   return {key:'red',color:'#dc2626',label:'unter Ziel'};
 }
 function cqCfgC(cfgs,pid,sk){ var f=function(p,s){return (cfgs||[]).find(function(c){return (c.project_id||null)===(p||null)&&(c.skill||null)===(s||null);});}; return f(pid,sk)||f(pid,null)||f(null,null)||{green_min:90,yellow_min:75}; }
+// Compliance: fachliche Rohpunkte (Verstoß nullt den offiziellen Score, nicht die fachliche Leistung).
+function cqIsBreachC(r){ return !!(r&&r.compliance_failed); }
+function cqRawPointsC(r){ return (r&&r.raw_points!=null)?Number(r.raw_points):((r&&r.total_points!=null)?Number(r.total_points):null); }
+function cqRawPctC(r){ var mp=(r&&r.max_points!=null)?Number(r.max_points):null; var rp=cqRawPointsC(r); return (mp&&rp!=null)?Math.round(rp/mp*1000)/10:((r&&r.total_pct!=null)?Number(r.total_pct):null); }
+function cqRawMetricC(r,cfg){ return cqUnitC(cfg)==='points'?cqRawPointsC(r):cqRawPctC(r); }
 function QualityView({client}){
   const [rows,setRows]=useState(null); const [cfgs,setCfgs]=useState([]); const [period,setPeriod]=useState('4w');
   useEffect(()=>{ let alive=true; (async()=>{
@@ -2002,27 +2007,28 @@ function QualityView({client}){
       {PB.map(([k,l])=><button key={k} onClick={()=>setPeriod(k)} style={{padding:'7px 13px',borderRadius:9,fontSize:13,fontWeight:700,cursor:'pointer',border:'1px solid '+(period===k?'#0f172a':'#cbd5e1'),background:period===k?'#0f172a':'#fff',color:period===k?'#fff':'#0f172a'}}>{l}</button>)}
     </div>
     {skills.length===0 ? <EmptyHint icon="📞" text="Für den gewählten Zeitraum liegen keine Call-Bewertungen vor." /> :
-      skills.map(sk=>{ const cfg=cqCfgC(cfgs,bySkill[sk][0].project_id,sk); const unit=cqUnitC(cfg); const metric=r=> unit==='points'? r.total_points : r.total_pct;
+      skills.map(sk=>{ const cfg=cqCfgC(cfgs,bySkill[sk][0].project_id,sk); const unit=cqUnitC(cfg); const metric=r=>cqRawMetricC(r,cfg);   // Ø fachlich (raw)
         const list=bySkill[sk].slice().sort((a,b)=>(metric(b)||0)-(metric(a)||0));
         const maxP=(list.find(r=>r.max_points!=null)||{}).max_points;
         const vals=list.map(metric).filter(x=>x!=null); const avg=vals.length?Math.round(vals.reduce((a,b)=>a+b,0)/vals.length*10)/10:null;
-        const d={green:0,amber:0,red:0}; list.forEach(r=>{ const a=cqAmpelC(r.total_pct,r.total_points,cfg); if(a.key!=='none')d[a.key]++; });
+        const nb=list.filter(cqIsBreachC).length;
+        const d={green:0,amber:0,red:0}; list.forEach(r=>{ const a=cqAmpelC(cqRawPctC(r),cqRawPointsC(r),cfg); if(a.key!=='none')d[a.key]++; });   // fachliche Verteilung
         const t=(d.green+d.amber+d.red)||1; const avgA=cqAmpelC(unit==='points'?null:avg, unit==='points'?avg:null, cfg);
         return <div key={sk} style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:16,padding:'20px 22px',marginBottom:16,boxShadow:'0 6px 20px rgba(15,23,42,.05)'}}>
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',flexWrap:'wrap',gap:10}}>
             <div style={{fontSize:18,fontWeight:800,color:'#0f172a'}}>{sk.charAt(0).toUpperCase()+sk.slice(1)}</div>
-            <div style={{textAlign:'right'}}><div style={{fontSize:26,fontWeight:800,color:avgA.color}}>{avg==null?'—':(unit==='points'?cqNumC(avg)+(maxP!=null?' / '+cqNumC(maxP):'')+' Pkt':avg+' %')}</div><div style={{fontSize:11,color:'#94a3b8'}}>Ø · Ziel ≥ {cqNumC(cfg.green_min)} {unit==='points'?'Pkt':'%'}</div></div>
+            <div style={{textAlign:'right'}}><div style={{fontSize:26,fontWeight:800,color:avgA.color}}>{avg==null?'—':(unit==='points'?cqNumC(avg)+(maxP!=null?' / '+cqNumC(maxP):'')+' Pkt':avg+' %')}</div><div style={{fontSize:11,color:'#94a3b8'}}>Ø fachlich · Ziel ≥ {cqNumC(cfg.green_min)} {unit==='points'?'Pkt':'%'}</div></div>
           </div>
           <div style={{display:'flex',height:10,borderRadius:5,overflow:'hidden',background:'#eef2f4',margin:'12px 0 6px'}}>
             {d.green>0&&<div style={{width:(d.green/t*100)+'%',background:'#059669'}}/>}
             {d.amber>0&&<div style={{width:(d.amber/t*100)+'%',background:'#d97706'}}/>}
             {d.red>0&&<div style={{width:(d.red/t*100)+'%',background:'#dc2626'}}/>}
           </div>
-          <div style={{fontSize:12,color:'#64748b',marginBottom:14}}>{list.length} Bewertung{list.length>1?'en':''} · {d.green} stark · {d.amber} solide · {d.red} unter Ziel</div>
+          <div style={{fontSize:12,color:'#64748b',marginBottom:14}}>{list.length} Bewertung{list.length>1?'en':''} · {d.green} stark · {d.amber} solide · {d.red} unter Ziel{nb>0&&<span style={{color:'#b91c1c',fontWeight:700}}> · ⛔ {nb} Compliance-Verstoß{nb>1?'e':''}</span>}</div>
           <div style={{display:'flex',flexDirection:'column',gap:6}}>
-            {list.map(r=>{ const a=cqAmpelC(r.total_pct,r.total_points,cfg); return <div key={r.id} style={{display:'flex',alignItems:'center',gap:12,padding:'8px 12px',border:'1px solid #eef2f7',borderRadius:8}}>
+            {list.map(r=>{ const a=cqAmpelC(r.total_pct,r.total_points,cfg); const br=cqIsBreachC(r); const rawTxt=unit==='points'?(cqNumC(cqRawPointsC(r))+(maxP!=null?' / '+cqNumC(maxP):'')+' Pkt'):(cqRawPctC(r)+' %'); return <div key={r.id} style={{display:'flex',alignItems:'center',gap:12,padding:'8px 12px',border:'1px solid '+(br?'#fecaca':'#eef2f7'),borderRadius:8,background:br?'#fef2f2':'#fff'}}>
               <span style={{width:9,height:9,borderRadius:'50%',background:a.color,flexShrink:0}}/>
-              <div style={{flex:1,minWidth:0,fontSize:14,fontWeight:600,color:'#0f172a',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r.employee_name}</div>
+              <div style={{flex:1,minWidth:0,fontSize:14,fontWeight:600,color:'#0f172a',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{br&&<span style={{color:'#b91c1c',fontWeight:800,marginRight:5}} title="Compliance-Verstoß">⛔</span>}{r.employee_name}{br&&<span style={{fontSize:11,fontWeight:600,color:'#b91c1c',marginLeft:6}}>Compliance-Verstoß · fachlich {rawTxt}</span>}</div>
               <span style={{fontSize:11,color:'#94a3b8'}}>{fmtDC(r.sampled_date)}</span>
               <span style={{fontSize:14,fontWeight:800,color:a.color,fontFamily:'monospace',width:64,textAlign:'right'}}>{unit==='points'?(r.total_points==null?'—':cqNumC(r.total_points)+' Pkt'):(r.total_pct==null?'—':Math.round(r.total_pct)+'%')}</span>
             </div>; })}

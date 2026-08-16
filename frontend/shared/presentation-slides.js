@@ -354,7 +354,8 @@
     var unit=(cs&&cs.unit==='points')?'points':'percent'; var cmax=cs&&cs.max;
     var st=R.useState(null), open=st[0], setOpen=st[1];
     var avgTxt=(cs&&cs.avg!=null)?(unit==='points'?(' · Ø '+fmtNum(cs.avg,1)+' Pkt'):(' · Ø '+fmtNum(cs.avg,0)+' %')):'';
-    var meta=count?((count)+' Stichprobe'+(count>1?'n':'')+avgTxt):'';
+    var breachTxt=(cs&&cs.breaches>0)?(' · ⛔ '+cs.breaches+' Compliance-Verstoß'+(cs.breaches>1?'e':'')):'';
+    var meta=count?((count)+' Stichprobe'+(count>1?'n':'')+avgTxt+breachTxt):'';
     var head=fondHead(P, lbl, 'Call-Qualität', meta);
     if(!count || (!best.length && !worst.length)){
       return Slide(ctx, [ head, panel(P, h('div',{style:{flex:1,display:'flex',alignItems:'center',justifyContent:'center',textAlign:'center'}},
@@ -365,7 +366,7 @@
     }
     function row(e,i){ var w=Math.max(4,Math.min(100,numOr(e.pct,0))); var clk=!!e._detail;
       return h('div',{key:i, onClick: clk?function(){ setOpen(e); }:null, style:{display:'flex',alignItems:'center',gap:'1.1cqw',padding:'0.85cqw 0',cursor:clk?'pointer':'default',borderBottom:'1px solid #f1f5f9'}},[
-        h('span',{key:'n',style:{flex:1,minWidth:0,fontSize:'1.5cqw',fontWeight:600,color:P.ink,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},e.name),
+        h('span',{key:'n',style:{flex:1,minWidth:0,fontSize:'1.5cqw',fontWeight:600,color:P.ink,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},[ e.breach?h('span',{key:'cb',style:{color:'#dc2626',fontWeight:800,marginRight:'.4cqw'},title:'Compliance-Verstoß'},'⛔'):null, e.name ]),
         h('div',{key:'b',style:{width:'26%',height:'0.9cqw',background:'#eef2f4',borderRadius:'.5cqw',overflow:'hidden',flexShrink:0}}, h('div',{style:{width:w+'%',height:'100%',background:e.color||P.onLight,borderRadius:'.5cqw'}})),
         h('span',{key:'v',style:{width:'7cqw',textAlign:'right',fontFamily:MONO,fontWeight:800,fontSize:'1.7cqw',color:e.color||P.ink,flexShrink:0}}, unit==='points'?(e.points==null?'—':fmtNum(e.points,1)+(cmax!=null?' / '+fmtNum(cmax,0):'')):(fmtNum(e.pct,0)+'%')),
         h('span',{key:'c',style:{width:'1.4cqw',textAlign:'right',fontSize:'1.5cqw',color:'#cbd5e1',flexShrink:0}}, clk?'›':'')

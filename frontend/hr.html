@@ -32566,7 +32566,7 @@ function CallQaCatalog({projects, showToast}){
   const [rows,setRows]=useState(null);
   const [edit,setEdit]=useState(null);   // 'new' | criterion | null
   const [showArchived,setShowArchived]=useState(false);
-  const blank={category:'',prompt:'',type:'points',max_points:1,weight:1,allow_na:true,hint:'',agent_hint:'',lh_yes:'',lh_partial:'',lh_no:''};
+  const blank={category:'',prompt:'',type:'points',max_points:1,weight:1,allow_na:true,hint:'',agent_hint:'',lh_yes:'',lh_partial:'',lh_no:'',compliance_critical:false};
   const [form,setForm]=useState(blank);
   const set=(k,v)=>setForm(f=>({...f,[k]:v}));
 
@@ -32607,14 +32607,16 @@ function CallQaCatalog({projects, showToast}){
   const cats=[...new Set((rows||[]).map(c=>c.category).filter(Boolean))];
   const totalWeight=(rows||[]).filter(c=>c.active).reduce((s,c)=>s+(Number(c.weight)||0),0);
   function openNew(){ setForm(blank); setEdit('new'); }
-  function openEdit(c){ const lh=c.level_hints||{}; setForm({category:c.category||'',prompt:c.prompt||'',type:c.type||'points',max_points:c.max_points==null?1:c.max_points,weight:c.weight==null?1:c.weight,allow_na:c.allow_na!==false,hint:c.hint||'',agent_hint:c.agent_hint||'',lh_yes:lh.yes||'',lh_partial:lh.partial||'',lh_no:lh.no||''}); setEdit(c); }
+  function openEdit(c){ const lh=c.level_hints||{}; setForm({category:c.category||'',prompt:c.prompt||'',type:c.type||'points',max_points:c.max_points==null?1:c.max_points,weight:c.weight==null?1:c.weight,allow_na:c.allow_na!==false,hint:c.hint||'',agent_hint:c.agent_hint||'',lh_yes:lh.yes||'',lh_partial:lh.partial||'',lh_no:lh.no||'',compliance_critical:!!c.compliance_critical}); setEdit(c); }
   async function save(){
     if(!form.prompt.trim()){ showToast&&showToast('Kriterium ist Pflicht','info'); return; }
-    const lh = form.type==='tristate' ? {yes:form.lh_yes.trim()||null, partial:form.lh_partial.trim()||null, no:form.lh_no.trim()||null} : null;
+    const compCrit = !!form.compliance_critical && (form.type==='tristate'||form.type==='yesno');
+    const lh = form.type==='tristate' ? {yes:form.lh_yes.trim()||null, partial:compCrit?null:(form.lh_partial.trim()||null), no:form.lh_no.trim()||null} : null;
     const anyLh = lh && (lh.yes||lh.partial||lh.no);
     const payload={ project_id:projId, skill:skill, category:form.category.trim()||null, prompt:form.prompt.trim(),
       type:form.type, max_points:cqTypeMax(form.type,form.max_points), weight:Number(form.weight)||1,
-      allow_na:!!form.allow_na, hint:form.hint.trim()||null, agent_hint:form.agent_hint.trim()||null, level_hints: anyLh?lh:null,
+      allow_na: compCrit?false:!!form.allow_na, hint:form.hint.trim()||null, agent_hint:form.agent_hint.trim()||null, level_hints: anyLh?lh:null,
+      compliance_critical: compCrit,
       updated_at:new Date().toISOString() };
     let error;
     if(edit==='new'){ const maxOrd=Math.max(0,...(rows||[]).map(c=>c.order_index||0));
@@ -32705,7 +32707,7 @@ function CallQaCatalog({projects, showToast}){
             <span style={{fontSize:11,fontWeight:700,padding:'2px 7px',borderRadius:5,whiteSpace:'nowrap',background:'#eef2ff',color:'#4338ca'}}>{cqTypeLabel(c.type)}{(c.type==='points'||c.type==='tristate')?' · max '+nf(c.max_points):''}</span>
             <div style={{flex:1,minWidth:0}}>
               <div style={{fontSize:13,fontWeight:600}}>{c.prompt}{!c.active&&<span style={{marginLeft:6,fontSize:10,color:'var(--muted)'}}>(archiviert)</span>}</div>
-              <div style={{fontSize:11,color:'var(--muted)',marginTop:2}}>Gewicht {nf(c.weight)}{c.allow_na?' · „nicht anwendbar" erlaubt':''}{c.agent_hint?' · 👤 Agenten-Hilfe':''}{c.level_hints?' · 🧭 Ausprägungen':''}{c.hint?' · '+c.hint:''}</div>
+              <div style={{fontSize:11,color:'var(--muted)',marginTop:2}}>Gewicht {nf(c.weight)}{c.compliance_critical?' · ':''}{c.compliance_critical&&<span style={{color:'#b91c1c',fontWeight:700}}>⛔ Compliance-kritisch</span>}{c.allow_na?' · „nicht anwendbar" erlaubt':''}{c.agent_hint?' · 👤 Agenten-Hilfe':''}{c.level_hints?' · 🧭 Ausprägungen':''}{c.hint?' · '+c.hint:''}</div>
             </div>
             {c.active ? <React.Fragment>
               <button className="btn btn-sm" onClick={()=>openEdit(c)}>Bearbeiten</button>
@@ -32739,15 +32741,23 @@ function CallQaCatalog({projects, showToast}){
               <div className="form-group" style={{marginTop:10}}><label className="form-label">Hilfestellung für den Agenten (optional)</label>
                 <textarea className="form-input" rows={2} style={{resize:'vertical'}} value={form.agent_hint} onChange={e=>set('agent_hint',e.target.value)} placeholder="Wie macht der Agent das gut? (sichtbar auch im Mitarbeiter-Portal)"/>
               </div>
+              {(form.type==='tristate'||form.type==='yesno') && (
+                <div className="form-group" style={{marginTop:10}}>
+                  <label style={{fontSize:13,display:'flex',alignItems:'center',gap:7,cursor:'pointer',fontWeight:700}}><input type="checkbox" checked={!!form.compliance_critical} onChange={e=>set('compliance_critical',e.target.checked)}/>⛔ Compliance-kritisch</label>
+                  {form.compliance_critical && <div style={{marginTop:6,padding:'8px 10px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:8,color:'#b91c1c',fontSize:11,lineHeight:1.5}}>
+                    Nur <b>ja/nein</b>, keine Teilweise-Stufe und kein „nicht anwendbar". Bei <b>„nein"</b> fällt der <b>gesamte Call auf 0 Punkte</b>, unabhängig von allen anderen Kriterien. Die fachliche Punktzahl bleibt separat sichtbar.
+                  </div>}
+                </div>
+              )}
               {form.type==='tristate' && (
                 <div style={{marginTop:10,padding:'12px 14px',background:'var(--surface-2)',borderRadius:8}}>
                   <div style={{fontSize:12,fontWeight:700,marginBottom:8}}>Auswerter-Ausprägungen <span style={{fontWeight:400,color:'var(--muted)'}}>— was bedeutet welche Stufe konkret?</span></div>
                   <div className="form-group"><label className="form-label" style={{color:'#059669'}}>ja (1 Punkt)</label>
                     <textarea className="form-input" rows={2} style={{resize:'vertical'}} value={form.lh_yes} onChange={e=>set('lh_yes',e.target.value)} placeholder="Wann wird volle Punktzahl vergeben?"/>
                   </div>
-                  <div className="form-group"><label className="form-label" style={{color:'#d97706'}}>teilweise (0,5 Punkte)</label>
+                  {!form.compliance_critical && <div className="form-group"><label className="form-label" style={{color:'#d97706'}}>teilweise (0,5 Punkte)</label>
                     <textarea className="form-input" rows={2} style={{resize:'vertical'}} value={form.lh_partial} onChange={e=>set('lh_partial',e.target.value)} placeholder="Wann gibt es halbe Punktzahl?"/>
-                  </div>
+                  </div>}
                   <div className="form-group"><label className="form-label" style={{color:'#dc2626'}}>nein (0 Punkte)</label>
                     <textarea className="form-input" rows={2} style={{resize:'vertical'}} value={form.lh_no} onChange={e=>set('lh_no',e.target.value)} placeholder="Wann gibt es keine Punkte?"/>
                   </div>
@@ -32763,7 +32773,9 @@ function CallQaCatalog({projects, showToast}){
                   <input className="form-input" type="number" min="0" step="0.5" value={form.weight} onChange={e=>set('weight',e.target.value)}/>
                 </div>
                 <div className="form-group" style={{alignSelf:'flex-end'}}>
-                  <label style={{fontSize:13,display:'flex',alignItems:'center',gap:7,cursor:'pointer'}}><input type="checkbox" checked={form.allow_na} onChange={e=>set('allow_na',e.target.checked)}/>„Nicht anwendbar" erlauben</label>
+                  {(form.compliance_critical&&(form.type==='tristate'||form.type==='yesno'))
+                    ? <span style={{fontSize:12,color:'var(--muted)'}}>„Nicht anwendbar" bei Compliance-kritisch deaktiviert</span>
+                    : <label style={{fontSize:13,display:'flex',alignItems:'center',gap:7,cursor:'pointer'}}><input type="checkbox" checked={form.allow_na} onChange={e=>set('allow_na',e.target.checked)}/>„Nicht anwendbar" erlauben</label>}
                 </div>
               </div>
               <div className="form-group" style={{marginTop:10}}><label className="form-label">Hinweis für den Prüfer (optional)</label>
@@ -32771,8 +32783,8 @@ function CallQaCatalog({projects, showToast}){
               </div>
               <div style={{marginTop:10,fontSize:11,color:'var(--muted)'}}>
                 {form.type==='points' && ('Punkte 0…'+(Number(form.max_points)||1)+' je Kriterium, gewichtet in den Score.')}
-                {form.type==='yesno' && 'Ja = volle Punktzahl, Nein = 0 — gewichtet in den Score.'}
-                {form.type==='tristate' && ('Dreistufig: ja = '+(Number(form.max_points)||1)+', teilweise = '+((Number(form.max_points)||1)/2)+', nein = 0. „Nicht anwendbar" zählt wie ja (volle Punkte).')}
+                {form.type==='yesno' && (form.compliance_critical?'Compliance-kritisch: Ja = volle Punkte, Nein → gesamter Call = 0.':'Ja = volle Punktzahl, Nein = 0 — gewichtet in den Score.')}
+                {form.type==='tristate' && (form.compliance_critical?('Compliance-kritisch: ja = '+(Number(form.max_points)||1)+', nein = 0. Bei „nein" fällt der gesamte Call auf 0 Punkte.'):('Dreistufig: ja = '+(Number(form.max_points)||1)+', teilweise = '+((Number(form.max_points)||1)/2)+', nein = 0. „Nicht anwendbar" zählt wie ja (volle Punkte).'))}
                 {form.type==='grade' && 'Note 1–5 (1 = beste), in Punkte umgerechnet und gewichtet in den Score.'}
               </div>
             </div>
@@ -32838,6 +32850,16 @@ function cqAmpel(pct, cfg){
 function cqUnit(cfg){ return (cfg&&cfg.threshold_unit)==='points'?'points':'percent'; }
 function cqAmpelU(pct, points, cfg){ return cqUnit(cfg)==='points' ? cqAmpel(points, cfg) : cqAmpel(pct, cfg); }
 function cqNum(n){ return Number(n||0).toLocaleString('de-DE',{maximumFractionDigits:1}); }
+// ── Compliance: zwei getrennte Achsen ──
+// Ein Verstoß nullt total_points/total_pct. Fürs FACHLICHE (Ø/Rangliste/Trend) zählt raw_points
+// (Fallback auf total_points für Alt-Stichproben ohne den Wert). Verstöße werden SEPARAT gezählt.
+function cqIsBreach(s){ return !!(s&&s.compliance_failed); }
+function cqRawPoints(s){ return (s&&s.raw_points!=null)?Number(s.raw_points):((s&&s.total_points!=null)?Number(s.total_points):null); }
+function cqRawPct(s){ const mp=(s&&s.max_points!=null)?Number(s.max_points):null; const rp=cqRawPoints(s); return (mp&&rp!=null)?Math.round(rp/mp*1000)/10:((s&&s.total_pct!=null)?Number(s.total_pct):null); }
+// Fachlicher Metrik-Wert je nach Ampel-Einheit (Punkte vs. Prozent) — für Aggregate.
+function cqRawMetric(s,cfg){ return cqUnit(cfg)==='points'?cqRawPoints(s):cqRawPct(s); }
+// Verstoß-Badge (rote Compliance-Ampel), sonst normale einheitsbewusste Ampel.
+function cqAmpelS(s,cfg){ return cqIsBreach(s)?{key:'red',color:'#dc2626',bg:'#fef2f2',label:'⛔ Compliance-Verstoß'}:cqAmpelU(s.total_pct,s.total_points,cfg); }
 function cqResolveConfig(cfgs, projId, skill){
   const find=(p,s)=>(cfgs||[]).find(c=>(c.project_id||null)===(p||null)&&(c.skill||null)===(s||null));
   return find(projId,skill)||find(projId,null)||find(null,null)||{green_min:90,yellow_min:75};
@@ -32877,15 +32899,17 @@ function CqRing({pct, ampel, size, big, sub}){
   </svg>;
 }
 function CqTrend({samples, cfg}){
-  const pts=samples.slice().reverse().filter(s=>s.total_pct!=null);
+  // Fachliche Kurve (raw) — ein Compliance-Verstoß nullt den Call, soll aber die
+  // Leistungskurve nicht verzerren. Verstoß-Punkte werden rot umrandet markiert.
+  const pts=samples.slice().reverse().map(s=>({v:cqRawPct(s),breach:cqIsBreach(s),s})).filter(p=>p.v!=null);
   if(pts.length<2) return null;
-  const ys0=pts.map(s=>s.total_pct);
+  const ys0=pts.map(p=>p.v);
   const W=220,H=46,mn=Math.min.apply(null,ys0),mx=Math.max.apply(null,ys0),span=Math.max(1,mx-mn);
   const xs=i=>i/(pts.length-1)*(W-8)+4, ys=v=>H-((v-mn)/span)*(H-12)-6;
-  const d=pts.map((s,i)=>(i?'L':'M')+xs(i).toFixed(1)+' '+ys(s.total_pct).toFixed(1)).join(' ');
+  const d=pts.map((p,i)=>(i?'L':'M')+xs(i).toFixed(1)+' '+ys(p.v).toFixed(1)).join(' ');
   return <svg width={W} height={H} viewBox={'0 0 '+W+' '+H}>
     <path d={d} fill="none" stroke="#cbd5e1" strokeWidth="2"/>
-    {pts.map((s,i)=>{ const a=cqAmpelU(s.total_pct,s.total_points,cfg); return <circle key={i} cx={xs(i)} cy={ys(s.total_pct)} r={i===pts.length-1?4.5:2.8} fill={a.color}/>; })}
+    {pts.map((p,i)=>{ const a=cqAmpelU(cqRawPct(p.s),cqRawPoints(p.s),cfg); return <circle key={i} cx={xs(i)} cy={ys(p.v)} r={i===pts.length-1?4.5:2.8} fill={p.breach?'#dc2626':a.color} stroke={p.breach?'#dc2626':'none'} strokeWidth={p.breach?2:0}/>; })}
   </svg>;
 }
 function CqBreakdown({scores, cfg}){
@@ -32897,7 +32921,7 @@ function CqBreakdown({scores, cfg}){
         {catHead && <div style={{fontSize:10,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em',margin:'10px 0 4px'}}>{catHead}</div>}
         <div style={{display:'flex',alignItems:'center',gap:10,padding:'5px 0'}}>
           <div style={{flex:1,minWidth:0}}>
-            <div style={{fontSize:12,fontWeight:600}}>{s.prompt_snapshot}</div>
+            <div style={{fontSize:12,fontWeight:600}}>{s.prompt_snapshot}{s.compliance_critical_snapshot&&<span style={{marginLeft:6,fontSize:9,fontWeight:800,color:'#b91c1c'}}>⛔</span>}</div>
             {s.comment && <div style={{fontSize:11,color:'var(--muted)',marginTop:1}}>{s.comment}</div>}
           </div>
           <div style={{width:120,height:8,background:'#eef2f4',borderRadius:5,overflow:'hidden',flexShrink:0}}>{f!=null && <div style={{width:(f*100)+'%',height:'100%',background:col}}/>}</div>
@@ -32908,7 +32932,8 @@ function CqBreakdown({scores, cfg}){
   </div>;
 }
 function CqSampleCard({sample, cfg}){
-  const a=cqAmpelU(sample.total_pct,sample.total_points,cfg); const unit=cqUnit(cfg); const {strong,weak}=cqRankScores(sample._scores); const [open,setOpen]=useState(false);
+  const breach=cqIsBreach(sample); const a=cqAmpelS(sample,cfg); const unit=cqUnit(cfg); const {strong,weak}=cqRankScores(sample._scores); const [open,setOpen]=useState(false);
+  const rawTxt = unit==='points' ? (cqNum(cqRawPoints(sample))+' / '+cqNum(sample.max_points!=null?sample.max_points:0)+' Pkt') : (cqRawPct(sample)+' %');
   const big = unit==='points' ? (sample.total_points==null?'—':cqNum(sample.total_points)) : (sample.total_pct==null?'—':Math.round(sample.total_pct));
   const sub = unit==='points' ? ('/ '+cqNum(sample.max_points!=null?sample.max_points:0)+' Pkt') : 'Prozent';
   return <div style={{border:'1px solid var(--border)',borderRadius:12,padding:16,background:'var(--card)',marginBottom:12}}>
@@ -32918,7 +32943,8 @@ function CqSampleCard({sample, cfg}){
         <span style={{display:'inline-block',fontSize:12,fontWeight:800,padding:'3px 11px',borderRadius:20,background:a.bg,color:a.color}}>{a.label}</span>
         <div style={{fontSize:12,color:'var(--muted)',marginTop:6}}>{sample.sampled_date} · KW {sample.kw}/{sample.year} · {sample.project_id||'—'}{sample.skill?' · '+sample.skill:''}{sample.conducted_by_name?' · '+sample.conducted_by_name:''}</div>
         {sample.note && <div style={{fontSize:13,marginTop:6}}>{sample.note}</div>}
-        {sample.feedback_text && <div style={{fontSize:12,marginTop:8,padding:'8px 10px',borderRadius:8,background:a.bg,color:a.color,fontWeight:600}}>{sample.feedback_text}</div>}
+        {breach && <div style={{fontSize:12,marginTop:8,padding:'8px 10px',borderRadius:8,background:'#fef2f2',border:'1px solid #fecaca',color:'#b91c1c',fontWeight:600}}>Gesamt auf <b>0</b> wegen Compliance-Verstoß. Fachliche Leistung: <b>{rawTxt}</b> — zählt in den fachlichen Schnitt, nicht in die 0.</div>}
+        {!breach && sample.feedback_text && <div style={{fontSize:12,marginTop:8,padding:'8px 10px',borderRadius:8,background:a.bg,color:a.color,fontWeight:600}}>{sample.feedback_text}</div>}
       </div>
     </div>
     <div style={{display:'flex',gap:16,flexWrap:'wrap',marginTop:12}}>
@@ -32936,29 +32962,32 @@ function CqSampleCard({sample, cfg}){
   </div>;
 }
 function CqOlderRow({sample, cfg}){
-  const a=cqAmpelU(sample.total_pct,sample.total_points,cfg); const unit=cqUnit(cfg); const [open,setOpen]=useState(false);
+  const breach=cqIsBreach(sample); const a=cqAmpelS(sample,cfg); const unit=cqUnit(cfg); const [open,setOpen]=useState(false);
   const num = unit==='points' ? (sample.total_points==null?'—':cqNum(sample.total_points)) : (sample.total_pct==null?'—':Math.round(sample.total_pct));
+  const rawTxt = unit==='points' ? (cqNum(cqRawPoints(sample))+' / '+cqNum(sample.max_points!=null?sample.max_points:0)+' Pkt') : (cqRawPct(sample)+' %');
   return <div style={{border:'1px solid var(--border)',borderRadius:8,marginBottom:6,overflow:'hidden'}}>
     <div onClick={()=>setOpen(o=>!o)} style={{display:'flex',alignItems:'center',gap:12,padding:'8px 12px',cursor:'pointer'}}>
       <span style={{width:48,textAlign:'center',fontWeight:800,fontFamily:'var(--font-mono)',color:a.color}}>{num}</span>
       <span style={{width:9,height:9,borderRadius:'50%',background:a.color,flexShrink:0}}/>
-      <div style={{flex:1,minWidth:0,fontSize:12}}>{sample.sampled_date} · KW {sample.kw}/{sample.year} · {sample.project_id||'—'}{sample.skill?' · '+sample.skill:''}</div>
+      <div style={{flex:1,minWidth:0,fontSize:12}}>{breach&&<span style={{color:'#b91c1c',fontWeight:800,marginRight:5}}>⛔</span>}{sample.sampled_date} · KW {sample.kw}/{sample.year} · {sample.project_id||'—'}{sample.skill?' · '+sample.skill:''}</div>
       <span style={{fontSize:11,color:'var(--muted)'}}>{open?'▲':'▼'}</span>
     </div>
-    {open && <div style={{padding:'0 12px 12px'}}><CqBreakdown scores={sample._scores} cfg={cfg}/>{sample.feedback_text&&<div style={{fontSize:12,marginTop:8,padding:'6px 9px',borderRadius:7,background:a.bg,color:a.color,fontWeight:600}}>{sample.feedback_text}</div>}{sample.note&&<div style={{fontSize:12,marginTop:6,color:'var(--muted)'}}>{sample.note}</div>}</div>}
+    {open && <div style={{padding:'0 12px 12px'}}><CqBreakdown scores={sample._scores} cfg={cfg}/>{breach&&<div style={{fontSize:12,marginTop:8,padding:'6px 9px',borderRadius:7,background:'#fef2f2',border:'1px solid #fecaca',color:'#b91c1c',fontWeight:600}}>Gesamt auf 0 wegen Compliance-Verstoß · fachlich {rawTxt}</div>}{!breach&&sample.feedback_text&&<div style={{fontSize:12,marginTop:8,padding:'6px 9px',borderRadius:7,background:a.bg,color:a.color,fontWeight:600}}>{sample.feedback_text}</div>}{sample.note&&<div style={{fontSize:12,marginTop:6,color:'var(--muted)'}}>{sample.note}</div>}</div>}
   </div>;
 }
 function CqArchive({samples, cfg}){
-  const unit=cqUnit(cfg); const metric=s=> unit==='points'? s.total_points : s.total_pct;
+  const unit=cqUnit(cfg); const metric=s=>cqRawMetric(s,cfg);   // Ø auf fachlicher Rohpunktzahl (Verstoß nicht eingerechnet)
   const sorted=samples.slice().sort((a,b)=>String(b.sampled_date).localeCompare(String(a.sampled_date)));
   const latest=sorted[0], older=sorted.slice(1);
   const last3=sorted.map(metric).filter(x=>x!=null).slice(0,3);
   const avg=last3.length?Math.round(last3.reduce((a,b)=>a+b,0)/last3.length*10)/10:null;
   const avgA=cqAmpel(avg,cfg);
+  const breaches=sorted.filter(cqIsBreach).length;
   return <div>
     <div style={{display:'flex',gap:24,alignItems:'center',flexWrap:'wrap',marginBottom:14}}>
       <div><div style={{fontSize:12,color:'var(--muted)',fontWeight:700}}>Stichproben</div><div style={{fontSize:22,fontWeight:800}}>{sorted.length}</div></div>
-      <div><div style={{fontSize:12,color:'var(--muted)',fontWeight:700}}>Ø letzte 3</div><div style={{fontSize:22,fontWeight:800,color:avgA.color}}>{avg==null?'—':(unit==='points'?cqNum(avg)+' Pkt':avg+' %')}</div></div>
+      <div><div style={{fontSize:12,color:'var(--muted)',fontWeight:700}}>Ø fachlich (letzte 3)</div><div style={{fontSize:22,fontWeight:800,color:avgA.color}}>{avg==null?'—':(unit==='points'?cqNum(avg)+' Pkt':avg+' %')}</div></div>
+      {breaches>0 && <div><div style={{fontSize:12,color:'#b91c1c',fontWeight:700}}>⛔ Compliance-Verstöße</div><div style={{fontSize:22,fontWeight:800,color:'#dc2626'}}>{breaches}</div></div>}
       <div style={{marginLeft:'auto'}}><CqTrend samples={sorted} cfg={cfg}/></div>
     </div>
     {latest && <CqSampleCard sample={latest} cfg={cfg}/>}
@@ -33013,18 +33042,27 @@ function CallSampleModal({emp, onClose, onSaved}){
   })(); },[]);
   const setV=(cid,patch)=>setValues(v=>({...v,[cid]:{...(v[cid]||{}),...patch}}));
   const preview=(bogen||[]).map(c=>{ const v=values[c.id]||{}; return {type_snapshot:c.type, points:v.na?null:(v.points==null?null:v.points), max_points_snapshot:cqTypeMax(c.type,c.max_points), weight_snapshot:c.weight, na:!!v.na}; });
-  const pct=cqTotalPct(preview); const pts=cqPoints(preview); const unit=cqUnit(cfg);
+  const rawPct=cqTotalPct(preview); const rawPts=cqPoints(preview); const unit=cqUnit(cfg);
   const fullMax=(bogen||[]).reduce((s,c)=>s+(Number(c.weight)||1)*cqTypeMax(c.type,c.max_points),0);   // gesamte mögliche Punktzahl des Bogens
-  const started = pct!=null;   // mind. ein Kriterium bewertet
-  const amp = started ? cqAmpelU(pct, pts.got, cfg) : {key:'none',color:'#94a3b8',bg:'#f1f5f9',label:'noch nicht bewertet'};
+  // Compliance-Verstoß: ein compliance-kritisches Kriterium wurde explizit mit „nein" (0) bewertet.
+  // → gesamter Call auf 0, unabhängig von allen anderen. Die fachliche Punktzahl (rawPts) bleibt erhalten.
+  const breachCrit=(bogen||[]).find(c=>{ const v=values[c.id]||{}; return c.compliance_critical && !v.na && v.points===0; })||null;
+  const breach=!!breachCrit;
+  const pct = breach ? 0 : rawPct;                         // offizieller Score (0 bei Verstoß)
+  const pts = breach ? {got:0, max:rawPts.max} : rawPts;
+  const started = rawPct!=null;   // mind. ein Kriterium bewertet
+  const amp = !started ? {key:'none',color:'#94a3b8',bg:'#f1f5f9',label:'noch nicht bewertet'}
+    : breach ? {key:'red',color:'#dc2626',bg:'#fef2f2',label:'Compliance-Verstoß'}
+    : cqAmpelU(pct, pts.got, cfg);
   const resultNum = unit==='points' ? (cqNum(pts.got)+' / '+cqNum(fullMax)+' Pkt') : (started ? (pct+' %') : '—');
-  const feedbackFor = started ? (amp.key==='green'?(cfg.feedback_green||null) : amp.key==='amber'?(cfg.feedback_amber||null) : amp.key==='red'?(cfg.feedback_red||null) : null) : null;
+  const feedbackFor = (started && !breach) ? (amp.key==='green'?(cfg.feedback_green||null) : amp.key==='amber'?(cfg.feedback_amber||null) : amp.key==='red'?(cfg.feedback_red||null) : null) : null;
   async function save(){
     if(isExample||pct==null||busy) return; setBusy(true);
-    const scoreRows=bogen.map(c=>{ const v=values[c.id]||{}; return { criterion_id:c.id, order_index:c.order_index||0, category_snapshot:c.category||null, prompt_snapshot:c.prompt, type_snapshot:c.type, max_points_snapshot:cqTypeMax(c.type,c.max_points), weight_snapshot:Number(c.weight)||1, points:v.na?null:(v.points==null?null:Number(v.points)), na:!!v.na, comment:(v.comment&&v.comment.trim())||null, level_hints_snapshot:(c.type==='tristate'&&c.level_hints)?c.level_hints:null }; });
+    const scoreRows=bogen.map(c=>{ const v=values[c.id]||{}; return { criterion_id:c.id, order_index:c.order_index||0, category_snapshot:c.category||null, prompt_snapshot:c.prompt, type_snapshot:c.type, max_points_snapshot:cqTypeMax(c.type,c.max_points), weight_snapshot:Number(c.weight)||1, points:v.na?null:(v.points==null?null:Number(v.points)), na:!!v.na, comment:(v.comment&&v.comment.trim())||null, level_hints_snapshot:(c.type==='tristate'&&c.level_hints)?c.level_hints:null, compliance_critical_snapshot:!!c.compliance_critical }; });
     const [Y,M,D]=date.split('-').map(Number); const cw=getISOWeek(new Date(Y,M-1,D));
     let uid=null; try{ const u=await sb.auth.getUser(); uid=u&&u.data&&u.data.user?u.data.user.id:null; }catch(e){}
-    const {data:s,error}=await sb.from('call_samples').insert({ employee_id:emp.id, sampled_date:date, kw:cw.kw, year:cw.year, project_id:projId, skill:skill, criteria_scope:scope, call_ref:callRef.trim()||null, note:note.trim()||null, total_pct:pct, total_points:pts.got, max_points:pts.max, feedback_text:feedbackFor||null, status:'done', conducted_by:uid, conducted_by_name:condName||null, conducted_at:new Date().toISOString() }).select().single();
+    // Bei Verstoß: total_* auf 0 (pct/pts sind bereits genullt), raw_points = fachliche Summe, compliance_failed=true.
+    const {data:s,error}=await sb.from('call_samples').insert({ employee_id:emp.id, sampled_date:date, kw:cw.kw, year:cw.year, project_id:projId, skill:skill, criteria_scope:scope, call_ref:callRef.trim()||null, note:note.trim()||null, total_pct:pct, total_points:pts.got, max_points:pts.max, raw_points:rawPts.got, compliance_failed:breach, feedback_text:feedbackFor||null, status:'done', conducted_by:uid, conducted_by_name:condName||null, conducted_at:new Date().toISOString() }).select().single();
     if(error){ setBusy(false); alert('Nicht gespeichert: '+(error.message||'')); return; }
     const ins=scoreRows.map(r=>({...r, sample_id:s.id}));
     const {error:e2}=await sb.from('call_scores').insert(ins);
@@ -33056,18 +33094,19 @@ function CallSampleModal({emp, onClose, onSaved}){
               <div style={{padding:'8px 0',borderBottom:'1px solid var(--border)'}}>
                 <div style={{display:'flex',alignItems:'flex-start',gap:10,flexWrap:'wrap'}}>
                   <div style={{flex:1,minWidth:150}}>
-                    <div style={{fontSize:13,fontWeight:600,opacity:v.na?0.5:1}}>{c.prompt}</div>
+                    <div style={{fontSize:13,fontWeight:600,opacity:v.na?0.5:1}}>{c.prompt}{c.compliance_critical&&<span style={{marginLeft:6,fontSize:10,fontWeight:800,color:'#b91c1c',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:5,padding:'1px 5px',whiteSpace:'nowrap'}}>⛔ Compliance-kritisch</span>}</div>
                     {c.agent_hint && <div style={{fontSize:11,color:'var(--muted)',marginTop:2}}>💡 {c.agent_hint}</div>}
                     {c.hint && <div style={{fontSize:11,color:'var(--muted)',marginTop:1}}>{c.hint}</div>}
                   </div>
                   {!v.na && <div style={{display:'flex',gap:6,alignItems:'center',flexShrink:0}}>
                     {c.type==='points' && <React.Fragment><input className="form-input" type="number" min="0" max={max} step="1" style={{width:80}} value={v.points==null?'':v.points} onChange={e=>setV(c.id,{points:e.target.value===''?null:Number(e.target.value)})}/><span style={{fontSize:11,color:'var(--muted)'}}>/ {nf(max)}</span></React.Fragment>}
                     {c.type==='yesno' && [['1','Ja'],['0','Nein']].map(([val,l])=><button key={val} className="btn btn-sm" style={{background:String(v.points)===val?(val==='1'?'#059669':'#dc2626'):'transparent',color:String(v.points)===val?'#fff':'var(--text)',border:'1px solid var(--border)',fontWeight:700}} onClick={()=>setV(c.id,{points:Number(val)})}>{l}</button>)}
-                    {c.type==='tristate' && [['ja',max,'#059669'],['teilw.',max/2,'#d97706'],['nein',0,'#dc2626']].map(([l,val,col])=>{ const sel=Number(v.points)===val; return <button key={l} className="btn btn-sm" style={{background:sel?col:'transparent',color:sel?'#fff':'var(--text)',border:'1px solid var(--border)',fontWeight:700}} onClick={()=>setV(c.id,{points:val})}>{l}</button>; })}
+                    {c.type==='tristate' && (c.compliance_critical?[['ja',max,'#059669'],['nein',0,'#dc2626']]:[['ja',max,'#059669'],['teilw.',max/2,'#d97706'],['nein',0,'#dc2626']]).map(([l,val,col])=>{ const sel=Number(v.points)===val; return <button key={l} className="btn btn-sm" style={{background:sel?col:'transparent',color:sel?'#fff':'var(--text)',border:'1px solid var(--border)',fontWeight:700}} onClick={()=>setV(c.id,{points:val})}>{l}</button>; })}
                     {c.type==='grade' && [1,2,3,4,5].map(n=><button key={n} className="btn btn-sm" style={{minWidth:34,background:v.points===n?fbGradeColor(n):'transparent',color:v.points===n?'#fff':'var(--text)',border:'1px solid var(--border)',fontWeight:700}} onClick={()=>setV(c.id,{points:n})}>{n}</button>)}
                   </div>}
-                  {c.allow_na && <label style={{fontSize:11,display:'flex',alignItems:'center',gap:4,color:'var(--muted)',cursor:'pointer',flexShrink:0}} title="Nicht anwendbar — zählt wie ja (volle Punkte)"><input type="checkbox" checked={!!v.na} onChange={e=>setV(c.id,{na:e.target.checked})}/>n.a.</label>}
+                  {c.allow_na && !c.compliance_critical && <label style={{fontSize:11,display:'flex',alignItems:'center',gap:4,color:'var(--muted)',cursor:'pointer',flexShrink:0}} title="Nicht anwendbar — zählt wie ja (volle Punkte)"><input type="checkbox" checked={!!v.na} onChange={e=>setV(c.id,{na:e.target.checked})}/>n.a.</label>}
                 </div>
+                {c.compliance_critical && !v.na && v.points===0 && <div style={{marginTop:6,padding:'6px 9px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:6,color:'#b91c1c',fontSize:11,fontWeight:700}}>⛔ Compliance-Verstoß — der gesamte Call wird mit 0 Punkten gewertet.</div>}
                 {c.type==='tristate' && c.level_hints && !v.na && <div style={{marginTop:6,fontSize:11,lineHeight:1.5,background:'var(--surface-2)',borderRadius:6,padding:'6px 8px'}}>
                   {c.level_hints.yes && <div><b style={{color:'#059669'}}>ja:</b> <span style={{color:'var(--muted)'}}>{c.level_hints.yes}</span></div>}
                   {c.level_hints.partial && <div><b style={{color:'#d97706'}}>teilw.:</b> <span style={{color:'var(--muted)'}}>{c.level_hints.partial}</span></div>}
@@ -33087,6 +33126,9 @@ function CallSampleModal({emp, onClose, onSaved}){
             <span style={{fontSize:22,fontWeight:800,fontFamily:'var(--font-mono)',color:amp.color}}>{resultNum}</span>
             <span style={{fontSize:12,fontWeight:800,padding:'2px 9px',borderRadius:20,background:amp.bg,color:amp.color}}>{amp.label}</span>
           </div>
+          {breach && <div style={{marginTop:10,padding:'8px 10px',borderRadius:8,background:'#fef2f2',border:'1px solid #fecaca',color:'#b91c1c',fontSize:12,lineHeight:1.5}}>
+            <b>⛔ Compliance-Verstoß{breachCrit&&breachCrit.prompt?' bei „'+breachCrit.prompt+'"':''}.</b> Der gesamte Call wird mit <b>0 Punkten</b> gewertet. Fachliche Leistung: <b>{cqNum(rawPts.got)} / {cqNum(fullMax)} Pkt</b> — bleibt separat sichtbar und zählt in den fachlichen Schnitt, nicht in die 0.
+          </div>}
         </React.Fragment>}
       </div>
       <div className="modal-footer" style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
@@ -33161,7 +33203,7 @@ function CallQaOverview({projects, employees, showToast}){
   const projName=id=>{const p=projList.find(x=>x.id===id);return p?p.name:(id||'—');};
   const skillLabel=(pid,sk)=>{ const p=projList.find(x=>x.id===pid); const s=p&&Array.isArray(p.skills)?p.skills.find(z=>String((z&&z.key)||z).toLowerCase()===sk):null; return s?((s.label)||(s.key)||s):(sk||'—'); };
   useEffect(()=>{ let alive=true; (async()=>{ setRows(null);
-    let q=sb.from('call_samples').select('id,employee_id,project_id,skill,total_pct,total_points,max_points,sampled_date').eq('status','done');
+    let q=sb.from('call_samples').select('id,employee_id,project_id,skill,total_pct,total_points,max_points,raw_points,compliance_failed,sampled_date').eq('status','done');
     const from=cqPeriodFrom(period); if(from) q=q.gte('sampled_date',from);
     if(projFilter!=='all') q=q.eq('project_id',projFilter);
     const {data}=await q.order('sampled_date',{ascending:false});
@@ -33171,17 +33213,21 @@ function CallQaOverview({projects, employees, showToast}){
 
   const cfgOf=(pid,sk)=>cqResolveConfig(cfgs,pid,sk);
   const dkey=a=>a.key==='green'?'green':a.key==='amber'?'amber':'red';
-  const withA=(rows||[]).map(s=>({...s,_a:cqAmpelU(s.total_pct,s.total_points,cfgOf(s.project_id,(s.skill||'').toLowerCase()))}));
+  // Zwei Ampeln je Stichprobe: _aRaw = fachlich (raw, für Ø/Verteilung), _aOff = offiziell (Verstoß→rot, für die Einzel-Liste).
+  const withA=(rows||[]).map(s=>{ const c=cfgOf(s.project_id,(s.skill||'').toLowerCase());
+    return {...s,_c:c,_aRaw:cqAmpelU(cqRawPct(s),cqRawPoints(s),c),_aOff:cqAmpelS(s,c)}; });
   const n=withA.length;
-  const avg=n?Math.round(withA.reduce((a,s)=>a+Number(s.total_pct||0),0)/n):null;   // Übersicht-Ø in % (über Bögen vergleichbar)
-  const dist={green:0,amber:0,red:0}; withA.forEach(s=>{ if(s.total_pct!=null) dist[dkey(s._a)]++; });
+  const rawPcts=withA.map(cqRawPct).filter(x=>x!=null);
+  const avg=rawPcts.length?Math.round(rawPcts.reduce((a,b)=>a+b,0)/rawPcts.length):null;   // Ø fachlich in % (über Bögen vergleichbar)
+  const breaches=withA.filter(cqIsBreach).length;
+  const dist={green:0,amber:0,red:0}; withA.forEach(s=>{ if(cqRawPct(s)!=null) dist[dkey(s._aRaw)]++; });   // fachliche Verteilung
   const avgA=cqAmpel(avg,{green_min:90,yellow_min:75});
   const groups={}; withA.forEach(s=>{ const k=s.project_id+'|'+((s.skill||'').toLowerCase()); (groups[k]=groups[k]||[]).push(s); });
   const groupList=Object.keys(groups).map(k=>{ const list=groups[k]; const i=k.indexOf('|'); const pid=k.slice(0,i),sk=k.slice(i+1);
-    const gcfg=cfgOf(pid,sk); const gunit=cqUnit(gcfg); const metric=s=> gunit==='points'? s.total_points : s.total_pct;
+    const gcfg=cfgOf(pid,sk); const gunit=cqUnit(gcfg); const metric=s=>cqRawMetric(s,gcfg);   // fachlich (raw)
     const vals=list.map(metric).filter(x=>x!=null); const gavg=vals.length?Math.round(vals.reduce((a,b)=>a+b,0)/vals.length*10)/10:0;
-    const gd={green:0,amber:0,red:0}; list.forEach(s=>{ if(metric(s)!=null) gd[dkey(s._a)]++; });
-    return {pid,sk,count:list.length,avg:gavg,unit:gunit,dist:gd,ampel:cqAmpel(gavg,gcfg)}; }).sort((a,b)=>b.count-a.count);
+    const gd={green:0,amber:0,red:0}; list.forEach(s=>{ if(metric(s)!=null) gd[dkey(s._aRaw)]++; });
+    return {pid,sk,count:list.length,breaches:list.filter(cqIsBreach).length,avg:gavg,unit:gunit,dist:gd,ampel:cqAmpel(gavg,gcfg)}; }).sort((a,b)=>b.count-a.count);
 
   return <div>
     <div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'center',marginBottom:16}}>
@@ -33201,8 +33247,12 @@ function CallQaOverview({projects, employees, showToast}){
           <div style={{fontSize:28,fontWeight:800}}>{n}</div>
         </div>
         <div style={{flex:'1 1 160px',border:'1px solid var(--border)',borderRadius:12,padding:'14px 16px',background:'var(--card)'}}>
-          <div style={{fontSize:12,color:'var(--muted)',fontWeight:700}}>Ø-Score</div>
+          <div style={{fontSize:12,color:'var(--muted)',fontWeight:700}}>Ø fachlich</div>
           <div style={{fontSize:28,fontWeight:800,color:avgA.color}}>{avg==null?'—':avg+' %'}</div>
+        </div>
+        <div style={{flex:'1 1 160px',border:'1px solid '+(breaches>0?'#fecaca':'var(--border)'),borderRadius:12,padding:'14px 16px',background:breaches>0?'#fef2f2':'var(--card)'}}>
+          <div style={{fontSize:12,color:breaches>0?'#b91c1c':'var(--muted)',fontWeight:700}}>⛔ Compliance-Verstöße</div>
+          <div style={{fontSize:28,fontWeight:800,color:breaches>0?'#dc2626':'var(--muted)'}}>{breaches}</div>
         </div>
         <div style={{flex:'2 1 260px',border:'1px solid var(--border)',borderRadius:12,padding:'14px 16px',background:'var(--card)'}}>
           <div style={{fontSize:12,color:'var(--muted)',fontWeight:700,marginBottom:8}}>Verteilung</div>
@@ -33223,7 +33273,7 @@ function CallQaOverview({projects, employees, showToast}){
               <div style={{fontWeight:700,fontSize:13,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{projName(g.pid)} · {skillLabel(g.pid,g.sk)}</div>
               <div style={{fontSize:20,fontWeight:800,color:g.ampel.color,fontFamily:'var(--mono)'}}>{g.unit==='points'?cqNum(g.avg)+' Pkt':g.avg+'%'}</div>
             </div>
-            <div style={{fontSize:11,color:'var(--muted)',margin:'2px 0 8px'}}>{g.count} Stichprobe{g.count>1?'n':''}</div>
+            <div style={{fontSize:11,color:'var(--muted)',margin:'2px 0 8px'}}>{g.count} Stichprobe{g.count>1?'n':''}{g.breaches>0&&<span style={{color:'#b91c1c',fontWeight:700}}> · ⛔ {g.breaches} Verstoß{g.breaches>1?'e':''}</span>}</div>
             <CqDist d={g.dist} height={9}/>
           </div>
         ))}
@@ -33233,9 +33283,9 @@ function CallQaOverview({projects, employees, showToast}){
       <div style={{display:'flex',flexDirection:'column',gap:6}}>
         {withA.slice(0,20).map(s=>(
           <div key={s.id} style={{display:'flex',alignItems:'center',gap:12,padding:'8px 12px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)'}}>
-            <span style={{width:52,textAlign:'center',fontWeight:800,fontFamily:'var(--mono)',color:s._a.color}}>{cqUnit(cfgOf(s.project_id,(s.skill||'').toLowerCase()))==='points'?(s.total_points==null?'—':cqNum(s.total_points)):(s.total_pct==null?'—':Math.round(s.total_pct))}</span>
-            <span style={{width:9,height:9,borderRadius:'50%',background:s._a.color,flexShrink:0}}/>
-            <div style={{flex:1,minWidth:0,fontSize:13,fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{empName(s.employee_id)}</div>
+            <span style={{width:52,textAlign:'center',fontWeight:800,fontFamily:'var(--mono)',color:s._aOff.color}}>{cqUnit(s._c)==='points'?(s.total_points==null?'—':cqNum(s.total_points)):(s.total_pct==null?'—':Math.round(s.total_pct))}</span>
+            <span style={{width:9,height:9,borderRadius:'50%',background:s._aOff.color,flexShrink:0}}/>
+            <div style={{flex:1,minWidth:0,fontSize:13,fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{cqIsBreach(s)&&<span style={{color:'#b91c1c',fontWeight:800,marginRight:5}}>⛔</span>}{empName(s.employee_id)}</div>
             <div style={{fontSize:11,color:'var(--muted)',whiteSpace:'nowrap'}}>{projName(s.project_id)} · {skillLabel(s.project_id,(s.skill||'').toLowerCase())} · {fmtDate(s.sampled_date)}</div>
           </div>
         ))}
@@ -35682,8 +35732,8 @@ function PresentationsView({projects, employees, team, showToast}){
     snap._theme={accent,font:fontFam,projName:selProj.name,customerLogo:theme.customerLogo||'',ourLogo:ourLogo||''};   // Snapshot: Look&Feel einfrieren
     // Snapshot: nur die ÜBERSICHT einfrieren (Name/Prozent/Ampel). Interne Kriterien-Details + Freitexte
     // (_detail) werden ABGESTREIFT — sie gehören nicht zum Kunden. Damit hat die öffentliche Seite sie gar nicht.
-    const csClean={}; Object.keys(callScores||{}).forEach(k=>{ const r=callScores[k]||{}; const strip=e=>({name:e.name,pct:e.pct,points:e.points,color:e.color,label:e.label});
-      csClean[k]={best:(r.best||[]).map(strip),worst:(r.worst||[]).map(strip),count:r.count,avg:r.avg,unit:r.unit,max:r.max,thresholds:r.thresholds}; });
+    const csClean={}; Object.keys(callScores||{}).forEach(k=>{ const r=callScores[k]||{}; const strip=e=>({name:e.name,pct:e.pct,points:e.points,color:e.color,label:e.label,breach:!!e.breach});
+      csClean[k]={best:(r.best||[]).map(strip),worst:(r.worst||[]).map(strip),count:r.count,avg:r.avg,unit:r.unit,max:r.max,breaches:r.breaches||0,thresholds:r.thresholds}; });
     snap._callscores=csClean;
     snap._measures=(measures||[]).map(m=>({id:m.id,text:m.text,status:m.status,comment:m.comment,created_kw:m.created_kw,created_year:m.created_year}));   // Maßnahmen-Stand einfrieren (Kunde read-only)
     const rev=reviewWeek(); const tok=token||genToken(); const title=selProj.name+' · KW '+rev.kw+'/'+rev.yr;
@@ -35738,27 +35788,31 @@ function PresentationsView({projects, employees, team, showToast}){
   // Rang je Mitarbeiter = Ø seiner Stichproben im Zeitraum. k = 3 ab 8 MA, sonst 2. Best/Worst ohne Überlappung.
   // _sid = neueste Stichprobe des MA (für die aufklappbaren Kriterien-Details, NUR in-app), _note = deren Freitext.
   function buildCallScores(samples, skillKey, cfgs){
-    const rows=(samples||[]).filter(x=>((((x.skill||'')+'').toLowerCase())===skillKey) && x.total_pct!=null);
+    // Ranking auf FACHLICHER Rohpunktzahl (raw) — ein Compliance-Verstoß nullt den Call, soll aber
+    // einen fachlich starken Agenten nicht ans Ende ziehen. Verstöße werden separat gezählt/markiert.
+    const rows=(samples||[]).filter(x=>((((x.skill||'')+'').toLowerCase())===skillKey) && cqRawPct(x)!=null);
     const byEmp={}; rows.forEach(x=>{ (byEmp[x.employee_id]=byEmp[x.employee_id]||[]).push(x); });
     const cfg=cqResolveConfig(cfgs, selProj?selProj.id:null, skillKey); const unit=cqUnit(cfg);
     const ranked=Object.keys(byEmp).map(id=>{ const list=byEmp[id];
-      const avgPct=list.reduce((a,b)=>a+Number(b.total_pct),0)/list.length;
-      const pv=list.map(b=>b.total_points).filter(x=>x!=null); const avgPts=pv.length?pv.reduce((a,b)=>a+Number(b),0)/pv.length:null;
+      const avgPct=list.reduce((a,b)=>a+cqRawPct(b),0)/list.length;
+      const pv=list.map(cqRawPoints).filter(x=>x!=null); const avgPts=pv.length?pv.reduce((a,b)=>a+b,0)/pv.length:null;
       const mx=(list.find(b=>b.max_points!=null)||{}).max_points;
+      const breaches=list.filter(cqIsBreach).length;
       const latest=list.slice().sort((a,b)=>String(b.sampled_date).localeCompare(String(a.sampled_date)))[0];
-      return {id,pct:avgPct,points:avgPts,max:mx,_sid:latest?latest.id:null,_note:latest?latest.note:null}; })
+      return {id,pct:avgPct,points:avgPts,max:mx,breaches,_sid:latest?latest.id:null,_note:latest?latest.note:null}; })
       .sort((a,b)=> unit==='points' ? ((b.points||0)-(a.points||0)) : (b.pct-a.pct));
-    const m=ranked.length; if(!m) return {best:[],worst:[],count:0,avg:null,unit,max:null,_sampleIds:[]};
+    const m=ranked.length; if(!m) return {best:[],worst:[],count:0,avg:null,unit,max:null,breaches:0,_sampleIds:[]};
     const nameOf=id=>{ const e=(employees||[]).find(x=>x&&x.id===id); return e?empName(e):'—'; };
-    const dress=e=>{ const a=cqAmpelU(e.pct,e.points,cfg); return {name:nameOf(e.id),pct:Math.round(e.pct),points:e.points==null?null:Math.round(e.points*10)/10,color:a.color,label:a.label,_sid:e._sid,_note:e._note}; };
+    const dress=e=>{ const a=cqAmpelU(e.pct,e.points,cfg); return {name:nameOf(e.id),pct:Math.round(e.pct),points:e.points==null?null:Math.round(e.points*10)/10,color:a.color,label:a.label,breach:e.breaches>0,_sid:e._sid,_note:e._note}; };
     const k=m>=8?3:2;
     const best=ranked.slice(0,k).map(dress);
     const worst=ranked.slice(Math.max(k,m-k)).reverse().map(dress);
     const avgPctAll=Math.round(ranked.reduce((s,e)=>s+e.pct,0)/m);
     const pa=ranked.map(e=>e.points).filter(x=>x!=null); const avgPtsAll=pa.length?Math.round(pa.reduce((a,b)=>a+b,0)/pa.length*10)/10:null;
     const maxP=(ranked.find(e=>e.max!=null)||{}).max;
+    const breachCount=rows.filter(cqIsBreach).length;
     const _sampleIds=[...best,...worst].map(e=>e._sid).filter(Boolean);
-    return {best,worst,count:rows.length,avg:unit==='points'?avgPtsAll:avgPctAll,unit,max:maxP,thresholds:{green:cfg.green_min,yellow:cfg.yellow_min},_sampleIds};
+    return {best,worst,count:rows.length,avg:unit==='points'?avgPtsAll:avgPctAll,unit,max:maxP,breaches:breachCount,thresholds:{green:cfg.green_min,yellow:cfg.yellow_min},_sampleIds};
   }
   function demoDetail(good){ const cf={green_min:90,yellow_min:75};
     const rows=[
@@ -35773,10 +35827,10 @@ function PresentationsView({projects, employees, team, showToast}){
       scores: rows.map(r=>({prompt:r.prompt,category:r.category,pct:r.pct,na:false,comment:r.comment||null,color:cqAmpel(r.pct,cf).color})) };
   }
   function demoCallScores(){ const out={};
-    const mk=(name,pct,good)=>{ const a=cqAmpel(pct,{green_min:90,yellow_min:75}); return {name,pct,color:a.color,label:a.label,_detail:demoDetail(good)}; };
+    const mk=(name,pct,good,breach)=>{ const a=cqAmpel(pct,{green_min:90,yellow_min:75}); return {name,pct,color:a.color,label:a.label,breach:!!breach,_detail:demoDetail(good)}; };
     const A=[['Arben Krasniqi',96,true],['Elira Berisha',93,true],['Ardit Gashi',90,true]];
-    const B=[['Blerta Hoxha',64,false],['Faton Rexhaj',71,false],['Leon Berisha',74,false]];
-    (skills||[]).forEach(s=>{ out[s.key]={ best:A.map(x=>mk(x[0],x[1],x[2])), worst:B.map(x=>mk(x[0],x[1],x[2])), count:14, avg:83, thresholds:{green:90,yellow:75} }; });
+    const B=[['Blerta Hoxha',64,false],['Faton Rexhaj',71,false,true],['Leon Berisha',74,false]];
+    (skills||[]).forEach(s=>{ out[s.key]={ best:A.map(x=>mk(x[0],x[1],x[2],x[3])), worst:B.map(x=>mk(x[0],x[1],x[2],x[3])), count:14, avg:83, breaches:1, thresholds:{green:90,yellow:75} }; });
     return out;
   }
   // Echt-Daten IMMER aus der DB (kein stiller Fallback auf Beispiel): bei Fehler/leer → {} → Folie zeigt Hinweis.
@@ -35786,7 +35840,7 @@ function PresentationsView({projects, employees, team, showToast}){
     if(!selProj){ if(alive) setCallScores({}); return; }
     try{
       const rv=reviewWeek();
-      const {data:samples}=await sb.from('call_samples').select('id,employee_id,skill,total_pct,total_points,max_points,sampled_date,note').eq('project_id',selProj.id).eq('year',rv.yr).eq('kw',rv.kw).eq('status','done');
+      const {data:samples}=await sb.from('call_samples').select('id,employee_id,skill,total_pct,total_points,max_points,raw_points,compliance_failed,sampled_date,note').eq('project_id',selProj.id).eq('year',rv.yr).eq('kw',rv.kw).eq('status','done');
       const {data:cfgs}=await sb.from('call_score_config').select('*');
       const out={}; const sids=[];
       (skills||[]).forEach(s=>{ const r=buildCallScores(samples||[],s.key,cfgs||[]); out[s.key]=r; (r._sampleIds||[]).forEach(id=>sids.push(id)); });
