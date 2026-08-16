@@ -226,13 +226,15 @@
   // Folie 2 — Besetzung & FTE. Daten in deck.teams[tk].fteList = {rows:[{id,name,fte}], total, bands?, org?, _src}.
   // Mit org (Organigramm-Zweig aus org_nodes): Baum in Präsentations-Optik (Kundenfarbe-Fond, weiße Karten,
   // Verbindungslinien), FTE an den Karten. Ohne org: Namensliste als Fallback.
-  function Fte(ctx, tk){ var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk);
-    var fl=td.fteList||{}; var rows=fl.rows||[]; var org=fl.org; var bands=fl.bands; var total=(fl.total!=null)?fl.total:numOr(td.fte,null);
+  // Seitenzahl der FTE-Folie (Agenten-Band paginiert; pl/overhead nur Seite 0).
+  function ftePages(ctx, tk){ var fl=((ctx.deck.teams||{})[tk]||{}).fteList||{};
+    if(fl.bands&&fl.bands.length){ var ab=fl.bands.filter(function(b){return b.key==='agent';})[0]; return agentPages((ab&&ab.people)||[],14).length; }
+    return agentPages(fl.rows||[],24).length; }
+  function Fte(ctx, tk, page){ page=page||0; var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk);
+    var fl=td.fteList||{}; var rows=fl.rows||[]; var bands=fl.bands; var total=(fl.total!=null)?fl.total:numOr(td.fte,null);
     var hasBands=!!(bands&&bands.length&&bands.some(function(b){ return b.people&&b.people.length; }));
-    var hasOrg=!hasBands&&!!(org&&org.nodes&&org.nodes.length&&org.nodes.some(function(nd){ return nd.members&&nd.members.length; }));
     var pcount=hasBands?bands.reduce(function(s,b){ return s+b.people.length; },0):rows.length;
-    var head=fondHead(P, lbl, 'Besetzung & FTE', pcount?(pcount+' Mitarbeiter'):'');
-    if(!rows.length && !hasBands && !hasOrg){ return Slide(ctx,[head, panel(P, h('div',{style:{flex:1,display:'flex',alignItems:'center',justifyContent:'center',textAlign:'center'}}, h('div',{},[
+    if(!rows.length && !hasBands){ return Slide(ctx,[fondHead(P, lbl, 'Besetzung & FTE',''), panel(P, h('div',{style:{flex:1,display:'flex',alignItems:'center',justifyContent:'center',textAlign:'center'}}, h('div',{},[
       h('div',{key:'t',style:{fontSize:'2.4cqw',fontWeight:800,color:P.ink}},'Keine Besetzung übernommen'),
       h('div',{key:'s',style:{fontSize:'1.4cqw',marginTop:'1cqw',color:P.muted}},'FTE-Standard je Mitarbeiter pflegen und übernehmen.')
     ])))]); }
@@ -240,12 +242,19 @@
       h('span',{key:'n',style:{fontSize:'5.4cqw',fontWeight:800,color:P.onLightTxt,lineHeight:1,fontVariantNumeric:'tabular-nums'}}, total==null?'—':fmtNum(total,2)),
       h('span',{key:'l',style:{fontSize:'1.6cqw',fontWeight:700,color:P.muted}},'FTE gesamt')
     ]);
-    if(hasBands){ return Slide(ctx, [ head, panel(P, [ totalBadge, FteBandsBody(bands, P) ]) ]); }
-    // Kein Organigramm-Baum mehr (Variante B = Funktions-Bänder ist die gewählte Optik). Legacy-Snapshots
-    // ohne bands fallen auf die mehrspaltige Namensliste — „Besetzung übernehmen" baut die Bänder neu.
-    // Fallback: Namensliste (mehrspaltig, kein Stapeln)
-    var cols3=rows.length>8?3:(rows.length>4?2:1); var per=Math.ceil(rows.length/cols3); var groups=[]; for(var g=0;g<cols3;g++) groups.push(rows.slice(g*per,(g+1)*per));
-    return Slide(ctx, [ head, panel(P, [ totalBadge,
+    if(hasBands){
+      var agentBand=bands.filter(function(b){return b.key==='agent';})[0]; var others=bands.filter(function(b){return b.key!=='agent';});
+      var apages=agentPages((agentBand&&agentBand.people)||[],14); var np=Math.max(1,apages.length);
+      var pageBands = page===0 ? others.concat(agentBand?[{key:'agent',label:agentBand.label,people:apages[0]||[]}]:[])
+                               : (agentBand?[{key:'agent',label:agentBand.label+' (Fortsetzung)',people:apages[page]||[]}]:[]);
+      var head=page===0?fondHead(P, lbl, 'Besetzung & FTE', (pcount?(pcount+' Mitarbeiter'):'')+(np>1?(' · '+np+' Seiten'):'')):null;
+      return Slide(ctx, [ head, panel(P, (page===0?[totalBadge]:[]).concat([FteBandsBody(pageBands, P)])) ].filter(Boolean));
+    }
+    // Fallback: mehrspaltige Namensliste (Legacy ohne bands), paginiert
+    var lpages=agentPages(rows,24); var lr=lpages[page]||[];
+    var head2=page===0?fondHead(P, lbl, 'Besetzung & FTE', (pcount?(pcount+' Mitarbeiter'):'')+(lpages.length>1?(' · '+lpages.length+' Seiten'):'')):null;
+    var cols3=lr.length>8?3:(lr.length>4?2:1); var per=Math.ceil(lr.length/cols3); var groups=[]; for(var g=0;g<cols3;g++) groups.push(lr.slice(g*per,(g+1)*per));
+    return Slide(ctx, [ head2, panel(P, (page===0?[totalBadge]:[]).concat([
       h('div',{key:'grid',style:{flex:1,minHeight:0,display:'flex',gap:'3.5cqw',overflow:'hidden'}},
         groups.map(function(grp,gi){ return h('div',{key:gi,style:{flex:1,minWidth:0,display:'flex',flexDirection:'column',gap:'.5cqw'}},
           grp.map(function(r,ri){ return h('div',{key:r.id||ri,style:{display:'flex',alignItems:'center',justifyContent:'space-between',gap:'1cqw',padding:'.45cqw 0',borderBottom:'1px solid #f1f5f9'}},[
@@ -254,7 +263,7 @@
           ]); })
         ); })
       )
-    ]) ]);
+    ])) ].filter(Boolean));
   }
 
   // Folie 3 — Gelieferte Stunden als 8-Spalten-Tabelle (KW · Plan · Rückmeldung · Diff R−P · Geliefert · Diff G−R · % · Erläuterung).
@@ -297,28 +306,25 @@
   // Kleiner "gerechnet"-Hinweis: Teamwerte auf Call-/CSAT-Folien sind gerechnet (gewichtetes
   // Mittel der Agentenwerte), kein gepflegter Wert. Nur Kennzeichnung, keine zweite Speicherung.
   function calcTag(P){ return h('span',{style:{fontSize:'.9cqw',fontWeight:700,letterSpacing:'.02em',color:P.muted,border:'.12cqw solid '+P.muted,borderRadius:'.5cqw',padding:'.05cqw .6cqw',marginLeft:'.7cqw',whiteSpace:'nowrap',opacity:.8}},'gerechnet'); }
-  function Calls(ctx, tk){ return CallsView(ctx, tk, 'vorwoche', 'Vorwoche'); }
-  function CallsMtd(ctx, tk){ return CallsView(ctx, tk, 'monat', 'Monat (MTD)'); }
-  function CallsView(ctx, tk, period, eyebrow){ var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk); var cols=callCols(tk);
-    var members=(ctx.membersOf(tk)||[]).filter(function(m){ return ((td.members||[]).length===0)||(td.members||[]).indexOf(m.id)>=0; });
+  function Calls(ctx, tk, page){ return CallsView(ctx, tk, 'vorwoche', 'Vorwoche', page); }
+  function CallsMtd(ctx, tk, page){ return CallsView(ctx, tk, 'monat', 'Monat (MTD)', page); }
+  function CallsView(ctx, tk, period, eyebrow, page){ page=page||0; var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk); var cols=callCols(tk);
     var cur=(td.calls&&td.calls[period])||{};
     if(!Object.keys(cur).length) return emptyPanel(ctx, fondHead(P, lbl+' · '+eyebrow, 'Call-Kennzahlen'), P, 'Keine Call-Kennzahlen in diesem Zeitraum.');
-    members=members.filter(function(m){ var c=cur[m.id]; return c && c.answered!=null && String(c.answered).trim()!==''; });   // nur MA mit ECHTER Call-Zeile (Answered gesetzt) — Overhead/Leerzeilen raus (gilt auch für Support)
+    var members=callsAgents(ctx, tk, period);
     var rows=members.map(function(m){ var c=cur[m.id]||{}; return Object.assign({},c,{answered:c.answered}); });
     var ans=members.map(function(m){ return {m:m,n:numOr((cur[m.id]||{}).answered,0)}; }).sort(function(a,b){ return b.n-a.n; });
-    var dom=zoomDomain(ans.map(function(a){ return a.n; }));   // gespreizte Skala: nahe Werte sichtbar unterscheiden
+    var dom=zoomDomain(ans.map(function(a){ return a.n; }));
     var htCol=cols.filter(function(c){ return /handle|aht/i.test(c.k); })[0]; var htKey=htCol?htCol.k:'avg_handle';
-    return Slide(ctx, [
-      fondHead(P, lbl+' · '+eyebrow, 'Call-Kennzahlen'),
-      panel(P, (function(){
-        // Liste = Inhalt. Kopfzahlen KOMPAKT einzeilig (nicht zwei große Blöcke). Bei >7 MA zwei Spalten,
-        // damit auch 15 Zeilen (Support) mit lesbarem Abstand passen — feste Zeilenhöhe, nicht flex-gestaucht.
-        var shown=ans.slice(0,16), twoCol=shown.length>7, half=Math.ceil(shown.length/2);
-        var colGroups=twoCol?[shown.slice(0,half),shown.slice(half)]:[shown];
+    var pages=agentPages(ans, 14); var pa=pages[page]||[]; var baseRank=pages.slice(0,page).reduce(function(s,p){return s+p.length;},0);
+    var head=page===0?fondHead(P, lbl+' · '+eyebrow, 'Call-Kennzahlen', (ans.length+' Agenten'+(pages.length>1?(' · '+pages.length+' Seiten'):''))):null;
+    var body=panel(P, (function(){
+        var twoCol=pa.length>7, half=Math.ceil(pa.length/2);
+        var colGroups=twoCol?[pa.slice(0,half),pa.slice(half)]:[pa];
         var nameW=twoCol?'12cqw':'20cqw';
-        function stat(val,lbl,col){ return h('div',{style:{display:'flex',alignItems:'baseline',gap:'.9cqw'}},[
+        function stat(val,l,col){ return h('div',{style:{display:'flex',alignItems:'baseline',gap:'.9cqw'}},[
           h('span',{key:'n',style:{fontSize:'3.4cqw',fontWeight:800,color:col,lineHeight:1,fontVariantNumeric:'tabular-nums'}},val),
-          h('span',{key:'l',style:{fontSize:'1.15cqw',color:P.muted,fontWeight:700}},lbl) ]); }
+          h('span',{key:'l',style:{fontSize:'1.15cqw',color:P.muted,fontWeight:700}},l) ]); }
         function rankRow(o,rank){ var w=Math.max(6,frac(o.n,dom)*100);
           return h('div',{key:o.m.id,style:{display:'flex',alignItems:'center',gap:'1.2cqw'}},[
             h('span',{key:'r',style:{width:'2.2cqw',textAlign:'right',fontFamily:MONO,fontSize:'1.1cqw',fontWeight:700,color:P.muted,flexShrink:0}},rank+'.'),
@@ -326,22 +332,21 @@
             h('div',{key:'b',style:{flex:1,height:'0.85cqw',background:'#eef2f4',borderRadius:'.5cqw',overflow:'hidden'}}, h('div',{style:{width:w+'%',height:'100%',background:P.onLight,borderRadius:'.5cqw'}})),
             h('span',{key:'v',style:{width:'5cqw',textAlign:'right',fontFamily:MONO,fontWeight:700,fontSize:'1.25cqw',color:P.ink,flexShrink:0}},fmtNum(o.n))
           ]); }
-        return [
-          h('div',{key:'big',style:{display:'flex',gap:'4.5cqw',alignItems:'baseline',flexWrap:'wrap',marginBottom:'2cqw',flexShrink:0}},[
+        var out=[];
+        if(page===0) out.push(h('div',{key:'big',style:{display:'flex',gap:'4.5cqw',alignItems:'baseline',flexWrap:'wrap',marginBottom:'2cqw',flexShrink:0}},[
             stat(fmtNum(sumCol(rows,'answered')),'Answered gesamt',P.onLightTxt),
             stat(wavgTime(rows,htKey,'answered'),['Ø Handle',calcTag(P)],P.ink)
-          ]),
-          h('div',{key:'list',style:{flex:1,minHeight:0,display:'flex',gap:'4.5cqw',overflow:'hidden'}},
-            ans.length===0 ? [h('div',{key:'e',style:{color:P.muted,fontSize:'1.4cqw'}},'Keine Mitarbeiter.')]
+          ]));
+        out.push(h('div',{key:'list',style:{flex:1,minHeight:0,display:'flex',gap:'4.5cqw',overflow:'hidden'}},
+            pa.length===0 ? [h('div',{key:'e',style:{color:P.muted,fontSize:'1.4cqw'}},'Keine Mitarbeiter.')]
             : colGroups.map(function(colRows,ci){ return h('div',{key:ci,style:{flex:1,minWidth:0,display:'flex',flexDirection:'column',gap:'.7cqw',justifyContent:colRows.length<=5?'center':'flex-start'}},
-                colRows.map(function(o,ri){ return rankRow(o, ci*half+ri+1); })
+                colRows.map(function(o,ri){ return rankRow(o, baseRank + ci*half + ri + 1); })
               ); })
-          ),
-          h('div',{key:'foot',style:{fontSize:'1cqw',color:P.muted,marginTop:'.6cqw',flexShrink:0}},'Ø Handle ist gerechnet: gewichtetes Mittel der Agenten nach Answered, kein gepflegter Wert.'),
-          dom.zoomed?h('div',{key:'scale',style:{fontFamily:MONO,fontSize:'1cqw',color:P.muted,opacity:.8,marginTop:'.4cqw',textAlign:'right',flexShrink:0}},'Balkenskala ab '+fmtNum(dom.lo)+' (gespreizt) · exakte Werte am Balken'):null
-        ];
-      })())
-    ]);
+          ));
+        out.push(h('div',{key:'foot',style:{fontSize:'1cqw',color:P.muted,marginTop:'.6cqw',flexShrink:0}}, (page===0?'Ø Handle ist gerechnet: gewichtetes Mittel nach Answered. ':'')+(pages.length>1?('Seite '+(page+1)+'/'+pages.length):'')));
+        return out;
+      })());
+    return Slide(ctx, [head, body].filter(Boolean));
   }
 
   function skillLabel(ctx, key){ var s=(ctx.skills||[]).filter(function(x){return x.key===key;})[0]; if(s) return s.label||s.key; return key==='sales'?'Sales':key==='support'?'Support':key; }
@@ -421,17 +426,18 @@
   // CSAT (Folie 13) — Kundenzufriedenheit je Mitarbeiter über das 5-Wochen-Fenster. Daten aus weekly_gauges,
   // beim Übernehmen in deck.teams[tk].csat = {weeks:[{kw,key}], rows:[{id,name,cells:{key:{v,n}},avg}], _src}
   // eingefroren (Namen im Snapshot → öffentliche Seite braucht keine employees). Ø gewichtet nach n (Anzahl).
-  function Csat(ctx, tk){ var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk);
+  function Csat(ctx, tk, page){ page=page||0; var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk);
     var cs=td.csat||{}; var weeks=cs.weeks||[]; var rows=cs.rows||[];
     var rangeTxt=weeks.length?('KW '+weeks[0].kw+' – KW '+weeks[weeks.length-1].kw):'';
-    var head=fondHead(P, lbl+' · CSAT', 'Kundenzufriedenheit', rangeTxt);
-    if(!rows.length){ return Slide(ctx,[head, panel(P, h('div',{style:{flex:1,display:'flex',alignItems:'center',justifyContent:'center',textAlign:'center'}}, h('div',{},[
+    if(!rows.length){ return Slide(ctx,[fondHead(P, lbl+' · CSAT', 'Kundenzufriedenheit', rangeTxt), panel(P, h('div',{style:{flex:1,display:'flex',alignItems:'center',justifyContent:'center',textAlign:'center'}}, h('div',{},[
       h('div',{key:'t',style:{fontSize:'2.4cqw',fontWeight:800,color:P.ink}},'Keine CSAT-Daten in diesem Zeitraum'),
       h('div',{key:'s',style:{fontSize:'1.4cqw',marginTop:'1cqw',color:P.muted}},'Für '+lbl+' liegen keine Gauges-/CSAT-Werte vor.')
     ])))]); }
     function wavg(list){ var sv=0,sn=0; (list||[]).forEach(function(c){ if(c&&c.v!=null){ var n=(c.n||0)||1; sv+=c.v*n; sn+=n; } }); return sn?sv/sn:null; }
     var teamWeek={}; weeks.forEach(function(w){ teamWeek[w.key]=wavg(rows.map(function(r){ return r.cells[w.key]; })); });
     var teamAvg=wavg(rows.map(function(r){ return {v:r.avg,n:1}; }));
+    var pages=agentPages(rows, 11); var pr=pages[page]||[]; var isLast=(page===pages.length-1);
+    var head=page===0?fondHead(P, lbl+' · CSAT', 'Kundenzufriedenheit', rangeTxt+(pages.length>1?(' · '+rows.length+' MA · '+pages.length+' Seiten'):'')):null;
     var colName='30cqw';
     function valCell(c){ if(!c||c.v==null) return h('div',{style:{flex:1,textAlign:'center',fontFamily:MONO,fontSize:'1.4cqw',color:'#cbd5e1'}},'—');
       return h('div',{style:{flex:1,textAlign:'center'}},[
@@ -443,7 +449,7 @@
       [h('div',{key:'n',style:{width:colName,fontSize:'1.2cqw',fontWeight:700,color:P.muted,textTransform:'uppercase',letterSpacing:'.06em'}},'Mitarbeiter')]
       .concat(weeks.map(function(w){ return h('div',{key:w.key,style:{flex:1,textAlign:'center',fontFamily:MONO,fontSize:'1.2cqw',fontWeight:700,color:P.muted}},'KW '+w.kw); }))
       .concat([h('div',{key:'avg',style:{flex:1,textAlign:'center',fontSize:'1.2cqw',fontWeight:800,color:P.onLightTxt}},'Ø')]));
-    var body=rows.map(function(r,i){ return h('div',{key:r.id||i,style:{display:'flex',alignItems:'center',gap:'1cqw',padding:'.4cqw 0',borderBottom:'1px solid #f1f5f9'}},
+    var body=pr.map(function(r,i){ return h('div',{key:r.id||i,style:{display:'flex',alignItems:'center',gap:'1cqw',padding:'.4cqw 0',borderBottom:'1px solid #f1f5f9'}},
       [h('div',{key:'n',style:{width:colName,fontSize:'1.35cqw',fontWeight:600,color:P.ink,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},r.name)]
       .concat(weeks.map(function(w){ return valCell(r.cells[w.key]); }))
       .concat([h('div',{key:'avg',style:{flex:1,textAlign:'center',fontFamily:MONO,fontSize:'1.6cqw',fontWeight:800,color:P.onLightTxt}}, r.avg==null?'—':fmtNum(r.avg,1))])); });
@@ -452,8 +458,8 @@
       .concat(weeks.map(function(w){ var v=teamWeek[w.key]; return h('div',{key:w.key,style:{flex:1,textAlign:'center',fontFamily:MONO,fontSize:'1.5cqw',fontWeight:800,color:P.ink}}, v==null?'—':fmtNum(v,1)); }))
       .concat([h('div',{key:'avg',style:{flex:1,textAlign:'center',fontFamily:MONO,fontSize:'1.7cqw',fontWeight:800,color:P.onLightTxt}}, teamAvg==null?'—':fmtNum(teamAvg,1))]));
     return Slide(ctx, [ head, panel(P, [
-      h('div',{key:'tbl',style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',overflow:'hidden'}}, [headerRow].concat(body).concat([teamRow])),
-      h('div',{key:'ft',style:{fontSize:'1.1cqw',color:P.muted,marginTop:'1cqw'}},'CSAT je Mitarbeiter und Woche · n = Anzahl Bewertungen · Team Ø gerechnet: gewichtetes Mittel nach n, kein gepflegter Wert')
+      h('div',{key:'tbl',style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',overflow:'hidden'}}, [headerRow].concat(body).concat(isLast?[teamRow]:[])),
+      h('div',{key:'ft',style:{fontSize:'1.1cqw',color:P.muted,marginTop:'1cqw'}},'CSAT je Mitarbeiter und Woche · n = Anzahl Bewertungen · Team Ø gewichtet nach n'+(pages.length>1?(' · Seite '+(page+1)+'/'+pages.length):''))
     ]) ]);
   }
 
@@ -628,8 +634,12 @@
   function activeSkills(ctx){ var a=(ctx.skills||[]).filter(function(s){ return skillActive(ctx,s.key); }); return a.length?a:(ctx.skills||[]).slice(0,1); }
   // Agenten-Grafiken brechen bei zu vielen Personen automatisch auf Folgeseiten um (Folienzahl ergibt sich selbst,
   // nicht fest verdrahtet). Gleichmäßige Aufteilung: 17 Agenten → 2 Seiten à 9/8, nicht 15/2.
-  var AGENT_PER_PAGE=15;
-  function agentPages(list){ list=list||[]; var n=list.length; if(n<=AGENT_PER_PAGE) return [list]; var pages=Math.ceil(n/AGENT_PER_PAGE); var per=Math.ceil(n/pages); var out=[]; for(var i=0;i<n;i+=per) out.push(list.slice(i,i+per)); return out; }
+  var AGENT_PER_PAGE=10;
+  function agentPages(list, cap){ list=list||[]; cap=cap||AGENT_PER_PAGE; var n=list.length; if(n<=cap) return [list]; var pages=Math.ceil(n/cap); var per=Math.ceil(n/pages); var out=[]; for(var i=0;i<n;i+=per) out.push(list.slice(i,i+per)); return out; }
+  // Eligible-Call-Agenten (echte Answered-Zeile) — für Pagination-Count in skillPlan UND in CallsView identisch.
+  function callsAgents(ctx, tk, period){ var td=(ctx.deck.teams||{})[tk]||{}; var cur=(td.calls&&td.calls[period])||{};
+    var members=(ctx.membersOf(tk)||[]).filter(function(m){ return ((td.members||[]).length===0)||(td.members||[]).indexOf(m.id)>=0; });
+    return members.filter(function(m){ var c=cur[m.id]; return c && c.answered!=null && String(c.answered).trim()!==''; }); }
   // Mini-Verlauf je Agent (kleine Vielfache) — geteilt von AHT (Support) und CR (Sales). value(a,w)=Balkenwert,
   // fmtAvg(a)=Ø-Text. head nur auf Seite 0 (Folgeseiten ohne Titel, wie in der Kundenvorlage).
   function AgentMultiples(ctx, tk, page, cfg){ page=page||0; var P=pal(ctx.accent); var lbl=skillLabel(ctx,tk);
@@ -672,7 +682,7 @@
   }
   function ThankYou(ctx){ var P=pal(ctx.accent);
     return Slide(ctx, h('div',{style:{flex:1,display:'flex',flexDirection:'column',justifyContent:'center'}},[
-      h('div',{key:'t',style:{fontSize:'8cqw',fontWeight:800,letterSpacing:'-.03em',color:P.fondText,lineHeight:1.02}},'Thank you'),
+      h('div',{key:'t',style:{fontSize:'8cqw',fontWeight:800,letterSpacing:'-.03em',color:P.fondText,lineHeight:1.02}},'Danke'),
       h('div',{key:'s',style:{fontSize:'2.2cqw',color:rgba(P.fondText,.72),marginTop:'2cqw',fontWeight:500}}, (ctx.projName||'')+' · KW '+ctx.period.no+' / '+ctx.period.year)
     ]));
   }
@@ -691,9 +701,11 @@
       pendingBody(ctx, P, 'Mail-Verlauf je Agent folgt', 'Folgt mit den Mail-Daten; bricht bei vielen Agenten automatisch um.') ]);
   }
   // EINE Wahrheit für Folienreihenfolge + Anker-Keys je Skill. Sales-Set (mit CR) ≠ Support-Set (mit Mail).
-  function skillPlan(ctx, k){ var L=skillLabel(ctx,k); var kind=(k==='sales')?'sales':'support'; var p=[];
+  function skillPlan(ctx, k){ var L=skillLabel(ctx,k); var kind=(k==='sales')?'sales':'support'; var p=[]; var td=(ctx.deck.teams||{})[k]||{};
     function add(key,label,fn){ p.push({key:k+':'+key, label:L+' · '+label, fn:fn}); }
-    add('fte','FTE',function(){return Fte(ctx,k);});
+    // Paginierter Eintrag: n Seiten (≥1), Folgeseiten „(Forts.)" mit eigenem Key — Umbruch statt Abschneiden.
+    function addPaged(baseKey,label,n,fn){ for(var pi=0;pi<Math.max(1,n);pi++){ (function(pi){ add(baseKey+(pi?':'+pi:''), label+(pi?' (Forts.)':''), function(){ return fn(pi); }); })(pi); } }
+    addPaged('fte','FTE', ftePages(ctx,k), function(pi){ return Fte(ctx,k,pi); });
     add('stundentab','Stunden (Tabelle)',function(){return StundenTable(ctx,k);});
     add('stunden','Stunden',function(){return Stunden(ctx,k);});
     if(hasFehlzeiten(ctx,k)) add('fehlzeiten','Fehlzeiten',function(){return Fehlzeiten(ctx,k);});
@@ -702,20 +714,20 @@
       add('crtab','CR (Tabelle)',function(){return CrTable(ctx,k);});
       add('crchart','CR (Verlauf)',function(){return CrChart(ctx,k);});
       add('agentcr','CR je Agent',function(){return AgentCr(ctx,k);});
-      agentPages((((ctx.deck.teams||{})[k]||{}).cr||{}).agents||[]).forEach(function(pg,pi){ add('agentcrtrend'+(pi?':'+pi:''),'CR-Verlauf je Agent'+(pi?' (Forts.)':''),function(){ return AgentCrTrend(ctx,k,pi); }); });
+      addPaged('agentcrtrend','CR-Verlauf je Agent', agentPages((td.cr||{}).agents||[]).length, function(pi){ return AgentCrTrend(ctx,k,pi); });
       add('mtd','MTD',function(){return Mtd(ctx,k);});
-      add('calls','Calls (Vorwoche)',function(){return Calls(ctx,k);});
-      add('callsmtd','Calls (Monat)',function(){return CallsMtd(ctx,k);});
+      addPaged('calls','Calls (Vorwoche)', agentPages(callsAgents(ctx,k,'vorwoche'),14).length, function(pi){ return Calls(ctx,k,pi); });
+      addPaged('callsmtd','Calls (Monat)', agentPages(callsAgents(ctx,k,'monat'),14).length, function(pi){ return CallsMtd(ctx,k,pi); });
     } else {
-      add('calls','Calls (Vorwoche)',function(){return Calls(ctx,k);});
-      add('callsmtd','Calls (Monat)',function(){return CallsMtd(ctx,k);});
-      agentPages((((ctx.deck.teams||{})[k]||{}).callaht||{}).agents||[]).forEach(function(pg,pi){ add('callaht'+(pi?':'+pi:''),'AHT je Agent'+(pi?' (Forts.)':''),function(){ return CallAgentAht(ctx,k,pi); }); });
+      addPaged('calls','Calls (Vorwoche)', agentPages(callsAgents(ctx,k,'vorwoche'),14).length, function(pi){ return Calls(ctx,k,pi); });
+      addPaged('callsmtd','Calls (Monat)', agentPages(callsAgents(ctx,k,'monat'),14).length, function(pi){ return CallsMtd(ctx,k,pi); });
+      addPaged('callaht','AHT je Agent', agentPages((td.callaht||{}).agents||[]).length, function(pi){ return CallAgentAht(ctx,k,pi); });
       add('mailvorwoche','Mail (Vorwoche)',function(){return MailKpis(ctx,k,'vorwoche');});
       add('mailmonat','Mail (Monat)',function(){return MailKpis(ctx,k,'monat');});
       add('mailagent','Mail je Agent',function(){return MailAgentTrend(ctx,k);});
     }
     if(deckShowCalls(ctx)) add('callscores','Call-Qualität',function(){return CallScores(ctx,k);});
-    add('csat','CSAT',function(){return Csat(ctx,k);});
+    addPaged('csat','CSAT', agentPages((td.csat||{}).rows||[],11).length, function(pi){ return Csat(ctx,k,pi); });
     add('massnahmen','Maßnahmen',function(){return Massnahmen(ctx,k);});
     return p;
   }
