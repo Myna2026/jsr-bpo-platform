@@ -226,3 +226,24 @@ create policy "HR full access showcases" on public.showcases for all to authenti
     and role_keys && array['management','hr','finance','projektleiter','teamlead']::text[]))
   with check (exists (select 1 from public.app_users where user_id=auth.uid()
     and role_keys && array['management','hr','finance','projektleiter','teamlead']::text[]));
+
+-- ── 8) Urlaubsantraege (vacation_requests) fuer Projektleiter/Teamleiter, projektbezogen ─────
+-- Ein Lead genehmigt/lehnt Urlaub SEINES Teams ab, statt dass jeder Antrag bei HR landet.
+-- Projektbezug ueber is_emp_in_my_project(employee_id) (vacation_requests hat kein project_id).
+-- Zusaetzliche permissive Policies -> per OR mit den bestehenden HR-Policies kombiniert; HR/Mgmt
+-- bleiben unberuehrt. Die Genehmigung schreibt die Absence nach employees.absences -> deckt
+-- Teil 2 (employees_update_lead + Trigger) bereits ab.
+drop policy if exists "vacreq lead select project" on public.vacation_requests;
+create policy "vacreq lead select project" on public.vacation_requests
+  for select to authenticated
+  using ( public.is_lead_only() and public.is_emp_in_my_project(employee_id) );
+
+drop policy if exists "vacreq lead update project" on public.vacation_requests;
+create policy "vacreq lead update project" on public.vacation_requests
+  for update to authenticated
+  using      ( public.is_lead_only() and public.is_emp_in_my_project(employee_id) )
+  with check ( public.is_lead_only() and public.is_emp_in_my_project(employee_id) );
+
+-- Nachweis (als Ylli): select count(*) from vacation_requests;  -- nur Antraege seines Teams
+-- update vacation_requests set status='approved' where id='<antrag eines teammates>';  -- geht
+-- update vacation_requests set status='approved' where id='<antrag fremdes projekt>';  -- 0 rows (RLS)
