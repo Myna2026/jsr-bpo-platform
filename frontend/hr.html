@@ -34725,25 +34725,38 @@ function LongtermImport({projId, initYear, onSaved}){
   const [file,setFile]=useState(null); const [fileHash,setFileHash]=useState('');
   const [year,setYear]=useState(initYear||2026); const [startMonth,setStartMonth]=useState(1);   // wird beim Import aus Zeile 2 überschrieben
   const [sheetsData,setSheetsData]=useState(null);   // {sales:[{label,m:[12]}], support:[...]}
+  const [diag,setDiag]=useState(null);               // was der Parser tatsächlich erkennt (je Blatt)
   const [err,setErr]=useState(''); const [busy,setBusy]=useState(false); const [saved,setSaved]=useState(false);
-  function onFile(f){ if(!f) return; setErr(''); setSaved(false); setSheetsData(null);
+  function onFile(f){ if(!f) return; setErr(''); setSaved(false); setSheetsData(null); setDiag(null);
     const rd=new FileReader();
     rd.onload=ev=>{ try{
       const bytes=new Uint8Array(ev.target.result); const wb=XLSX.read(bytes,{type:'array',cellDates:true});
-      const out={}; let detStart=null; const norm=s=>String(s||'').trim().toLowerCase();
+      const out={}; const dg={}; let detStart=null; const norm=s=>String(s||'').trim().toLowerCase();
       wb.SheetNames.forEach(nm=>{ const key=norm(nm).indexOf('sales')>=0?'sales':norm(nm).indexOf('support')>=0?'support':null; if(!key) return;
         const aoa=XLSX.utils.sheet_to_json(wb.Sheets[nm],{header:1,defval:''});
-        // Monatskopf aus Zeile 2 (Index 1): Spalte C.. (Index 2..) = echte Datumswerte → Startmonat/Jahr ableiten.
-        const hdr=aoa[1]||[]; if(!detStart){ const my=longtermMonthYear(hdr[2]); if(my) detStart=my; }
-        // Daten ab Zeile 3 (Index 2): Beschriftung Spalte B (Index 1), 12 Werte ab Spalte C (Index 2..13).
-        // Zeilen OHNE Werte überspringen (leere Zeilen, Beschriftung ohne Zahlen).
+        // Kopfzeile AUTOMATISCH finden = die Zeile mit den meisten Datumswerten (der Monatskopf). Die
+        // Datumsspalten markieren die 12 Monate; die Beschriftung ist die Spalte direkt davor. Damit ist
+        // egal, ob die genutzte Range bei A1 beginnt oder versetzt ist.
+        let hdrIdx=-1, hdrDates=[], best=0;
+        for(let ri=0; ri<Math.min(aoa.length,8); ri++){ const row=aoa[ri]||[]; const ds=[];
+          for(let ci=0; ci<row.length; ci++){ const my=longtermMonthYear(row[ci]); if(my) ds.push({ci,my}); }
+          if(ds.length>best){ best=ds.length; hdrIdx=ri; hdrDates=ds; } }
+        const monthCols=hdrDates.slice(0,12).map(d=>d.ci);
+        const labelCol=monthCols.length?Math.max(0,monthCols[0]-1):1;
+        if(!detStart && hdrDates.length){ detStart={month:hdrDates[0].my.month, year:hdrDates[0].my.year}; }
         const rows=[];
-        for(let ri=2; ri<aoa.length; ri++){ const r=aoa[ri]||[]; const label=String(r[1]==null?'':r[1]).trim(); if(!label) continue;
-          const m=Array.from({length:12},(_,i)=>{ const v=r[2+i]; return (v==null||v===''||v instanceof Date)?'':(typeof v==='number'?Math.round(v*100)/100:String(v).trim()); });
-          if(!m.some(v=>v!=='')) continue;   // keine Werte → überspringen
+        for(let ri=(hdrIdx>=0?hdrIdx+1:2); ri<aoa.length; ri++){ const r=aoa[ri]||[]; const label=String(r[labelCol]==null?'':r[labelCol]).trim(); if(!label) continue;
+          const m=monthCols.map(ci=>{ const v=r[ci]; return (v==null||v===''||v instanceof Date)?'':(typeof v==='number'?Math.round(v*100)/100:String(v).trim()); });
+          while(m.length<12) m.push('');
+          if(!m.some(v=>v!=='')) continue;   // in ALLEN Monaten leer → überspringen (leere Monate sind sonst erlaubt)
           rows.push({label, m, calc:longtermIsCalc(label)});
         }
-        if(rows.length) out[key]=rows; });
+        if(rows.length) out[key]=rows;
+        dg[key]={ hdrRow:(hdrIdx>=0?(hdrIdx+1):'?'), labelCol:XLSX.utils.encode_col(labelCol),
+          firstMonthCol:(monthCols.length?XLSX.utils.encode_col(monthCols[0]):'?'), lastMonthCol:(monthCols.length?XLSX.utils.encode_col(monthCols[monthCols.length-1]):'?'),
+          monthsN:monthCols.length, start:(hdrDates.length?(hdrDates[0].my.year+'-'+String(hdrDates[0].my.month).padStart(2,'0')):'?') };
+      });
+      setDiag(dg);
       if(!Object.keys(out).length){ setErr('Keine Blätter „Sales"/„Support" mit Werten gefunden. Blätter: '+wb.SheetNames.join(', ')); return; }
       setFile(f); setFileHash('sz'+bytes.length); setSheetsData(out); if(detStart){ setStartMonth(detStart.month); setYear(detStart.year); }
     }catch(e){ setErr('Datei nicht lesbar: '+(e.message||'')); } };
@@ -34766,16 +34779,13 @@ function LongtermImport({projId, initYear, onSaved}){
     </div>
     {err && <div style={{padding:'8px 10px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:8,color:'#b91c1c',fontSize:12,marginBottom:8}}>{err}</div>}
     {saved && <div style={{padding:'8px 10px',background:'#ecfdf5',border:'1px solid #a7f3d0',borderRadius:8,color:'#059669',fontSize:12,fontWeight:700,marginBottom:8}}>✓ Langzeit-Modell gespeichert. Erscheint auf Folie 4, sobald der Bericht neu geladen ist.</div>}
-    {sheetsData && <React.Fragment>
-      {Object.keys(sheetsData).map(sk=>{ const rs=sheetsData[sk];
-        const emptyN=rs.filter(r=>!(r.m||[]).some(v=>v!==''&&!isNaN(Number(String(v).replace(',','.'))))).length;
-        return <div key={sk} style={{fontSize:11,color:'var(--muted)',marginBottom:6}}>
-          <div><b style={{textTransform:'capitalize'}}>{sk}</b>: {rs.length} Kennzahl-Zeilen · Start {LONGTERM_MONTHS[startMonth-1]} {year}</div>
-          <div style={{marginTop:2,color:'var(--dim)'}}>{rs.map(r=>r.label).join(', ')}</div>
-          {emptyN>0 && <div style={{color:'#b45309',marginTop:2}}>⚠ {emptyN} Zeile(n) ohne Zahlenwerte, vermutlich Formeln ohne gespeichertes Ergebnis. Datei in Excel öffnen und neu speichern, dann erneut importieren.</div>}
-        </div>; })}
-      <button className="btn btn-sm btn-primary" disabled={busy} onClick={save}>💾 Langzeit-Modell speichern</button>
-    </React.Fragment>}
+    {diag && Object.keys(diag).map(sk=>{ const d=diag[sk]; const rs=(sheetsData&&sheetsData[sk])||[];
+      return <div key={'dg'+sk} style={{fontSize:11,marginBottom:8,padding:'8px 10px',background:'var(--surface-2)',borderRadius:7,border:'1px solid var(--border)'}}>
+        <div style={{fontWeight:700,color:'var(--text)'}}><span style={{textTransform:'capitalize'}}>{sk}</span> · {rs.length} Kennzahlen gefunden</div>
+        <div style={{color:'var(--muted)',marginTop:2}}>Erkannt: Kopfzeile in Zeile {d.hdrRow} · Beschriftung in Spalte {d.labelCol} · Monate {d.firstMonthCol}–{d.lastMonthCol} ({d.monthsN} Spalten) · Start {d.start}</div>
+        {rs.length>0 && <div style={{color:'var(--dim)',marginTop:2}}>{rs.map(r=>r.label).join(', ')}</div>}
+      </div>; })}
+    {sheetsData && <button className="btn btn-sm btn-primary" disabled={busy} onClick={save}>💾 Langzeit-Modell speichern</button>}
   </div>;
 }
 
@@ -37842,6 +37852,8 @@ function App(){
   // 25a: employees persistieren nicht mehr nach jsr_emp_v3 (Supabase ist SoT)
   useEffect(()=>{localStorage.setItem('jsr_test_q_v1',JSON.stringify(testQuestions));if(_appCfgMounted.current)saveConfigToDB('jsr_test_q_v1',testQuestions);},[testQuestions]);
   useEffect(()=>{localStorage.setItem('jsr_kb_v1',JSON.stringify(kbData));if(_appCfgMounted.current)saveConfigToDB('jsr_kb_v1',kbData);},[kbData]);
+  // Handbuch (SYSTEM_MANUAL, Code-Konstante) einmal nach app_config spiegeln, damit der Assistent (Edge Function) es serverseitig lesen kann.
+  useEffect(()=>{ try{ saveConfigToDB('jsr_system_manual_v1', SYSTEM_MANUAL); }catch(e){} },[]);
   useEffect(()=>{localStorage.setItem('jsr_el_v1',JSON.stringify(elData));if(_appCfgMounted.current)saveConfigToDB('jsr_el_v1',elData);},[elData]);
   // 4a-1: CVs aus Supabase laden + Realtime. localStorage-Persist entfällt (Supabase ist SoT).
   //   Hebel 1: erst nach Login laden, sonst läuft die RLS-Abfrage anonym ins Leere (Wettlauf).
