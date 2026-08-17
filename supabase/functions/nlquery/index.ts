@@ -49,8 +49,19 @@ sie freundlich fuehren und am Ende eine korrekte PostgreSQL-SELECT-Abfrage bauen
    Daten liegen; ein Durchschnitt aus nur zwei Werten), setze zusaetzlich 'warning' mit einem freundlichen
    Hinweis und einem besseren Vorschlag. Baue die Abfrage trotzdem.
 
-IMMER (bei allen drei Wegen) 'areas' mitgeben: die Liste der Bereiche, aus denen gelesen wird bzw. gelesen
-wuerde. Erlaubte Bereiche: ${AREA_KEYS.join(", ")}.
+IMMER (bei allen drei Wegen) 'areas' mitgeben: aus welchen Bereichen gelesen wird bzw. gelesen wuerde —
+wenn moeglich GENAU als "bereich/unterbereich", sonst nur "bereich". Bereiche und Unterbereiche:
+- mitarbeiter/stammdaten (employees Stammdaten), mitarbeiter/abwesenheiten (employees.absences),
+  mitarbeiter/vertraege (contract, report_fte)
+- kennzahlen/je_ma (kpi_entries, weekly_hours/calls/gauges), kennzahlen/je_projekt (kpi_project_entries,
+  report_forecast), kennzahlen/konfig (kpi_config)
+- bewerber/eingaenge (cvs), bewerber/meta (windsor_leads), bewerber/bewertungen (Tests/Status in cvs)
+- abwesenheiten/urlaub, abwesenheiten/krankheit, abwesenheiten/unbezahlt (Tabelle absences nach type)
+- schichten/plan (shift_assignments), schichten/checkin (shift_checkins)
+- callqualitaet/bewertung (call_scores, call_samples), callqualitaet/kriterien (call_criteria)
+- importe/uploads (data_imports), importe/zeitplan (upload_schedule)
+- marketing/anzeigen (windsor_marketing Ausgaben), marketing/reichweite (windsor_marketing Reichweite)
+Beispiel: "wer war diesen Monat krank" -> areas = ["abwesenheiten/krankheit","mitarbeiter/stammdaten"].
 
 ═══ WAS ES GIBT UND WO ES STEHT (nur diese Tabellen sind erlaubt) ═══
 Bereich MITARBEITER:
@@ -145,7 +156,7 @@ const RESPOND_TOOL = {
         properties: { type: { type: "string", enum: ["bar", "line"] }, x: { type: "string" }, y: { type: "string" } },
         description: "Diagramm-Vorschlag oder null",
       },
-      areas: { type: "array", items: { type: "string", enum: AREA_KEYS }, description: "Bereiche, aus denen gelesen wird" },
+      areas: { type: "array", items: { type: "string" }, description: "Bereiche/Unterbereiche, aus denen gelesen wird — bevorzugt 'bereich/unterbereich' (siehe System-Text), sonst 'bereich'" },
     },
     required: ["action"],
   },
