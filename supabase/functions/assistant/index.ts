@@ -183,5 +183,9 @@ Deno.serve(async (req) => {
   const out = tool.input || {};
   const known = out.known !== false;
   const jump = (typeof out.jump === "string" && NAV_KEYS.has(out.jump)) ? out.jump : null;
+  // Lücken-Report: unbeantwortete Fragen protokollieren, damit HR sieht, was im Handbuch fehlt.
+  if (!known) {
+    try { const q = String(messages[messages.length - 1]?.content || "").trim().slice(0, 500); if (q) await admin.from("assistant_gaps").insert({ question: q, asked_by: uid }); } catch (_e) { /* egal */ }
+  }
   return json({ known, steps: Array.isArray(out.steps) ? out.steps : [], jump, note: out.note || "" });
 });

@@ -31381,7 +31381,54 @@ const SYSTEM_MANUAL = [
 
 // Etappe 1: reines Skelett — rendert alle Einträge statisch (aufklappbar).
 // hasAccess ist schon in der Signatur, aber NOCH ungenutzt (Rollenfilter = Etappe 3).
-function SystemManualView({hasAccess}){
+// Schnitt 2: Frage-Box über dem Handbuch. Ruft die Edge Function assistant; Antwort als Schritte + Sprung-Ziel.
+function AssistantBox({onNavigate}){
+  const [q,setQ]=useState(''); const [busy,setBusy]=useState(false); const [ans,setAns]=useState(null); const [err,setErr]=useState('');
+  const jumpLabel=k=>{ const it=(MENU_BADGE_MAIN_ITEMS||[]).find(x=>x.key===k); return it?it.label:k; };
+  async function ask(){ const question=q.trim(); if(!question||busy) return; setBusy(true); setErr(''); setAns(null);
+    let tok=null; try{ const s=await sb.auth.getSession(); tok=s&&s.data&&s.data.session&&s.data.session.access_token; }catch(e){}
+    try{ const r=await fetch(SB_URL+'/functions/v1/assistant',{method:'POST',headers:{'Authorization':'Bearer '+tok,'apikey':SB_KEY,'content-type':'application/json'},body:JSON.stringify({question})});
+      let j; try{ j=await r.json(); }catch(e){ j={error:'Antwort nicht lesbar ('+r.status+')'}; }
+      if(!r.ok||j.error){ setErr(j.error||('Fehler '+r.status)); } else setAns(j);
+    }catch(e){ setErr('Assistent nicht erreichbar: '+(e.message||'')); }
+    setBusy(false);
+  }
+  return <div style={{border:'1px solid var(--border)',borderRadius:14,padding:'14px 16px',marginBottom:14,background:'var(--card)'}}>
+    <div style={{fontSize:14,fontWeight:800,marginBottom:8,display:'flex',alignItems:'center',gap:8}}>🧭 Frag den Assistenten</div>
+    <div style={{display:'flex',gap:8}}>
+      <input className="form-input" style={{flex:1}} placeholder="z. B. Wie lege ich einen neuen Mitarbeiter an?" value={q} onChange={e=>setQ(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')ask();}} disabled={busy}/>
+      <button className="btn btn-primary btn-sm" disabled={busy||!q.trim()} onClick={ask}>{busy?'…':'Fragen'}</button>
+    </div>
+    {err&&<div style={{marginTop:10,padding:'8px 10px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:8,color:'#b91c1c',fontSize:12.5}}>{err}</div>}
+    {ans&&<div style={{marginTop:12}}>
+      {ans.known===false
+        ? <div style={{padding:'10px 12px',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:10,fontSize:13,color:'#92400e',lineHeight:1.5}}>{ans.note||'Dazu habe ich nichts hinterlegt, frag am besten Johannes.'}</div>
+        : <React.Fragment>
+            {(ans.steps||[]).length>0 && <ol style={{margin:'0 0 8px',paddingLeft:20,fontSize:13.5,lineHeight:1.6}}>{ans.steps.map((s,i)=><li key={i} style={{marginBottom:3}}>{s}</li>)}</ol>}
+            {ans.note && <div style={{fontSize:12.5,color:'var(--muted)',marginBottom:8}}>{ans.note}</div>}
+            {ans.jump && <button className="btn btn-sm" style={{background:'var(--blue-bg)',border:'1px solid #cfe0e2',color:'#0F5661',fontWeight:700}} onClick={()=>{ if(onNavigate) onNavigate({kind:'view',view:ans.jump}); }}>→ Zu „{jumpLabel(ans.jump)}" springen</button>}
+          </React.Fragment>}
+    </div>}
+  </div>;
+}
+// Schnitt 3: Lücken-Report. Unbeantwortete Fragen (Assistent: „weiß ich nicht") — nur HR/Management sehen sie.
+function AssistantGaps({team}){
+  const roles=(team&&team.role_keys)||[]; const isAdmin=roles.some(r=>r==='management'||r==='hr');
+  const [gaps,setGaps]=useState(null); const [open,setOpen]=useState(false);
+  const load=async()=>{ try{ const {data}=await sb.from('assistant_gaps').select('*').eq('resolved',false).order('created_at',{ascending:false}).limit(50); setGaps(data||[]); }catch(e){ setGaps([]); } };
+  useEffect(()=>{ if(isAdmin) load(); },[]);
+  async function resolve(id){ try{ await sb.from('assistant_gaps').update({resolved:true}).eq('id',id); }catch(e){} load(); }
+  if(!isAdmin||!gaps||!gaps.length) return null;
+  return <div style={{border:'1px solid #fde68a',borderRadius:12,background:'#fffbeb',padding:'12px 14px',marginBottom:14}}>
+    <div onClick={()=>setOpen(o=>!o)} style={{display:'flex',alignItems:'center',gap:8,cursor:'pointer',fontSize:13,fontWeight:800,color:'#92400e'}}>⚠ {gaps.length} offene Frage(n), zu denen nichts hinterlegt ist <span style={{marginLeft:'auto'}}>{open?'▲':'▼'}</span></div>
+    {open?<div style={{marginTop:8,display:'flex',flexDirection:'column',gap:6}}>{gaps.map(g=><div key={g.id} style={{display:'flex',alignItems:'center',gap:10,fontSize:12.5}}>
+      <span style={{flex:1}}>„{g.question}"</span>
+      <span style={{color:'var(--muted)',fontSize:11}}>{fmtDate(g.created_at)}</span>
+      <button className="btn btn-sm" onClick={()=>resolve(g.id)}>erledigt</button>
+    </div>)}</div>:<div style={{fontSize:11.5,color:'#92400e',marginTop:4}}>Aufklappen zeigt, was Kollegen gefragt haben und im Handbuch noch fehlt.</div>}
+  </div>;
+}
+function SystemManualView({hasAccess, team, onNavigate}){
   const [open, setOpen] = useState(null);   // tab_key des aufgeklappten Eintrags
   const [q, setQ] = useState('');
   // Read-Status pro Gerät: { [tab_key]: zuletzt gesehene updated_at }
@@ -31405,8 +31452,10 @@ function SystemManualView({hasAccess}){
     <div>
       <div style={{marginBottom:16}}>
         <div style={{fontSize:18,fontWeight:700}}>Wissen System</div>
-        <div style={{fontSize:13,color:'var(--muted)',marginTop:2}}>Bedienungsanleitung</div>
+        <div style={{fontSize:13,color:'var(--muted)',marginTop:2}}>Frag den Assistenten oder blättere im Nachschlagewerk.</div>
       </div>
+      <AssistantBox onNavigate={onNavigate}/>
+      <AssistantGaps team={team}/>
       <input className="kbx-search" placeholder="🔍 Anleitungen durchsuchen…" value={q} onChange={e=>setQ(e.target.value)}/>
       {visible.length===0&&<div className="kbx-empty">Keine Ergebnisse.</div>}
       {visible.map(doc=>{
@@ -38457,7 +38506,7 @@ function App(){
           {view==='calendar'&&<CalendarView team={team} projects={projects} employees={employees} showToast={showToast} isMobileW={isMobileW} jumpTo={calNav} onJumpConsumed={()=>setCalNav(null)}/>}
           {view==='cockpit'&&<Cockpit employees={employees} projects={projects} team={team} plans={plans} forecast={forecast} onAbsence={e=>setAbsenceModal(e)} onNavigate={dqNavigate} isMobileW={isMobileW} setEmployees={setEmployees} showToast={showToast}/>}
           {view==='datacheck'&&<DataQualityPanel employees={employees} projects={projects} plans={plans} onNavigate={dqNavigate}/>}
-          {view==='wissen_system'&&<SystemManualView hasAccess={hasAccess}/>}
+          {view==='wissen_system'&&<SystemManualView hasAccess={hasAccess} team={team} onNavigate={dqNavigate}/>}
           {view==='activity_log'&&<ActivityLogView employees={employees}/>}
           {view==='productivity'&&<ProductivityView employees={employees} projects={projects} setEmployees={setEmployees}/>}
       {view==='performance'&&<PerformanceView employees={employees} projects={projects}/>}
