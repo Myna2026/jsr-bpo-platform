@@ -54,6 +54,20 @@ Regeln:
 - Nutze sprechende Spalten-Aliase (deutsch) in der Ergebnismenge.
 - Datumsbezug ueber kw/year (ISO-Woche) bzw. month/year; fuer "letzte N Wochen"/Monate rechne mit kw/year.
 - Bei Zeitreihen/Kategorien: schlage ein Diagramm vor (chart), sonst chart null.
+
+DETERMINISMUS (wichtig): Formuliere fuer dieselbe oder bedeutungsgleiche Frage IMMER exakt dieselbe
+Abfrage. Triff Standardannahmen fest und einheitlich; variiere Tabellenwahl, Joins, Aggregation und
+Aliase nicht von Lauf zu Lauf. Waehle stets die einfachste kanonische Form. Halte dich dabei strikt an:
+- Immer ein deterministisches ORDER BY mit eindeutigem Tie-Breaker (z.B. zusaetzlich nach id bzw. name),
+  damit auch die Zeilenreihenfolge stabil ist.
+- "Mitarbeiter" ohne Zusatz = ALLE Zeilen in employees, keine Status-Filterung. Nur filtern, wenn die
+  Frage einen Status nennt ("aktive", "in Schulung", "gekuendigte" ...).
+- "je Projekt" = GROUP BY employees.project_id, Projektname per JOIN auf projects.name. Analog "je Skill"
+  ueber project_skill, "je Standort" ueber location.
+- Zaehlungen mit count(*). Feste deutsche Aliase: anzahl, projekt, skill, standort, mitarbeiter, woche, monat.
+- Kennzahlen (KPI) IMMER ueber die im Glossar genannte kpi_id ansprechen, nie ueber den Namen raten.
+- Bei mehreren plausiblen Lesarten (Zeitraum? Kennzahl? Gliederung? Status?) NICHT raten, sondern mit
+  action='clarify' rueckfragen. Lieber einmal praezisieren als bei jedem Lauf anders interpretieren.
 `;
 
 async function buildGlossary(sb: any): Promise<string> {
@@ -130,35 +144,87 @@ Deno.serve(async (req) => {
 
   const system = SCHEMA_CORE + (await buildGlossary(sb));
 
-  // Claude aufrufen, Antwort ueber das respond-Tool erzwingen.
-  let tool: any;
-  try {
-    const resp = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: { "x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-      body: JSON.stringify({
-        model: MODEL,
-        max_tokens: 1500,
-        system,
-        tools: [RESPOND_TOOL],
-        tool_choice: { type: "tool", name: "respond" },
-        messages: messages.map((m: any) => ({ role: m.role === "assistant" ? "assistant" : "user", content: String(m.content || "") })),
-      }),
-    });
-    const data = await resp.json();
-    if (!resp.ok) return json({ error: "KI-Fehler: " + (data?.error?.message || resp.status) }, 502);
-    tool = (data.content || []).find((c: any) => c.type === "tool_use");
-    if (!tool) return json({ error: "Keine verwertbare KI-Antwort." }, 502);
-  } catch (e) {
-    return json({ error: "KI nicht erreichbar: " + (e as Error).message }, 502);
-  }
+  // Extrahiert den bisher gestreamten Wert des "sql"-Felds aus (unvollstaendigem) Tool-JSON.
+  const extractSqlLive = (s: string): string | null => {
+    const m = s.match(/"sql"\s*:\s*"/);
+    if (!m) return null;
+    let i = (m.index || 0) + m[0].length, out = "";
+    while (i < s.length) {
+      const c = s[i];
+      if (c === "\\") {
+        const n = s[i + 1];
+        if (n === undefined) break; // unvollstaendige Escape-Sequenz am Puffer-Rand
+        out += n === "n" ? "\n" : n === "t" ? "\t" : n === "r" ? "\r" : n === '"' ? '"' : n === "\\" ? "\\" : n === "/" ? "/" : n;
+        i += 2; continue;
+      }
+      if (c === '"') break; // schliessendes Anfuehrungszeichen -> sql komplett
+      out += c; i++;
+    }
+    return out;
+  };
 
-  const out = tool.input || {};
-  if (out.action === "clarify") {
-    return json({ action: "clarify", question: out.question || "Bitte praezisieren:", options: (out.options || []).slice(0, 3) });
-  }
-  // action === 'sql' — SQL nur ZURUECKGEBEN (sichtbar, bevor es laeuft). Ausfuehren erst ueber den execute-Modus.
-  const sql = String(out.sql || "").trim();
-  if (!sql) return json({ error: "Keine Abfrage erzeugt." }, 502);
-  return json({ action: "sql", sql, explanation: out.explanation || "", chart: out.chart || null });
+  // Claude STREAMEN (SSE), Antwort ueber das respond-Tool erzwingen, temperature 0 fuer Reproduzierbarkeit.
+  // Die SQL wird waehrend des Eintreffens als NDJSON an den Browser weitergereicht (sql_delta), am Ende
+  // kommt das autoritative Ergebnis (done/clarify).
+  const enc = new TextEncoder();
+  const stream = new ReadableStream({
+    async start(controller) {
+      const send = (o: unknown) => controller.enqueue(enc.encode(JSON.stringify(o) + "\n"));
+      try {
+        const resp = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: { "x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+          body: JSON.stringify({
+            model: MODEL,
+            max_tokens: 1500,
+            stream: true,
+            system,
+            tools: [RESPOND_TOOL],
+            tool_choice: { type: "tool", name: "respond" },
+            messages: messages.map((m: any) => ({ role: m.role === "assistant" ? "assistant" : "user", content: String(m.content || "") })),
+          }),
+        });
+        if (!resp.ok || !resp.body) {
+          let msg = "KI-Fehler " + resp.status;
+          try { const e = await resp.json(); msg = "KI-Fehler: " + (e?.error?.message || resp.status); } catch { /* egal */ }
+          send({ t: "error", error: msg }); controller.close(); return;
+        }
+        const reader = resp.body.getReader();
+        const dec = new TextDecoder();
+        let buf = "", jsonAcc = "", sqlSent = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          let idx: number;
+          while ((idx = buf.indexOf("\n")) >= 0) {
+            const line = buf.slice(0, idx); buf = buf.slice(idx + 1);
+            if (!line.startsWith("data:")) continue;
+            const payload = line.slice(5).trim();
+            if (!payload || payload === "[DONE]") continue;
+            let ev: any; try { ev = JSON.parse(payload); } catch { continue; }
+            if (ev.type === "content_block_delta" && ev.delta?.type === "input_json_delta") {
+              jsonAcc += ev.delta.partial_json || "";
+              const live = extractSqlLive(jsonAcc);
+              if (live != null && live.length > sqlSent) { send({ t: "sql_delta", v: live.slice(sqlSent) }); sqlSent = live.length; }
+            }
+          }
+        }
+        // Vollstaendiges Tool-JSON auswerten (autoritativ).
+        let parsed: any = {};
+        try { parsed = JSON.parse(jsonAcc); } catch { /* unvollstaendig */ }
+        if (parsed.action === "clarify") {
+          send({ t: "clarify", question: parsed.question || "Bitte praezisieren:", options: (parsed.options || []).slice(0, 3) });
+        } else {
+          const sql = String(parsed.sql || extractSqlLive(jsonAcc) || "").trim();
+          if (!sql) send({ t: "error", error: "Keine Abfrage erzeugt." });
+          else send({ t: "done", action: "sql", sql, explanation: parsed.explanation || "", chart: parsed.chart || null });
+        }
+      } catch (e) {
+        send({ t: "error", error: "KI nicht erreichbar: " + (e as Error).message });
+      }
+      controller.close();
+    },
+  });
+  return new Response(stream, { headers: { ...cors, "Content-Type": "application/x-ndjson" } });
 });

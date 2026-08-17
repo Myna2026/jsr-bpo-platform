@@ -149,50 +149,6 @@
     ]);
   }
 
-  // Organigramm-Baum in LESBARER Größe (kein Schrumpfen). Wird der Baum zu groß, sind Knoten mit Kindern
-  // AUTO-FIT: passt sich von selbst ins 16:9-Format ein (kein Klick nötig → gilt auch für PDF/Kundenseite).
-  // Zwei Hebel: (a) Agenten in mehreren Spalten je Karte → kompakter, weniger Höhe; (b) natürliche Höhe messen
-  // und per transform:scale einpassen. Aufklappen (▾/▸) bleibt zusätzlich für die In-App-Ansicht.
-  function FteOrgBody(props){ var P=props.P, org=props.org;
-    var st=R.useState({}); var collapsed=st[0], setCollapsed=st[1];
-    var wrapRef=R.useRef(null), innerRef=R.useRef(null), scaleRef=R.useRef(1);
-    var sc=R.useState(1), scale=sc[0], setScale=sc[1];
-    var nodes=org.nodes||[]; var byId={}; nodes.forEach(function(n){ byId[n.id]=n; });
-    var children={}; nodes.forEach(function(n){ if(n.parent&&byId[n.parent]){ (children[n.parent]=children[n.parent]||[]).push(n); } });
-    Object.keys(children).forEach(function(k){ children[k].sort(function(a,b){ return (a.seq||0)-(b.seq||0); }); });
-    var roots=nodes.filter(function(n){ return !n.parent||!byId[n.parent]; }).sort(function(a,b){ return (a.seq||0)-(b.seq||0); });
-    function toggle(id){ setCollapsed(function(c){ var n2=Object.assign({},c); if(n2[id]) delete n2[id]; else n2[id]=true; return n2; }); }
-    // scrollHeight ist die Layouthöhe VOR transform → stabile Messung, kein Render-Loop (Guard via scaleRef).
-    R.useLayoutEffect(function(){ var wrap=wrapRef.current, inner=innerRef.current; if(!wrap||!inner) return;
-      var avail=wrap.clientHeight, need=inner.scrollHeight; if(!avail||!need) return;
-      var k=need>avail? Math.max(0.35, avail/need) : 1;
-      if(Math.abs(k-scaleRef.current)>0.005){ scaleRef.current=k; setScale(k); }
-    });
-    function node(nd){ var kids=children[nd.id]||[]; var coll=!!collapsed[nd.id];
-      var mc=(nd.members&&nd.members.length)||0;
-      var cols= mc>18?4 : mc>10?3 : mc>4?2 : 1;   // Agenten mehrspaltig → Höhe begrenzt
-      var mem= mc?h('div',{key:'m',style:{display:'grid',gridTemplateColumns:'repeat('+cols+',minmax(0,1fr))',gap:'.25cqw .9cqw',marginTop:'.7cqw'}}, nd.members.map(function(m,i){ return h('div',{key:i,style:{display:'flex',justifyContent:'space-between',alignItems:'center',gap:'.7cqw'}},[
-          h('span',{key:'n',style:{fontSize:'1.15cqw',color:P.ink,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},m.name),
-          m.fte!=null?h('span',{key:'f',style:{fontFamily:MONO,fontSize:'1.05cqw',fontWeight:800,color:P.onLightTxt,background:rgba(P.onLight,.12),borderRadius:'.5cqw',padding:'.05cqw .5cqw',flexShrink:0}},fmtNum(m.fte,2)):null
-        ]); })):null;
-      var maxW= cols>=3?'50cqw' : cols===2?'34cqw' : '30cqw';   // mehrspaltige Karten dürfen breiter werden
-      var cardEl=h('div',{style:{border:'1px solid #e6edef',borderTop:'.4cqw solid '+P.onLight,borderRadius:'1cqw',padding:'.9cqw 1.2cqw',minWidth:'16cqw',maxWidth:maxW,background:'#fff',boxShadow:'0 .6cqw 1.4cqw -1cqw rgba(3,20,26,.25)'}},[
-        h('div',{key:'h',style:{display:'flex',justifyContent:'space-between',alignItems:'baseline',gap:'1cqw'}},[
-          h('div',{key:'t',style:{fontSize:'1.5cqw',fontWeight:800,color:P.ink,lineHeight:1.1}},nd.title||'—'),
-          kids.length?h('span',{key:'x',onClick:function(){ toggle(nd.id); },title:coll?'Aufklappen':'Einklappen',style:{cursor:'pointer',userSelect:'none',fontFamily:MONO,fontSize:'1.2cqw',fontWeight:800,color:P.onLight,flexShrink:0}}, coll?('▸ '+kids.length):'▾'):null
-        ]),
-        nd.subtitle?h('div',{key:'s',style:{fontSize:'.95cqw',fontWeight:700,letterSpacing:'.08em',color:P.muted,textTransform:'uppercase',marginTop:'.15cqw'}},nd.subtitle):null,
-        mem
-      ]);
-      return h('div',{key:nd.id,style:{display:'flex',flexDirection:'column',alignItems:'center'}},[
-        cardEl,
-        (!coll&&kids.length)?h('div',{key:'c',style:{width:'.2cqw',height:'2cqw',background:'#d5dde3'}}):null,
-        (!coll&&kids.length)?h('div',{key:'k',style:{display:'flex',gap:'2.2cqw',justifyContent:'center',alignItems:'flex-start'}}, kids.map(node)):null
-      ]);
-    }
-    return h('div',{ref:wrapRef,style:{flex:1,minHeight:0,overflow:'hidden',display:'flex',justifyContent:'center',alignItems:'flex-start'}},
-      h('div',{ref:innerRef,style:{transform:'scale('+scale+')',transformOrigin:'top center',display:'flex',gap:'2.2cqw',justifyContent:'center',alignItems:'flex-start',paddingTop:'.6cqw'}}, roots.map(node)));
-  }
   // FUNKTIONS-BÄNDER (Variante B): drei beschriftete Ebenen untereinander — Projektleitung / Overhead / Agenten.
   // KEINE Linien, KEINE Skalierung. Personen als vollfarbige Kacheln (Funktionsfarbe pp.color + Kontrast pp.txt,
   // in hr.html gebacken). Agenten-Raster adaptiv (Spalten nach Anzahl). Passt für 7 (Sales) wie 17 (Support).
@@ -227,8 +183,29 @@
   // Mit org (Organigramm-Zweig aus org_nodes): Baum in Präsentations-Optik (Kundenfarbe-Fond, weiße Karten,
   // Verbindungslinien), FTE an den Karten. Ohne org: Namensliste als Fallback.
   // Seitenzahl der FTE-Folie (Agenten-Band paginiert; pl/overhead nur Seite 0).
+  // Seiten-Plan der FTE-Folie: Seite 0 trägt Total-Badge + Projektleitung + Overhead. Gibt es diese Bänder,
+  // starten die AGENTEN auf Seite 1 (sonst würde Seite 0 mit Badge+PL+Overhead+Agenten unten abgeschnitten,
+  // die nutzbare Panel-Höhe reicht dafür nicht). Ohne PL/Overhead beginnen die Agenten auf Seite 0.
+  // Agentenseiten fassen 15 (5 Spalten × 3 Zeilen), gleichmäßig gesplittet. EINE Wahrheit für Count + Render.
+  function ftePlan(fl){
+    var bands=(fl&&fl.bands)||[];
+    var ab=bands.filter(function(b){return b.key==='agent';})[0]; var agents=(ab&&ab.people)||[];
+    var others=bands.filter(function(b){return b.key!=='agent';});
+    var hasOthers=others.reduce(function(s,b){return s+((b.people&&b.people.length)||0);},0)>0;
+    var aLabel=(ab&&ab.label)||'Agenten';
+    var aPages=agents.length?agentPages(agents,15):[];
+    var pages=[];
+    if(hasOthers){
+      pages.push({others:others, agents:[]});                                 // Seite 0: Führung + Overhead
+      aPages.forEach(function(ap,i){ pages.push({others:[], agents:ap, cont:i>0, aLabel:aLabel}); });
+    } else {
+      if(!aPages.length){ pages.push({others:[], agents:[]}); }               // gar keine Personen → 1 leere Seite
+      aPages.forEach(function(ap,i){ pages.push({others:[], agents:ap, cont:i>0, aLabel:aLabel}); });
+    }
+    return pages;
+  }
   function ftePages(ctx, tk){ var fl=((ctx.deck.teams||{})[tk]||{}).fteList||{};
-    if(fl.bands&&fl.bands.length){ var ab=fl.bands.filter(function(b){return b.key==='agent';})[0]; return agentPages((ab&&ab.people)||[],14).length; }
+    if(fl.bands&&fl.bands.length){ return ftePlan(fl).length; }
     return agentPages(fl.rows||[],24).length; }
   function Fte(ctx, tk, page){ page=page||0; var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk);
     var fl=td.fteList||{}; var rows=fl.rows||[]; var bands=fl.bands; var total=(fl.total!=null)?fl.total:numOr(td.fte,null);
@@ -243,10 +220,8 @@
       h('span',{key:'l',style:{fontSize:'1.6cqw',fontWeight:700,color:P.muted}},'FTE gesamt')
     ]);
     if(hasBands){
-      var agentBand=bands.filter(function(b){return b.key==='agent';})[0]; var others=bands.filter(function(b){return b.key!=='agent';});
-      var apages=agentPages((agentBand&&agentBand.people)||[],14); var np=Math.max(1,apages.length);
-      var pageBands = page===0 ? others.concat(agentBand?[{key:'agent',label:agentBand.label,people:apages[0]||[]}]:[])
-                               : (agentBand?[{key:'agent',label:agentBand.label+' (Fortsetzung)',people:apages[page]||[]}]:[]);
+      var plan=ftePlan(fl); var np=plan.length; var pg=plan[page]||plan[0];
+      var pageBands=(pg.others||[]).concat(pg.agents.length?[{key:'agent',label:pg.aLabel+(pg.cont?' (Fortsetzung)':''),people:pg.agents}]:[]);
       var head=page===0?fondHead(P, lbl, 'Besetzung & FTE', (pcount?(pcount+' Mitarbeiter'):'')+(np>1?(' · '+np+' Seiten'):'')):null;
       return Slide(ctx, [ head, panel(P, (page===0?[totalBadge]:[]).concat([FteBandsBody(pageBands, P)])) ].filter(Boolean));
     }

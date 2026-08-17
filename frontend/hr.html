@@ -1310,9 +1310,9 @@ const MENU_BADGE_MAIN_ITEMS = [
   {key:'timetracking',label:'Zeiterfassung'},{key:'locations',label:'Standorte'},{key:'spaces',label:'Spaces & Seats'},
   {key:'payroll',label:'Löhne'},{key:'orgchart',label:'Organigramm'},{key:'absences',label:'Abwesenheiten'},{key:'calendar',label:'Kalender'},
   {key:'urlaubantraege',label:'Urlaubsanträge'},{key:'feedback',label:'Feedbackgespräche'},{key:'kanban',label:'Recruiting'},{key:'funnel',label:'Bewerber-Trichter'},{key:'onboarding',label:'Onboarding'},
-  {key:'cvs',label:'CVs & Bewerber'},{key:'showcase',label:'Showcases'},{key:'training_plans',label:'Schulungsplanung'},
+  {key:'cvs',label:'CVs & Bewerber'},{key:'dubletten',label:'Dubletten'},{key:'showcase',label:'Showcases'},{key:'training_plans',label:'Schulungsplanung'},
   {key:'timeline',label:'Timeline'},{key:'projects',label:'Projekte'},{key:'forecast',label:'Forecast'},{key:'fcist',label:'Forecast vs. Ist'},
-  {key:'profitability',label:'Wirtschaftlichkeit'},{key:'praesentation',label:'Präsentationen'},{key:'dataimport',label:'Datenimport'},{key:'recmkt',label:'Recruiting Marketing'},{key:'nlquery',label:'Datenabfrage'},
+  {key:'profitability',label:'Wirtschaftlichkeit'},{key:'praesentation',label:'Präsentationen'},{key:'uploads',label:'Upload-Status'},{key:'uploadmatrix',label:'Upload-Übersicht'},{key:'dataimport',label:'Datenimport'},{key:'uploadplan',label:'Upload-Plan'},{key:'recmkt',label:'Recruiting Marketing'},{key:'nlquery',label:'Datenabfrage'},
   {key:'superadmin',label:'System / Konfiguration'},{key:'tabperms',label:'Portal-Tabs'},
   {key:'aisettings',label:'KI-Einstellungen'},{key:'aiendpoint',label:'KI-Anbindung'},{key:'cvsync',label:'CV-Sync'},
   {key:'cockpits',label:'Cockpits'},{key:'hraccess',label:'HR-Zugriff'},{key:'appusers',label:'App-User'},
@@ -7828,6 +7828,8 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW}){
         <div className="welcome-hero" style={{fontSize:32}}>Tagesaufgaben</div>
         <p className="welcome-sub" style={{margin:'12px auto 0'}}>Deine Aufgaben für deine Rolle. Wer eine Aufgabe erledigt, hakt sie ab, und das Team sieht es. Die Reihenfolge ist nur ein Vorschlag; du kannst dir Punkte in beliebiger Reihenfolge greifen.</p>
       </div>
+      {/* Meine Upload-Pflichten (nur wo ich zuständig bin) — zuoberst, weil zeitkritisch. */}
+      <UploadDutyPanel projects={projects} onNavigate={onNavigate}/>
       {/* MANAGER: Zusammenschau ganz oben, groß und präsent — womit man morgens den Stand erfasst. */}
       {isManager&&(
         <div style={{marginBottom:TASKS.length>0?28:8}}>
@@ -8599,7 +8601,16 @@ function CockpitMarketingTile({team, employees, mobile, onNavigate}){
   const insta=(rows||[]).filter(x=>x.datasource==='instagram'&&inR(x.date,cur));
   const sum=(a,k)=>a.reduce((s,x)=>s+(x[k]||0),0);
   const spend=sum(meta,'spend'), metaReach=sum(meta,'reach'), igReach=sum(insta,'reach');
+  const cvOrigin=c=>{ const s=String((c&&c.source)||'').toLowerCase(); if(s==='meta') return 'meta'; if(s.indexOf('sheet')>=0||s.indexOf('google')>=0) return 'sheet'; return 'other'; };
   const apps=(cvs||[]).filter(c=>inR(wmDate(c.cv_date),cur)).length + (employees||[]).filter(e=>e&&e.source==='cv'&&inR(wmDate(e.cv_received_at),cur)).length;
+  const appsMeta=(cvs||[]).filter(c=>c&&cvOrigin(c)==='meta'&&inR(wmDate(c.cv_date),cur)).length;
+  const appsSheet=(cvs||[]).filter(c=>c&&cvOrigin(c)==='sheet'&&inR(wmDate(c.cv_date),cur)).length;
+  // Kosten je Bewerbung: echte Zuordnung (nur source=meta), ab Kampagnenstart.
+  const firstSpendDate=(rows||[]).reduce((m,x)=>(x.datasource==='facebook'&&(x.spend||0)>0&&(!m||x.date<m))?x.date:m,null);
+  const cpaFrom=(firstSpendDate&&(!cur.from||firstSpendDate>cur.from))?firstSpendDate:cur.from;
+  const appsCPA=(cvs||[]).filter(c=>c&&c.source==='meta'&&inR(wmDate(c.cv_date),{from:cpaFrom,to:cur.to})).length;
+  const cpaVal=appsCPA>0?spend/appsCPA:null;
+  const fmtD=d=>d?d.toLocaleDateString('de-DE',{day:'numeric',month:'short'}):'';
   const hasData=(rows||[]).some(x=>inR(x.date,cur));
   const eur=n=>n==null?'—':n.toLocaleString('de-DE',{minimumFractionDigits:2,maximumFractionDigits:2})+' €';
   const int=n=>n==null?'—':Math.round(n).toLocaleString('de-DE');
@@ -8624,8 +8635,8 @@ function CockpitMarketingTile({team, employees, mobile, onNavigate}){
           {stat('Meta-Reichweite', int(metaReach))}
           {stat('Instagram-Reichw.', int(igReach))}
           {stat('Bewerbungen', int(apps))}
-          {stat('Kosten je Bewerbung', apps>0?eur(spend/apps):'—', 'var(--accent,#2563eb)')}
-        </div>{spendChart}</React.Fragment>}
+          {stat('Kosten je Meta-Bew.', cpaVal==null?'—':eur(cpaVal), 'var(--accent,#2563eb)')}
+        </div><div style={{fontSize:10.5,color:'var(--muted)',marginTop:6}}>Herkunft: {int(appsMeta)} Meta · {int(appsSheet)} Sheet{(apps-appsMeta-appsSheet)>0?(' · '+int(apps-appsMeta-appsSheet)+' übrige'):''}{firstSpendDate?(' · Kosten je Meta-Bewerbung seit '+fmtD(firstSpendDate)):''}</div>{spendChart}</React.Fragment>}
   </div>;
 }
 function CockpitPresentationComments({projects, team, mobile}){
@@ -8853,6 +8864,7 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
     <div className="ckm">
       {/* Termine heute — ganz oben, noch vor den Kennzahlen. Was heute ansteht, sieht man zuerst. */}
       <CockpitTodayEvents mobile={true} onNavigate={onNavigate}/>
+      <CockpitUploadTile team={team} projects={projects} onNavigate={onNavigate}/>
 
       {/* Kennzahlen: zwei kompakte Kacheln + gestapelte Verlaufs-Kacheln. Auf schmalem Screen untereinander,
           damit die Verläufe volle Breite bekommen; Werte per Antippen (kein Hover am Telefon). Gleiche Optik wie Desktop. */}
@@ -9325,6 +9337,7 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
     const isDefault=(!_ck.order||JSON.stringify(order)===JSON.stringify(DEF_ORDER))&&hiddenSet.size===0;
     return(<React.Fragment>
       <CockpitTodayEvents mobile={false} onNavigate={onNavigate}/>
+      <CockpitUploadTile team={team} projects={projects} onNavigate={onNavigate}/>
       <div style={{display:'flex',justifyContent:'flex-end',gap:8,marginBottom:10}}>
         {mgmtEdit&&!isDefault&&<button className="btn btn-sm" style={{background:'transparent',color:'var(--muted)'}} onClick={()=>saveMgmtCk({order:null,hidden:[]})} title="Standard-Anordnung wiederherstellen">↩ Standard</button>}
         <button className="btn btn-sm" onClick={()=>setMgmtEdit(!mgmtEdit)} style={mgmtEdit?{background:'#fffbeb',color:'#b45309',border:'1.5px solid #f59e0b'}:undefined} title="Blöcke umsortieren und aus-/einblenden">{mgmtEdit?'✓ Fertig':'✏ Anordnen'}</button>
@@ -18494,6 +18507,25 @@ Levels: A2, B1, B2, C1, C2. Für Kundenservice ist B2 das Minimum.`;
 
         <div className="modal-body" style={{flex:1,overflowY:'auto'}}>
 
+          {/* ── Aus der Bewerbung (Meta / facebook_leads): read-only, was der Bewerber im Formular angegeben hat ── */}
+          {cv && (cv.source==='meta' || (cv.extra && (cv.extra.lead_id||cv.extra.campaign||cv.extra.cc_experience||cv.extra.german))) && (()=>{
+            const ex=cv.extra||{};
+            const rows=[
+              ['Deutsch', form.language_level||ex.german],
+              ['Call-Center-Erfahrung', ex.cc_experience],
+              ['Arbeitszeit', ex.work_time],
+              ['Kann anfangen ab', form.available_from||ex.available],
+              ['Angaben zu „in welchen…"', ex.interests],
+            ].filter(r=>r[1]);
+            const meta=[['Kampagne',ex.campaign],['Anzeige',ex.ad_name],['Formular',ex.form_id]].filter(r=>r[1]);
+            return <div style={{margin:'0 0 14px',padding:'12px 14px',border:'1px solid var(--border)',borderRadius:10,background:'var(--surface-2)'}}>
+              <div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)',marginBottom:8}}>📣 Aus der Bewerbung</div>
+              <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(190px,1fr))',gap:'8px 16px'}}>
+                {rows.map(([k,v],i)=><div key={i}><div style={{fontSize:10,color:'var(--muted)',fontWeight:700}}>{k}</div><div style={{fontSize:13}}>{v}</div></div>)}
+              </div>
+              {meta.length>0 && <div style={{marginTop:10,paddingTop:8,borderTop:'1px dashed var(--border)',fontSize:11,color:'var(--muted)',display:'flex',flexWrap:'wrap',gap:'4px 14px'}}>{meta.map(([k,v],i)=><span key={i}>{k}: <b style={{fontWeight:600,color:'var(--text)'}}>{v}</b></span>)}</div>}
+            </div>;
+          })()}
 
           {/* ── BASIS (immer sichtbar, LP-Felder readonly wenn vom LP) ── */}
           {tab==='basis'&&(
@@ -20417,6 +20449,9 @@ function RecruitingFunnel({cvList, employees, isMobileW}){
   const parking=cvIn.filter(c=>c.status==='parking');
   const hiredN=hired.length;
   const total=cvIn.length+hiredN;
+  // Herkunft der Eingänge: Meta-Anzeigen vs. Google-Sheet vs. übrige (cvs.source).
+  const origOf=c=>{ const s=String((c&&c.source)||'').toLowerCase(); if(s==='meta') return 'meta'; if(s.indexOf('sheet')>=0||s.indexOf('google')>=0) return 'sheet'; return 'other'; };
+  const oMeta=cvIn.filter(c=>origOf(c)==='meta').length, oSheet=cvIn.filter(c=>origOf(c)==='sheet').length, oOther=cvIn.length-oMeta-oSheet;
   // Reach je Stufe = aktive CVs an Stufe i oder weiter + alle Eingestellten (die haben alle Stufen passiert).
   const reach=ORDER.map((k,i)=> active.filter(c=>posOf(c.status)>=i).length + hiredN );
   const stages=ORDER.map((k,i)=>({key:k, label:lbl(k), color:col(k), n:reach[i], conv: i===0?null:(reach[i-1]?Math.round(reach[i]/reach[i-1]*100):0)}));
@@ -20430,6 +20465,10 @@ function RecruitingFunnel({cvList, employees, isMobileW}){
         <div>
           <div style={{fontSize:20,fontWeight:800}}>Bewerber-Trichter</div>
           <div style={{fontSize:12,color:'var(--muted)',marginTop:2}}>Vom Eingang bis zur Einstellung. Zeitraum nach Eingangsdatum.</div>
+          <div style={{fontSize:11,color:'var(--muted)',marginTop:4,display:'flex',gap:7,flexWrap:'wrap',alignItems:'center'}}>
+            <span>Herkunft der {cvIn.length} Eingänge:</span>
+            <b style={{color:'#1d4ed8'}}>{oMeta} Meta</b><span>·</span><b style={{color:'#0F5661'}}>{oSheet} Google-Sheet</b>{oOther>0?<React.Fragment><span>·</span><b>{oOther} übrige</b></React.Fragment>:null}
+          </div>
         </div>
         <div style={{display:'flex',border:'1px solid var(--border)',borderRadius:10,overflow:'hidden',...(isMobileW?{width:'100%'}:{})}}>
           {[['month',isMobileW?'Monat':'Laufender Monat'],['30d',isMobileW?'30 Tage':'Letzte 30 Tage'],['all','Alles']].map(([k,l])=>(
@@ -21997,6 +22036,13 @@ function ProjectProfitability({projects, employees, forecast, setForecast, onNav
   const totCost = filledRows.reduce((s,r)=>s+r.totalCost,0);
   const totProfit = totRev - totCost;
   const avgMargin = totRev > 0 ? Math.round(totProfit/totRev*100) : null;
+  // Tabelle: nur Monate ab dem ersten mit sinnvollen Daten (erfasstes Ist ODER echte Kosten/Plan) —
+  // kein leeres H1. Bis mindestens zum aktuellen Monat sichtbar lassen, damit man neu erfassen kann.
+  const _profMeaningful = r => r.hasData || r.totalCost>0 || r.planRev>0;
+  const _curMonthIdx = new Date().getMonth();
+  let _profStart = rows.findIndex(_profMeaningful);
+  if(_profStart<0 || _profStart>_curMonthIdx) _profStart=_curMonthIdx;
+  const visRows = rows.slice(_profStart);
 
   return(
     <div>
@@ -22229,7 +22275,7 @@ function ProjectProfitability({projects, employees, forecast, setForecast, onNav
             <th></th>
           </tr></thead>
           <tbody>
-            {rows.map(({month,data,rev,costPersonnel,persOverride,trainCost,costOther,compAlloc,matAlloc,noRk,totalCost,profit,margin,hasData,planRev,planMissing,dev,devPct,planProfit,planMargin})=>(
+            {visRows.map(({month,data,rev,costPersonnel,persOverride,trainCost,costOther,compAlloc,matAlloc,noRk,totalCost,profit,margin,hasData,planRev,planMissing,dev,devPct,planProfit,planMargin})=>(
               <tr key={month} style={{background:hasData?'transparent':'rgba(107,114,128,.03)',cursor:'pointer'}} onClick={()=>openEdit(month)}>
                 <td style={{fontWeight:hasData?600:400,color:hasData?'var(--text)':'var(--muted)'}}>{fmtMonth(month)}</td>
                 <td style={{fontFamily:'var(--font-mono)',color:hasData?'var(--green)':'var(--muted)',fontWeight:hasData?600:400}}>{hasData?`${rev.toLocaleString('de-DE')} €`:'+ eintragen'}</td>
@@ -34333,11 +34379,20 @@ function RecruitingMarketingView({employees}){
     const a=(cvs||[]).filter(c=>inR(wmDate(c.cv_date),r)).length;
     const b=(employees||[]).filter(e=>e&&e.source==='cv'&&inR(wmDate(e.cv_received_at),r)).length;
     return a+b; };
+  // Herkunft je CV-Eingang: 'meta' (Anzeigen), 'sheet' (Google-Sync), 'other' (Rest). Split für die Trennung.
+  const cvOrigin=c=>{ const s=String((c&&c.source)||'').toLowerCase(); if(s==='meta') return 'meta'; if(s.indexOf('sheet')>=0||s.indexOf('google')>=0) return 'sheet'; return 'other'; };
+  const appsBy=(r,orig)=>r?(cvs||[]).filter(c=>c&&cvOrigin(c)===orig&&inR(wmDate(c.cv_date),r)).length:0;
   const rowsCur=[...metaIn(cur),...instaIn(cur)];
 
   const eur=n=>n==null?'—':n.toLocaleString('de-DE',{minimumFractionDigits:2,maximumFractionDigits:2})+' €';
   const int=n=>n==null?'—':Math.round(n).toLocaleString('de-DE');
   const fmtD=d=>d?d.toLocaleDateString('de-DE',{day:'numeric',month:'short'}):'';
+  // Kosten je Bewerbung erst ab Kampagnenstart = erster Tag mit Meta-Ausgaben. Bewerbungen davor (als
+  // noch nichts geschaltet war) dürfen den Preis nicht künstlich senken.
+  const firstSpendDate=(rows||[]).reduce((m,x)=>(x.datasource==='facebook'&&(x.spend||0)>0&&(!m||x.date<m))?x.date:m,null);
+  const floorFrom=r=>(firstSpendDate&&(!r.from||firstSpendDate>r.from))?firstSpendDate:r.from;
+  const appsSinceSpend=r=>r?appsIn({from:floorFrom(r),to:r.to}):0;
+  const metaAppsSinceSpend=r=>r?appsBy({from:floorFrom(r),to:r.to},'meta'):0;   // CPA: echte Zuordnung (nur source=meta)
   const rangeLabel = level==='all' ? (startDate?('seit '+fmtD(startDate)):'') : level==='today' ? fmtD(cur.to) : (fmtD(cur.from)+' – '+fmtD(cur.to));
   const cmpLabel = level==='today'?'vs. gestern':level==='week'?'vs. Vorwoche':level==='month'?'vs. Vormonat':'';
 
@@ -34345,8 +34400,8 @@ function RecruitingMarketingView({employees}){
     {key:'spend', label:'Ausgaben (Meta)', fmt:eur, good:'neutral', val:r=>sum(metaIn(r),'spend')},
     {key:'metaReach', label:'Meta-Reichweite', fmt:int, good:'up', sub:'bezahlt', val:r=>sum(metaIn(r),'reach')},
     {key:'instaReach', label:'Instagram-Reichweite', fmt:int, good:'up', sub:'organisch', val:r=>sum(instaIn(r),'reach')},
-    {key:'apps', label:'Bewerbungen', fmt:int, good:'up', val:r=>appsIn(r)},
-    {key:'cpa', label:'Kosten je Bewerbung', fmt:eur, good:'down', val:r=>{ const a=appsIn(r); return a>0? sum(metaIn(r),'spend')/a : null; }},
+    {key:'apps', label:'Bewerbungen', fmt:int, good:'up', val:r=>appsIn(r), subFn:r=>{ const me=appsBy(r,'meta'),sh=appsBy(r,'sheet'),ot=appsBy(r,'other'); const p=[me+' Meta',sh+' Sheet']; if(ot) p.push(ot+' übrige'); return p.join(' · '); }},
+    {key:'cpa', label:'Kosten je Bewerbung', fmt:eur, good:'down', sub:(firstSpendDate?('nur Meta · seit '+fmtD(firstSpendDate)):'nur Meta'), val:r=>{ const a=metaAppsSinceSpend(r); return a>0? sum(metaIn(r),'spend')/a : null; }},
   ];
   const chip=(c,p,good)=>{ if(c==null||p==null) return null;
     if(p===0) return c>0?{txt:'neu',color:'var(--muted)'}:null;
@@ -34364,10 +34419,12 @@ function RecruitingMarketingView({employees}){
   const igMax=igDays.reduce((m,d)=>Math.max(m,d.reach||0),0)||1;
   let igDrop=null; for(let i=1;i<igDays.length;i++){ const p=igDays[i-1].reach, c2=igDays[i].reach; if(p>0&&c2!=null){ const pct=(c2-p)/p*100; if(pct<0&&(!igDrop||pct<igDrop.pct)) igDrop={pct,day:igDays[i].date,from:p,to:c2}; } }
   const igFoll=igDays.filter(d=>d.followers_count!=null);
-  // Kosten je Bewerbung: transparente Aufschlüsselung (offene CVs + übernommene).
-  const appsOpen=(cvs||[]).filter(c=>inR(wmDate(c.cv_date),cur)).length;
-  const appsProm=(employees||[]).filter(e=>e&&e.source==='cv'&&inR(wmDate(e.cv_received_at),cur)).length;
-  const appsTot=appsOpen+appsProm; const spendCur=sum(metaIn(cur),'spend'); const cpaCur=appsTot>0?spendCur/appsTot:null;
+  // Kosten je Bewerbung: echte Zuordnung über die Herkunft — nur Bewerbungen aus Meta-Anzeigen (source=meta),
+  // erst ab Kampagnenstart. Google-Sheet-Eingänge (ohne Werbung) zählen hier NICHT mit.
+  const cpaFrom=floorFrom(cur);
+  const appsMetaTot=(cvs||[]).filter(c=>c&&c.source==='meta'&&inR(wmDate(c.cv_date),{from:cpaFrom,to:cur.to})).length;
+  const appsSheetTot=appsBy({from:cpaFrom,to:cur.to},'sheet');
+  const spendCur=sum(metaIn(cur),'spend'); const cpaCur=appsMetaTot>0?spendCur/appsMetaTot:null;
   const box=(bg,bd,col,txt)=><div style={{padding:'12px 16px',borderRadius:10,background:bg,border:'1px solid '+bd,color:col,fontSize:13,fontWeight:700}}>{txt}</div>;
 
   return <div style={{maxWidth:1100}}>
@@ -34388,7 +34445,7 @@ function RecruitingMarketingView({employees}){
                 <div style={{fontSize:26,fontWeight:800,lineHeight:1.15,marginTop:3}}>{m.fmt(cv)}</div>
                 <div style={{display:'flex',alignItems:'center',gap:8,marginTop:4,minHeight:16}}>
                   {c ? <span style={{fontSize:12,fontWeight:800,color:c.color}}>{c.txt}</span> : <span style={{fontSize:11,color:'var(--muted)'}}>{level==='all'?'seit Start':''}</span>}
-                  {m.sub?<span style={{fontSize:11,color:'var(--muted)'}}>{m.sub}</span>:null}
+                  {(()=>{ const sb2=m.subFn?m.subFn(cur):m.sub; return sb2?<span style={{fontSize:11,color:'var(--muted)'}}>{sb2}</span>:null; })()}
                 </div>
               </div>; })}
           </div>
@@ -34436,16 +34493,16 @@ function RecruitingMarketingView({employees}){
             <div style={{display:'flex',alignItems:'center',gap:18,flexWrap:'wrap',padding:'14px 18px',border:'1px solid var(--border)',borderRadius:12,background:'var(--card)'}}>
               <div><div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)'}}>Meta-Ausgaben</div><div style={{fontSize:22,fontWeight:800}}>{eur(spendCur)}</div></div>
               <div style={{fontSize:20,fontWeight:800,color:'var(--muted)'}}>÷</div>
-              <div><div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)'}}>Bewerbungen</div><div style={{fontSize:22,fontWeight:800}}>{int(appsTot)}</div><div style={{fontSize:11,color:'var(--muted)'}}>{appsOpen} offen + {appsProm} übernommen</div></div>
+              <div><div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)'}}>Meta-Bewerbungen</div><div style={{fontSize:22,fontWeight:800}}>{int(appsMetaTot)}</div><div style={{fontSize:11,color:'var(--muted)'}}>nur source=meta{firstSpendDate?(' · seit '+fmtD(firstSpendDate)):''}</div></div>
               <div style={{fontSize:20,fontWeight:800,color:'var(--muted)'}}>=</div>
-              <div><div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)'}}>Kosten je Bewerbung</div><div style={{fontSize:26,fontWeight:800,color:'var(--accent,#2563eb)'}}>{cpaCur==null?'—':eur(cpaCur)}</div></div>
+              <div><div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)'}}>Kosten je Meta-Bewerbung</div><div style={{fontSize:26,fontWeight:800,color:'var(--accent,#2563eb)'}}>{cpaCur==null?'—':eur(cpaCur)}</div></div>
             </div>
-            <div style={{fontSize:11,color:'var(--muted)',marginTop:8,lineHeight:1.6}}><b>Näherung.</b> Es gibt keine Verbindung zwischen einzelner Bewerbung und Kampagne — die Anzeige führt über ein Google-Sheet ohne Herkunftskennzeichnung ins System. Solange nur eine Kampagne läuft, ist die Zahl belastbar; bei mehreren gleichzeitig nicht mehr.{nCamp>1?(' Aktuell liefen '+nCamp+' Kampagnen im Zeitraum — die Zahl ist entsprechend grob.'):''}{cpaCur==null?' (Keine Bewerbungen im Zeitraum → keine Angabe.)':''}</div>
+            <div style={{fontSize:11,color:'var(--muted)',marginTop:8,lineHeight:1.6}}><b>Echte Zuordnung.</b> Seit dem Meta-Import trägt jede Anzeigen-Bewerbung die Herkunft <b>source=meta</b> — gezählt werden nur diese, nicht mehr alle CV-Eingänge. Keine Näherung mehr. {appsSheetTot>0?('Im Zeitraum kamen zusätzlich '+appsSheetTot+' Bewerbung'+(appsSheetTot===1?'':'en')+' über den Google-Sheet-Sync (ohne Werbung) — die bleiben hier außen vor. '):''}{nCamp>1?('Bei '+nCamp+' gleichzeitigen Kampagnen lässt sich eine einzelne Bewerbung keiner bestimmten Kampagne zuordnen, die Gesamtkosten je Meta-Bewerbung stimmen aber. '):''}{cpaCur==null?'(Keine Meta-Bewerbungen im Zeitraum → keine Angabe.)':''}</div>
           </div>
           <div style={{fontSize:11,color:'var(--muted)',marginTop:12,lineHeight:1.6}}>
             Reichweite = Summe der Tageswerte (nicht deduplizierte Unique-Reichweite); Meta (bezahlt) und Instagram (organisch) getrennt.
-            Bewerbungen = CV-Eingänge im Zeitraum (offene CVs + bereits übernommene Bewerber).
-            Kosten je Bewerbung = Meta-Ausgaben ÷ Bewerbungen — <b>Näherung</b>, da keine Herkunft Bewerber↔Anzeige; belastbar, solange nur eine Kampagne läuft.
+            Bewerbungen = CV-Eingänge im Zeitraum, getrennt nach Herkunft (Meta-Anzeigen · Google-Sheet · übrige).
+            Kosten je Meta-Bewerbung = Meta-Ausgaben ÷ Bewerbungen mit source=meta — <b>echte Zuordnung</b> über die Herkunftskennzeichnung, keine Näherung.
             {cmpLabel?(' Vergleich '+cmpLabel+': gleich langer Ausschnitt der Vorperiode.'):''}
           </div>
         </div>}
@@ -34667,10 +34724,19 @@ function LongtermImport({projId, initYear, onSaved}){
       const out={}; const norm=s=>String(s||'').trim().toLowerCase();
       wb.SheetNames.forEach(nm=>{ const key=norm(nm).indexOf('sales')>=0?'sales':norm(nm).indexOf('support')>=0?'support':null; if(!key) return;
         const aoa=XLSX.utils.sheet_to_json(wb.Sheets[nm],{header:1,defval:''});
-        const rows=aoa.slice(1).map(r=>({label:String(r[0]==null?'':r[0]).trim(), m:Array.from({length:12},(_,i)=>{ const v=r[i+1]; return (v==null||v==='')?'':(typeof v==='number'?Math.round(v*100)/100:String(v).trim()); })}))
-          .filter(r=>r.label && r.m.some(v=>v!==''));
+        // Jede BENANNTE Kennzahl-Zeile behalten — auch ohne Werte (z. B. Formelzellen ohne gespeichertes
+        // Ergebnis). Leerzeilen ZWISCHEN den Kennzahlen werden ÜBERSPRUNGEN, nicht als Tabellenende
+        // gewertet (früher brach der Parser bei der ersten Leerzeile ab → nur „Forecast in h" kam an).
+        // Wir lesen das ganze Blatt bis zum letzten benannten Zeileninhalt.
+        const rows=[];
+        for(const r of aoa.slice(1)){
+          const label=String(r[0]==null?'':r[0]).trim();
+          if(label==='') continue;           // Leerzeile ODER Wert ohne Namen → überspringen (kein Abbruch)
+          const m=Array.from({length:12},(_,i)=>{ const v=r[i+1]; return (v==null||v==='')?'':(typeof v==='number'?Math.round(v*100)/100:String(v).trim()); });
+          rows.push({label, m});
+        }
         if(rows.length) out[key]=rows; });
-      if(!Object.keys(out).length){ setErr('Keine Blätter „Sales"/„Support" mit Daten gefunden. Blätter: '+wb.SheetNames.join(', ')); return; }
+      if(!Object.keys(out).length){ setErr('Keine Blätter „Sales"/„Support" mit benannten Kennzahl-Zeilen gefunden. Blätter: '+wb.SheetNames.join(', ')); return; }
       setFile(f); setFileHash('sz'+bytes.length); setSheetsData(out);
     }catch(e){ setErr('Datei nicht lesbar: '+(e.message||'')); } };
     rd.readAsArrayBuffer(f);
@@ -34693,7 +34759,13 @@ function LongtermImport({projId, initYear, onSaved}){
     {err && <div style={{padding:'8px 10px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:8,color:'#b91c1c',fontSize:12,marginBottom:8}}>{err}</div>}
     {saved && <div style={{padding:'8px 10px',background:'#ecfdf5',border:'1px solid #a7f3d0',borderRadius:8,color:'#059669',fontSize:12,fontWeight:700,marginBottom:8}}>✓ Langzeit-Modell gespeichert. Erscheint auf Folie 4, sobald der Bericht neu geladen ist.</div>}
     {sheetsData && <React.Fragment>
-      <div style={{fontSize:11,color:'var(--muted)',marginBottom:6}}>{Object.keys(sheetsData).map(sk=>sk+': '+sheetsData[sk].length+' Zeilen').join(' · ')} · Start {LONGTERM_MONTHS[startMonth-1]} {year}</div>
+      {Object.keys(sheetsData).map(sk=>{ const rs=sheetsData[sk];
+        const emptyN=rs.filter(r=>!(r.m||[]).some(v=>v!==''&&!isNaN(Number(String(v).replace(',','.'))))).length;
+        return <div key={sk} style={{fontSize:11,color:'var(--muted)',marginBottom:6}}>
+          <div><b style={{textTransform:'capitalize'}}>{sk}</b>: {rs.length} Kennzahl-Zeilen · Start {LONGTERM_MONTHS[startMonth-1]} {year}</div>
+          <div style={{marginTop:2,color:'var(--dim)'}}>{rs.map(r=>r.label).join(', ')}</div>
+          {emptyN>0 && <div style={{color:'#b45309',marginTop:2}}>⚠ {emptyN} Zeile(n) ohne Zahlenwerte, vermutlich Formeln ohne gespeichertes Ergebnis. Datei in Excel öffnen und neu speichern, dann erneut importieren.</div>}
+        </div>; })}
       <button className="btn btn-sm btn-primary" disabled={busy} onClick={save}>💾 Langzeit-Modell speichern</button>
     </React.Fragment>}
   </div>;
@@ -34805,6 +34877,69 @@ function ForecastImport({projId, skill, initYear, onSaved}){
 
 // Datenabfrage per Sprache (Management-only). Ruft die Edge Function nlquery; die KI klärt in Schritten,
 // erzeugt ein SELECT (sichtbar), führt es erst auf Klick über die Read-only-Rolle aus. Ergebnis Tabelle/Diagramm/Excel.
+// ── Datenabfrage: SQL-Syntax-Färbung (reines JS, keine Bibliothek) ──
+const NLQ_KW=new Set(('with select from where group by order having join left right inner outer full cross '+
+  'on using as and or not in is null count sum avg min max distinct limit offset case when then else end '+
+  'between like ilike similar desc asc over partition union all except intersect exists any some coalesce '+
+  'nullif greatest least cast extract interval date_trunc date_part age now current_date current_timestamp '+
+  'true false ilike round floor ceil abs').split(' '));
+const NLQ_COL={comment:'#5b6b86',string:'#7ee7a2',number:'#f5b942',keyword:'#3ec5f0',func:'#c4a7fb',punct:'#8aa0bd',ident:'#dbe4f0'};
+function nlqTokenize(sql){
+  const out=[]; const re=/(--[^\n]*)|('(?:''|[^'])*')|(\b\d+(?:\.\d+)?\b)|([A-Za-z_][A-Za-z0-9_$]*)|(\s+)|([(),.;:*=<>!+\/%|~^-]+)|([\s\S])/g;
+  let m,k=0;
+  while((m=re.exec(sql))){
+    const s=m[0]; let col=NLQ_COL.ident,it=false,bold=false;
+    if(m[1]){ col=NLQ_COL.comment; it=true; }
+    else if(m[2]){ col=NLQ_COL.string; }
+    else if(m[3]){ col=NLQ_COL.number; }
+    else if(m[4]){
+      if(NLQ_KW.has(s.toLowerCase())){ col=NLQ_COL.keyword; bold=true; }
+      else { let j=re.lastIndex; while(j<sql.length&&/\s/.test(sql[j])) j++; if(sql[j]==='(') col=NLQ_COL.func; }
+    }
+    else if(m[5]){ col=null; }
+    else if(m[6]){ col=NLQ_COL.punct; }
+    out.push(col==null? s : <span key={k++} style={{color:col,fontStyle:it?'italic':'normal',fontWeight:bold?700:400}}>{s}</span>);
+  }
+  return out;
+}
+const NLQ_CSS=`
+.nlq-bar{display:flex;align-items:center;gap:12px;padding:15px 16px;border-radius:16px;
+  background:linear-gradient(180deg,var(--card),var(--surface-2));border:1px solid var(--border);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.5),0 2px 4px rgba(15,23,42,.05);transition:box-shadow .2s,border-color .2s;}
+.nlq-bar:focus-within{border-color:transparent;box-shadow:0 0 0 1.5px #0EA5A5,0 0 0 5px rgba(14,165,165,.16),0 10px 34px rgba(14,165,165,.14);}
+.nlq-ic{flex-shrink:0;color:#0EA5A5;display:flex;}
+.nlq-in{flex:1;min-width:0;border:none;outline:none;background:transparent;font-size:16px;color:var(--text);font-weight:600;letter-spacing:-.01em;}
+.nlq-in::placeholder{color:var(--muted);font-weight:500;}
+.nlq-go{flex-shrink:0;border:none;border-radius:11px;padding:10px 18px;font-size:13.5px;font-weight:700;cursor:pointer;color:#fff;
+  background:linear-gradient(180deg,#12b3b3,#0F5661);box-shadow:0 1px 2px rgba(15,86,97,.45),inset 0 1px 0 rgba(255,255,255,.18);
+  display:inline-flex;align-items:center;gap:7px;transition:filter .15s,transform .05s;}
+.nlq-go:hover:not(:disabled){filter:brightness(1.07);} .nlq-go:active:not(:disabled){transform:translateY(1px);}
+.nlq-go:disabled{opacity:.4;cursor:default;}
+.nlq-chip{border:1px solid var(--border);background:var(--card);border-radius:999px;padding:8px 15px;font-size:12.5px;color:var(--text);
+  cursor:pointer;transition:all .15s;font-weight:500;text-align:left;line-height:1.35;}
+.nlq-chip:hover{border-color:#0EA5A5;color:#0F5661;background:rgba(14,165,165,.06);}
+.nlq-code{position:relative;background:#0b1120;border:1px solid #1e2b45;border-radius:14px;overflow:hidden;box-shadow:0 14px 46px rgba(2,6,23,.34);}
+.nlq-hd{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid #1a2540;background:#0d1728;}
+.nlq-dot{width:11px;height:11px;border-radius:50%;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);}
+.nlq-hd-t{font-family:var(--mono);font-size:11px;font-weight:600;color:#63769b;letter-spacing:.04em;margin-left:4px;}
+.nlq-badge{margin-left:auto;font-family:var(--mono);font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+  color:#5cd6d6;background:rgba(14,165,165,.12);border:1px solid rgba(14,165,165,.28);border-radius:6px;padding:2px 8px;}
+.nlq-pre{margin:0;padding:16px 18px;font-family:var(--mono);font-size:13px;line-height:1.75;color:#dbe4f0;white-space:pre-wrap;
+  word-break:break-word;min-height:96px;tab-size:2;}
+.nlq-caret{display:inline-block;width:7px;height:1.05em;vertical-align:text-bottom;margin-left:1px;background:#2ee6c8;
+  border-radius:1px;animation:nlq-blink 1.05s steps(1) infinite;box-shadow:0 0 6px rgba(46,230,200,.7);}
+@keyframes nlq-blink{50%{opacity:0;}}
+.nlq-scan{position:absolute;left:0;right:0;top:0;height:2px;pointer-events:none;
+  background:linear-gradient(90deg,transparent,#1fd1c4,transparent);animation:nlq-scandown 1.7s ease-in-out infinite;}
+@keyframes nlq-scandown{0%{top:0;opacity:0;}15%{opacity:.9;}85%{opacity:.9;}100%{top:100%;opacity:0;}}
+.nlq-band{position:relative;overflow:hidden;display:flex;align-items:center;gap:9px;padding:14px 18px;min-height:96px;}
+.nlq-band-t{font-family:var(--mono);font-size:12.5px;font-weight:600;color:#7fb2e6;letter-spacing:.02em;z-index:1;}
+.nlq-band::after{content:'';position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(31,209,196,.16),transparent);
+  background-size:38% 100%;background-repeat:no-repeat;animation:nlq-sweep 1.25s linear infinite;}
+@keyframes nlq-sweep{0%{background-position:-38% 0;}100%{background-position:138% 0;}}
+.nlq-orb{width:8px;height:8px;border-radius:50%;background:#1fd1c4;box-shadow:0 0 8px #1fd1c4;animation:nlq-pulse 1s ease-in-out infinite;z-index:1;}
+@keyframes nlq-pulse{0%,100%{opacity:.35;transform:scale(.8);}50%{opacity:1;transform:scale(1.15);}}
+`;
 function NlQueryView({team}){
   const isMgmt=((team&&team.role_keys)||[]).some(r=>r==='management');
   const [msgs,setMsgs]=useState([]);            // API-Konversation
@@ -34812,74 +34947,464 @@ function NlQueryView({team}){
   const [input,setInput]=useState('');
   const [stage,setStage]=useState(null);        // {kind:'clarify',...} | {kind:'sql',...}
   const [rows,setRows]=useState(null);
-  const [busy,setBusy]=useState(false); const [err,setErr]=useState('');
+  const [working,setWorking]=useState(null);    // 'ask' (übersetzt/streamt) | 'run' (führt aus) | null
+  const [err,setErr]=useState('');
+  const busy=working!=null;
   async function callFn(payload){ let tok=null; try{ const s=await sb.auth.getSession(); tok=s&&s.data&&s.data.session&&s.data.session.access_token; }catch(e){}
     const r=await fetch(SB_URL+'/functions/v1/nlquery',{method:'POST',headers:{'Authorization':'Bearer '+tok,'apikey':SB_KEY,'content-type':'application/json'},body:JSON.stringify(payload)});
     let j; try{ j=await r.json(); }catch(e){ j={error:'Antwort nicht lesbar ('+r.status+')'}; } if(!r.ok&&!j.error) j.error='Fehler '+r.status; return j; }
-  async function ask(text){ if(!text.trim()||busy) return; setErr(''); setRows(null);
-    const nm=[...msgs,{role:'user',content:text.trim()}]; setMsgs(nm); setTurns(t=>[...t,{who:'you',text:text.trim()}]); setInput(''); setStage(null); setBusy(true);
-    const res=await callFn({messages:nm}); setBusy(false);
-    if(res.error){ setErr(res.error); return; }
-    if(res.action==='clarify'){ setMsgs([...nm,{role:'assistant',content:'Rückfrage: '+res.question+'\nOptionen: '+(res.options||[]).join(' | ')}]); setStage({kind:'clarify',question:res.question,options:res.options||[]}); setTurns(t=>[...t,{who:'ai',text:res.question}]); }
-    else if(res.action==='sql'){ setStage({kind:'sql',sql:res.sql,explanation:res.explanation,chart:res.chart}); }
+  // Abgeschickt wird IMMER der Text, nie die SQL. Jede getippte Frage ist EIGENSTÄNDIG (frischer
+  // Verlauf); nur eine offene Rückfrage bzw. ein Options-Klick (cont=true) führt den Verlauf weiter —
+  // damit Frage 2 nicht im Kontext von Frage 1 interpretiert wird. Die SQL STRÖMT live vom Server
+  // ein (NDJSON) und erscheint dabei, statt danach animiert getippt zu werden.
+  async function ask(text, cont){ if(!text.trim()||busy) return; setErr('');
+    const continuing = cont || (stage&&stage.kind==='clarify');
+    const nm=[...(continuing?msgs:[]),{role:'user',content:text.trim()}];
+    setMsgs(nm);
+    setTurns(t=>continuing?[...t,{who:'you',text:text.trim()}]:[{who:'you',text:text.trim()}]);
+    setInput(''); setStage(null); setRows(null); setWorking('ask');
+    let tok=null; try{ const s=await sb.auth.getSession(); tok=s&&s.data&&s.data.session&&s.data.session.access_token; }catch(e){}
+    let liveSql='';
+    try{
+      const r=await fetch(SB_URL+'/functions/v1/nlquery',{method:'POST',headers:{'Authorization':'Bearer '+tok,'apikey':SB_KEY,'content-type':'application/json'},body:JSON.stringify({messages:nm,stream:true})});
+      if(!r.ok||!r.body){ let j={}; try{ j=await r.json(); }catch(e){} setWorking(null); setErr(j.error||('Fehler '+r.status)); return; }
+      const reader=r.body.getReader(); const dec=new TextDecoder(); let buf='';
+      const handle=ev=>{
+        if(ev.t==='sql_delta'){ liveSql+=(ev.v||''); setStage({kind:'sql',sql:liveSql,streaming:true}); }
+        else if(ev.t==='clarify'||ev.action==='clarify'){ const q=ev.question||'Bitte präzisieren:'; const opts=(ev.options||[]); setStage({kind:'clarify',question:q,options:opts}); setMsgs([...nm,{role:'assistant',content:'Rückfrage: '+q+'\nOptionen: '+opts.join(' | ')}]); setTurns(t=>[...t,{who:'ai',text:q}]); }
+        else if(ev.t==='done'||ev.action==='sql'){ liveSql=ev.sql||liveSql; setStage({kind:'sql',sql:liveSql,explanation:ev.explanation||'',chart:ev.chart||null,streaming:false}); setMsgs([...nm,{role:'assistant',content:'SQL:\n'+liveSql}]); }
+        else if(ev.t==='error'||ev.error){ setErr(ev.error||'Fehler'); }
+      };
+      const drain=chunk=>{ buf+=chunk; let idx; while((idx=buf.indexOf('\n'))>=0){ const line=buf.slice(0,idx).trim(); buf=buf.slice(idx+1); if(!line) continue; let ev; try{ ev=JSON.parse(line); }catch(e){ continue; } handle(ev); } };
+      for(;;){ const {done,value}=await reader.read(); if(done) break; drain(dec.decode(value,{stream:true})); }
+      const tail=buf.trim(); if(tail){ try{ handle(JSON.parse(tail)); }catch(e){} }
+    }catch(e){ setErr('KI nicht erreichbar: '+(e.message||'')); }
+    setWorking(null);
   }
-  async function runSql(){ if(!stage||stage.kind!=='sql'||busy) return; setErr(''); setBusy(true);
-    const res=await callFn({execute:stage.sql}); setBusy(false);
+  async function runSql(){ if(!stage||stage.kind!=='sql'||busy) return; setErr(''); setWorking('run');
+    const res=await callFn({execute:stage.sql}); setWorking(null);
     if(res.error){ setErr(res.error); return; } setRows(res.rows||[]); }
   function reset(){ setMsgs([]); setTurns([]); setStage(null); setRows(null); setErr(''); setInput(''); }
   function exportXlsx(){ if(!rows||!rows.length) return; try{ const ws=XLSX.utils.json_to_sheet(rows); const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'Abfrage'); XLSX.writeFile(wb,'datenabfrage_'+isoLocal(new Date())+'.xlsx'); }catch(e){ setErr('Excel-Export fehlgeschlagen: '+(e.message||'')); } }
   if(!isMgmt) return <div className="sp-empty">Nur für Management.</div>;
   const cols = rows&&rows.length ? Object.keys(rows[0]) : [];
   const chart = (stage&&stage.kind==='sql'&&stage.chart&&rows&&rows.length)? stage.chart : null;
-  const EX=['Wer hatte in den letzten drei Monaten mehr als fünf Krankheitstage?','Wie hat sich die Conversion je Agent über acht Wochen entwickelt?','Welche Bewerber kamen über Instagram und wurden eingestellt?'];
-  return <div style={{maxWidth:1200}}>
-    <div style={{fontSize:20,fontWeight:700,marginBottom:2}}>🔎 Datenabfrage</div>
-    <div style={{fontSize:13,color:'var(--muted)',marginBottom:14}}>Frag die Datenbank in Alltagssprache. Die KI klärt bei Bedarf in Schritten, zeigt die Abfrage, und führt sie erst auf Klick aus — ausschließlich lesend.</div>
-    <div style={{display:'flex',gap:16,flexWrap:'wrap',alignItems:'flex-start'}}>
-      {/* Links: Frage + Klärung */}
-      <div style={{flex:'1 1 380px',minWidth:320}}>
-        {turns.length===0 && <div style={{marginBottom:12}}>
-          <div style={{fontSize:12,fontWeight:700,color:'var(--muted)',marginBottom:6}}>Beispiele</div>
-          {EX.map((q,i)=><button key={i} className="btn btn-sm" style={{display:'block',textAlign:'left',width:'100%',marginBottom:6,whiteSpace:'normal'}} onClick={()=>ask(q)}>{q}</button>)}
+  const EX=['Mitarbeiter je Projekt','Krankheitstage im letzten Monat','Aktive Mitarbeiter je Standort'];
+  const hasSql=stage&&stage.kind==='sql';
+  const streaming=hasSql&&stage.streaming;
+  const translating=working==='ask';
+  const badge = working==='run'?'führt aus': streaming?'schreibt': (translating&&!hasSql)?'übersetzt': hasSql?'bereit':'wartet';
+  return <div style={{maxWidth:1220}}>
+    <style>{NLQ_CSS}</style>
+    <div style={{display:'flex',alignItems:'center',gap:9,marginBottom:2}}>
+      <div style={{fontSize:20,fontWeight:700}}>Datenabfrage</div>
+      <span style={{fontFamily:'var(--mono)',fontSize:10.5,fontWeight:700,letterSpacing:'.06em',textTransform:'uppercase',color:'#0F5661',background:'var(--blue-bg)',border:'1px solid #cfe0e2',borderRadius:6,padding:'2px 8px'}}>SQL · nur lesend</span>
+    </div>
+    <div style={{fontSize:13,color:'var(--muted)',marginBottom:16}}>Frag die Daten in Alltagssprache. Die Abfrage entsteht rechts sichtbar und läuft erst auf Klick, ausschließlich lesend.</div>
+
+    {/* Kommandozeile */}
+    <div className="nlq-bar" style={{marginBottom:14}}>
+      <span className="nlq-ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></span>
+      <input className="nlq-in" placeholder="Frag die Daten…  z. B. Krankheitstage je Projekt im letzten Quartal" value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')ask(input);}} disabled={busy}/>
+      {turns.length>0&&<button className="nlq-chip" style={{padding:'8px 12px'}} onClick={reset} title="Neue Abfrage" disabled={busy}>↺ Neu</button>}
+      <button className="nlq-go" disabled={busy||!input.trim()} onClick={()=>ask(input)}>{translating?'übersetzt…':'Übersetzen'}<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"/></svg></button>
+    </div>
+
+    <div style={{display:'flex',gap:18,flexWrap:'wrap',alignItems:'flex-start'}}>
+      {/* Links: Verlauf + Klärung */}
+      <div style={{flex:'1 1 360px',minWidth:300}}>
+        {turns.length===0 && <div>
+          <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em',marginBottom:9}}>Beispiele</div>
+          <div style={{display:'flex',flexDirection:'column',gap:8}}>{EX.map((q,i)=><button key={i} className="nlq-chip" onClick={()=>ask(q)}>{q}</button>)}</div>
         </div>}
-        {turns.map((t,i)=><div key={i} style={{marginBottom:8,padding:'8px 12px',borderRadius:10,background:t.who==='you'?'var(--blue-bg,#eff6ff)':'var(--surface-2)',border:'1px solid var(--border)'}}>
-          <div style={{fontSize:10.5,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em'}}>{t.who==='you'?'Du':'KI'}</div>
-          <div style={{fontSize:13,marginTop:2}}>{t.text}</div>
+        {turns.map((t,i)=><div key={i} style={{marginBottom:8,padding:'9px 13px',borderRadius:12,background:t.who==='you'?'var(--blue-bg)':'var(--surface-2)',border:'1px solid var(--border)'}}>
+          <div style={{fontSize:10,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em'}}>{t.who==='you'?'Du':'Assistenz'}</div>
+          <div style={{fontSize:13.5,marginTop:2}}>{t.text}</div>
         </div>)}
-        {stage&&stage.kind==='clarify'&&<div style={{display:'flex',flexDirection:'column',gap:6,margin:'6px 0 12px'}}>
-          {stage.options.map((o,i)=><button key={i} className="btn btn-sm btn-primary" style={{textAlign:'left',whiteSpace:'normal'}} onClick={()=>ask(o)} disabled={busy}>{o}</button>)}
+        {stage&&stage.kind==='clarify'&&<div style={{display:'flex',flexDirection:'column',gap:7,margin:'8px 0'}}>
+          <div style={{fontSize:11,fontWeight:700,color:'var(--muted)'}}>Bitte präzisieren:</div>
+          {stage.options.map((o,i)=><button key={i} className="nlq-chip" style={{borderColor:'#0EA5A5',color:'#0F5661'}} onClick={()=>ask(o,true)} disabled={busy}>{o}</button>)}
         </div>}
-        <div style={{display:'flex',gap:6,marginTop:8}}>
-          <input className="form-input" style={{flex:1}} placeholder="Frage eingeben…" value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')ask(input);}}/>
-          <button className="btn btn-primary btn-sm" disabled={busy||!input.trim()} onClick={()=>ask(input)}>{busy?'…':'Fragen'}</button>
-          {turns.length>0&&<button className="btn btn-sm" onClick={reset} title="Neue Abfrage">↺</button>}
-        </div>
-        {err&&<div style={{marginTop:10,padding:'8px 10px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:8,color:'#b91c1c',fontSize:12}}>{err}</div>}
+        {err&&<div style={{marginTop:10,padding:'9px 11px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:10,color:'#b91c1c',fontSize:12.5}}>{err}</div>}
       </div>
-      {/* Rechts: SQL + Ergebnis */}
-      <div style={{flex:'1 1 480px',minWidth:340}}>
-        {stage&&stage.kind==='sql'?<React.Fragment>
-          {stage.explanation&&<div style={{fontSize:12,color:'var(--muted)',marginBottom:6}}>{stage.explanation}</div>}
-          <pre style={{background:'#0f172a',color:'#e2e8f0',padding:'12px 14px',borderRadius:10,fontSize:12,overflowX:'auto',fontFamily:'var(--mono)',whiteSpace:'pre-wrap',margin:0}}>{stage.sql}</pre>
-          <div style={{display:'flex',gap:8,alignItems:'center',margin:'8px 0'}}>
-            <button className="btn btn-primary btn-sm" disabled={busy} onClick={runSql}>{busy?'Läuft…':'▶ Ausführen'}</button>
+
+      {/* Rechts: Code-Panel (immer sichtbar) + Ergebnis */}
+      <div style={{flex:'1 1 500px',minWidth:340}}>
+        <div className="nlq-code">
+          <div className="nlq-hd">
+            <span className="nlq-dot" style={{background:'#ff5f56'}}/><span className="nlq-dot" style={{background:'#febc2e'}}/><span className="nlq-dot" style={{background:'#28c840'}}/>
+            <span className="nlq-hd-t">übersetzung.sql</span>
+            <span className="nlq-badge">{badge}</span>
+          </div>
+          {translating && !hasSql
+            ? <div className="nlq-band"><span className="nlq-orb"/><span className="nlq-band-t">Übersetze deine Frage in SQL…</span><span className="nlq-scan"/></div>
+            : hasSql
+              ? <pre className="nlq-pre">{nlqTokenize(stage.sql)}{streaming&&<span className="nlq-caret"/>}{streaming&&<span className="nlq-scan"/>}</pre>
+              : <pre className="nlq-pre" style={{color:'#4a5b78',fontStyle:'italic'}}>-- Deine Abfrage erscheint hier, während sie entsteht,{'\n'}-- Zeichen für Zeichen direkt aus der Übersetzung.</pre>}
+        </div>
+
+        {hasSql&&<React.Fragment>
+          {stage.explanation&&<div style={{fontSize:12,color:'var(--muted)',margin:'9px 2px 0'}}>{stage.explanation}</div>}
+          <div style={{display:'flex',gap:8,alignItems:'center',margin:'10px 0'}}>
+            <button className="nlq-go" style={{background:streaming?'#94a3b8':'linear-gradient(180deg,#12b3b3,#0F5661)'}} disabled={busy||streaming} onClick={runSql}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="6 4 20 12 6 20"/></svg>{working==='run'?'Läuft…':streaming?'schreibt…':'Ausführen'}</button>
             {rows&&<button className="btn btn-sm" onClick={exportXlsx} disabled={!rows.length}>⬇ Als Excel</button>}
             {rows&&<span style={{fontSize:11,color:'var(--muted)'}}>{rows.length} Zeile{rows.length!==1?'n':''}{rows.length>=1000?' (max. 1000)':''}</span>}
           </div>
-          {chart&&<div style={{border:'1px solid var(--border)',borderRadius:10,padding:'10px 12px',marginBottom:10,background:'var(--card)'}}>
+          {chart&&<div style={{border:'1px solid var(--border)',borderRadius:12,padding:'10px 12px',marginBottom:10,background:'var(--card)'}}>
             <HoverChart data={rows.map(r=>Number(r[chart.y])||0)} labels={rows.map(r=>String(r[chart.x]))} color="#0F5661" kind={chart.type==='line'?'area':'bar'} h={120} fmt={v=>fmtNum(v,1)}/>
             <div style={{fontSize:10.5,color:'var(--muted)',marginTop:4}}>{chart.y} über {chart.x}</div>
           </div>}
-          {rows&&rows.length>0&&<div style={{overflow:'auto',maxHeight:460,border:'1px solid var(--border)',borderRadius:10}}>
+          {rows&&rows.length>0&&<div style={{overflow:'auto',maxHeight:460,border:'1px solid var(--border)',borderRadius:12}}>
             <table style={{borderCollapse:'collapse',fontSize:12,width:'100%'}}>
               <thead><tr>{cols.map(c=><th key={c} style={{position:'sticky',top:0,background:'var(--surface-2)',padding:'6px 10px',textAlign:'left',fontWeight:700,borderBottom:'1px solid var(--border)',whiteSpace:'nowrap'}}>{c}</th>)}</tr></thead>
               <tbody>{rows.map((r,i)=><tr key={i} style={{borderTop:'1px solid var(--border)'}}>{cols.map(c=><td key={c} style={{padding:'5px 10px',whiteSpace:'nowrap',fontFamily:(typeof r[c]==='number')?'var(--mono)':'inherit'}}>{r[c]==null?'':(typeof r[c]==='object'?JSON.stringify(r[c]):String(r[c]))}</td>)}</tr>)}</tbody>
             </table>
           </div>}
           {rows&&rows.length===0&&<div className="sp-empty">Kein Ergebnis.</div>}
-        </React.Fragment>:<div style={{fontSize:13,color:'var(--muted)',padding:'20px 0'}}>Die erzeugte Abfrage erscheint hier — sichtbar, bevor sie läuft.</div>}
+        </React.Fragment>}
       </div>
     </div>
+  </div>;
+}
+
+// Import-Quellen — EINE WAHRHEIT (Datenimport + Upload-Plan). key = data_imports.source_type.
+const UPLOAD_SOURCES=[
+  {key:'rohdaten',    label:'Rohdaten-Excel',        sub:'Stunden je Skill (agent_qm)',              period:'week'},
+  {key:'calls',       label:'Call-CSV',              sub:'Answered, AHT, ACW',                       period:'week'},
+  {key:'gauges',      label:'Gauges-Excel',          sub:'CSAT',                                     period:'week'},
+  {key:'booking_a',   label:'Booking-Excel (Agent)', sub:'Conversion, Buchungen, Sales Calls je Agent', period:'week'},
+  {key:'booking_week',label:'Booking-Team Woche',    sub:'CR, Buchungen, Sales Calls je KW',         period:'week'},
+  {key:'booking_month',label:'Booking-Team Monat',   sub:'CR, Buchungen, Sales Calls je Monat',      period:'month'},
+  {key:'forecast_sales',  label:'Forecast Woche · Sales',   sub:'FC-Stunden je KW (Auftraggeber, Blatt 5)', period:'week'},
+  {key:'forecast_support',label:'Forecast Woche · Support', sub:'FC-Stunden je KW (Auftraggeber, Blatt 5)', period:'week'},
+  {key:'longterm',        label:'Langzeit-Kapazität',       sub:'12-Monats-Modell (Blätter Sales + Support)', period:'week'},
+];
+// Rhythmen (Rückgriff im Admin + späterer Statusrechner). daily/weekly_progressive ohne feste Wochentag-Fälligkeit.
+const UPLOAD_CADENCES=[
+  ['daily',              'Täglich (Werte bis gestern)'],
+  ['weekly_retro',       'Wöchentlich rückwirkend (Vorwoche)'],
+  ['weekly_progressive', 'Mehrfach/Woche (bis Abschluss)'],
+  ['monthly',            'Monatlich'],
+];
+const UPLOAD_WEEKDAYS=[[1,'Montag'],[2,'Dienstag'],[3,'Mittwoch'],[4,'Donnerstag'],[5,'Freitag'],[6,'Samstag'],[7,'Sonntag']];
+
+// Schnitt 1: Konfiguration des Upload-Plans (Management-only). Je Projekt + Quelle: Rhythmus, Fälligkeit,
+// Kulanz, Zuständiger (Rückfall auf projektweiten Standard). Ampel/Status kommen in Schnitt 2/3 (live gerechnet).
+function UploadScheduleAdminView({team, projects}){
+  const isMgmt=((team&&team.role_keys)||[]).some(r=>r==='management');
+  const projList=(projects||[]).filter(p=>p&&p.id).slice().sort((a,b)=>String(a.name).localeCompare(String(b.name),'de'));
+  const [projId,setProjId]=useState(()=>projList[0]?projList[0].id:'');
+  const [rows,setRows]=useState({});        // source_type -> config-Zeile
+  const [owner,setOwner]=useState('');       // projektweiter Standard-Zuständiger (user_id)
+  const [users,setUsers]=useState([]);
+  const [uid,setUid]=useState(null);
+  const [err,setErr]=useState(''); const [savedKey,setSavedKey]=useState('');
+  useEffect(()=>{ let a=true; (async()=>{ try{ const u=await sb.auth.getUser(); if(a) setUid(u&&u.data&&u.data.user&&u.data.user.id||null); }catch(e){}
+    try{ const {data}=await sb.from('app_users').select('user_id,full_name,role_keys,active'); if(a) setUsers((data||[]).filter(u=>u&&u.active!==false)); }catch(e){} })(); return ()=>{a=false;}; },[]);
+  useEffect(()=>{ let a=true; (async()=>{ if(!projId){ setRows({}); setOwner(''); return; }
+    try{ const {data}=await sb.from('upload_schedule').select('*').eq('project_id',projId);
+      const m={}; (data||[]).forEach(r=>m[r.source_type]=r); if(a) setRows(m);
+    }catch(e){ if(a) setErr('Plan nicht ladbar: '+(e.message||'')); }
+    try{ const {data}=await sb.from('upload_project_owner').select('responsible_user').eq('project_id',projId).maybeSingle();
+      if(a) setOwner((data&&data.responsible_user)||''); }catch(e){}
+  })(); return ()=>{a=false;}; },[projId]);
+  const userName=u=>{ const x=users.find(z=>z.user_id===u); return x?(x.full_name||'—'):'—'; };
+  async function patchRow(key, patch){ setErr('');
+    const base=rows[key]||{project_id:projId, source_type:key, active:false, cadence:'weekly_retro', grace_days:1};
+    const next={...base, ...patch, project_id:projId, source_type:key, updated_by:uid, updated_at:new Date().toISOString()};
+    setRows(m=>({...m,[key]:next}));
+    const rec={project_id:projId, source_type:key, active:!!next.active, cadence:next.cadence,
+      due_weekday:next.due_weekday!=null?Number(next.due_weekday):null, due_day:(next.due_day!=null&&next.due_day!=='')?Number(next.due_day):null,
+      grace_days:Number(next.grace_days)||0, responsible_user:next.responsible_user||null, note:next.note||null, updated_by:uid};
+    const {error}=await sb.from('upload_schedule').upsert(rec,{onConflict:'project_id,source_type'});
+    if(error){ setErr('Nicht gespeichert: '+(error.message||error)); return; }
+    setSavedKey(key); setTimeout(()=>setSavedKey(k=>k===key?'':k),1200);
+  }
+  async function saveOwner(u){ setOwner(u); setErr('');
+    const {error}=await sb.from('upload_project_owner').upsert({project_id:projId, responsible_user:u||null, updated_by:uid, updated_at:new Date().toISOString()},{onConflict:'project_id'});
+    if(error) setErr('Standard-Zuständiger nicht gespeichert: '+(error.message||error)); }
+  if(!isMgmt) return <div className="sp-empty">Nur für Management.</div>;
+  const inp={padding:'4px 6px',border:'1px solid var(--border)',borderRadius:6,fontSize:12};
+  return <div style={{maxWidth:1080}}>
+    <div style={{fontSize:20,fontWeight:700,marginBottom:2}}>🗂 Upload-Plan</div>
+    <div style={{fontSize:13,color:'var(--muted)',marginBottom:14}}>Je Projekt und Quelle: Rhythmus, Fälligkeit, Kulanz und Zuständiger. Die Ampel („heute fällig / überfällig") wird daraus live berechnet, hier legst du nur die Regeln fest.</div>
+    <div style={{display:'flex',gap:12,alignItems:'center',marginBottom:14,flexWrap:'wrap'}}>
+      <select className="form-select" style={{width:'auto',fontWeight:700}} value={projId} onChange={e=>setProjId(e.target.value)}>{projList.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select>
+      <span style={{fontSize:12,color:'var(--muted)'}}>Standard-Zuständiger:</span>
+      <select className="form-select" style={{width:'auto'}} value={owner} onChange={e=>saveOwner(e.target.value)}>
+        <option value=''>— (keiner)</option>{users.map(u=><option key={u.user_id} value={u.user_id}>{u.full_name||u.user_id}</option>)}
+      </select>
+      <span style={{fontSize:11,color:'var(--muted)'}}>gilt, wo bei einer Quelle niemand gesetzt ist</span>
+    </div>
+    {err&&<div style={{marginBottom:10,padding:'8px 10px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:8,color:'#b91c1c',fontSize:12}}>{err}</div>}
+    <div style={{border:'1px solid var(--border)',borderRadius:12,overflow:'hidden'}}>
+      {UPLOAD_SOURCES.map((s,i)=>{ const r=rows[s.key]||{}; const on=!!r.active; const cad=r.cadence||'weekly_retro';
+        const isWeekly=cad==='weekly_retro'||cad==='weekly_progressive'; const isMonthly=cad==='monthly';
+        return <div key={s.key} style={{borderTop:i?'1px solid var(--border)':'none',padding:'11px 14px',background:on?'transparent':'var(--surface-2)'}}>
+          <div style={{display:'flex',alignItems:'center',gap:12,flexWrap:'wrap'}}>
+            <label style={{display:'flex',alignItems:'center',gap:7,minWidth:230}}>
+              <input type="checkbox" checked={on} onChange={e=>patchRow(s.key,{active:e.target.checked})}/>
+              <span><span style={{fontSize:13,fontWeight:700}}>{s.label}</span><span style={{fontSize:11,color:'var(--muted)',marginLeft:6}}>{s.sub}</span></span>
+            </label>
+            {on&&<React.Fragment>
+              <label style={{fontSize:11,color:'var(--muted)'}}>Rhythmus <select style={inp} value={cad} onChange={e=>patchRow(s.key,{cadence:e.target.value})}>{UPLOAD_CADENCES.map(([k,l])=><option key={k} value={k}>{l}</option>)}</select></label>
+              {isWeekly&&<label style={{fontSize:11,color:'var(--muted)'}}>fällig <select style={inp} value={r.due_weekday||1} onChange={e=>patchRow(s.key,{due_weekday:Number(e.target.value)})}>{UPLOAD_WEEKDAYS.map(([k,l])=><option key={k} value={k}>{l}</option>)}</select></label>}
+              {isMonthly&&<label style={{fontSize:11,color:'var(--muted)'}}>fällig am <input type="number" min={1} max={31} style={{...inp,width:52}} value={r.due_day!=null?r.due_day:''} onChange={e=>patchRow(s.key,{due_day:e.target.value})}/>.</label>}
+              <label style={{fontSize:11,color:'var(--muted)'}}>Kulanz <input type="number" min={0} max={30} style={{...inp,width:48}} value={r.grace_days!=null?r.grace_days:1} onChange={e=>patchRow(s.key,{grace_days:e.target.value})}/> Tage</label>
+              <label style={{fontSize:11,color:'var(--muted)'}}>Zuständig <select style={inp} value={r.responsible_user||''} onChange={e=>patchRow(s.key,{responsible_user:e.target.value})}>
+                <option value=''>Standard{owner?(' ('+userName(owner)+')'):''}</option>{users.map(u=><option key={u.user_id} value={u.user_id}>{u.full_name||u.user_id}</option>)}
+              </select></label>
+              {savedKey===s.key&&<span style={{fontSize:11,fontWeight:700,color:'#059669'}}>✓ gespeichert</span>}
+            </React.Fragment>}
+          </div>
+        </div>;
+      })}
+    </div>
+    <div style={{fontSize:11,color:'var(--muted)',marginTop:10,lineHeight:1.6}}>
+      <b>Rhythmen:</b> Täglich = jeden Werktag Werte bis gestern · Wöchentlich rückwirkend = einmal für die abgeschlossene Vorwoche · Mehrfach/Woche = wird bis Wochenabschluss mehrfach geladen · Monatlich = einmal je Monat. <b>Kulanz</b> = Tage nach Fälligkeit, bis die Ampel von Gelb auf Rot springt.
+    </div>
+  </div>;
+}
+
+// Schnitt 4: „Meine Upload-Pflichten" — NUR die Quellen, für die ICH zuständig bin (cfg.responsible_user
+// bzw. Rückfall auf den Projekt-Standard). Über RLS projekt-scoped; Management filtert zusätzlich auf sich.
+async function loadMyUploadDuties(projects){
+  let uid=null; try{ const u=await sb.auth.getUser(); uid=u&&u.data&&u.data.user&&u.data.user.id||null; }catch(e){}
+  if(!uid) return {uid:null, dutyCount:0, items:[]};
+  let cfgs=[]; try{ const {data}=await sb.from('upload_schedule').select('*').eq('active',true); cfgs=data||[]; }catch(e){}
+  let owners={}; try{ const {data}=await sb.from('upload_project_owner').select('project_id,responsible_user'); (data||[]).forEach(r=>owners[r.project_id]=r.responsible_user); }catch(e){}
+  const mine=cfgs.filter(c=>(c.responsible_user||owners[c.project_id]||null)===uid);
+  const today=new Date(); today.setHours(0,0,0,0);
+  const byProj={}; mine.forEach(c=>{ (byProj[c.project_id]=byProj[c.project_id]||[]).push(c); });
+  const items=[];
+  for(const pid of Object.keys(byProj)){ const lastMap=await uploadLastMap(pid);
+    for(const c of byProj[pid]){ const st=await computeUploadStatus(c, pid, today, lastMap);
+      if(st.bucket==='overdue'||st.bucket==='today'||st.bucket==='week'){ const p=(projects||[]).find(x=>x.id===pid); items.push({projId:pid, projName:p?p.name:pid, source:c.source_type, st}); } } }
+  const rank={overdue:0,today:1,week:2}; items.sort((a,b)=>rank[a.st.bucket]-rank[b.st.bucket]);
+  return {uid, dutyCount:mine.length, items};
+}
+function UploadDutyPanel({projects, onNavigate, compact}){
+  const [d,setD]=useState(null);
+  useEffect(()=>{ let a=true; (async()=>{ const r=await loadMyUploadDuties(projects); if(a) setD(r); })(); return ()=>{a=false;}; },[]);
+  if(!d || d.dutyCount===0) return null;   // nichts für mich konfiguriert → nicht anzeigen
+  const items=d.items; const n=items.length;
+  const jump=(pid,src)=>{ UPLOAD_JUMP={projId:pid, source:src}; if(onNavigate) onNavigate({kind:'view',view:'dataimport'}); };
+  const goList=()=>{ if(onNavigate) onNavigate({kind:'view',view:'uploads'}); };
+  const overdue=items.filter(i=>i.st.bucket==='overdue').length, todayN=items.filter(i=>i.st.bucket==='today').length, weekN=items.filter(i=>i.st.bucket==='week').length;
+  const cap=compact?4:12;
+  return <div style={{border:'1px solid '+(overdue?'#fecaca':'var(--border)'),borderRadius:14,background:overdue?'#fef2f2':'var(--card)',padding:compact?'12px 14px':'14px 16px',marginBottom:14}}>
+    <div onClick={goList} style={{display:'flex',alignItems:'center',gap:8,cursor:'pointer',marginBottom:n?8:0,flexWrap:'wrap'}}>
+      <span style={{fontSize:14,fontWeight:800}}>🚦 Meine Uploads</span>
+      <span style={{fontSize:11,fontWeight:700,color:'var(--muted)'}}>{overdue} überfällig · {todayN} heute · {weekN} diese Woche →</span>
+    </div>
+    {n===0 ? <div style={{fontSize:12,color:'#059669',fontWeight:700}}>✓ Alles aktuell.</div>
+      : <div style={{display:'flex',flexDirection:'column',gap:6}}>{items.slice(0,cap).map(i=>{ const MB=UPLOAD_BUCKET_META[i.st.bucket]||{dot:'#9ca3af'};
+        return <div key={i.projId+i.source} style={{display:'flex',alignItems:'center',gap:9,fontSize:12}}>
+          <span style={{width:10,height:10,borderRadius:'50%',background:MB.dot,flexShrink:0}}/>
+          <span style={{flex:1,minWidth:0}}><b>{UPLOAD_LABEL[i.source]||i.source}</b> <span style={{color:'var(--muted)'}}>· {i.projName} · {i.st.rel}</span></span>
+          <button className="btn btn-sm btn-primary" onClick={()=>jump(i.projId,i.source)} title="Hochladen">⬆</button>
+        </div>; })}
+        {items.length>cap && <div onClick={goList} style={{fontSize:11,color:'var(--muted)',cursor:'pointer'}}>+ {items.length-cap} weitere →</div>}
+      </div>}
+  </div>;
+}
+function CockpitUploadTile({team, projects, onNavigate}){
+  const roles=(team&&team.role_keys)||[]; if(!(roles.some(r=>r==='management')||isLeadOnlyRoles(roles))) return null;
+  return <UploadDutyPanel projects={projects} onNavigate={onNavigate} compact={true}/>;
+}
+
+// Schnitt 3: Management-Matrix Projekt × Quelle + „wer hängt hinterher". Live gerechnet.
+function UploadMatrixView({team, projects}){
+  const isMgmt=((team&&team.role_keys)||[]).some(r=>r==='management');
+  const [grid,setGrid]=useState(null); const [behind,setBehind]=useState([]); const [tick,setTick]=useState(0);
+  const projName=id=>{ const p=(projects||[]).find(x=>x.id===id); return p?p.name:id; };
+  useEffect(()=>{ let a=true; (async()=>{ setGrid(null);
+    let cfgs=[]; try{ const {data}=await sb.from('upload_schedule').select('*').eq('active',true); cfgs=data||[]; }catch(e){}
+    let ow={}; try{ const {data}=await sb.from('upload_project_owner').select('project_id,responsible_user'); (data||[]).forEach(r=>ow[r.project_id]=r.responsible_user); }catch(e){}
+    let us={}; try{ const {data}=await sb.from('app_users').select('user_id,full_name'); (data||[]).forEach(u=>us[u.user_id]=u.full_name); }catch(e){}
+    const today=new Date(); today.setHours(0,0,0,0);
+    const byProj={}; cfgs.forEach(x=>{ (byProj[x.project_id]=byProj[x.project_id]||[]).push(x); });
+    const g={}; const agg={};
+    for(const pid of Object.keys(byProj)){ const lastMap=await uploadLastMap(pid); g[pid]={};
+      for(const cfg of byProj[pid]){ const st=await computeUploadStatus(cfg, pid, today, lastMap); g[pid][cfg.source_type]={st};
+        if(st.bucket==='overdue'||st.bucket==='today'){ const uid=cfg.responsible_user||ow[pid]||'—'; agg[uid]=agg[uid]||{overdue:0,today:0}; if(st.bucket==='overdue') agg[uid].overdue++; else agg[uid].today++; } } }
+    if(!a) return;
+    const bl=Object.keys(agg).map(uid=>({uid, name:(uid==='—'?'(kein Zuständiger)':(us[uid]||'—')), overdue:agg[uid].overdue, today:agg[uid].today})).sort((x,y)=>(y.overdue-x.overdue)||(y.today-x.today));
+    setBehind(bl); setGrid(g);
+  })(); return ()=>{a=false;}; },[tick]);
+  if(!isMgmt) return <div className="sp-empty">Nur für Management.</div>;
+  const projIds=grid?Object.keys(grid):[];
+  const usedSources=UPLOAD_SOURCES.filter(s=>projIds.some(pid=>grid[pid][s.key]));
+  const dotColor=st=>st.state==='red'?'#dc2626':st.state==='yellow'?'#d97706':st.state==='green'?'#059669':'#d1d5db';
+  return <div style={{maxWidth:1200}}>
+    <div style={{fontSize:20,fontWeight:700,marginBottom:2}}>🚦 Upload-Übersicht</div>
+    <div style={{fontSize:13,color:'var(--muted)',marginBottom:12}}>Alle Projekte auf einen Blick. Rot = überfällig, gelb = fällig, grün = erledigt. Live berechnet.</div>
+    <div style={{marginBottom:12}}><button className="btn btn-sm" onClick={()=>setTick(t=>t+1)}>↻ Aktualisieren</button></div>
+    {grid===null ? <div className="sp-empty">Lädt…</div>
+     : projIds.length===0 ? <div className="sp-empty">Noch kein Upload-Plan hinterlegt. Unter „Upload-Plan" anlegen.</div>
+     : <React.Fragment>
+        {behind.length>0 && <div style={{marginBottom:16}}>
+          <div style={{fontSize:12,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)',marginBottom:6}}>Wer hängt hinterher</div>
+          <div style={{display:'flex',flexWrap:'wrap',gap:8}}>{behind.map(b=><div key={b.uid} style={{display:'flex',alignItems:'center',gap:8,padding:'7px 12px',border:'1px solid '+(b.overdue?'#fecaca':'var(--border)'),borderRadius:20,background:b.overdue?'#fef2f2':'var(--card)',fontSize:12}}>
+            <span style={{fontWeight:700}}>{b.name}</span>
+            {b.overdue>0&&<span style={{color:'#dc2626',fontWeight:700}}>{b.overdue} überfällig</span>}
+            {b.today>0&&<span style={{color:'#d97706',fontWeight:700}}>{b.today} heute</span>}
+          </div>)}</div>
+        </div>}
+        <div style={{overflowX:'auto'}}>
+          <table style={{borderCollapse:'collapse',fontSize:12,minWidth:640}}>
+            <thead><tr>
+              <th style={{textAlign:'left',padding:'6px 10px',position:'sticky',left:0,background:'var(--surface-2)'}}>Projekt</th>
+              {usedSources.map(s=><th key={s.key} style={{padding:'6px 8px',textAlign:'center',fontWeight:700,whiteSpace:'nowrap'}}>{s.label}</th>)}
+            </tr></thead>
+            <tbody>{projIds.map(pid=><tr key={pid} style={{borderTop:'1px solid var(--border)'}}>
+              <td style={{padding:'6px 10px',fontWeight:700,whiteSpace:'nowrap',position:'sticky',left:0,background:'var(--card)'}}>{projName(pid)}</td>
+              {usedSources.map(s=>{ const cell=grid[pid][s.key];
+                return <td key={s.key} style={{padding:'6px 8px',textAlign:'center'}}>{cell?<span title={(UPLOAD_LABEL[s.key]||s.key)+': '+cell.st.rel} style={{display:'inline-block',width:14,height:14,borderRadius:'50%',background:dotColor(cell.st)}}/>:<span style={{color:'#e5e7eb'}}>·</span>}</td>; })}
+            </tr>)}</tbody>
+          </table>
+        </div>
+        <div style={{fontSize:11,color:'var(--muted)',marginTop:10}}>● rot überfällig · ● gelb fällig · ● grün erledigt · leere Zelle = Quelle für dieses Projekt nicht aktiv.</div>
+      </React.Fragment>}
+  </div>;
+}
+const UPLOAD_LABEL={}; UPLOAD_SOURCES.forEach(s=>{ UPLOAD_LABEL[s.key]=s.label; });
+let UPLOAD_JUMP=null;   // {projId, source} — Upload-Status → Datenimport (Projekt/Quelle vorwählen)
+const UPLOAD_BUCKET_META={
+  overdue:{label:'Überfällig',          dot:'#dc2626', bg:'#fef2f2', bd:'#fecaca'},
+  today:  {label:'Heute fällig',        dot:'#d97706', bg:'#fffbeb', bd:'#fde68a'},
+  week:   {label:'Diese Woche fällig',  dot:'#d97706', bg:'#fffbeb', bd:'#fde68a'},
+};
+// ── Statusrechner Upload-Ampel (Schnitt 2) — live gerechnet, nichts gespeichert ──
+async function uploadPresent(fn){ try{ const {count}=await fn(); return (count||0)>0; }catch(e){ return false; } }
+// „Sind die Ziel-Daten der Periode da?" je Quelle (Spiegel der DataImportView-Prüfung, autoritativ).
+async function uploadTargetDone(key, projId, kw, year, month){
+  switch(key){
+    case 'rohdaten':     return uploadPresent(()=>sb.from('weekly_hours').select('*',{count:'exact',head:true}).eq('project_id',projId).eq('kw',kw).eq('year',year));
+    case 'calls':        return uploadPresent(()=>sb.from('weekly_calls').select('*',{count:'exact',head:true}).eq('project_id',projId).eq('kw',kw).eq('year',year));
+    case 'gauges':       return uploadPresent(()=>sb.from('weekly_gauges').select('*',{count:'exact',head:true}).eq('project_id',projId).eq('kw',kw).eq('year',year));
+    case 'booking_a':    return uploadPresent(()=>sb.from('kpi_entries').select('*',{count:'exact',head:true}).eq('kw',kw).eq('year',year).eq('source','import').eq('kpi_id','kpi_hc_open_bookings'));
+    case 'booking_week': return uploadPresent(()=>sb.from('kpi_project_entries').select('*',{count:'exact',head:true}).eq('project_id',projId).eq('kw',kw).eq('year',year).eq('source','import'));
+    case 'booking_month':return uploadPresent(()=>sb.from('kpi_project_entries').select('*',{count:'exact',head:true}).eq('project_id',projId).eq('month',month).eq('year',year).eq('source','import'));
+    case 'forecast_sales':   return uploadPresent(()=>sb.from('report_forecast').select('*',{count:'exact',head:true}).eq('project_id',projId).eq('skill','sales').eq('kw',kw).eq('year',year));
+    case 'forecast_support': return uploadPresent(()=>sb.from('report_forecast').select('*',{count:'exact',head:true}).eq('project_id',projId).eq('skill','support').eq('kw',kw).eq('year',year));
+    case 'longterm':     return uploadPresent(()=>sb.from('report_longterm').select('*',{count:'exact',head:true}).eq('project_id',projId));
+    default: return false;
+  }
+}
+function uploadPrevWeek(iso){ const mon=isoWeekMonday(iso.year, iso.kw); const d=new Date(mon); d.setDate(mon.getDate()-7); return getISOWeek(d); }
+function uploadDueDate(iso, wd){ const mon=isoWeekMonday(iso.year, iso.kw); const d=new Date(mon); d.setDate(mon.getDate()+((wd||1)-1)); d.setHours(0,0,0,0); return d; }
+function uploadWeeksOfMonth(Y, M){ const set=new Set(); const last=new Date(Y,M,0).getDate();
+  for(let d=1; d<=last; d++){ const w=getISOWeek(new Date(Y,M-1,d)); if(w.year===Y) set.add(w.kw); } return Array.from(set); }
+async function uploadLastMap(projId){
+  try{ const {data}=await sb.from('data_imports').select('source_type,created_at').eq('project_id',projId).order('created_at',{ascending:false}).limit(300);
+    const m={}; (data||[]).forEach(r=>{ if(!m[r.source_type]) m[r.source_type]=new Date(r.created_at); }); return m;
+  }catch(e){ return {}; }
+}
+// Ampel + Bucket je konfigurierter Quelle. today = lokale Mitternacht.
+async function computeUploadStatus(cfg, projId, today, lastMap){
+  if(!cfg.active) return {state:'grey', bucket:'inactive'};
+  const grace=Number(cfg.grace_days)||0; const iso=getISOWeek(today);
+  const dayDiff=(a,b)=>Math.floor((b-a)/86400000);
+  if(cfg.cadence==='daily' || cfg.cadence==='weekly_progressive'){
+    const last=lastMap[cfg.source_type]||null; const due=today; const bkt=cfg.cadence==='daily'?'today':'week';
+    if(!last) return {state:'red', bucket:'overdue', due, rel:'noch nie geladen'};
+    const ld=new Date(last); ld.setHours(0,0,0,0); const gap=dayDiff(ld, today);
+    if(gap<=0) return {state:'green', bucket:'done', rel:'heute geladen'};
+    if(gap<=grace) return {state:'yellow', bucket:bkt, due, rel:'zuletzt vor '+gap+' Tag'+(gap===1?'':'en')};
+    return {state:'red', bucket:'overdue', due, rel:gap+' Tage kein Upload'};
+  }
+  if(cfg.cadence==='weekly_retro'){
+    const prev=uploadPrevWeek(iso); const done=await uploadTargetDone(cfg.source_type, projId, prev.kw, prev.year, null);
+    const rel='KW '+prev.kw; const due=uploadDueDate(iso, cfg.due_weekday);
+    if(done) return {state:'green', bucket:'done', rel:rel+' da'};
+    const overdueAt=new Date(due); overdueAt.setDate(due.getDate()+grace);
+    if(today>overdueAt) return {state:'red', bucket:'overdue', due, rel};
+    if(today>=due) return {state:'yellow', bucket:'today', due, rel};
+    return {state:'yellow', bucket:'week', due, rel};
+  }
+  if(cfg.cadence==='monthly'){
+    const M=today.getMonth()+1, Y=today.getFullYear(); let done=false;
+    if(cfg.source_type==='booking_month') done=await uploadTargetDone('booking_month', projId, null, Y, M);
+    else if(cfg.source_type==='longterm') done=await uploadTargetDone('longterm', projId, null, Y, null);
+    else if(cfg.source_type==='forecast_sales'||cfg.source_type==='forecast_support'){
+      const kws=uploadWeeksOfMonth(Y,M); const skill=cfg.source_type==='forecast_sales'?'sales':'support';
+      done=await uploadPresent(()=>sb.from('report_forecast').select('*',{count:'exact',head:true}).eq('project_id',projId).eq('skill',skill).eq('year',Y).in('kw',kws));
+    } else { const last=lastMap[cfg.source_type]; done=!!(last && last.getFullYear()===Y && last.getMonth()+1===M); }
+    const lastDay=new Date(Y,M,0).getDate(); const dd=Math.min(cfg.due_day||1,lastDay); const due=new Date(Y,M-1,dd); due.setHours(0,0,0,0);
+    const rel=(CAL_MONTHS[M-1]||('Monat '+M));
+    if(done) return {state:'green', bucket:'done', rel:rel+' da'};
+    const overdueAt=new Date(due); overdueAt.setDate(due.getDate()+grace);
+    if(today>overdueAt) return {state:'red', bucket:'overdue', due, rel};
+    if(today>=due) return {state:'yellow', bucket:'today', due, rel};
+    if(getISOWeek(due).kw===iso.kw) return {state:'yellow', bucket:'week', due, rel};
+    return {state:'grey', bucket:'upcoming', due, rel};
+  }
+  return {state:'grey', bucket:'inactive'};
+}
+
+// Schnitt 2: Anwender-Ansicht „was muss ich tun". Projekt-scoped über RLS (Lead sieht sein Projekt,
+// Management alle). Ampel live gerechnet; „Hochladen" springt in den Datenimport mit vorgewählter Quelle.
+function UploadStatusView({team, projects, onNavigate}){
+  const [cfgs,setCfgs]=useState(null); const [owners,setOwners]=useState({}); const [users,setUsers]=useState({});
+  const [projId,setProjId]=useState(''); const [items,setItems]=useState(null); const [tick,setTick]=useState(0);
+  const projName=id=>{ const p=(projects||[]).find(x=>x.id===id); return p?p.name:id; };
+  useEffect(()=>{ let a=true; (async()=>{
+    try{ const {data}=await sb.from('upload_schedule').select('*').eq('active',true); if(a) setCfgs(data||[]); }catch(e){ if(a) setCfgs([]); }
+    try{ const {data}=await sb.from('upload_project_owner').select('project_id,responsible_user'); const m={}; (data||[]).forEach(r=>m[r.project_id]=r.responsible_user); if(a) setOwners(m); }catch(e){}
+    try{ const {data}=await sb.from('app_users').select('user_id,full_name'); const m={}; (data||[]).forEach(u=>m[u.user_id]=u.full_name); if(a) setUsers(m); }catch(e){}
+  })(); return ()=>{a=false;}; },[tick]);
+  const projIds=Array.from(new Set((cfgs||[]).map(c=>c.project_id)));
+  useEffect(()=>{ if((!projId||projIds.indexOf(projId)<0) && projIds.length) setProjId(projIds[0]); },[cfgs]);
+  useEffect(()=>{ let a=true; (async()=>{ if(!projId){ setItems([]); return; } setItems(null);
+    const today=new Date(); today.setHours(0,0,0,0); const lastMap=await uploadLastMap(projId);
+    const rows=(cfgs||[]).filter(c=>c.project_id===projId && c.active);
+    const out=await Promise.all(rows.map(async c=>({cfg:c, st:await computeUploadStatus(c, projId, today, lastMap)})));
+    const rank={overdue:0,today:1,week:2,upcoming:3,done:4,inactive:5};
+    out.sort((x,y)=>(rank[x.st.bucket]-rank[y.st.bucket])||String(UPLOAD_LABEL[x.cfg.source_type]||'').localeCompare(String(UPLOAD_LABEL[y.cfg.source_type]||'')));
+    if(a) setItems(out);
+  })(); return ()=>{a=false;}; },[projId, cfgs, tick]);
+  const respName=cfg=>{ const uid=cfg.responsible_user||owners[cfg.project_id]||null; return uid?(users[uid]||'—'):'—'; };
+  function jump(source){ UPLOAD_JUMP={projId, source}; if(onNavigate) onNavigate({kind:'view', view:'dataimport'}); }
+  const count=b=>(items||[]).filter(i=>i.st.bucket===b).length;
+  const actionable=['overdue','today','week']; const doneList=(items||[]).filter(i=>i.st.bucket==='done'||i.st.bucket==='upcoming');
+  return <div style={{maxWidth:900}}>
+    <div style={{fontSize:20,fontWeight:700,marginBottom:2}}>🚦 Upload-Status</div>
+    <div style={{fontSize:13,color:'var(--muted)',marginBottom:14}}>Was heute und diese Woche fällig ist und was fehlt. Live berechnet aus dem Upload-Plan.</div>
+    <div style={{display:'flex',gap:10,alignItems:'center',marginBottom:14,flexWrap:'wrap'}}>
+      {projIds.length>1 && <select className="form-select" style={{width:'auto',fontWeight:700}} value={projId} onChange={e=>setProjId(e.target.value)}>{projIds.map(id=><option key={id} value={id}>{projName(id)}</option>)}</select>}
+      {projIds.length===1 && <span style={{fontWeight:700}}>{projName(projId)}</span>}
+      <button className="btn btn-sm" onClick={()=>setTick(t=>t+1)}>↻ Aktualisieren</button>
+      {items&&<span style={{fontSize:12,color:'var(--muted)'}}>{count('overdue')} überfällig · {count('today')} heute · {count('week')} diese Woche</span>}
+    </div>
+    {cfgs===null||items===null ? <div className="sp-empty">Lädt…</div>
+     : projIds.length===0 ? <div className="sp-empty">Noch kein Upload-Plan hinterlegt. Management legt ihn unter „Upload-Plan" an.</div>
+     : <React.Fragment>
+        {actionable.map(b=>{ const list=(items||[]).filter(i=>i.st.bucket===b); if(!list.length) return null; const MB=UPLOAD_BUCKET_META[b];
+          return <div key={b} style={{marginBottom:14}}>
+            <div style={{fontSize:12,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em',color:MB.dot,marginBottom:6}}>{MB.label} ({list.length})</div>
+            <div style={{display:'flex',flexDirection:'column',gap:8}}>{list.map(i=><div key={i.cfg.source_type} style={{display:'flex',alignItems:'center',gap:12,padding:'10px 12px',border:'1px solid '+MB.bd,borderRadius:10,background:MB.bg,flexWrap:'wrap'}}>
+              <span style={{width:12,height:12,borderRadius:'50%',background:MB.dot,flexShrink:0}}/>
+              <div style={{flex:1,minWidth:160}}>
+                <div style={{fontSize:13,fontWeight:700}}>{UPLOAD_LABEL[i.cfg.source_type]||i.cfg.source_type}</div>
+                <div style={{fontSize:11,color:'var(--muted)'}}>{i.st.rel}{i.st.due?(' · fällig '+fmtDate(i.st.due)):''}</div>
+              </div>
+              <span style={{fontSize:11,color:'var(--muted)'}}>Zuständig: {respName(i.cfg)}</span>
+              <button className="btn btn-sm btn-primary" onClick={()=>jump(i.cfg.source_type)}>⬆ Hochladen</button>
+            </div>)}</div>
+          </div>;
+        })}
+        {actionable.every(b=>count(b)===0) && <div style={{padding:'12px 14px',borderRadius:10,background:'#ecfdf5',border:'1px solid #a7f3d0',color:'#059669',fontWeight:700,fontSize:13,marginBottom:14}}>✓ Alles aktuell, nichts fällig.</div>}
+        {doneList.length>0 && <div>
+          <div style={{fontSize:12,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)',marginBottom:6}}>Erledigt / keine Aktion</div>
+          <div style={{display:'flex',flexDirection:'column',gap:5}}>{doneList.map(i=><div key={i.cfg.source_type} style={{display:'flex',alignItems:'center',gap:10,padding:'7px 12px',border:'1px solid var(--border)',borderRadius:8,fontSize:12}}>
+            <span style={{width:9,height:9,borderRadius:'50%',background:i.st.state==='green'?'#059669':'#9ca3af',flexShrink:0}}/>
+            <span style={{flex:1,fontWeight:600}}>{UPLOAD_LABEL[i.cfg.source_type]||i.cfg.source_type}</span>
+            <span style={{color:'var(--muted)'}}>{i.st.rel}</span>
+          </div>)}</div>
+        </div>}
+      </React.Fragment>}
   </div>;
 }
 
@@ -34892,17 +35417,9 @@ function DataImportView({projects, employees}){
   const [open,setOpen]=useState(null);   // welcher Quelle-Uploader ist aufgeklappt
   const [imports,setImports]=useState(null); const [tick,setTick]=useState(0);
   const [status,setStatus]=useState({});   // key -> importiert für gewählte Periode?
-  const SOURCES=[
-    {key:'rohdaten',    label:'Rohdaten-Excel',        sub:'Stunden je Skill (agent_qm)',              period:'week'},
-    {key:'calls',       label:'Call-CSV',              sub:'Answered, AHT, ACW',                       period:'week'},
-    {key:'gauges',      label:'Gauges-Excel',          sub:'CSAT',                                     period:'week'},
-    {key:'booking_a',   label:'Booking-Excel (Agent)', sub:'Conversion, Buchungen, Sales Calls je Agent', period:'week'},
-    {key:'booking_week',label:'Booking-Team Woche',    sub:'CR, Buchungen, Sales Calls je KW',         period:'week'},
-    {key:'booking_month',label:'Booking-Team Monat',   sub:'CR, Buchungen, Sales Calls je Monat',      period:'month'},
-    {key:'forecast_sales',  label:'Forecast Woche · Sales',   sub:'FC-Stunden je KW (Auftraggeber, Blatt 5)', period:'week'},
-    {key:'forecast_support',label:'Forecast Woche · Support', sub:'FC-Stunden je KW (Auftraggeber, Blatt 5)', period:'week'},
-    {key:'longterm',        label:'Langzeit-Kapazität',       sub:'12-Monats-Modell (Blätter Sales + Support)', period:'week'},
-  ];
+  // Sprung aus dem Upload-Status: Projekt + Quelle vorwählen und den Uploader öffnen.
+  useEffect(()=>{ if(UPLOAD_JUMP){ const j=UPLOAD_JUMP; UPLOAD_JUMP=null; if(j.projId) setProjId(j.projId); if(j.source) setOpen(j.source); } },[]);
+  const SOURCES=UPLOAD_SOURCES;
   const srcLabel={}; SOURCES.forEach(s=>srcLabel[s.key]=s.label); srcLabel.booking_team='Booking-Team';
   // Letzte Importe (alle Quellen dieses Projekts).
   useEffect(()=>{ let alive=true; (async()=>{ if(!projId){ setImports([]); return; }
@@ -35098,6 +35615,212 @@ async function syncCvsFromSheet(){
   const skippedTotal=skipped.length+dupSkipped;
   finish({last_error:null, last_sync_count:inserted, last_sync_skipped:skippedTotal});
   return {imported:inserted, skipped:skippedTotal, preCutoff, total:rows.length, cutoff, skippedRows:skipped, skipByReason, preview:rows.slice(0,5), error:null};
+}
+
+// ── Meta-Bewerbungen (facebook_leads) → cvs (Schnitt 2) ──────────────────────
+// Telefon MUSS vor phoneClassify gesäubert werden: der Classifier verwirft jeden String mit
+// Buchstaben (→ 'unclear'). Zusätze wie „WhatsApp"/„Albanien" abschneiden, „00"→„+", nur Ziffern.
+function metaCleanPhone(raw){
+  let s=String(raw||'').trim(); if(!s) return '';
+  s=s.replace(/^\s*00/,'+');                 // internationale 00-Vorwahl → +
+  const plus=/^\s*\+/.test(s)?'+':'';
+  const digits=s.replace(/[^\d]/g,'');       // reine Ziffern; Zusätze fallen weg
+  return digits?(plus+digits):'';
+}
+function metaSplitName(full){ const p=String(full||'').trim().split(/\s+/).filter(Boolean); const f=p.shift()||''; return {first_name:f, last_name:p.join(' ')}; }
+function metaLevel(g){ const m=String(g||'').match(/\b([abc][12])\b/i); return m?m[1].toUpperCase():''; }
+// „wann kannst du anfangen": nur echtes Datum → available_from; „Sofort/Ab sofort/Jetzt/Heute" → Eingangsdatum;
+// alles andere (frei) → null (Rohtext landet in extra.available). Formate: YYYY-MM-DD, D.M.YYYY, D/M/YYYY, D.M.YY.
+function metaAvailable(raw, cvDate){
+  const s=String(raw||'').trim(); if(!s) return null;
+  if(/^(sofort|ab sofort|jetzt|heute)\b/i.test(s)) return cvDate||isoLocal(new Date());
+  let m=s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?!\d)/); if(m) return m[1]+'-'+m[2].padStart(2,'0')+'-'+m[3].padStart(2,'0');
+  m=s.match(/^(\d{1,2})[.\/](\d{1,2})[.\/](\d{4}|\d{2})(?!\d)/);
+  if(m){ let y=m[3]; if(y.length===2) y='20'+y; return y+'-'+m[2].padStart(2,'0')+'-'+m[1].padStart(2,'0'); }
+  return null;
+}
+// Windsor schreibt die Original-Spaltennamen (__…__, Bindestrich, Umlaut). Feld über exakten Namen holen,
+// Fallback: normalisierter Schlüssel-Vergleich (Umlaut/Case/Sonderzeichen egal), damit kleine Abweichungen
+// im Spaltennamen nicht zu leeren Feldern führen.
+function metaField(row, ...names){
+  for(const n of names){ const v=row&&row[n]; if(v!=null && String(v).trim()!=='') return v; }
+  if(!row) return null;
+  const norm=s=>String(s||'').toLowerCase().replace(/ä/g,'a').replace(/ö/g,'o').replace(/ü/g,'u').replace(/ß/g,'ss').replace(/[^a-z0-9]/g,'');
+  const want=names.map(norm);
+  for(const k of Object.keys(row)){ if(want.indexOf(norm(k))>=0){ const v=row[k]; if(v!=null && String(v).trim()!=='') return v; } }
+  return null;
+}
+// windsor_leads-Zeile → cvs-Payload (source='meta'). Geteilt von Runner UND „Meta übernehmen" im Dubletten-Center.
+// Liest die Windsor-Originalnamen (raw gibt es nicht mehr).
+function metaLeadToPayload(lead){
+  const rawPhone=metaField(lead,'__telefonnummer__','phone');
+  const cleaned=metaCleanPhone(rawPhone); const pc=cleaned?phoneClassify(cleaned):{cat:'missing'};
+  const phone=(pc.cat==='ok'||pc.cat==='e164')?pc.target:null;
+  const nm=metaSplitName(metaField(lead,'vor-_und_nachname','full_name'));
+  const german=metaField(lead,'__sprichst_du_deutsch__','german'); const lvl=metaLevel(german);
+  const created=metaField(lead,'created_time'); const cvDate=(created?String(created).slice(0,10):isoLocal(new Date()));
+  const availRaw=metaField(lead,'__wann_kannst_du_anfangen__','available'); const av=metaAvailable(availRaw, cvDate);
+  const cc=metaField(lead,'__hast_du_erfahrung_im_call_center__','cc_experience');
+  const work=metaField(lead,'__arbeitszeit_verfügbar__','__arbeitszeit_verfuegbar__','work_time');
+  const interests=metaField(lead,'in_welchen_','interests');
+  const campaign=metaField(lead,'campaign'); const adName=metaField(lead,'ad_name'); const formId=metaField(lead,'form_id');
+  const leadId=(lead&&lead.id!=null)?String(lead.id):(metaField(lead,'lead_id')?String(metaField(lead,'lead_id')):null);
+  const trim=v=>{ const s=(v==null?'':String(v)).trim(); return s||null; };
+  const extra={};
+  if(trim(cc))        extra.cc_experience=trim(cc);
+  if(trim(work))      extra.work_time=trim(work);
+  if(trim(interests)) extra.interests=trim(interests);
+  if(trim(german))    extra.german=trim(german);
+  if(trim(availRaw)&&!av) extra.available=trim(availRaw);
+  if(trim(campaign))  extra.campaign=trim(campaign);
+  if(trim(adName))    extra.ad_name=trim(adName);
+  if(trim(formId))    extra.form_id=trim(formId);
+  if(leadId)          extra.lead_id=leadId;
+  if(!phone && trim(rawPhone)) extra.phone_raw=trim(rawPhone);
+  const payload={ first_name:trim(nm.first_name), last_name:trim(nm.last_name), email:null,
+    phone:phone||null, city:null, project_id:null, target_role:'Agent', status:'cv_inbound',
+    cv_date:cvDate, source:'meta', language_level:(lvl||null), available_from:av||null,
+    work_history:null, notes:null, audios:[], videos:[], test_scores:{}, test_answers:{}, extra };
+  return {payload, phone};
+}
+// Liest windsor_leads (imported=false, ungeprüft), legt cvs an. Telefon-Kollision mit Bestand → NICHT anlegen,
+// sondern status_review='dup' + imported_cv_id=<Treffer> (HR entscheidet im Dubletten-Center). Ohne brauchbare
+// Nummer wird trotzdem angelegt (phone=null, Rohwert nach extra.phone_raw).
+async function importMetaLeads(){
+  let leads=[];
+  try{ const {data,error}=await sb.from('windsor_leads').select('*').eq('imported',false).is('status_review',null).order('created_time',{ascending:true}); if(error) throw error; leads=data||[]; }
+  catch(e){ return {error:(e&&e.message)||String(e)}; }
+  if(!leads.length) return {created:0, held:0, errors:0, noPhone:0, total:0};
+  const byPhone=new Map();
+  try{ const {data}=await sb.from('cvs').select('id,phone'); (data||[]).forEach(c=>{ if(c.phone) byPhone.set(String(c.phone).trim(), c.id); }); }catch(e){}
+  let created=0, held=0, errors=0, noPhone=0;
+  for(const lead of leads){
+    const {payload, phone}=metaLeadToPayload(lead);
+    if(!phone) noPhone++;
+    if(phone && byPhone.has(phone)){
+      try{ await sb.from('windsor_leads').update({status_review:'dup', imported_cv_id:byPhone.get(phone)}).eq('id',lead.id); }catch(e){}
+      held++; continue;
+    }
+    let insId=null, e1=null;
+    try{ const r=await sb.from('cvs').insert(payload).select('id').single(); if(r.error) e1=r.error; else insId=r.data&&r.data.id; }
+    catch(e){ e1={message:(e&&e.message)}; }
+    if(e1){ if(e1.code==='23505'){ try{ await sb.from('windsor_leads').update({status_review:'dup'}).eq('id',lead.id); }catch(e){} held++; } else errors++; continue; }
+    try{ await sb.from('windsor_leads').update({imported:true, imported_cv_id:insId}).eq('id',lead.id); }catch(e){}
+    created++; if(phone) byPhone.set(phone, insId);
+  }
+  return {created, held, errors, noPhone, total:leads.length};
+}
+// Ruft die Edge Function applicant-import (serverseitige Übernahme-Logik). source: 'meta'|'google'|undefined(beide).
+async function callApplicantImport(source){
+  let tok=null; try{ const s=await sb.auth.getSession(); tok=s&&s.data&&s.data.session&&s.data.session.access_token; }catch(e){}
+  const r=await fetch(SB_URL+'/functions/v1/applicant-import',{method:'POST',headers:{'Authorization':'Bearer '+tok,'apikey':SB_KEY,'content-type':'application/json'},body:JSON.stringify(source?{source}:{})});
+  let j; try{ j=await r.json(); }catch(e){ j={error:'Antwort nicht lesbar ('+r.status+')'}; }
+  if(!r.ok&&!j.error) j.error='Fehler '+r.status; return j;
+}
+function MetaImportPanel({setCvList}){
+  const [pending,setPending]=useState(null); const [dupCount,setDupCount]=useState(0);
+  const [busy,setBusy]=useState(false); const [res,setRes]=useState(null); const [err,setErr]=useState('');
+  const loadCounts=async()=>{
+    try{ const {count}=await sb.from('windsor_leads').select('id',{count:'exact',head:true}).eq('imported',false).is('status_review',null); setPending(count||0); }catch(e){ setPending(null); }
+    try{ const {count}=await sb.from('windsor_leads').select('id',{count:'exact',head:true}).eq('status_review','dup'); setDupCount(count||0); }catch(e){}
+  };
+  useEffect(()=>{ loadCounts(); },[]);
+  async function run(){ setBusy(true); setErr(''); setRes(null);
+    const j=await callApplicantImport('meta'); setBusy(false);
+    if(j.error){ setErr(j.error); return; }
+    const m=j.meta||{}; if(m.error){ setErr(m.error); return; }
+    setRes(m); await loadCounts();
+    if((m.created||0)>0 && setCvList){ loadCvsFromDB().then(setCvList); }
+  }
+  return <div style={{border:'1px solid var(--border)',borderRadius:12,padding:'16px 18px',marginTop:16,background:'var(--card)'}}>
+    <div style={{fontSize:15,fontWeight:800,marginBottom:4}}>📣 Meta-Bewerbungen (facebook_leads)</div>
+    <div style={{fontSize:12,color:'var(--muted)',marginBottom:12}}>Läuft automatisch täglich um ~02:00 UTC serverseitig. Der Knopf stößt denselben Lauf sofort an, falls du nachziehen willst. Telefon-Dubletten werden nicht angelegt, sondern zur Entscheidung in „Dubletten" zurückgehalten.</div>
+    <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
+      <button className="btn btn-primary" disabled={busy||pending===0} onClick={run}>{busy?'Übernehme…':('⬇ Übernehmen'+(pending!=null?(' ('+pending+' neu)'):''))}</button>
+      <button className="btn btn-sm" onClick={loadCounts} disabled={busy}>↻</button>
+      {dupCount>0&&<span style={{fontSize:12,color:'#b45309',fontWeight:700}}>{dupCount} Telefon-Dublette(n) offen</span>}
+    </div>
+    {err&&<div style={{marginTop:10,padding:'8px 10px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:8,color:'#b91c1c',fontSize:12}}>{err}</div>}
+    {res&&<div style={{marginTop:10,fontSize:12,color:'var(--muted)'}}>✓ {res.created} angelegt · {res.held} als Dublette zurückgehalten · {res.noPhone} ohne Telefonnummer{res.errors?(' · '+res.errors+' Fehler'):''}</div>}
+  </div>;
+}
+
+// Schnitt 4: Dubletten-Center (HR/Management). Zwei Bereiche:
+// 1) Telefon-Kollisionen Meta ↔ Bestand (zurückgehaltene Leads) — HR: Meta übernehmen (ersetzt) oder verwerfen.
+// 2) Name+Datum-Gruppen im Bestand (mehrere CVs gleicher Person) — HR löscht die überflüssige. Kein Auto-Löschen.
+function DuplicatesView({team, setCvList}){
+  const roles=(team&&team.role_keys)||[]; const allow=roles.some(r=>r==='management'||r==='hr');
+  const [pairs,setPairs]=useState(null); const [groups,setGroups]=useState(null); const [busy,setBusy]=useState('');
+  const norm=x=>String(x||'').trim().toLowerCase();
+  const load=async()=>{
+    let leads=[]; try{ const {data}=await sb.from('windsor_leads').select('*').eq('status_review','dup'); leads=data||[]; }catch(e){}
+    const ids=leads.map(l=>l.imported_cv_id).filter(Boolean); const cvById={};
+    if(ids.length){ try{ const {data}=await sb.from('cvs').select('*').in('id',ids); (data||[]).forEach(c=>cvById[c.id]=c); }catch(e){} }
+    setPairs(leads.map(l=>({lead:l, cv:cvById[l.imported_cv_id]||null})));
+    let all=[]; try{ const {data}=await sb.from('cvs').select('id,first_name,last_name,cv_date,phone,source,status'); all=data||[]; }catch(e){}
+    const gm={}; all.forEach(c=>{ const nm=norm(c.first_name)+' '+norm(c.last_name); const k=nm.trim()+'|'+String(c.cv_date||'').slice(0,10); if(!nm.trim()) return; (gm[k]=gm[k]||[]).push(c); });
+    setGroups(Object.values(gm).filter(g=>g.length>1));
+  };
+  useEffect(()=>{ if(allow) load(); },[]);
+  async function takeMeta(p){ if(!(await uiConfirm({title:'Meta übernehmen', text:'Der bestehende Bewerber wird gelöscht und durch die Meta-Bewerbung ersetzt.', danger:true, confirmLabel:'Übernehmen'}))) return;
+    setBusy(p.lead.id);
+    try{ if(p.cv) await sb.from('cvs').delete().eq('id',p.cv.id);
+      const {payload}=metaLeadToPayload(p.lead); const r=await sb.from('cvs').insert(payload).select('id').single(); if(r.error) throw r.error;
+      await sb.from('windsor_leads').update({imported:true, status_review:null, imported_cv_id:r.data.id}).eq('id',p.lead.id);
+    }catch(e){ alert('Nicht möglich: '+((e&&e.message)||e)); }
+    setBusy(''); await load(); if(setCvList) loadCvsFromDB().then(setCvList);
+  }
+  async function discardMeta(p){ if(!(await uiConfirm({title:'Meta verwerfen', text:'Die Meta-Bewerbung wird verworfen, der bestehende Bewerber bleibt.', confirmLabel:'Verwerfen'}))) return;
+    setBusy(p.lead.id);
+    try{ await sb.from('windsor_leads').update({status_review:'discarded'}).eq('id',p.lead.id); }catch(e){}
+    setBusy(''); await load();
+  }
+  async function delCv(id){ if(!(await uiConfirm({title:'Bewerber löschen', text:'Dieser Bewerber-Datensatz wird gelöscht. Das lässt sich nicht rückgängig machen.', danger:true, confirmLabel:'Löschen'}))) return;
+    try{ await sb.from('cvs').delete().eq('id',id); }catch(e){ alert('Löschen fehlgeschlagen: '+((e&&e.message)||e)); }
+    await load(); if(setCvList) loadCvsFromDB().then(setCvList);
+  }
+  if(!allow) return <div className="sp-empty">Nur für HR / Management.</div>;
+  const nm=c=>((c&&(c.first_name||'')+' '+(c&&c.last_name||''))||'—').trim()||'—';
+  const box={border:'1px solid var(--border)',borderRadius:10,padding:'10px 12px',background:'var(--card)',minWidth:220,flex:1};
+  return <div style={{maxWidth:1000}}>
+    <div style={{fontSize:20,fontWeight:700,marginBottom:2}}>📑 Dubletten</div>
+    <div style={{fontSize:13,color:'var(--muted)',marginBottom:14}}>Telefon-Kollisionen aus dem Meta-Import und mehrfach vorhandene Bewerber. Nichts wird automatisch gelöscht, du entscheidest.</div>
+    <div style={{marginBottom:12}}><button className="btn btn-sm" onClick={load}>↻ Aktualisieren</button></div>
+
+    <div style={{fontSize:12,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)',marginBottom:8}}>Telefon-Kollisionen · Meta ↔ Bestand {pairs?('('+pairs.length+')'):''}</div>
+    {pairs===null ? <div className="sp-empty">Lädt…</div>
+     : pairs.length===0 ? <div style={{fontSize:13,color:'var(--muted)',marginBottom:18}}>Keine offenen Telefon-Kollisionen.</div>
+     : <div style={{display:'flex',flexDirection:'column',gap:12,marginBottom:22}}>{pairs.map(p=><div key={p.lead.id} style={{border:'1px solid #fde68a',borderRadius:12,background:'#fffbeb',padding:'12px 14px'}}>
+        <div style={{display:'flex',gap:12,flexWrap:'wrap'}}>
+          <div style={box}>
+            <div style={{fontSize:10,fontWeight:800,textTransform:'uppercase',color:'#b45309'}}>Neu · Meta</div>
+            <div style={{fontSize:14,fontWeight:700}}>{metaField(p.lead,'vor-_und_nachname','full_name')||'—'}</div>
+            <div style={{fontSize:12,color:'var(--muted)'}}>{(()=>{const ph=metaField(p.lead,'__telefonnummer__','phone'); return metaCleanPhone(ph)||ph||'ohne Nummer';})()} · {(()=>{const ct=metaField(p.lead,'created_time'); return ct?String(ct).slice(0,10):'—';})()}</div>
+            <div style={{fontSize:11,color:'var(--muted)',marginTop:4}}>{[metaField(p.lead,'__sprichst_du_deutsch__','german'),metaField(p.lead,'__hast_du_erfahrung_im_call_center__','cc_experience'),metaField(p.lead,'campaign')].filter(Boolean).join(' · ')}</div>
+          </div>
+          <div style={box}>
+            <div style={{fontSize:10,fontWeight:800,textTransform:'uppercase',color:'var(--muted)'}}>Bestand</div>
+            <div style={{fontSize:14,fontWeight:700}}>{p.cv?nm(p.cv):'(nicht mehr vorhanden)'}</div>
+            {p.cv&&<div style={{fontSize:12,color:'var(--muted)'}}>{p.cv.phone||'—'} · {String(p.cv.cv_date||'').slice(0,10)||'—'} · Quelle {p.cv.source||'—'}</div>}
+          </div>
+        </div>
+        <div style={{display:'flex',gap:8,marginTop:10}}>
+          <button className="btn btn-sm btn-primary" disabled={busy===p.lead.id} onClick={()=>takeMeta(p)}>Meta übernehmen (Bestand ersetzen)</button>
+          <button className="btn btn-sm" disabled={busy===p.lead.id} onClick={()=>discardMeta(p)}>Meta verwerfen</button>
+        </div>
+      </div>)}</div>}
+
+    <div style={{fontSize:12,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)',marginBottom:8}}>Gleicher Name + Datum im Bestand {groups?('('+groups.length+')'):''}</div>
+    {groups===null ? <div className="sp-empty">Lädt…</div>
+     : groups.length===0 ? <div style={{fontSize:13,color:'var(--muted)'}}>Keine Namens-Dubletten gefunden.</div>
+     : <div style={{display:'flex',flexDirection:'column',gap:10}}>{groups.map((g,gi)=><div key={gi} style={{border:'1px solid var(--border)',borderRadius:12,padding:'10px 12px'}}>
+        <div style={{fontSize:13,fontWeight:700,marginBottom:6}}>{nm(g[0])} · {String(g[0].cv_date||'').slice(0,10)}</div>
+        <div style={{display:'flex',flexDirection:'column',gap:6}}>{g.map(c=><div key={c.id} style={{display:'flex',alignItems:'center',gap:10,fontSize:12,padding:'5px 0',borderTop:'1px solid var(--border)'}}>
+          <span style={{flex:1}}>{c.phone||'ohne Nummer'} · Quelle <b>{c.source||'—'}</b> · {c.status||'—'}</span>
+          <button className="btn btn-sm" style={{color:'#dc2626',borderColor:'#fecaca'}} onClick={()=>delCv(c.id)}>Löschen</button>
+        </div>)}</div>
+      </div>)}</div>}
+  </div>;
 }
 
 function CvSyncView({setCvList, projects}){
@@ -37307,6 +38030,7 @@ function App(){
   const navSections = [
     {sec:'Hilfe', items:[
       {key:'wissen_system',label:'Wissen System',icon:'📖'},
+      ...((team&&(team.role_keys||[]).some(r=>r==='management')) ? [{key:'nlquery',label:'Datenabfrage',icon:'🔎'}] : []),   // Management-only
     ]},
     {sec:'Übersicht', items:[
       {key:'start',label:'Start',icon:'👋'},
@@ -37339,6 +38063,7 @@ function App(){
       {key:'funnel',label:'Bewerber-Trichter',icon:'📊'},
       {key:'onboarding',label:'Onboarding',icon:'✅'},
       {key:'cvs',label:'CVs & Bewerber',icon:'📋'},
+      ...((team&&(team.role_keys||[]).some(r=>r==='management'||r==='hr')) ? [{key:'dubletten',label:'Dubletten',icon:'📑'}] : []),   // HR + Management
       {key:'showcase',label:'Showcases',icon:'🌟'},
     ]},
     {sec:'Schulung', items:[
@@ -37351,9 +38076,11 @@ function App(){
       ...((team&&(team.role_keys||[]).some(r=>r==='management')) ? [{key:'fcist',label:'Forecast vs. Ist',icon:'🔮'}] : []),   // Management-only
       {key:'profitability',label:'Wirtschaftlichkeit',icon:'💹'},
       ...((team&&((team.role_keys||[]).some(r=>r==='management')||isLeadOnlyRoles(team.role_keys))) ? [{key:'praesentation',label:'Präsentationen',icon:'📊'}] : []),   // Management + Projektleiter (projektbezogen)
+      ...((team&&((team.role_keys||[]).some(r=>r==='management')||isLeadOnlyRoles(team.role_keys))) ? [{key:'uploads',label:'Upload-Status',icon:'🚦'}] : []),   // Management + Projektleiter (Anwender-Ansicht)
+      ...((team&&(team.role_keys||[]).some(r=>r==='management')) ? [{key:'uploadmatrix',label:'Upload-Übersicht',icon:'🗺'}] : []),   // Management-only (alle Projekte)
       ...((team&&((team.role_keys||[]).some(r=>r==='management')||isLeadOnlyRoles(team.role_keys))) ? [{key:'dataimport',label:'Datenimport',icon:'📥'}] : []),   // Management + Projektleiter (projektbezogen)
+      ...((team&&(team.role_keys||[]).some(r=>r==='management')) ? [{key:'uploadplan',label:'Upload-Plan',icon:'🗂'}] : []),   // Management-only (Konfiguration)
       ...((team&&(team.role_keys||[]).some(r=>r==='management')) ? [{key:'recmkt',label:'Recruiting Marketing',icon:'📣'}] : []),   // Management-only
-      ...((team&&(team.role_keys||[]).some(r=>r==='management')) ? [{key:'nlquery',label:'Datenabfrage',icon:'🔎'}] : []),   // Management-only
     ]},
     {sec:'System', items:[
       {key:'superadmin',label:'System / Konfiguration',icon:'⚙️'},
@@ -37414,6 +38141,7 @@ function App(){
       'onboarding':'<path d="M5.25 6.375a4.125 4.125 0 1 1 8.25 0 4.125 4.125 0 0 1-8.25 0ZM2.25 19.125a7.125 7.125 0 0 1 14.25 0v.003l-.001.119a.75.75 0 0 1-.363.63 13.067 13.067 0 0 1-6.761 1.873c-2.472 0-4.786-.684-6.76-1.873a.75.75 0 0 1-.364-.63l-.001-.122ZM18.75 7.5a.75.75 0 0 0-1.5 0v2.25H15a.75.75 0 0 0 0 1.5h2.25v2.25a.75.75 0 0 0 1.5 0v-2.25H21a.75.75 0 0 0 0-1.5h-2.25V7.5Z"/>',
       'cvs':'<path fill-rule="evenodd" d="M5.625 1.5c-1.036 0-1.875.84-1.875 1.875v17.25c0 1.035.84 1.875 1.875 1.875h12.75c1.035 0 1.875-.84 1.875-1.875V12.75A3.75 3.75 0 0 0 16.5 9h-1.875a1.875 1.875 0 0 1-1.875-1.875V5.25A3.75 3.75 0 0 0 9 1.5H5.625ZM7.5 15a.75.75 0 0 1 .75-.75h7.5a.75.75 0 0 1 0 1.5h-7.5A.75.75 0 0 1 7.5 15Zm.75 2.25a.75.75 0 0 0 0 1.5H12a.75.75 0 0 0 0-1.5H8.25Z" clip-rule="evenodd"/> <path d="M12.971 1.816A5.23 5.23 0 0 1 14.25 5.25v1.875c0 .207.168.375.375.375H16.5a5.23 5.23 0 0 1 3.434 1.279 9.768 9.768 0 0 0-6.963-6.963Z"/>',
       'showcase':'<path fill-rule="evenodd" d="M10.788 3.21c.448-1.077 1.976-1.077 2.424 0l2.082 5.006 5.404.434c1.164.093 1.636 1.545.749 2.305l-4.117 3.527 1.257 5.273c.271 1.136-.964 2.033-1.96 1.425L12 18.354 7.373 21.18c-.996.608-2.231-.29-1.96-1.425l1.257-5.273-4.117-3.527c-.887-.76-.415-2.212.749-2.305l5.404-.434 2.082-5.005Z" clip-rule="evenodd"/>',
+      'dubletten':'<path fill-rule="evenodd" d="M15.75 1.5a6.75 6.75 0 0 0-6.651 7.906c.067.39-.032.717-.221.906l-6.5 6.499a3 3 0 0 0-.878 2.121v2.818c0 .414.336.75.75.75H6a.75.75 0 0 0 .75-.75v-1.5h1.5A.75.75 0 0 0 9 20.25v-1.5h1.5a.75.75 0 0 0 .53-.22l2.658-2.658c.19-.189.517-.288.906-.22A6.75 6.75 0 1 0 15.75 1.5Zm0 3a.75.75 0 0 0 0 1.5A2.25 2.25 0 0 1 18 8.25a.75.75 0 0 0 1.5 0 3.75 3.75 0 0 0-3.75-3.75Z" clip-rule="evenodd"/>',
       'training_plans':'<path d="M11.25 4.533A9.707 9.707 0 0 0 6 3a9.735 9.735 0 0 0-3.25.555.75.75 0 0 0-.5.707v14.25a.75.75 0 0 0 1 .707A8.237 8.237 0 0 1 6 18.75c1.995 0 3.823.707 5.25 1.886V4.533ZM12.75 20.636A8.214 8.214 0 0 1 18 18.75c.966 0 1.89.166 2.75.47a.75.75 0 0 0 1-.708V4.262a.75.75 0 0 0-.5-.707A9.735 9.735 0 0 0 18 3a9.707 9.707 0 0 0-5.25 1.533v16.103Z"/>',
       'timeline':'<path fill-rule="evenodd" d="M4.755 10.059a7.5 7.5 0 0 1 12.548-3.364l1.903 1.903h-3.183a.75.75 0 1 0 0 1.5h4.992a.75.75 0 0 0 .75-.75V4.356a.75.75 0 0 0-1.5 0v3.18l-1.9-1.9A9 9 0 0 0 3.306 9.67a.75.75 0 1 0 1.45.388Zm15.408 3.352a.75.75 0 0 0-.919.53 7.5 7.5 0 0 1-12.548 3.364l-1.902-1.903h3.183a.75.75 0 0 0 0-1.5H2.984a.75.75 0 0 0-.75.75v4.992a.75.75 0 0 0 1.5 0v-3.18l1.9 1.9a9 9 0 0 0 15.059-4.035.75.75 0 0 0-.53-.918Z" clip-rule="evenodd"/>',
       'knowledge':'<path d="M12 .75a8.25 8.25 0 0 0-4.135 15.39c.686.398 1.115 1.008 1.134 1.623a.75.75 0 0 0 .577.706c.352.083.71.148 1.074.195.323.041.6-.218.6-.544v-4.661a6.714 6.714 0 0 1-.937-.171.75.75 0 1 1 .374-1.453 5.261 5.261 0 0 0 2.626 0 .75.75 0 1 1 .374 1.452 6.712 6.712 0 0 1-.937.172v4.66c0 .327.277.586.6.545.364-.047.722-.112 1.074-.195a.75.75 0 0 0 .577-.706c.02-.615.448-1.225 1.134-1.623A8.25 8.25 0 0 0 12 .75Z"/> <path fill-rule="evenodd" d="M9.013 19.9a.75.75 0 0 1 .877-.597 11.319 11.319 0 0 0 4.22 0 .75.75 0 1 1 .28 1.473 12.819 12.819 0 0 1-4.78 0 .75.75 0 0 1-.597-.876ZM9.754 22.344a.75.75 0 0 1 .824-.668 13.682 13.682 0 0 0 2.844 0 .75.75 0 1 1 .156 1.492 15.156 15.156 0 0 1-3.156 0 .75.75 0 0 1-.668-.824Z" clip-rule="evenodd"/>',
@@ -37423,6 +38151,9 @@ function App(){
       'profitability':'<path fill-rule="evenodd" d="M12 2.25c-5.385 0-9.75 4.365-9.75 9.75s4.365 9.75 9.75 9.75 9.75-4.365 9.75-9.75S17.385 2.25 12 2.25Zm-1.902 7.098a3.75 3.75 0 0 1 3.903-.884.75.75 0 1 0 .498-1.415A5.25 5.25 0 0 0 8.005 9.75H7.5a.75.75 0 0 0 0 1.5h.054a5.281 5.281 0 0 0 0 1.5H7.5a.75.75 0 0 0 0 1.5h.505a5.25 5.25 0 0 0 6.494 2.701.75.75 0 1 0-.498-1.415 3.75 3.75 0 0 1-4.252-1.286h3.001a.75.75 0 0 0 0-1.5H9.075a3.77 3.77 0 0 1 0-1.5h3.675a.75.75 0 0 0 0-1.5h-3c.105-.14.221-.274.348-.402Z" clip-rule="evenodd"/>',
       'praesentation':'<path fill-rule="evenodd" d="M2.25 2.25a.75.75 0 0 0 0 1.5H3v10.5a3 3 0 0 0 3 3h1.21l-1.172 3.513a.75.75 0 0 0 1.424.474l.329-.987h8.418l.33.987a.75.75 0 0 0 1.422-.474l-1.17-3.513H18a3 3 0 0 0 3-3V3.75h.75a.75.75 0 0 0 0-1.5H2.25Zm6.54 15h6.42l.5 1.5H8.29l.5-1.5Zm8.085-8.995a.75.75 0 1 0-.75-1.299 12.81 12.81 0 0 0-3.558 3.05L11.03 8.47a.75.75 0 0 0-1.06 0l-2.25 2.25a.75.75 0 1 0 1.06 1.06l1.72-1.72 1.774 1.775a.75.75 0 0 0 1.174-.144 11.31 11.31 0 0 1 3.477-3.146Z" clip-rule="evenodd"/>',
       'dataimport':'<path fill-rule="evenodd" d="M12 2.25a.75.75 0 0 1 .75.75v11.69l3.22-3.22a.75.75 0 1 1 1.06 1.06l-4.5 4.5a.75.75 0 0 1-1.06 0l-4.5-4.5a.75.75 0 1 1 1.06-1.06l3.22 3.22V3a.75.75 0 0 1 .75-.75Zm-9 13.5a.75.75 0 0 1 .75.75v2.25a1.5 1.5 0 0 0 1.5 1.5h13.5a1.5 1.5 0 0 0 1.5-1.5V16.5a.75.75 0 0 1 1.5 0v2.25a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3V16.5a.75.75 0 0 1 .75-.75Z" clip-rule="evenodd"/>',
+      'uploadplan':'<path fill-rule="evenodd" d="M19.5 21a3 3 0 0 0 3-3v-4.5a3 3 0 0 0-3-3h-15a3 3 0 0 0-3 3V18a3 3 0 0 0 3 3h15ZM1.5 10.146V6a3 3 0 0 1 3-3h5.379a2.25 2.25 0 0 1 1.59.659l2.122 2.121c.14.141.331.22.53.22H19.5a3 3 0 0 1 3 3v1.146A4.483 4.483 0 0 0 19.5 9h-15a4.483 4.483 0 0 0-3 1.146Z" clip-rule="evenodd"/>',
+      'uploads':'<path d="M5.85 3.5a.75.75 0 0 0-1.117-1 9.719 9.719 0 0 0-2.348 4.876.75.75 0 0 0 1.479.248A8.219 8.219 0 0 1 5.85 3.5ZM19.267 2.5a.75.75 0 1 0-1.118 1 8.22 8.22 0 0 1 2.135 4.373.75.75 0 0 0 1.48-.248A9.72 9.72 0 0 0 19.266 2.5Z"/><path fill-rule="evenodd" d="M12 2.25A6.75 6.75 0 0 0 5.25 9v.75a8.217 8.217 0 0 1-2.119 5.52.75.75 0 0 0 .298 1.206c1.544.57 3.16.99 4.831 1.243a3.75 3.75 0 1 0 7.48 0 24.583 24.583 0 0 0 4.83-1.244.75.75 0 0 0 .298-1.205 8.217 8.217 0 0 1-2.118-5.52V9A6.75 6.75 0 0 0 12 2.25ZM9.75 18c0-.034 0-.067.002-.1a25.05 25.05 0 0 0 4.496 0l.002.1a2.25 2.25 0 1 1-4.5 0Z" clip-rule="evenodd"/>',
+      'uploadmatrix':'<path fill-rule="evenodd" d="M2.25 6a3 3 0 0 1 3-3h13.5a3 3 0 0 1 3 3v12a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3V6Zm3.97.97a.75.75 0 0 1 1.06 0l2.25 2.25a.75.75 0 0 1 0 1.06l-2.25 2.25a.75.75 0 0 1-1.06-1.06l1.72-1.72-1.72-1.72a.75.75 0 0 1 0-1.06Zm4.28 4.28a.75.75 0 0 0 0 1.5h3a.75.75 0 0 0 0-1.5h-3Z" clip-rule="evenodd"/>',
       'recmkt':'<path d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 0 1 3 19.875v-6.75ZM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V8.625ZM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V4.125Z"/>',
       'nlquery':'<path fill-rule="evenodd" d="M10.5 3.75a6.75 6.75 0 1 0 0 13.5 6.75 6.75 0 0 0 0-13.5ZM2.25 10.5a8.25 8.25 0 1 1 14.59 5.28l4.69 4.69a.75.75 0 1 1-1.06 1.06l-4.69-4.69A8.25 8.25 0 0 1 2.25 10.5Z" clip-rule="evenodd"/>',
       'superadmin':'<path fill-rule="evenodd" d="M11.078 2.25c-.917 0-1.699.663-1.85 1.567L9.05 4.889c-.02.12-.115.26-.297.348a7.493 7.493 0 0 0-.986.57c-.166.115-.334.126-.45.083L6.3 5.508a1.875 1.875 0 0 0-2.282.819l-.922 1.597a1.875 1.875 0 0 0 .432 2.385l.84.692c.095.078.17.229.154.43a7.598 7.598 0 0 0 0 1.139c.015.2-.059.352-.153.43l-.841.692a1.875 1.875 0 0 0-.432 2.385l.922 1.597a1.875 1.875 0 0 0 2.282.818l1.019-.382c.115-.043.283-.031.45.082.312.214.641.405.985.57.182.088.277.228.297.35l.178 1.071c.151.904.933 1.567 1.85 1.567h1.844c.916 0 1.699-.663 1.85-1.567l.178-1.072c.02-.12.114-.26.297-.349.344-.165.673-.356.985-.57.167-.114.335-.125.45-.082l1.02.382a1.875 1.875 0 0 0 2.28-.819l.923-1.597a1.875 1.875 0 0 0-.432-2.385l-.84-.692c-.095-.078-.17-.229-.154-.43a7.614 7.614 0 0 0 0-1.139c-.016-.2.059-.352.153-.43l.84-.692c.708-.582.891-1.59.433-2.385l-.922-1.597a1.875 1.875 0 0 0-2.282-.818l-1.02.382c-.114.043-.282.031-.449-.083a7.49 7.49 0 0 0-.985-.57c-.183-.087-.277-.227-.297-.348l-.179-1.072a1.875 1.875 0 0 0-1.85-1.567h-1.843ZM12 15.75a3.75 3.75 0 1 0 0-7.5 3.75 3.75 0 0 0 0 7.5Z" clip-rule="evenodd"/>',
@@ -37471,8 +38202,8 @@ function App(){
   // Präsentation/Datenimport: Management + Projektleiter (projektbezogen). Recruiting Marketing bleibt Management-only.
   useEffect(()=>{ const mgmt=(team&&(team.role_keys||[]).some(r=>r==='management'));
     const lead=(team&&isLeadOnlyRoles(team.role_keys));
-    if(!mgmt && !lead && (view==='praesentation'||view==='dataimport')) setView('cockpit');
-    if(!mgmt && (view==='recmkt'||view==='fcist'||view==='nlquery')) setView('cockpit'); },[view]);
+    if(!mgmt && !lead && (view==='praesentation'||view==='dataimport'||view==='uploads')) setView('cockpit');
+    if(!mgmt && (view==='recmkt'||view==='fcist'||view==='nlquery'||view==='uploadplan'||view==='uploadmatrix')) setView('cockpit'); },[view]);
   const allNavSections = isEmpUser
     ? [{sec:'Mein Bereich', items:[{key:'mein-plan',label:'Mein Schichtplan',icon:'📋'}]}, ...navSections]
     : navSections;
@@ -37645,7 +38376,8 @@ function App(){
           {view==='cockpits'&&(<div><CockpitsView/></div>)}
           {view==='hraccess'&&(<div><HrAccessView/></div>)}
           {view==='appusers'&&(<div><AppUsersView employees={employees} clients={clients} showToast={showToast}/></div>)}
-          {view==='cvsync'&&(<div><CvSyncView setCvList={setCvList} projects={projects}/></div>)}
+          {view==='cvsync'&&(<div><CvSyncView setCvList={setCvList} projects={projects}/><MetaImportPanel setCvList={setCvList}/></div>)}
+          {view==='dubletten'&&<DuplicatesView team={team} setCvList={setCvList}/>}
           {view==='feedback'&&<FeedbackView employees={employees} projects={projects} team={team} showToast={showToast} nav={feedbackNav} onNavConsumed={()=>setFeedbackNav(null)}/>}
           {view==='spaces'&&(
             <div>
@@ -37665,7 +38397,10 @@ function App(){
           )}
           {view==='orgchart'&&<OrgChart projects={projects} employees={employees} orgCharts={orgCharts} setOrgCharts={setOrgCharts}/>}
           {view==='praesentation'&&<PresentationsView projects={projects} employees={employees} team={team} showToast={showToast}/>}
+          {view==='uploads'&&<UploadStatusView team={team} projects={projects} onNavigate={dqNavigate}/>}
+          {view==='uploadmatrix'&&<UploadMatrixView team={team} projects={projects}/>}
           {view==='dataimport'&&<DataImportView projects={projects} employees={employees}/>}
+          {view==='uploadplan'&&<UploadScheduleAdminView team={team} projects={projects}/>}
           {view==='recmkt'&&<RecruitingMarketingView employees={employees}/>}
           {view==='nlquery'&&<NlQueryView team={team}/>}
           {view==='fcist'&&<ForecastVsIstView projects={projects}/>}
