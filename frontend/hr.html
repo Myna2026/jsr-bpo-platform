@@ -34712,6 +34712,28 @@ function ForecastVsIstView({projects}){
 // Langzeit-Import (Long_Term_Capacity…xlsx): Blätter „Sales"/„Support", Zeilen = Kapazitätsmodell,
 // 12 Monatsspalten ab start_month/start_year -> report_longterm. Eine Datei, beide Skills.
 const LONGTERM_MONTHS=['Jan','Feb','Mär','Apr','Mai','Jun','Jul','Aug','Sep','Okt','Nov','Dez'];
+// Die 17 Kennzahlen des Langzeit-Modells. m = eindeutiger, normalisierter Such-Teilstring (findet die Zeile
+// egal wo sie im Blatt steht, robust gegen Leerzeilen/versetzte Spalten/Umlaute). calc = gerechnetes Ergebnis.
+const LONGTERM_ROWS=[
+  {label:'Forecast in h',              m:'forecastin',      calc:false},
+  {label:'Workdays',                   m:'workday',         calc:false},
+  {label:'Brutto Arbeitszeit in min',  m:'bruttoarbeitszeit',calc:false},
+  {label:'Pause 1',                    m:'pause1',          calc:false},
+  {label:'Pause 2',                    m:'pause2',          calc:false},
+  {label:'Netto Arbeitszeit in h',     m:'nettoarbeitszeit',calc:true},
+  {label:'Produktivität in Prozent',   m:'produktivitat',   calc:false},
+  {label:'Shrinkage in Prozent',       m:'shrinkage',       calc:false},
+  {label:'Urlaubstage',                m:'urlaub',          calc:false},
+  {label:'Fluktuation',                m:'fluktuation',     calc:false},
+  {label:'New Hires',                  m:'newhire',         calc:false},
+  {label:'EOM Forecasted FTE',         m:'eomforecast',     calc:true},
+  {label:'Needed FTE',                 m:'neededfte',       calc:true},
+  {label:'Productive Hours',           m:'productivehour',  calc:true},
+  {label:'Coverage in Prozent',        m:'coverage',        calc:true},
+  {label:'Over/Under FTE',             m:'overunder',       calc:true},
+  {label:'Net Difference in h',        m:'netdifference',   calc:true},
+];
+const longtermNorm=s=>String(s==null?'':s).toLowerCase().replace(/ä/g,'a').replace(/ö/g,'o').replace(/ü/g,'u').replace(/ß/g,'ss').replace(/[^a-z0-9]/g,'');
 function LongtermImport({projId, initYear, onSaved}){
   const [file,setFile]=useState(null); const [fileHash,setFileHash]=useState('');
   const [year,setYear]=useState(initYear||2026); const [startMonth,setStartMonth]=useState(7);
@@ -34724,17 +34746,18 @@ function LongtermImport({projId, initYear, onSaved}){
       const out={}; const norm=s=>String(s||'').trim().toLowerCase();
       wb.SheetNames.forEach(nm=>{ const key=norm(nm).indexOf('sales')>=0?'sales':norm(nm).indexOf('support')>=0?'support':null; if(!key) return;
         const aoa=XLSX.utils.sheet_to_json(wb.Sheets[nm],{header:1,defval:''});
-        // Jede BENANNTE Kennzahl-Zeile behalten — auch ohne Werte (z. B. Formelzellen ohne gespeichertes
-        // Ergebnis). Leerzeilen ZWISCHEN den Kennzahlen werden ÜBERSPRUNGEN, nicht als Tabellenende
-        // gewertet (früher brach der Parser bei der ersten Leerzeile ab → nur „Forecast in h" kam an).
-        // Wir lesen das ganze Blatt bis zum letzten benannten Zeileninhalt.
-        const rows=[];
-        for(const r of aoa.slice(1)){
-          const label=String(r[0]==null?'':r[0]).trim();
-          if(label==='') continue;           // Leerzeile ODER Wert ohne Namen → überspringen (kein Abbruch)
-          const m=Array.from({length:12},(_,i)=>{ const v=r[i+1]; return (v==null||v==='')?'':(typeof v==='number'?Math.round(v*100)/100:String(v).trim()); });
-          rows.push({label, m});
-        }
+        // Label-getrieben: die 17 bekannten Kennzahlen im Blatt SUCHEN und die 12 Werte direkt hinter dem
+        // Label lesen. Robust gegen Leerzeilen, versetzte Label-/Monatsspalten und Umlaut-Schreibweisen —
+        // egal wo eine Zeile steht, sie wird gefunden. Reihenfolge = kanonische Reihenfolge der 17.
+        const found={};
+        (aoa||[]).forEach(rowArr=>{ if(!Array.isArray(rowArr)) return;
+          for(let c=0;c<rowArr.length;c++){ const kn=longtermNorm(rowArr[c]); if(!kn) continue;
+            let hit=null; for(const def of LONGTERM_ROWS){ if(!found[def.label] && kn.indexOf(def.m)>=0){ hit=def; break; } }
+            if(hit){ found[hit.label]={m:Array.from({length:12},(_,i)=>{ const v=rowArr[c+1+i]; return (v==null||v==='')?'':(typeof v==='number'?Math.round(v*100)/100:String(v).trim()); }), calc:hit.calc};
+              break; }   // eine Kennzahl je Zeile
+          }
+        });
+        const rows=LONGTERM_ROWS.filter(d=>found[d.label]).map(d=>({label:d.label, m:found[d.label].m, calc:d.calc}));
         if(rows.length) out[key]=rows; });
       if(!Object.keys(out).length){ setErr('Keine Blätter „Sales"/„Support" mit benannten Kennzahl-Zeilen gefunden. Blätter: '+wb.SheetNames.join(', ')); return; }
       setFile(f); setFileHash('sz'+bytes.length); setSheetsData(out);

@@ -576,19 +576,29 @@
     ]) : (onM? h('div',{key:'cap',style:{marginTop:'.8cqw',fontSize:'1.1cqw',color:P.muted,flexShrink:0}},'Maximal 5 neue Maßnahmen je Woche erreicht.'):null);
     return Slide(ctx,[head, panel(P,[list, addRow])]);
   }
-  // Folie 5 — Langzeit-Entwicklung, 12 Monate (voll manuell). deck.teams[tk].langzeit={year, rows:[{label, m:[12]}]}.
+  // Folie 5 — Langzeit-Entwicklung, 12 Monate. deck.teams[tk].langzeit={startMonth,startYear,rows:[{label,m:[12],calc}]}.
+  // 17 Kennzahlen × 12 Monate; gerechnete Ergebnis-Zeilen (calc) sind farblich von den Vorgaben abgesetzt.
   function Langzeit(ctx, tk){ var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk);
     var lz=td.langzeit||{}; var rows=lz.rows||[];
+    var MN=['Jan','Feb','Mär','Apr','Mai','Jun','Jul','Aug','Sep','Okt','Nov','Dez'];
     var sm=((lz.startMonth||1)-1); var yr=lz.startYear||lz.year;
-    var head=fondHead(P, lbl, 'Langzeit-Entwicklung', '12 Monate'+(yr?(' ab '+['Jan','Feb','Mär','Apr','Mai','Jun','Jul','Aug','Sep','Okt','Nov','Dez'][sm]+' '+yr):''));
+    var head=fondHead(P, lbl, 'Langzeit-Entwicklung', '12 Monate'+(yr?(' ab '+MN[sm]+' '+yr):''));
     if(!rows.length) return emptyPanel(ctx,head,P,'Keine Langzeit-Daten hinterlegt.');
-    var M0=['Jan','Feb','Mär','Apr','Mai','Jun','Jul','Aug','Sep','Okt','Nov','Dez']; var M=[]; for(var mi=0;mi<12;mi++) M.push(M0[(sm+mi)%12]); var colName='24cqw';
-    var hdr=h('div',{key:'h',style:{display:'flex',alignItems:'flex-end',paddingBottom:'.5cqw',borderBottom:'1px solid #e6edef',fontSize:'1.05cqw',fontWeight:700,color:P.muted}},
+    var M=[]; for(var mi=0;mi<12;mi++) M.push(MN[(sm+mi)%12]); var colName='25cqw';
+    var isCalc=function(r){ if(r.calc!=null) return !!r.calc; var s=String(r.label||'').toLowerCase();
+      return /netto|eom|needed|productive hour|coverage|over.?under|net difference/.test(s); };
+    var hdr=h('div',{key:'h',style:{display:'flex',alignItems:'flex-end',paddingBottom:'.45cqw',borderBottom:'1px solid #e6edef',fontSize:'1cqw',fontWeight:700,color:P.muted}},
       [h('div',{key:'n',style:{width:colName}},'')].concat(M.map(function(m,i){ return h('div',{key:i,style:{flex:1,textAlign:'center'}},m); })));
-    function row(r,ri){ return h('div',{key:ri,style:{display:'flex',alignItems:'center',padding:'.3cqw 0',borderBottom:'1px solid #f6f8f9',fontSize:'1.15cqw',color:P.ink}},
-      [h('div',{key:'n',style:{width:colName,fontWeight:600,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},r.label||'')]
-      .concat(M.map(function(m,i){ var v=(r.m||[])[i]; return h('div',{key:i,style:{flex:1,textAlign:'center',fontFamily:MONO,fontSize:'1.05cqw',color:(v===''||v==null)?'#cbd5e1':P.ink}}, (v===''||v==null)?'·':v); }))); }
-    return Slide(ctx,[head, panel(P,[ h('div',{key:'t',style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',overflow:'hidden'}}, [hdr].concat(rows.map(row))) ])]);
+    function row(r,ri){ var calc=isCalc(r);
+      return h('div',{key:ri,style:{display:'flex',alignItems:'center',padding:'.22cqw .5cqw',borderBottom:'1px solid #f4f7f8',fontSize:'1.05cqw',
+        background:calc?rgba(P.onLight,.06):'transparent',borderLeft:'.35cqw solid '+(calc?P.onLight:'transparent')}},
+        [h('div',{key:'n',style:{width:colName,fontWeight:calc?800:600,fontSize:'1cqw',color:calc?P.onLightTxt:P.ink,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},r.label||'')]
+        .concat(M.map(function(m,i){ var v=(r.m||[])[i]; return h('div',{key:i,style:{flex:1,textAlign:'center',fontFamily:MONO,fontSize:'.98cqw',fontWeight:calc?700:400,color:(v===''||v==null)?'#cbd5e1':(calc?P.onLightTxt:P.ink)}}, (v===''||v==null)?'·':v); }))); }
+    var legend=h('div',{key:'lg',style:{display:'flex',gap:'2.2cqw',alignItems:'center',fontSize:'.92cqw',color:P.muted,marginTop:'.55cqw',flexShrink:0}},[
+      h('span',{key:'a',style:{display:'inline-flex',alignItems:'center',gap:'.5cqw'}},[h('span',{style:{width:'1.5cqw',height:'.9cqw',background:'#fff',border:'1px solid #dfe7ea',display:'inline-block',borderRadius:'.2cqw'}}),'Vorgabe']),
+      h('span',{key:'b',style:{display:'inline-flex',alignItems:'center',gap:'.5cqw'}},[h('span',{style:{width:'1.5cqw',height:'.9cqw',background:rgba(P.onLight,.14),borderLeft:'.3cqw solid '+P.onLight,display:'inline-block',borderRadius:'.2cqw'}}),'Ergebnis (gerechnet)'])
+    ]);
+    return Slide(ctx,[head, panel(P,[ h('div',{key:'t',style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',overflow:'hidden'}}, [hdr].concat(rows.map(row))), legend ])]);
   }
 
   // Call-Reviews-Folie je Bericht schaltbar (ctx.callReviews). WICHTIG: deckSlides UND deckSlideKeys über
