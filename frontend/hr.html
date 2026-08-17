@@ -34712,55 +34712,40 @@ function ForecastVsIstView({projects}){
 // Langzeit-Import (Long_Term_Capacity…xlsx): Blätter „Sales"/„Support", Zeilen = Kapazitätsmodell,
 // 12 Monatsspalten ab start_month/start_year -> report_longterm. Eine Datei, beide Skills.
 const LONGTERM_MONTHS=['Jan','Feb','Mär','Apr','Mai','Jun','Jul','Aug','Sep','Okt','Nov','Dez'];
-// Die 17 Kennzahlen des Langzeit-Modells. m = eindeutiger, normalisierter Such-Teilstring (findet die Zeile
-// egal wo sie im Blatt steht, robust gegen Leerzeilen/versetzte Spalten/Umlaute). calc = gerechnetes Ergebnis.
-const LONGTERM_ROWS=[
-  {label:'Forecast in h',              m:'forecastin',      calc:false},
-  {label:'Workdays',                   m:'workday',         calc:false},
-  {label:'Brutto Arbeitszeit in min',  m:'bruttoarbeitszeit',calc:false},
-  {label:'Pause 1',                    m:'pause1',          calc:false},
-  {label:'Pause 2',                    m:'pause2',          calc:false},
-  {label:'Netto Arbeitszeit in h',     m:'nettoarbeitszeit',calc:true},
-  {label:'Produktivität in Prozent',   m:'produktivitat',   calc:false},
-  {label:'Shrinkage in Prozent',       m:'shrinkage',       calc:false},
-  {label:'Urlaubstage',                m:'urlaub',          calc:false},
-  {label:'Fluktuation',                m:'fluktuation',     calc:false},
-  {label:'New Hires',                  m:'newhire',         calc:false},
-  {label:'EOM Forecasted FTE',         m:'eomforecast',     calc:true},
-  {label:'Needed FTE',                 m:'neededfte',       calc:true},
-  {label:'Productive Hours',           m:'productivehour',  calc:true},
-  {label:'Coverage in Prozent',        m:'coverage',        calc:true},
-  {label:'Over/Under FTE',             m:'overunder',       calc:true},
-  {label:'Net Difference in h',        m:'netdifference',   calc:true},
-];
+// Langzeit-Kapazität: Beschriftungen in Spalte B, 12 Monatswerte ab Spalte C, Daten ab Zeile 3.
+// Monatskopf aus Zeile 2 (echte Datumswerte). Gerechnete Ergebnis-Zeilen (calc) werden auf der Folie abgesetzt.
 const longtermNorm=s=>String(s==null?'':s).toLowerCase().replace(/ä/g,'a').replace(/ö/g,'o').replace(/ü/g,'u').replace(/ß/g,'ss').replace(/[^a-z0-9]/g,'');
+// Gerechnete Ergebnis-Zeilen (englische Labels der Datei). Rest = Vorgabe/Eingabewerte.
+const LONGTERM_CALC=['workingnet','inoffice','eomforecast','neededfte','productivehour','coverage','overunder','netdifference'];
+function longtermIsCalc(label){ const n=longtermNorm(label); return LONGTERM_CALC.some(k=>n.indexOf(k)>=0); }
+function longtermMonthYear(v){ if(v instanceof Date && !isNaN(v.getTime())) return {month:v.getMonth()+1, year:v.getFullYear()};
+  const s=String(v==null?'':v).trim(); let m=s.match(/(\d{4})-(\d{1,2})-(\d{1,2})/); if(m) return {month:Number(m[2]), year:Number(m[1])};
+  m=s.match(/(\d{1,2})[.\/](\d{1,2})[.\/](\d{4})/); if(m) return {month:Number(m[2]), year:Number(m[3])}; return null; }
 function LongtermImport({projId, initYear, onSaved}){
   const [file,setFile]=useState(null); const [fileHash,setFileHash]=useState('');
-  const [year,setYear]=useState(initYear||2026); const [startMonth,setStartMonth]=useState(7);
+  const [year,setYear]=useState(initYear||2026); const [startMonth,setStartMonth]=useState(1);   // wird beim Import aus Zeile 2 überschrieben
   const [sheetsData,setSheetsData]=useState(null);   // {sales:[{label,m:[12]}], support:[...]}
   const [err,setErr]=useState(''); const [busy,setBusy]=useState(false); const [saved,setSaved]=useState(false);
   function onFile(f){ if(!f) return; setErr(''); setSaved(false); setSheetsData(null);
     const rd=new FileReader();
     rd.onload=ev=>{ try{
-      const bytes=new Uint8Array(ev.target.result); const wb=XLSX.read(bytes,{type:'array',cellDates:false});
-      const out={}; const norm=s=>String(s||'').trim().toLowerCase();
+      const bytes=new Uint8Array(ev.target.result); const wb=XLSX.read(bytes,{type:'array',cellDates:true});
+      const out={}; let detStart=null; const norm=s=>String(s||'').trim().toLowerCase();
       wb.SheetNames.forEach(nm=>{ const key=norm(nm).indexOf('sales')>=0?'sales':norm(nm).indexOf('support')>=0?'support':null; if(!key) return;
         const aoa=XLSX.utils.sheet_to_json(wb.Sheets[nm],{header:1,defval:''});
-        // Label-getrieben: die 17 bekannten Kennzahlen im Blatt SUCHEN und die 12 Werte direkt hinter dem
-        // Label lesen. Robust gegen Leerzeilen, versetzte Label-/Monatsspalten und Umlaut-Schreibweisen —
-        // egal wo eine Zeile steht, sie wird gefunden. Reihenfolge = kanonische Reihenfolge der 17.
-        const found={};
-        (aoa||[]).forEach(rowArr=>{ if(!Array.isArray(rowArr)) return;
-          for(let c=0;c<rowArr.length;c++){ const kn=longtermNorm(rowArr[c]); if(!kn) continue;
-            let hit=null; for(const def of LONGTERM_ROWS){ if(!found[def.label] && kn.indexOf(def.m)>=0){ hit=def; break; } }
-            if(hit){ found[hit.label]={m:Array.from({length:12},(_,i)=>{ const v=rowArr[c+1+i]; return (v==null||v==='')?'':(typeof v==='number'?Math.round(v*100)/100:String(v).trim()); }), calc:hit.calc};
-              break; }   // eine Kennzahl je Zeile
-          }
-        });
-        const rows=LONGTERM_ROWS.filter(d=>found[d.label]).map(d=>({label:d.label, m:found[d.label].m, calc:d.calc}));
+        // Monatskopf aus Zeile 2 (Index 1): Spalte C.. (Index 2..) = echte Datumswerte → Startmonat/Jahr ableiten.
+        const hdr=aoa[1]||[]; if(!detStart){ const my=longtermMonthYear(hdr[2]); if(my) detStart=my; }
+        // Daten ab Zeile 3 (Index 2): Beschriftung Spalte B (Index 1), 12 Werte ab Spalte C (Index 2..13).
+        // Zeilen OHNE Werte überspringen (leere Zeilen, Beschriftung ohne Zahlen).
+        const rows=[];
+        for(let ri=2; ri<aoa.length; ri++){ const r=aoa[ri]||[]; const label=String(r[1]==null?'':r[1]).trim(); if(!label) continue;
+          const m=Array.from({length:12},(_,i)=>{ const v=r[2+i]; return (v==null||v===''||v instanceof Date)?'':(typeof v==='number'?Math.round(v*100)/100:String(v).trim()); });
+          if(!m.some(v=>v!=='')) continue;   // keine Werte → überspringen
+          rows.push({label, m, calc:longtermIsCalc(label)});
+        }
         if(rows.length) out[key]=rows; });
-      if(!Object.keys(out).length){ setErr('Keine Blätter „Sales"/„Support" mit benannten Kennzahl-Zeilen gefunden. Blätter: '+wb.SheetNames.join(', ')); return; }
-      setFile(f); setFileHash('sz'+bytes.length); setSheetsData(out);
+      if(!Object.keys(out).length){ setErr('Keine Blätter „Sales"/„Support" mit Werten gefunden. Blätter: '+wb.SheetNames.join(', ')); return; }
+      setFile(f); setFileHash('sz'+bytes.length); setSheetsData(out); if(detStart){ setStartMonth(detStart.month); setYear(detStart.year); }
     }catch(e){ setErr('Datei nicht lesbar: '+(e.message||'')); } };
     rd.readAsArrayBuffer(f);
   }
