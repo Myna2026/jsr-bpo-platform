@@ -7662,6 +7662,12 @@ const ROLE_TASKS = [
   {key:'fin_lohn',         owner:'finance',    view:'payroll',     title:'Gehaltsabrechnung & Löhne',     desc:'Gehaltsabrechnung erstellen und Löhne vorbereiten.',                                                       window:[1], count:'payroll_open', auto_key:'payroll'},
   {key:'fin_bwa',          owner:'finance',    view:null,          title:'Monatsabschluss BWA',           desc:'Monatsabschluss und BWA erstellen (tive-finance).',                                                        window:[1,2], count:null},
 ];
+// Hat dieser Zugang eine gefüllte Tagesaufgaben-Ansicht? Rollen mit eigenen ROLE_TASKS (management, hr,
+// finance, teamlead). „management" deckt auch EXTERNES Management ab (mgmt_external): eigene Liste leer,
+// aber die Zusammenschau „Stand aller Rollen" ist die Ansicht. Bei true wird die Startseite durch die
+// Tagesaufgaben ersetzt und „Start" verschwindet aus dem Menü; sonst bleibt es bei der Startseite.
+const TASK_OWNER_ROLES = [...new Set(ROLE_TASKS.flatMap(t=>Array.isArray(t.owner)?t.owner:[t.owner]))];
+function hasDailyTasks(team){ const roles=(team&&team.role_keys)||[]; return roles.some(r=>TASK_OWNER_ROLES.includes(r)); }
 function DailyTasksView({employees, projects, onNavigate, team, isMobileW}){
   const _iso = d => d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
   const today = _iso(new Date());
@@ -38334,15 +38340,18 @@ function App(){
   // kein Inhalt eines gesperrten Tabs. Logik = hasAccess inline (const erst weiter unten).
   useEffect(()=>{
     if(!team) return;                              // waehrend Laden nicht umleiten
-    if(view==='start') return;
-    if(isLeadOnlyRoles(team.role_keys)){           // reine Leads: alles außerhalb des Führungs-Sets zurück auf start
-      if(!LEAD_ALLOWED_TABS.includes(view) || (Array.isArray(team.locked)&&team.locked.includes(view))) setView('start');
+    // Zuhause = Tagesaufgaben, wenn der Zugang welche hat (Startseite dann ersetzt); sonst Startseite.
+    const _home = hasDailyTasks(team) ? 'daily_tasks' : 'start';
+    if(view==='start' && _home!=='start'){ setView(_home); return; }   // Landing: Startseite -> Tagesaufgaben
+    if(view===_home || view==='start' || view==='daily_tasks') return; // Zuhause-Varianten nie wegleiten
+    if(isLeadOnlyRoles(team.role_keys)){           // reine Leads: alles außerhalb des Führungs-Sets zurück aufs Zuhause
+      if(!LEAD_ALLOWED_TABS.includes(view) || (Array.isArray(team.locked)&&team.locked.includes(view))) setView(_home);
       return;
     }
     if(HR_ALWAYS_TABS.includes(view)) return;
     const locked = Array.isArray(team.locked) && team.locked.includes(view);
     const allowed = team.access==='all' || (Array.isArray(team.access) && team.access.includes(view));
-    if(locked || !allowed) setView('start');
+    if(locked || !allowed) setView(_home);
   }, [view, team]);
 
   if(loggedIn && !team){
@@ -38355,6 +38364,7 @@ function App(){
   }
 
   const hasAccess = (key) => { try{
+    if(key==='daily_tasks' && hasDailyTasks(team)) return true;   // Tagesaufgaben = Zuhause der Aufgaben-Rollen (auch Teamlead, obwohl Lead)
     if(team && isLeadOnlyRoles(team.role_keys)){   // reine Leads: nur Führungs-Set (harte Obergrenze), Management kann darunter weiter sperren
       if(!LEAD_ALLOWED_TABS.includes(key)) return false;
       return !(Array.isArray(team.locked) && team.locked.includes(key));
@@ -38560,7 +38570,7 @@ function App(){
       ...((team&&(team.role_keys||[]).some(r=>r==='management')) ? [{key:'nlquery',label:'Datenabfrage',icon:'🔎'}] : []),   // Management-only
     ]},
     {sec:'Übersicht', items:[
-      {key:'start',label:'Start',icon:'👋'},
+      ...(!hasDailyTasks(team) ? [{key:'start',label:'Start',icon:'👋'}] : []),   // Startseite entfällt, wenn der Zugang Tagesaufgaben hat (überflüssig)
       {key:'daily_tasks',label:'Tagesaufgaben',icon:'✅'},
       {key:'calendar',label:'Kalender',icon:'📆'},
       {key:'cockpit',label:'Cockpit',icon:'⊞'},
