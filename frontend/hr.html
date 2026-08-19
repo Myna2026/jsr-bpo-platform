@@ -7667,9 +7667,9 @@ const ROLE_TASKS = [
   {key:'lead_absence',     owner:['projektleiter','teamlead'], view:'absences',       title:'Abwesenheiten & Krankmeldungen', desc:'Krankmeldungen (Anruf bis 8:30) eintragen und die heutigen Abwesenheiten prüfen, damit die Besetzung stimmt.', count:null},
   {key:'lead_vacreq',      owner:['projektleiter','teamlead'], view:'urlaubantraege', title:'Urlaubsanträge entscheiden',    desc:'Offene Urlaubsanträge deines Teams entscheiden (Grün/Gelb/Rot). Du kennst die Besetzung, darum entscheidest du, nicht HR.', count:'vacreq_open'},
   // Projektleiter zusätzlich (verantwortet das ganze Projekt).
-  {key:'pl_kpi',           owner:'projektleiter', view:'performance',  title:'Kennzahlen des Projekts pflegen', desc:'Die KPIs für Projekt und Skill der Woche pflegen, damit Auswertungen und Kundenbericht stimmen.',            count:'kpi_missing'},
-  {key:'pl_perf',          owner:'projektleiter', view:'performance',  title:'Team-Performance prüfen',         desc:'Wöchentlich die Rangliste im Blick behalten: wer läuft gut, wer braucht Unterstützung.',                     count:null},
-  {key:'pl_bericht',       owner:'projektleiter', view:'praesentation', title:'Wochenbericht vorbereiten',       desc:'Die Präsentation bzw. den Wochenbericht für den Kundentermin aktuell halten.',                              count:null},
+  {key:'pl_kpi',           owner:'projektleiter', view:'performance',  title:'Kennzahlen des Projekts pflegen', desc:'Die KPIs für Projekt und Skill der Woche pflegen, damit Auswertungen und Kundenbericht stimmen.',            count:'kpi_missing', cadence:'weekly'},
+  {key:'pl_perf',          owner:'projektleiter', view:'performance',  title:'Team-Performance prüfen',         desc:'Wöchentlich die Rangliste im Blick behalten: wer läuft gut, wer braucht Unterstützung.',                     count:null, cadence:'weekly'},
+  {key:'pl_bericht',       owner:'projektleiter', view:'praesentation', title:'Wochenbericht vorbereiten',       desc:'Die Präsentation bzw. den Wochenbericht für den Kundentermin aktuell halten.',                              count:null, cadence:'weekly'},
 ];
 // Hat dieser Zugang eine gefüllte Tagesaufgaben-Ansicht? Rollen mit eigenen ROLE_TASKS (management, hr,
 // finance, teamlead). „management" deckt auch EXTERNES Management ab (mgmt_external): eigene Liste leer,
@@ -7680,6 +7680,12 @@ function hasDailyTasks(team){ const roles=(team&&team.role_keys)||[]; return rol
 function DailyTasksView({employees, projects, onNavigate, team, isMobileW}){
   const _iso = d => d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
   const today = _iso(new Date());
+  // Wochen-Rhythmus: `cadence:'weekly'`-Aufgaben werden pro ISO-Woche EINMAL abgehakt (Merker am Montag der
+  // Woche), sonst kämen sie täglich wieder — was man täglich wegklickt, nimmt man nicht mehr ernst. Reset zum
+  // nächsten Montag. Kein Schema-Change: nutzt weiter daily_tasks_done, nur mit dem Montags-Datum als Schlüssel.
+  const _monday = (()=>{ const x=new Date(); const off=(x.getDay()+6)%7; x.setDate(x.getDate()-off); return _iso(x); })();
+  const periodDate = t => (t&&t.cadence==='weekly') ? _monday : today;
+  const isWeekly = t => !!(t&&t.cadence==='weekly');
   // Rollen-Partition: jede Rolle sieht NUR ihre eigenen Aufgaben. Manager EXTERN (mgmt_external)
   // hat keine eigene Liste — nur die Zusammenschau (Schnitt 3). Internes Management sieht seine Liste.
   const roleKeys=(team&&team.role_keys)||[];
@@ -7710,8 +7716,8 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW}){
   const [showDone,setShowDone] = useState(false);     // aufklappbarer „erledigt"-Bereich (Rückweg)
 
   const loadDone = async()=>{
-    try{ const {data,error}=await sb.from('daily_tasks_done').select('task_key,done_by_name,done_at').eq('date',today);
-      if(error) return; const m={}; (data||[]).forEach(r=>{ m[r.task_key]={done_by_name:r.done_by_name,done_at:r.done_at}; }); setDone(m); }catch(e){}
+    try{ const {data,error}=await sb.from('daily_tasks_done').select('task_key,date,done_by_name,done_at').in('date',[today,_monday]);
+      if(error) return; const m={}; (data||[]).forEach(r=>{ m[r.task_key+'|'+r.date]={done_by_name:r.done_by_name,done_at:r.done_at}; }); setDone(m); }catch(e){}
   };
   // Q4: Auto-Pflichttermine + aktuelles Monats-Vorkommen + Erledigt-Merker aus calendar_overrides laden.
   const loadAuto = async()=>{
@@ -7764,25 +7770,25 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW}){
     arm(); return ()=>clearTimeout(t);
   },[]);
 
-  async function toggle(key){
-    if(busy) return; setBusy(key);
-    const isDone=!!done[key], prev=done;
+  async function toggle(t){
+    if(busy) return; const key=t.key, d=periodDate(t), mk=key+'|'+d; setBusy(key);
+    const isDone=!!done[mk], prev=done;
     if(isDone){
-      setDone(p=>{ const n={...p}; delete n[key]; return n; });
-      const {error}=await sb.from('daily_tasks_done').delete().eq('task_key',key).eq('date',today);
+      setDone(p=>{ const n={...p}; delete n[mk]; return n; });
+      const {error}=await sb.from('daily_tasks_done').delete().eq('task_key',key).eq('date',d);
       if(error){ setDone(prev); window.alert('Konnte nicht zurücksetzen: '+(error.message||'DB')); }
     } else {
       const name=(team&&(team.full_name||team.name))||'jemand', at=new Date().toISOString();
-      setDone(p=>({...p,[key]:{done_by_name:name,done_at:at}}));
-      const {error}=await sb.from('daily_tasks_done').upsert({task_key:key,date:today,done_by:uid,done_by_name:name,done_at:at});
+      setDone(p=>({...p,[mk]:{done_by_name:name,done_at:at}}));
+      const {error}=await sb.from('daily_tasks_done').upsert({task_key:key,date:d,done_by:uid,done_by_name:name,done_at:at});
       if(error){ setDone(prev); window.alert('Konnte nicht speichern: '+(error.message||'DB')); }
     }
     setBusy('');
   }
   // Q4-Projektion: Aufgaben mit auto_key lesen/schreiben den Erledigt-Merker im Kalender (calendar_overrides),
   // NICHT in daily_tasks_done. Einmal abhaken -> in Tagesaufgaben UND Kalender erledigt.
-  const taskDone = t => t.auto_key ? !!(autoEv[t.auto_key]&&autoEv[t.auto_key].ov&&autoEv[t.auto_key].ov.done) : !!done[t.key];
-  const taskMeta = t => { if(t.auto_key){ const a=autoEv[t.auto_key]; return a&&a.ov&&a.ov.done?{done_by_name:a.ov.done_by_name,done_at:a.ov.done_at}:null; } return done[t.key]; };
+  const taskDone = t => t.auto_key ? !!(autoEv[t.auto_key]&&autoEv[t.auto_key].ov&&autoEv[t.auto_key].ov.done) : !!done[t.key+'|'+periodDate(t)];
+  const taskMeta = t => { if(t.auto_key){ const a=autoEv[t.auto_key]; return a&&a.ov&&a.ov.done?{done_by_name:a.ov.done_by_name,done_at:a.ov.done_at}:null; } return done[t.key+'|'+periodDate(t)]; };
   async function toggleAuto(t){
     if(busy) return; const a=autoEv[t.auto_key];
     if(!a||!a.occ){ window.alert('Kein Kalendertermin für diese Pflicht gefunden.'); return; }
@@ -7794,7 +7800,7 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW}){
     if(error){ window.alert('Konnte nicht speichern: '+(error.message||'DB')); loadAuto(); }
     setBusy('');
   }
-  const toggleTask = t => t.auto_key ? toggleAuto(t) : toggle(t.key);
+  const toggleTask = t => t.auto_key ? toggleAuto(t) : toggle(t);
 
   const counts=React.useMemo(()=>{
     const emp=(employees||[]).filter(e=>e&&['active','training','contract','inactive'].includes(e.status));
