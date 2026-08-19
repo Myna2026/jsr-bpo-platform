@@ -195,10 +195,22 @@ Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ error: "POST erwartet" }, 405);
   const auth = req.headers.get("Authorization") || "";
   const token = auth.replace(/^Bearer\s+/i, "").trim();
-  // Berechtigt: Cron (Service-Role-Key) ODER angemeldeter HR/Management-User (manueller Knopf).
+  // Berechtigt: Cron (Service-Role) ODER angemeldeter HR/Management-User (manueller Knopf).
   let ok = false;
-  if (token && token === SERVICE) ok = true;
-  else if (token) {
+  // 1) Exakter Service-Role-Match (falls Env == uebergebener Key).
+  if (token === SERVICE) ok = true;
+  // 2) Service-Role an der role-Claim des JWT erkennen. Das Gateway hat die Signatur bereits geprueft
+  //    (verify_jwt aktiv) -> ein Token mit role=service_role ist echt und rotationssicher, egal welcher
+  //    konkrete service_role-Key genutzt wird.
+  if (!ok && token.split(".").length === 3) {
+    try {
+      const b64 = (token.split(".")[1] || "").replace(/-/g, "+").replace(/_/g, "/");
+      const payload = JSON.parse(atob(b64 + "=".repeat((4 - b64.length % 4) % 4)));
+      if (payload && payload.role === "service_role") ok = true;
+    } catch (_e) { /* kein lesbarer JWT-Payload */ }
+  }
+  // 3) Angemeldeter HR/Management-User (manueller Knopf im Frontend).
+  if (!ok && token) {
     try {
       const u = createClient(SB_URL, ANON, { global: { headers: { Authorization: auth } } });
       const { data } = await u.auth.getUser(); const uid = data?.user?.id;

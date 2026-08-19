@@ -34498,16 +34498,31 @@ function RecruitingMarketingView({employees}){
   const [err,setErr]=useState('');
   const [cvs,setCvs]=useState([]);
   const [level,setLevel]=useState('month');
+  const [leadsTs,setLeadsTs]=useState(undefined);   // Meta-Bewerbungen: max windsor_leads.inserted_at (undefined=lädt, null=keine)
+  const [googleTs,setGoogleTs]=useState(undefined); // Google-Sheet-Sync: jsr_cv_sync_config_v1.last_sync_at
+  const [googleErr,setGoogleErr]=useState(null);
   const today=new Date();
   useEffect(()=>{ let alive=true; (async()=>{
     try{ const {data,error}=await sb.from('windsor_marketing').select('*'); if(error) throw error;
+      // Nur die zwei echten Marketing-Quellen. Der 'all'-Auftrag kann Fremd-Connector-Zeilen einschleppen
+      // (z. B. datasource='facebook_leads' aus dem Bewerbungs-Connector, ganz ohne Ausgaben/Reichweite) -> hart raus.
       const parsed=(data||[]).map(r=>({ date:wmDate(r.date), datasource:String(r.datasource||'').toLowerCase(), campaign:String(r.campaign||'').trim(),
-        spend:wmNum(r.spend), impressions:wmNum(r.impressions), clicks:wmNum(r.clicks), reach:wmNum(r.reach), followers_count:wmNum(r.followers_count) })).filter(x=>x.date);
+        spend:wmNum(r.spend), impressions:wmNum(r.impressions), clicks:wmNum(r.clicks), reach:wmNum(r.reach), followers_count:wmNum(r.followers_count) })).filter(x=>x.date&&(x.datasource==='facebook'||x.datasource==='instagram'));
       parsed.sort((a,b)=>a.date-b.date);
       if(alive) setRows(parsed);
     }catch(e){ if(alive){ setErr(e.message||'Ladefehler'); setRows([]); } }
   })(); return ()=>{alive=false;}; },[]);
   useEffect(()=>{ let alive=true; (async()=>{ try{ const {data}=await sb.from('cvs').select('id,cv_date,source'); if(alive) setCvs(data||[]); }catch(e){} })(); return ()=>{alive=false;}; },[]);
+  // Aktualitaet je Anbindung: Meta-Bewerbungen aus windsor_leads (echter Schreibzeitpunkt inserted_at),
+  // Google-Sheet-Sync aus dem Lauf-Marker in der Sync-Config (bei jedem Lauf gesetzt, auch ohne neue Zeilen).
+  useEffect(()=>{ let alive=true; (async()=>{
+    try{ const {data}=await sb.from('windsor_leads').select('inserted_at').order('inserted_at',{ascending:false,nullsFirst:false}).limit(1);
+      const t=data&&data[0]&&data[0].inserted_at?new Date(data[0].inserted_at):null; if(alive) setLeadsTs(t);
+    }catch(e){ if(alive) setLeadsTs(null); }
+    try{ const cfg=await loadConfigFromDB('jsr_cv_sync_config_v1');
+      const t=(cfg&&cfg.last_sync_at)?new Date(cfg.last_sync_at):null; if(alive){ setGoogleTs(t); setGoogleErr((cfg&&cfg.last_error)||null); }
+    }catch(e){ if(alive) setGoogleTs(null); }
+  })(); return ()=>{alive=false;}; },[]);
 
   const d0=(()=>{ const d=new Date(today); d.setHours(0,0,0,0); return d; })();
   const startDate=(rows&&rows.length)?rows[0].date:null;
@@ -34569,9 +34584,42 @@ function RecruitingMarketingView({employees}){
   const spendCur=sum(metaIn(cur),'spend'); const cpaCur=appsMetaTot>0?spendCur/appsMetaTot:null;
   const box=(bg,bd,col,txt)=><div style={{padding:'12px 16px',borderRadius:10,background:bg,border:'1px solid '+bd,color:col,fontSize:13,fontWeight:700}}>{txt}</div>;
 
+  // Aktualitaet je Anbindung. windsor_marketing hat KEINEN Schreibzeitpunkt -> juengstes Daten-Datum je
+  // datasource (nur Datum, "Datenstand"). Leads/Google-Sync haben echte Schreibzeitstempel (mit Uhrzeit).
+  const maxDateFor=ds=> rows===null ? undefined : (rows||[]).reduce((m,x)=>(x.datasource===ds&&(!m||x.date>m))?x.date:m,null);
+  const metaAdsTs=maxDateFor('facebook');
+  const instaTs=maxDateFor('instagram');
+  // grace = erlaubter Rueckstand in Tagen (Datenstand). Meta-Anzeigen liefern verzoegert -> 1 Tag ist normal;
+  // Quellen mit echtem Schreibzeitstempel (Leads/Google-Sync) sollen taeglich laufen -> grace 0.
+  const freshChip=(label,ts,withTime,note,grace)=>{
+    const g=grace||0;
+    const known=ts instanceof Date;
+    const sod=x=>{ const d=new Date(x); d.setHours(0,0,0,0); return d.getTime(); };
+    const ddays=known?Math.round((sod(new Date())-sod(ts))/86400000):null;
+    const fresh=known&&ddays<=g;
+    const col=!known?'#94a3b8':(fresh?'#059669':'#dc2626');
+    const bg=!known?'var(--surface-2)':(fresh?'#ecfdf5':'#fef2f2');
+    const bd=!known?'var(--border)':(fresh?'#a7f3d0':'#fecaca');
+    const when=!known?(ts===undefined?'lädt…':'keine Daten')
+      :(withTime? ts.toLocaleString('de-DE',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'})+' Uhr'
+               : ts.toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit',year:'numeric'}));
+    const suffix=!known?'':(ddays<=0?' · heute':ddays===1?' · gestern':' · veraltet');
+    return <div style={{flex:'1 1 210px',minWidth:180,display:'flex',flexDirection:'column',gap:3,padding:'10px 13px',borderRadius:10,background:bg,border:'1px solid '+bd}}>
+      <div style={{display:'flex',alignItems:'center',gap:7}}><span style={{width:9,height:9,borderRadius:'50%',background:col,flexShrink:0}}></span><span style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.04em',color:'var(--muted)'}}>{label}</span></div>
+      <div style={{fontSize:13.5,fontWeight:700,color:col}}>{when}{suffix}</div>
+      {note&&<div style={{fontSize:10.5,color:'var(--muted)'}}>{note}</div>}
+    </div>;
+  };
+
   return <div style={{maxWidth:1100}}>
     <div style={{fontSize:20,fontWeight:800,marginBottom:2}}>📣 Recruiting Marketing</div>
     <div style={{fontSize:13,color:'var(--muted)',marginBottom:14}}>Wo wir bei der Bewerbergewinnung stehen — Meta-Anzeigen und Instagram organisch.</div>
+    <div style={{display:'flex',gap:10,flexWrap:'wrap',marginBottom:16}}>
+      {freshChip('Meta-Anzeigen', metaAdsTs, false, 'Datenstand · bis 1 Tag Verzug normal', 1)}
+      {freshChip('Instagram organisch', instaTs, false, 'Datenstand · bis 1 Tag Verzug normal', 1)}
+      {freshChip('Meta-Bewerbungen', leadsTs, true, 'windsor_leads · nächtlich 01:00 UTC', 0)}
+      {freshChip('Google-Sheet-Sync', googleTs, true, googleErr?('Letzter Fehler: '+googleErr):null, 0)}
+    </div>
     <div style={{display:'flex',gap:6,marginBottom:6,flexWrap:'wrap'}}>
       {WM_LEVELS.map(([k,l])=><button key={k} className="btn btn-sm" onClick={()=>setLevel(k)} style={{fontWeight:700,background:level===k?'var(--accent,#2563eb)':'transparent',color:level===k?'#fff':'var(--text)',border:'1px solid '+(level===k?'var(--accent,#2563eb)':'var(--border)')}}>{l}</button>)}
     </div>
@@ -35256,6 +35304,49 @@ function LoginActivityView({team}){
   const stats={green:0,amber:0,red:0};
   (rows||[]).forEach(r=>{ const c=ampel(dayDiff(r.last_activity_at)); if(c==='#16a34a')stats.green++; else if(c==='#d97706')stats.amber++; else stats.red++; });
   const SortBtn=({k,children})=><button onClick={()=>setSortK(k)} style={{border:'1px solid var(--border)',background:sortK===k?'var(--blue-bg)':'var(--card)',color:sortK===k?'#0F5661':'var(--text)',borderRadius:8,padding:'5px 11px',fontSize:12,fontWeight:sortK===k?700:500,cursor:'pointer'}}>{children}</button>;
+  // PDF via Druckfenster (etabliertes Muster: window.open + document.write + Druck-Button). Ampel im PDF
+  // farbig UND als Symbol+Wort, damit sie im Schwarzweissdruck erkennbar bleibt.
+  function exportPdf(){
+    const E=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    const meta=d=> d==null?{c:'#dc2626',w:'nie',s:'○'} : (d<=3?{c:'#16a34a',w:'aktuell',s:'●'} : (d<=10?{c:'#d97706',w:'lahmt',s:'◐'} : {c:'#dc2626',w:'hängt',s:'○'}));
+    const created=new Date().toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit',year:'numeric'});
+    const w=window.open('','_blank','width=1200,height=850'); if(!w) return;
+    const body=list.map(r=>{ const m=meta(dayDiff(r.last_activity_at)); const kind=r.last_activity_kind?(ACT_KIND_LABELS[r.last_activity_kind]||r.last_activity_kind):'';
+      const zuletzt=r.last_activity_kind?(E(kind)+(r.last_activity_label?' · '+E(r.last_activity_label):'')):'—';
+      return '<tr>'
+        +'<td class="nm">'+E(r.full_name||'—')+'</td>'
+        +'<td>'+E(roleTxt(r.role_keys))+'</td>'
+        +'<td>'+E(ago(r.last_seen))+'</td>'
+        +'<td class="amp" style="color:'+m.c+'"><b>'+m.s+' '+m.w+'</b><span class="sub">'+E(ago(r.last_activity_at))+'</span></td>'
+        +'<td>'+zuletzt+'</td>'
+        +'<td class="num">'+(r.edits_30d||0)+'</td>'
+      +'</tr>'; }).join('');
+    const legend='<span class="lg"><span class="dot" style="background:#16a34a"></span>● aktuell (bis 3 Tage)</span>'
+      +'<span class="lg"><span class="dot" style="background:#d97706"></span>◐ lahmt (4 bis 10 Tage)</span>'
+      +'<span class="lg"><span class="dot" style="background:#dc2626"></span>○ hängt / nie (über 10 Tage)</span>';
+    const html='<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Nutzung & Aktivität '+created+'</title>'
+      +'<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:Arial,sans-serif;font-size:11px;color:#111}'
+      +'.page{padding:20px 26px}.hdr{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:2px solid #0F5661;padding-bottom:12px;margin-bottom:12px}'
+      +'.company{font-size:16px;font-weight:800;color:#0F5661}.sub2{font-size:11px;color:#64748b;margin-top:2px}'
+      +'.ttl{font-size:19px;font-weight:800;text-align:right}.date{font-size:11px;color:#64748b;text-align:right;margin-top:2px}'
+      +'.legend{display:flex;gap:20px;flex-wrap:wrap;margin-bottom:12px;font-size:10.5px;color:#334155}'
+      +'.lg{display:flex;align-items:center;gap:6px}.dot{width:10px;height:10px;border-radius:50%;display:inline-block;border:1px solid rgba(0,0,0,.25)}'
+      +'table{width:100%;border-collapse:collapse}th{background:#f1f5f9;text-align:left;font-size:9.5px;text-transform:uppercase;letter-spacing:.05em;color:#475569;padding:7px 9px;border-bottom:2px solid #cbd5e1}'
+      +'td{padding:7px 9px;border-bottom:1px solid #eef2f6;vertical-align:top}tr:nth-child(even) td{background:#fafbfc}'
+      +'.nm{font-weight:700}.num{text-align:right;font-family:"Courier New",monospace}.amp b{font-weight:800}.amp .sub{display:block;font-size:9.5px;color:#64748b;font-weight:400}'
+      +'.foot{margin-top:14px;font-size:9px;color:#94a3b8;line-height:1.5}'
+      +'.pbtn{margin-bottom:12px;padding:7px 14px;font-size:13px;cursor:pointer}'
+      +'@page{size:A4 landscape;margin:12mm}@media print{.no-print{display:none}body{print-color-adjust:exact;-webkit-print-color-adjust:exact}}'
+      +'</style></head><body><div class="page">'
+      +'<button class="pbtn no-print" onclick="window.print()">🖨 Drucken / Als PDF speichern</button>'
+      +'<div class="hdr"><div><div class="company">TIVE 360°</div><div class="sub2">Nutzung & Aktivität · '+list.length+' Zugänge</div></div>'
+      +'<div><div class="ttl">Nutzung & Aktivität</div><div class="date">Erstellt am '+created+'</div></div></div>'
+      +'<div class="legend">'+legend+'</div>'
+      +'<table><thead><tr><th>Zugang</th><th>Rolle</th><th>Zuletzt gesehen</th><th>Letzte Aktivität</th><th>Zuletzt getan</th><th>30 T</th></tr></thead><tbody>'+body+'</tbody></table>'
+      +'<div class="foot">„Zuletzt gesehen" = jüngstes Signal (Anmeldung, Eingabe oder Upload). „Letzte Aktivität" = letzte echte Eingabe (Mitarbeiter, Schichtplan, Kennzahlen, Bewerber, Abwesenheit, Lohn, Upload). „30 T" = Zahl der Eingaben der letzten 30 Tage. Status: ● aktuell, ◐ lahmt, ○ hängt/nie.</div>'
+      +'</div></body></html>';
+    w.document.write(html); w.document.close();
+  }
   return <div style={{maxWidth:1100}}>
     <div style={{marginBottom:6,fontSize:20,fontWeight:700}}>Nutzung & Aktivität</div>
     <div style={{fontSize:13,color:'var(--muted)',marginBottom:16}}>Wer nutzt das System, und vor allem: wer pflegt Daten. Die Farbe zeigt, wie lange die letzte Eingabe her ist.</div>
@@ -35270,6 +35361,7 @@ function LoginActivityView({team}){
     <div style={{display:'flex',gap:8,alignItems:'center',marginBottom:10,flexWrap:'wrap'}}>
       <span style={{fontSize:11.5,color:'var(--muted)',fontWeight:600}}>Sortieren:</span>
       <SortBtn k="activity">Nach Aktivität</SortBtn><SortBtn k="seen">Nach Zuletzt gesehen</SortBtn><SortBtn k="name">Nach Name</SortBtn>
+      <button onClick={exportPdf} disabled={!rows||!rows.length} title="Übersicht als PDF" style={{marginLeft:'auto',border:'1px solid var(--border)',background:'var(--card)',color:'var(--text)',borderRadius:8,padding:'6px 13px',fontSize:12.5,fontWeight:600,cursor:(!rows||!rows.length)?'default':'pointer',opacity:(!rows||!rows.length)?.5:1}}>🖨 Als PDF</button>
     </div>
     {err&&<div style={{marginBottom:12,padding:'9px 11px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:10,color:'#b91c1c',fontSize:12.5}}>{err}</div>}
     {rows===null&&<div className="sp-empty">Lädt…</div>}
