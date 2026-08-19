@@ -7637,7 +7637,7 @@ function ForcePasswordChange({info, onDone, onCancel}){
 // das steuert das Kennzeichen team.mgmt_external, nicht die owner-Rolle.
 const ROLE_TASKS = [
   // Manager intern (owner 'management') + Teamleiter (owner-Array): Check-in ist Führungs-, keine HR-Aufgabe.
-  {key:'mgr_checkin',      owner:['management','teamlead'], view:'checkin', title:'Check-in: Anwesenheit bestätigen', desc:'Für die heute eingeteilten Mitarbeiter bestätigen, wer da ist. Ein Klick „Da", die Uhrzeit wird automatisch erfasst, die Verspätung ermittelt das System. Krank oder „kommt nicht mehr" im zweiten Schritt. Wer es morgens nicht macht, dem fehlt der Ist-Stand für den Tag.', count:'checkin_open'},
+  {key:'mgr_checkin',      owner:['management','teamlead','projektleiter'], view:'checkin', title:'Check-in: Anwesenheit bestätigen', desc:'Für die heute eingeteilten Mitarbeiter bestätigen, wer da ist. Ein Klick „Da", die Uhrzeit wird automatisch erfasst, die Verspätung ermittelt das System. Krank oder „kommt nicht mehr" im zweiten Schritt. Wer es morgens nicht macht, dem fehlt der Ist-Stand für den Tag.', count:'checkin_open'},
   {key:'mgr_cv_abgleich',  owner:'management', view:'kanban',      title:'CV-Abgleich HR',                desc:'Mit HR abgleichen, dass eingegangene CVs erfasst und in der richtigen Phase sind.',                       count:null},
   {key:'mgr_cv_funnel',    owner:'management', view:'kanban',      title:'CV-Funnel prüfen',              desc:'Den Bewerber-Funnel im Blick behalten: bleibt kein Kandidat in einer Phase liegen?',                       count:'cv_funnel'},
   {key:'mgr_kunden',       owner:'management', view:'calendar',    title:'Kundentelefonate & Wochen-Updates', desc:'Die fälligen Kundentermine und Wochen-Updates führen (Termine im Kalender).',                          count:'customer_due'},
@@ -7661,6 +7661,15 @@ const ROLE_TASKS = [
   {key:'fin_buchungen',    owner:'finance',    view:null,          title:'Buchungen Buchhaltung',         desc:'Laufende Buchungen in der Buchhaltung (tive-finance).',                                                    count:null},
   {key:'fin_lohn',         owner:'finance',    view:'payroll',     title:'Gehaltsabrechnung & Löhne',     desc:'Gehaltsabrechnung erstellen und Löhne vorbereiten.',                                                       window:[1], count:'payroll_open', auto_key:'payroll'},
   {key:'fin_bwa',          owner:'finance',    view:null,          title:'Monatsabschluss BWA',           desc:'Monatsabschluss und BWA erstellen (tive-finance).',                                                        window:[1,2], count:null},
+  // ── FÜHRUNG: Projektleiter + Teamleiter (projekt-scoped über RLS). Kern für beide; Check-in siehe mgr_checkin
+  //    (owner um projektleiter erweitert). ──
+  {key:'lead_shift',       owner:['projektleiter','teamlead'], view:'shiftplan',      title:'Schichtplan aktuell halten',    desc:'Die kommenden Tage einplanen, damit keine offenen Tage bleiben. Wer wann auf welchem Skill sitzt, gehört vor den Tag festgelegt.', count:null},
+  {key:'lead_absence',     owner:['projektleiter','teamlead'], view:'absences',       title:'Abwesenheiten & Krankmeldungen', desc:'Krankmeldungen (Anruf bis 8:30) eintragen und die heutigen Abwesenheiten prüfen, damit die Besetzung stimmt.', count:null},
+  {key:'lead_vacreq',      owner:['projektleiter','teamlead'], view:'urlaubantraege', title:'Urlaubsanträge entscheiden',    desc:'Offene Urlaubsanträge deines Teams entscheiden (Grün/Gelb/Rot). Du kennst die Besetzung, darum entscheidest du, nicht HR.', count:'vacreq_open'},
+  // Projektleiter zusätzlich (verantwortet das ganze Projekt).
+  {key:'pl_kpi',           owner:'projektleiter', view:'performance',  title:'Kennzahlen des Projekts pflegen', desc:'Die KPIs für Projekt und Skill der Woche pflegen, damit Auswertungen und Kundenbericht stimmen.',            count:'kpi_missing'},
+  {key:'pl_perf',          owner:'projektleiter', view:'performance',  title:'Team-Performance prüfen',         desc:'Wöchentlich die Rangliste im Blick behalten: wer läuft gut, wer braucht Unterstützung.',                     count:null},
+  {key:'pl_bericht',       owner:'projektleiter', view:'praesentation', title:'Wochenbericht vorbereiten',       desc:'Die Präsentation bzw. den Wochenbericht für den Kundentermin aktuell halten.',                              count:null},
 ];
 // Hat dieser Zugang eine gefüllte Tagesaufgaben-Ansicht? Rollen mit eigenen ROLE_TASKS (management, hr,
 // finance, teamlead). „management" deckt auch EXTERNES Management ab (mgmt_external): eigene Liste leer,
@@ -7676,7 +7685,7 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW}){
   const roleKeys=(team&&team.role_keys)||[];
   const isExt=!!(team&&team.mgmt_external);
   // teamlead ist (noch) nur wegen Check-in dabei — voller Teamleiter-Aufgabensatz folgt in einem späteren Schnitt.
-  const myRoles=['management','hr','finance','teamlead'].filter(r=>roleKeys.includes(r)&&!(r==='management'&&isExt));
+  const myRoles=['management','hr','finance','teamlead','projektleiter'].filter(r=>roleKeys.includes(r)&&!(r==='management'&&isExt));
   const owners=t=>Array.isArray(t.owner)?t.owner:[t.owner];
   const TASKS=ROLE_TASKS.filter(t=>owners(t).some(o=>myRoles.includes(o)));
   // Zeitfenster: aktuelle Monatswoche (1..5). Aufgaben mit `window` sind nur in ihren Wochen aktiv, sonst gedämpft + gesperrt.
@@ -7691,6 +7700,7 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW}){
   const [cvInterview,setCvInterview] = useState(null);// eingeladen + Gespräch
   const [fbOpenCount,setFbOpenCount] = useState(null);// heute offene Feedbackgespräche
   const [checkinOpen,setCheckinOpen] = useState(null);// heute eingeteilt aber noch nicht bestätigt
+  const [vacreqOpen,setVacreqOpen] = useState(null);  // offene Urlaubsanträge (für Leads projekt-scoped über RLS)
   const [busy,setBusy] = useState('');
   const isManager=roleKeys.includes('management'); // sieht die Zusammenschau (intern + extern)
   const [ovOpen,setOvOpen] = useState(null);          // aufgeklappte Rolle in der Zusammenschau
@@ -7714,6 +7724,8 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW}){
       setAutoEv(map);
     }catch(e){}
   };
+  // Offene Urlaubsanträge (RLS liefert Leads nur ihr Projekt, HR/Management alle) — Zähler für lead_vacreq.
+  useEffect(()=>{ let a=true; (async()=>{ try{ const {count}=await sb.from('vacation_requests').select('id',{count:'exact',head:true}).eq('status','pending'); if(a) setVacreqOpen(count||0); }catch(e){} })(); return ()=>{a=false;}; },[]);
   useEffect(()=>{
     let alive=true;
     (async()=>{ try{ const {data}=await sb.auth.getUser(); if(alive&&data&&data.user) setUid(data.user.id); }catch(e){} await loadDone(); })();
@@ -7806,6 +7818,7 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW}){
     if(k==='onboarding_open') return counts.onboarding>0?{n:counts.onboarding,l:'im Onboarding'}:null;
     if(k==='feedback_open')   return fbOpenCount>0?{n:fbOpenCount,l:'heute offen'}:null;
     if(k==='checkin_open')    return checkinOpen>0?{n:checkinOpen,l:'offen heute'}:null;
+    if(k==='vacreq_open')     return vacreqOpen>0?{n:vacreqOpen,l:'zu entscheiden'}:null;
     return null;
   };
   const fmtTime=iso=>{ try{ const d=new Date(iso); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); }catch(e){ return ''; } };
@@ -30864,7 +30877,10 @@ async function applyVacationDecision(req, status, {employees, setEmployees, show
         type: req.type, from: req.from, to: req.to, days: req.days,
         paid: req.type!=='unpaid', approved: true, approved_by:'HR', from_request:req.id,
       }]};
-      try{ await saveEmployeeToDB(updated); }
+      // Abwesenheit über die RPC schreiben (funktioniert für Admin UND Lead im eigenen Projekt) — ein direkter
+      // employees-Write scheitert für Leads an der RLS (upsert-INSERT + keine SELECT-Sichtbarkeit). Der
+      // vacation_requests-Status-Update unten läuft für Leads direkt über die vacreq-lead-Policy.
+      try{ const {error:aErr}=await sb.rpc('set_employee_absences',{p_employee_id: emp.id, p_absences: updated.absences}); if(aErr) throw aErr; }
       catch(e){ showToast&&showToast('⚠ Abwesenheit fehlgeschlagen, Antrag bleibt offen: '+dbErrMsg(e),'error'); return false; }
       setEmployees&&setEmployees(es=>es.map(x=>x.id===updated.id?updated:x));
     }
