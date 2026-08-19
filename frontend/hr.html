@@ -18201,6 +18201,8 @@ function ContractSection({cv, onContractSaved, onPromote}){
                 📎 Unterzeichnet hochladen
                 <input type="file" accept=".pdf,.jpg,.jpeg,.png" style={{display:'none'}} onChange={handleSignedUpload}/>
               </label>
+              {onPromote&&<button className="btn btn-sm" disabled title="Erst nach Hochladen des unterschriebenen Vertrags" style={{opacity:.45,cursor:'not-allowed'}}>🎉 Zu Mitarbeiter konvertieren</button>}
+              {onPromote&&<div style={{flexBasis:'100%',fontSize:11,color:'var(--muted)',marginTop:2}}>Übernahme zu Mitarbeiter erst nach Hochladen des unterschriebenen Vertrags. Danach wird der Mitarbeiter auf „Schulung geplant" gesetzt.</div>}
             </>
           )}
           {contract?.signed&&(
@@ -38400,7 +38402,15 @@ function App(){
   // Block 1: pessimistisch — erst nach Supabase speichern, State nur bei Erfolg,
   // Toast + return bei Fehler. Ohne das ging jede Eingabe beim Reload verloren.
   async function saveAbsences(emp, keepOpen=false){
-    try{ await saveEmployeeToDB(emp); }
+    // Leads (projektleiter/teamlead) duerfen fremde employees-Zeilen weder per upsert (INSERT-RLS) noch per
+    // update (keine SELECT-Sichtbarkeit) schreiben -> Abwesenheit ueber die SECURITY-DEFINER-RPC, die nur
+    // absences schreibt und die Projekt-Berechtigung selbst prueft. Admins behalten saveEmployeeToDB
+    // (schreibt auch den Urlaubsanspruch-Override).
+    const _isAdmin=((team&&team.role_keys)||[]).some(r=>r==='management'||r==='hr'||r==='finance');
+    try{
+      if(_isAdmin){ await saveEmployeeToDB(emp); }
+      else { const {error}=await sb.rpc('set_employee_absences',{ p_employee_id: emp.id, p_absences: emp.absences||[] }); if(error) throw error; }
+    }
     catch(e){ showToast('⚠ Speichern fehlgeschlagen: '+dbErrMsg(e),'error'); return; }
     try{ logActivity('update','absence', emp.id, ((emp.first_name||'')+' '+(emp.last_name||'')).trim()||emp.id); }catch(e){}
     setEmployees(es=>es.map(e=>e.id===emp.id?emp:e));
@@ -38435,6 +38445,14 @@ function App(){
     // Transfer ALL relevant CV fields to employee
     // Salary/hours/schedule ONLY from contract
     const contract = cv.contract || {};
+    // Übernahme NUR mit hinterlegtem Vertrag. „Hinterlegt" = unterschriebener Vertrag vorhanden:
+    // contract.signed (Dokument hochgeladen) ODER Unterschriftsdatum ODER manuelles Häkchen. Zentrale Sperre,
+    // damit ALLE Wege (Vertrag-Tab, Status-Picker, Kanban, Ergebnis-Modal) gleich behandelt werden.
+    const _contractSigned = !!(contract.signed || contract.signed_at || contract.signed_manual || cv.contract_signed_manual || contract.signed_file);
+    if(!_contractSigned){
+      showToast('⚠ Übernahme erst mit hinterlegtem Vertrag: im Tab „Vertrag" den unterschriebenen Vertrag hochladen (oder Unterschriftsdatum/Häkchen setzen).','error');
+      return;
+    }
     // 4a-2-fix: staff_number aus der DB (nicht lokalem State) + nur numerische Werte
     // (AL-2401/HC-001 → parseInt=NaN → gefiltert). Verhindert 409 durch stale State/Parallel-Anlage.
     let nextNum;
@@ -38459,7 +38477,8 @@ function App(){
       position:cv.target_role||'Agent',
       primary_skill:cv.primary_skill||'',
       project_id:cv.target_project||'',
-      status:'active',
+      // Übernahme setzt „Schulung geplant" (Schulungs-Phasen wurden aus dem Bewerber-Funnel genommen).
+      status:'training_planned',
       // Language
       language_level:cv.language_level||'B2',
       writing_level:cv.writing_level||'B2',
