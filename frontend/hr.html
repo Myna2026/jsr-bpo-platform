@@ -38226,6 +38226,7 @@ function App(){
   const [employees, setEmployees] = useState([]);
   useEffect(()=>{ const m={}; (employees||[]).forEach(e=>{ if(e&&e.id) m[e.id]=e; }); EMP_BY_ID=m; },[employees]); // Snapshot fürs Protokoll-Diff
   const [empLoadError, setEmpLoadError] = useState(false);   // Hebel 3: Mitarbeiterladung fehlgeschlagen (Netz/Rechte) → sichtbar statt still leer
+  const [empReloadTick, setEmpReloadTick] = useState(0);     // manueller/erneuter Ladeversuch (Banner-Knopf), ohne Seiten-Reload
   // 25a: Client-Accounts analog
   const [clients, setClients] = useState([]);
   const [showClientsFallbackBanner, setShowClientsFallbackBanner] = useState(false);
@@ -38308,9 +38309,16 @@ function App(){
     if(!loggedIn) return;
     let alive=true;
     (async()=>{
-      const dbEmps = await loadEmployeesFromDB();
+      // Retry: ein transienter Fehler (Token noch nicht propagiert, Netz-Blip, RLS-Timing kurz nach Login)
+      // darf nicht in einem Dauer-Banner enden. Bis zu 3 Versuche mit Backoff, erst dann sichtbarer Fehler.
+      let dbEmps = null;
+      for(let attempt=0; attempt<3 && alive; attempt++){
+        dbEmps = await loadEmployeesFromDB();
+        if(dbEmps!==null) break;
+        await new Promise(r=>setTimeout(r, 800*(attempt+1)));
+      }
       if(!alive) return;
-      if(dbEmps===null){ setEmpLoadError(true); return; }   // echter Fehler: sichtbar machen
+      if(dbEmps===null){ setEmpLoadError(true); return; }   // nach allen Versuchen echter Fehler: sichtbar machen
       await loadVacationAccounts();                          // Urlaubskonto-Cache VOR dem ersten Render füllen
       if(!alive) return;
       setEmpLoadError(false);
@@ -38321,7 +38329,7 @@ function App(){
     const _fullFin = (team&&(team.role_keys||[]).some(r=>r==='management'||r==='finance'));
     const unsub = _fullFin ? subscribeEmployees(setEmployees) : null;
     return ()=>{ alive=false; if(unsub) unsub(); };
-  }, [loggedIn]);
+  }, [loggedIn, empReloadTick]);
 
   // Etappe 2: Projekte aus Supabase nachladen (Hybrid — der synchrone LS/PROJECTS_INIT-
   //           Lazy-Init bei 24320 bleibt Erstwert; null (Fehler/leer) -> LS behalten).
@@ -38790,8 +38798,9 @@ function App(){
     <div className="layout">
       <WelcomePopup firstName={firstName}/>
       {empLoadError && (
-        <div style={{position:'fixed',top:0,left:0,right:0,zIndex:9999,background:'var(--red-bg)',borderBottom:'1px solid var(--red)',color:'var(--red)',padding:'8px 14px',fontSize:12,textAlign:'center',fontWeight:600}}>
-          ⚠ Mitarbeiterdaten konnten nicht geladen werden (Verbindung oder Berechtigung). Bitte die Seite neu laden. Bleibt es bestehen, an IT wenden.
+        <div style={{position:'fixed',top:0,left:0,right:0,zIndex:9999,background:'var(--red-bg)',borderBottom:'1px solid var(--red)',color:'var(--red)',padding:'8px 14px',fontSize:12,textAlign:'center',fontWeight:600,display:'flex',alignItems:'center',justifyContent:'center',gap:12,flexWrap:'wrap'}}>
+          <span>⚠ Mitarbeiterdaten konnten nicht geladen werden (Verbindung oder Berechtigung). Das Anlegen von Bewerbern ist davon nicht betroffen.</span>
+          <button onClick={()=>{ setEmpLoadError(false); setEmpReloadTick(t=>t+1); }} style={{border:'1px solid var(--red)',background:'#fff',color:'var(--red)',borderRadius:8,padding:'3px 12px',fontSize:12,fontWeight:700,cursor:'pointer'}}>Erneut versuchen</button>
         </div>
       )}
       {showClientsFallbackBanner && (
