@@ -9053,7 +9053,7 @@ const COCKPIT_FILTERS = {
   emp_contract_expiring: e=>{ const ce=e&&((e.contract&&e.contract.end)||e.contract_end); if(!ce||e.status==='terminated'||e.status==='inactive') return false; const cM=parseInt(localStorage.getItem('jsr_contract_reminder_months')||'1'); const cut=new Date(); cut.setMonth(cut.getMonth()+cM); const end=new Date(ce); return end>=new Date()&&end<=cut; },
   emp_no_salary: e=>!!e&&e.status==='active'&&!parseFloat(e.hourly_rate||0),
   cv_new: c=>{ const wk=new Date(Date.now()-7*864e5).toISOString().slice(0,10); return !!c&&c.cv_date>=wk&&c.status==='cv_inbound'; },
-  cv_stuck: c=>{ if(!c) return false; if(['active',...REJECT_STATUS_KEYS].includes(c.status)) return false; const last=c.last_status_change||c.cv_date; if(!last) return false; return Math.round((new Date()-new Date(last))/(864e5))>7; },
+  cv_stuck: c=>{ if(!c) return false; if(['active',...REJECT_STATUS_KEYS].includes(c.status)) return false; const last=c.status_changed_at||c.cv_date; if(!last) return false; return Math.round((new Date()-new Date(last))/(864e5))>7; },
   cv_inbox: c=>{ if(!c) return false; const s=c.status; return s==='cv_inbound'||s==='new'||s==='test_sent'; },   // Posteingang (Tagesaufgaben-Sprung „CVs selektieren")
 };
 // Sichtbare Jahre für Jahres-Dropdowns — datengetrieben statt fester Liste. Tote Vergangenheitsjahre
@@ -20600,12 +20600,12 @@ function RecruitingFunnel({cvList, employees, isMobileW}){
         if(await uiConfirm({title:'Zu Mitarbeiter konvertieren', text:'CV von '+cv.first_name+' '+cv.last_name+' zu Mitarbeiter konvertieren?', confirmLabel:'Konvertieren'})){ onPromoteToEmployee&&onPromoteToEmployee(cv); }
         return;
       }
-      try{ await saveCvToDB({...cv,status:newStatus,status_changed:isoLocal(new Date())}); }
+      try{ await saveCvToDB({...cv,status:newStatus,status_changed_at:new Date().toISOString()}); }
       catch(e){ showToast&&showToast('⚠ '+(e.message||'DB'),'error'); }
     } else {
       const emp=(employees||[]).find(e=>e.id===item.id);
       if(!emp) return;
-      const updated={...emp,status:newStatus,status_changed:isoLocal(new Date())};
+      const updated={...emp,status:newStatus,status_changed_at:new Date().toISOString()};
       try{ await saveEmployeeToDB(updated); setEmployees(es=>es.map(e=>e.id===updated.id?updated:e)); }
       catch(e){ showToast&&showToast('⚠ '+(e.message||'DB'),'error'); }
     }
@@ -20639,7 +20639,7 @@ function RecruitingFunnel({cvList, employees, isMobileW}){
     const isCV=item._type==='cv';
     const sf=SF_BY_KEY[item.status];
     const nx=nextStatus(item.status);
-    const since=item.last_status_change||item.cv_date;
+    const since=item.status_changed_at||item.cv_date;
     const d = since ? Math.round((new Date()-new Date(since))/(864e5)) : null;
     const ageC = d===null?null:(d>14?'var(--red)':d>7?'var(--amber)':'var(--dim)');
     return(
@@ -29919,7 +29919,7 @@ const EMP_COLS = new Set([
   'fixed_salary','guaranteed_pct','deduct_missing','free_days_month','overtime_allowed','productive_pct',
   'forecast_include','kpi_exempt','overhead_productive_pct',
   'absences','audios','videos','warnings','project_assignments','allowed_shifts',
-  'bank','contract','extra',
+  'bank','contract','status_changed_at','extra',
   'abilities','bonuses','referrals','quality_ratings','hardware',
   'position','city','id_number',
   // Steckbrief/Profil (analog cvs, Migration 2026-07-20) — vorher via extra:
@@ -30438,9 +30438,10 @@ const CV_COLS = new Set([
   'dream','hobbies','favorite_food','travel_wish','photo_url','photo_color','better_email','better_phone',
   'notes','is_structured','sales_potential',
   'primary_skill','id_number','bank_name','bank_account','assessed_level','hr_rating',   // aus extra promotet (2026-07-24, Migration cvs_promote_extra_fields)
-  'test_answers','test_scores','audios','videos','ai_reasoning','extra',
+  'test_answers','test_scores','audios','videos','ai_reasoning','contract','status_changed_at','extra',
 ]);
-const CV_DB_MANAGED   = new Set(['created_at','updated_at']);
+// 'type' = transientes UI-Feld (leckt aus einer Abwesenheits-Auswahl aufs cv-Objekt) → nie persistieren, nie warnen.
+const CV_DB_MANAGED   = new Set(['created_at','updated_at','type']);
 // Bewusst gehalten (2026-07-25): CV-Typ-Coerce-Listen, analog EMP_* aktuell ungenutzt
 // (Postgres/PostgREST coerct implizit). Reserviert, NICHT als Versehen loeschen.
 // eslint-disable-next-line no-unused-vars
