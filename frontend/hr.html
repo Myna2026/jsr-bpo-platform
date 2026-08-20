@@ -18370,6 +18370,14 @@ function CVModal({cv, projects, team, onSave, onClose}){
     contract:null,
   });
   const [tab, setTab] = useState('basis');
+  // Termin-Tab: aktuellste Einladung dieses Bewerbers laden (läuft/angenommen/keine) + Neu-Erstellen-Modal.
+  const [invRow, setInvRow] = useState(undefined);   // undefined=lädt, null=keine, {}=Zeile
+  const [schedOpen, setSchedOpen] = useState(false);
+  const [invCopied, setInvCopied] = useState(false);
+  const loadInv = React.useCallback(async ()=>{ if(!cv||!cv.id){ setInvRow(null); return; }
+    try{ const {data}=await sb.from('interview_invites').select('*').eq('cv_id',cv.id).order('created_at',{ascending:false}).limit(1);
+      setInvRow((data&&data[0])||null); }catch(e){ setInvRow(null); } }, [cv]);
+  useEffect(()=>{ loadInv(); }, [loadInv]);
   const set = (k,v) => setForm(f=>({...f,[k]:v}));
 
   // ── KI-Bewertung ────────────────────────────────────────────
@@ -18506,6 +18514,7 @@ Levels: A2, B1, B2, C1, C2. Für Kundenservice ist B2 das Minimum.`;
     {id:'arbeit',   label:'Zeiten',   icon:'⏰', always:true},
     {id:'hr',       label:'HR',       icon:'📋', show: atLeast('cv_accepted') && isHR},
     {id:'phase',    label:'Phase',    icon:'📊', always:true},
+    {id:'termin',   label:'Gespräch', icon:'📅', show: !!cv && isHR},
     {id:'vertrag',  label:'Vertrag',  icon:'📝', show: atLeast('selection2') && isHR},
   ].filter(t=>t.always||t.show);
 
@@ -19228,6 +19237,27 @@ Levels: A2, B1, B2, C1, C2. Für Kundenservice ist B2 das Minimum.`;
             </div>
           )}
 
+          {/* ── GESPRÄCH: Terminvereinbarung + Einladungs-Status ── */}
+          {tab==='termin'&&(()=>{
+            const FL={phone:'Telefon',teams:'Video (Teams)',office:'Im Büro'};
+            const open = invRow&&invRow.status==='open'&&new Date(invRow.expires_at)>new Date();
+            const box=(bg,bd,col,el)=><div style={{background:bg,border:'1px solid '+bd,color:col,borderRadius:10,padding:'12px 14px',fontSize:13,lineHeight:1.55}}>{el}</div>;
+            return <div>
+              <div style={{fontSize:13,color:'var(--muted)',marginBottom:14,lineHeight:1.55}}>Der Bewerber bekommt einen Link und wählt selbst einen freien 30-Minuten-Termin. Bei Bestätigung entsteht automatisch ein Kalendereintrag für alle Teilnehmer.</div>
+              {invRow===undefined ? <div style={{color:'var(--muted)',fontSize:13}}>lädt…</div>
+                : invRow===null ? box('var(--surface-2)','var(--border)','var(--muted)','Noch keine Einladung verschickt.')
+                : invRow.status==='booked' ? box('#f0fdf4','#bbf7d0','#15803d',<span>✅ <b>Termin vereinbart:</b> {fmtDate(invRow.booked_slot)} um {String(invRow.booked_slot).slice(11,16)} Uhr{invRow.booked_form?(' · '+(FL[invRow.booked_form]||invRow.booked_form)):''}</span>)
+                : open ? box('var(--blue-bg)','#cfe0e2','#0F5661',<div>
+                    <div style={{fontWeight:700,marginBottom:3}}>⏳ Einladung läuft, noch nicht angenommen.</div>
+                    <div style={{fontSize:12,color:'var(--muted)'}}>Erstellt am {fmtDate(invRow.created_at)}, gültig bis {fmtDate(invRow.expires_at)}.</div>
+                    <button className="btn btn-sm" style={{marginTop:9}} onClick={()=>{ try{ navigator.clipboard.writeText('https://client.tive360.de/termin.html?t='+invRow.token); setInvCopied(true); setTimeout(()=>setInvCopied(false),1500);}catch(e){} }}>{invCopied?'✓ Kopiert':'Link erneut kopieren'}</button>
+                  </div>)
+                : box('var(--surface-2)','var(--border)','var(--muted)','Die letzte Einladung ist abgelaufen.')}
+              <button className="btn btn-primary" style={{marginTop:14}} onClick={()=>setSchedOpen(true)}>{open?'Neue Einladung erstellen':'Vorstellungsgespräch vereinbaren'}</button>
+            </div>;
+          })()}
+          {schedOpen && <InterviewScheduleModal cv={form} onClose={()=>{ setSchedOpen(false); loadInv(); }}/>}
+
           {/* ── VERTRAG (ab selection2) ── */}
           {tab==='vertrag'&&(
             <div>
@@ -19378,7 +19408,7 @@ function InterviewScheduleModal({cv, onClose}){
     }catch(e){ setErr('Fehler: '+(e.message||'')); }
     setBusy(false);
   }
-  const message='Hallo'+(firstName?' '+firstName:'')+',\n\nfür dein Vorstellungsgespräch bei TIVE 360° wähle bitte einen passenden Termin aus:\n'+link+'\n\nDer Link ist 10 Tage gültig. Wir freuen uns auf dich!';
+  const message='Hallo'+(firstName?' '+firstName:'')+',\n\nwir würden dich gern zu einem Vorstellungsgespräch einladen. Über diesen Link kannst du dir einfach einen Termin aussuchen, der dir passt:\n\n'+link+'\n\nDas Gespräch dauert etwa 30 Minuten. Der Link ist 10 Tage gültig. Bei Fragen melde dich gern.\n\nViele Grüße\nDein Team von TIVE 360°';
   function copy(text,which){ try{ navigator.clipboard.writeText(text); setCopied(which); setTimeout(()=>setCopied(''),1500); }catch(e){} }
   return <div className="modal-overlay" onClick={onClose}>
     <div className="modal" style={{maxWidth:520}} onClick={e=>e.stopPropagation()}>
@@ -19428,7 +19458,6 @@ function CVsView({cvList, setCvList, projects, onPromoteToEmployee, team, showTo
   const [savedFeedback, setSavedFeedback] = useState(null);
   const [quickView, setQuickView] = useState(null); // token
   const [resultsModal, setResultsModal] = useState(null);
-  const [interviewFor, setInterviewFor] = useState(null);   // Bewerber, für den ein Gesprächs-Link erzeugt wird
   const [filter, setFilter] = useState(isMobileW?'cv_inbound':'all');   // mobil auf den Posteingang starten
 
   async function saveCv(form){
@@ -19489,7 +19518,6 @@ function CVsView({cvList, setCvList, projects, onPromoteToEmployee, team, showTo
   return(
     <div>
       {modal&&<CVModal cv={modal==='add'?null:modal} projects={projects} team={team} onSave={saveCv} onClose={()=>setModal(null)}/>}
-      {interviewFor&&<InterviewScheduleModal cv={interviewFor} onClose={()=>setInterviewFor(null)}/>}
       {resultsModal&&<CVResultsModal cv={resultsModal} onClose={()=>setResultsModal(null)} onPromote={cv=>{onPromoteToEmployee(cv);setResultsModal(null);}}/>}
 
       <FilterBanner label={_navCv?_navCv.label:''} onClear={onClearNavFilter}/>
@@ -19537,7 +19565,6 @@ function CVsView({cvList, setCvList, projects, onPromoteToEmployee, team, showTo
               <div style={{fontWeight:700,fontSize:15}}>{quickView.first_name} {quickView.last_name}</div>
               {(()=>{const s=STATUS_FLOW.find(x=>x.key===quickView.status);return s?<span style={{fontSize:11,padding:'2px 8px',borderRadius:20,background:s.color+'18',color:s.color,fontWeight:700}}>{s.icon} {s.label}</span>:null;})()}
             </div>
-            <button className="btn btn-sm" title="Vorstellungsgespräch vereinbaren" onClick={()=>{setInterviewFor(quickView);setQuickView(null);}}>📅 Gespräch</button>
             <button className="btn btn-sm btn-primary" onClick={()=>{setModal(quickView);setQuickView(null);}}>✏ Öffnen</button>
             <button className="btn btn-sm" onClick={()=>setQuickView(null)}>×</button>
           </div>
