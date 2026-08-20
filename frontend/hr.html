@@ -19346,6 +19346,79 @@ function CVResultsModal({cv, onClose, onPromote}){
   );
 }
 
+// ── Terminvereinbarung: HR erzeugt Einladungs-Link (Schnitt 2) ────────────────
+// Shkurte waehlt Teilnehmer (Back-Office) + Formen PRO Einladung; create_interview_invite gibt Token,
+// daraus Link auf die oeffentliche termin.html + eine fertige Nachricht zum Mitschicken (kein Mailversand).
+const INTERVIEW_FORMS=[['phone','📞 Telefon'],['teams','💻 Teams'],['office','🏢 Persönlich im Büro']];
+function InterviewScheduleModal({cv, onClose}){
+  const [people,setPeople]=useState(null);   // Back-Office-Teilnehmer {full_name, employee_id}
+  const [selP,setSelP]=useState([]);
+  const [selF,setSelF]=useState([]);
+  const [link,setLink]=useState('');
+  const [busy,setBusy]=useState(false);
+  const [err,setErr]=useState('');
+  const [copied,setCopied]=useState('');
+  useEffect(()=>{ let a=true; (async()=>{
+    try{ const {data}=await sb.from('app_users').select('full_name,employee_id,role_keys').not('employee_id','is',null);
+      const BO=['management','hr','teamlead','projektleiter','qm','trainer','finance'];
+      const seen=new Set(); const list=[];
+      (data||[]).filter(u=>(u.role_keys||[]).some(r=>BO.includes(r))).forEach(u=>{ if(!seen.has(u.employee_id)){ seen.add(u.employee_id); list.push(u); } });
+      list.sort((x,y)=>String(x.full_name||'').localeCompare(String(y.full_name||''),'de'));
+      if(a) setPeople(list);
+    }catch(e){ if(a) setPeople([]); }
+  })(); return ()=>{a=false;}; },[]);
+  const toggle=(arr,setter,v)=>setter(arr.includes(v)?arr.filter(x=>x!==v):[...arr,v]);
+  const firstName=(cv.first_name||'').trim();
+  const applicant=((cv.first_name||'')+' '+(cv.last_name||'')).trim();
+  const lbl={fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em',marginBottom:9};
+  async function createLink(){ if(!selP.length||!selF.length||busy) return; setBusy(true); setErr('');
+    try{ const {data,error}=await sb.rpc('create_interview_invite',{p_cv_id:cv.id,p_participant_ids:selP,p_forms:selF});
+      if(error||!data||!data.token){ setErr('Link konnte nicht erzeugt werden'+((error&&error.message)?': '+error.message:'.')); setBusy(false); return; }
+      setLink('https://client.tive360.de/termin.html?t='+data.token);
+    }catch(e){ setErr('Fehler: '+(e.message||'')); }
+    setBusy(false);
+  }
+  const message='Hallo'+(firstName?' '+firstName:'')+',\n\nfür dein Vorstellungsgespräch bei TIVE 360° wähle bitte einen passenden Termin aus:\n'+link+'\n\nDer Link ist 10 Tage gültig. Wir freuen uns auf dich!';
+  function copy(text,which){ try{ navigator.clipboard.writeText(text); setCopied(which); setTimeout(()=>setCopied(''),1500); }catch(e){} }
+  return <div className="modal-overlay" onClick={onClose}>
+    <div className="modal" style={{maxWidth:520}} onClick={e=>e.stopPropagation()}>
+      <div className="modal-header"><span>📅 Vorstellungsgespräch vereinbaren</span><button className="btn btn-sm" onClick={onClose}>×</button></div>
+      <div className="modal-body">
+        <div style={{fontSize:13,color:'var(--muted)',marginBottom:16}}>Für <b style={{color:'var(--text)'}}>{applicant||'Bewerber'}</b>. Der Bewerber wählt danach selbst einen freien 30-Minuten-Termin.</div>
+        {!link ? <React.Fragment>
+          <div style={lbl}>Wer nimmt teil?</div>
+          {people===null ? <div style={{color:'var(--muted)',fontSize:13,marginBottom:14}}>lädt…</div> :
+            <div style={{display:'flex',flexDirection:'column',gap:7,maxHeight:200,overflowY:'auto',marginBottom:16,paddingRight:4}}>
+              {people.map(u=><label key={u.employee_id} style={{display:'flex',alignItems:'center',gap:9,fontSize:13.5,cursor:'pointer'}}>
+                <input type="checkbox" checked={selP.includes(u.employee_id)} onChange={()=>toggle(selP,setSelP,u.employee_id)} style={{width:15,height:15,cursor:'pointer'}}/>
+                {u.full_name||'—'}
+              </label>)}
+              {people.length===0&&<div style={{color:'var(--muted)',fontSize:13}}>Keine Teilnehmer gefunden.</div>}
+            </div>}
+          <div style={lbl}>Welche Formen anbieten?</div>
+          <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:16}}>
+            {INTERVIEW_FORMS.map(([k,l])=>{ const on=selF.includes(k); return <button key={k} type="button" onClick={()=>toggle(selF,setSelF,k)}
+              style={{border:'1.5px solid '+(on?'#0F5661':'var(--border)'),background:on?'var(--blue-bg)':'transparent',color:on?'#0F5661':'var(--text)',borderRadius:10,padding:'8px 13px',fontSize:13,fontWeight:600,cursor:'pointer'}}>{l}</button>; })}
+          </div>
+          {err&&<div style={{background:'#fef2f2',border:'1px solid #fecaca',color:'#b91c1c',borderRadius:8,padding:'8px 10px',fontSize:12.5,marginBottom:12}}>{err}</div>}
+          <button className="btn btn-primary" disabled={!selP.length||!selF.length||busy} onClick={createLink}>{busy?'…':'Link erzeugen'}</button>
+        </React.Fragment> : <React.Fragment>
+          <div style={lbl}>Link (10 Tage gültig)</div>
+          <div style={{display:'flex',gap:8,marginBottom:14}}>
+            <input readOnly value={link} onFocus={e=>e.target.select()} style={{flex:1,padding:'7px 9px',border:'1px solid var(--border)',borderRadius:8,fontFamily:'var(--mono)',fontSize:11}}/>
+            <button className="btn btn-sm" onClick={()=>copy(link,'link')}>{copied==='link'?'✓':'Kopieren'}</button>
+          </div>
+          <div style={lbl}>Nachricht zum Mitschicken</div>
+          <textarea readOnly value={message} onFocus={e=>e.target.select()} style={{width:'100%',height:135,padding:'9px 11px',border:'1px solid var(--border)',borderRadius:8,fontSize:12.5,lineHeight:1.5,resize:'vertical',fontFamily:'inherit'}}/>
+          <div style={{display:'flex',gap:8,marginTop:10}}>
+            <button className="btn btn-primary btn-sm" onClick={()=>copy(message,'msg')}>{copied==='msg'?'✓ Kopiert':'Nachricht kopieren'}</button>
+            <button className="btn btn-sm" onClick={onClose}>Fertig</button>
+          </div>
+        </React.Fragment>}
+      </div>
+    </div>
+  </div>;
+}
 // ── CV List View ──────────────────────────────────────────
 
 
@@ -19355,6 +19428,7 @@ function CVsView({cvList, setCvList, projects, onPromoteToEmployee, team, showTo
   const [savedFeedback, setSavedFeedback] = useState(null);
   const [quickView, setQuickView] = useState(null); // token
   const [resultsModal, setResultsModal] = useState(null);
+  const [interviewFor, setInterviewFor] = useState(null);   // Bewerber, für den ein Gesprächs-Link erzeugt wird
   const [filter, setFilter] = useState(isMobileW?'cv_inbound':'all');   // mobil auf den Posteingang starten
 
   async function saveCv(form){
@@ -19415,6 +19489,7 @@ function CVsView({cvList, setCvList, projects, onPromoteToEmployee, team, showTo
   return(
     <div>
       {modal&&<CVModal cv={modal==='add'?null:modal} projects={projects} team={team} onSave={saveCv} onClose={()=>setModal(null)}/>}
+      {interviewFor&&<InterviewScheduleModal cv={interviewFor} onClose={()=>setInterviewFor(null)}/>}
       {resultsModal&&<CVResultsModal cv={resultsModal} onClose={()=>setResultsModal(null)} onPromote={cv=>{onPromoteToEmployee(cv);setResultsModal(null);}}/>}
 
       <FilterBanner label={_navCv?_navCv.label:''} onClear={onClearNavFilter}/>
@@ -19462,6 +19537,7 @@ function CVsView({cvList, setCvList, projects, onPromoteToEmployee, team, showTo
               <div style={{fontWeight:700,fontSize:15}}>{quickView.first_name} {quickView.last_name}</div>
               {(()=>{const s=STATUS_FLOW.find(x=>x.key===quickView.status);return s?<span style={{fontSize:11,padding:'2px 8px',borderRadius:20,background:s.color+'18',color:s.color,fontWeight:700}}>{s.icon} {s.label}</span>:null;})()}
             </div>
+            <button className="btn btn-sm" title="Vorstellungsgespräch vereinbaren" onClick={()=>{setInterviewFor(quickView);setQuickView(null);}}>📅 Gespräch</button>
             <button className="btn btn-sm btn-primary" onClick={()=>{setModal(quickView);setQuickView(null);}}>✏ Öffnen</button>
             <button className="btn btn-sm" onClick={()=>setQuickView(null)}>×</button>
           </div>

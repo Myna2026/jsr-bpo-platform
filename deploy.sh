@@ -104,6 +104,9 @@ compile_stamp_rsync "$LOCAL_DIR/client.html" "$REMOTE_BASE/client/index.html"
 echo "→ Showcase (öffentlich)..."
 rsync -az --progress "$LOCAL_DIR/showcase.html" "$SERVER:$REMOTE_BASE/client/showcase.html"
 
+echo "→ Terminvereinbarung (öffentlich)..."
+rsync -az --progress "$LOCAL_DIR/termin.html" "$SERVER:$REMOTE_BASE/client/termin.html"
+
 echo "→ Root (Landing + Login)..."
 ssh "$SERVER" "mkdir -p $REMOTE_BASE/root"
 rsync -az --progress "$LOCAL_DIR/root-index.html" "$SERVER:$REMOTE_BASE/root/index.html"
