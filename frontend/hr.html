@@ -978,6 +978,8 @@ const STATUS_FLOW = [
   {key:'rejected_by_employee', label:'Absage Mitarbeiter',  icon:'🚶', color:'#dc2626', kanban:false, terminal:true, reject:true},
   {key:'rejected_by_client', label:'Absage Kunde',   icon:'🏢', color:'#dc2626', kanban:false, terminal:true, reject:true},
   {key:'no_contact',    label:'Kein Kontakt möglich', icon:'📵', color:'#a16207', kanban:false, terminal:true, reject:true},
+  {key:'homeoffice_only', label:'Nur Homeoffice',    icon:'🏠', color:'#a16207', kanban:false, terminal:true, reject:true},
+  {key:'incomplete',    label:'Bewerbung unbrauchbar', icon:'📄', color:'#a16207', kanban:false, terminal:true, reject:true},
   {key:'blacklist',     label:'Blacklist',           icon:'⛔', color:'#7f1d1d', kanban:false, terminal:true, reject:true},
   {key:'selected',      label:'Selektiert',          icon:'✅', color:'#059669', kanban:false, terminal:false},
   {key:'terminated',    label:'Gekündigt',           icon:'🚫', color:'#dc2626', kanban:false, terminal:true},
@@ -12715,7 +12717,12 @@ function SimpleShiftView({employees, projects, team, showToast}){
   // Leads (projektleiter/teamlead) sehen mehrere Projekte im Wähler, planen aber nur ihr eigenes. Ihre maskierte
   // Mitarbeiterliste enthält nur ihr Projekt -> darauf vorwählen, sonst bliebe der Plan auf einem Fremdprojekt leer.
   const _leadProj = (team && isLeadOnlyRoles(team.role_keys)) ? (((employees||[]).find(e=>e&&e.project_id)||{}).project_id||null) : null;
-  useEffect(()=>{ if(_leadProj && projList.some(p=>p.id===_leadProj)) setProjId(_leadProj); }, [_leadProj]);
+  // WICHTIG: _leadProjReady (nicht nur _leadProj) in der Dep-Liste. Mitarbeiter und Projekte laden
+  // unabhaengig; laden die MA zuerst, ist projList beim ersten Feuern noch leer -> some()=false -> kein Set,
+  // und da _leadProj sich danach nicht mehr aendert, feuerte der Effekt nie erneut (leerer Lead-Plan).
+  // _leadProjReady kippt false->true, sobald die Projekte nachkommen, und loest den Preselect dann aus.
+  const _leadProjReady = !!(_leadProj && projList.some(p=>p.id===_leadProj));
+  useEffect(()=>{ if(_leadProjReady) setProjId(_leadProj); }, [_leadProjReady, _leadProj]);
   const proj=projList.find(p=>p.id===projId)||null;
   const projSkills=(proj&&Array.isArray(proj.skills))?proj.skills:[];
   const [skillSel,setSkillSel]=useState('');
@@ -38543,7 +38550,11 @@ function App(){
         vacation_days_quota: form.vacation_days_quota||vQuota||20,
         bonuses: form.bonuses||[],
         referrals: form.referrals||[],
-        quality_ratings: form.quality_ratings||[]
+        quality_ratings: form.quality_ratings||[],
+        // Eintrittsdatum EINMALIG bei Erstanlage stempeln (nur dieser !form.id-Zweig). Direkteinstellung
+        // bekommt so ihren Zugehoerigkeits-Anker; Bearbeitung/Verlaengerung laeuft ueber den Update-Pfad
+        // und fasst hire_date nie an. Quelle = Vertragsbeginn (nested oder Legacy-Flachfeld).
+        hire_date: form.hire_date||(form.contract&&form.contract.start)||form.contract_start||form.start_date||''
       };
     }
     // Optimistic UI-Update (Realtime bestätigt anschließend)
@@ -38659,6 +38670,10 @@ function App(){
       hourly_rate: contract.hourly_rate||'',
       // salary computed from hourly_rate × work_hours × 22 (no static field needed)
       contract_start: contract.start_date||cv.start_date||'',
+      // Eintrittsdatum EINMALIG beim Mitarbeiter-Werden stempeln = Anker der Betriebszugehoerigkeit,
+      // getrennt vom Vertragsbeginn. Eine spaetere Verlaengerung laeuft ueber den Update-Pfad und
+      // fasst hire_date nie wieder an -> Zugehoerigkeit bleibt ueber jeden Vertragswechsel stabil.
+      hire_date: cv.hire_date||contract.start_date||cv.start_date||'',
       contract_end: contract.end_date||'',
       contract_duration: contract.duration_months||'',
       contract_title: contract.title||'',

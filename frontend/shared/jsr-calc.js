@@ -15,7 +15,14 @@
 
   function num(v, d) { v = Number(v); return isFinite(v) ? v : d; }
   function startDateOf(emp) {
-    return (emp && emp.contract && emp.contract.start) || (emp && emp.contract_start) || (emp && emp.hire_date) || '';
+    // Betriebszugehoerigkeit haengt am ERSTEN Eintritt, nicht am aktuellen Vertrag.
+    // Frühestes verfügbares Datum: hire_date wenn früher als contract.start, sonst contract.start.
+    // Bei Vertragsverlaengerung springt contract.start vor — hire_date bewahrt die echte Zugehoerigkeit.
+    // (ISO-Datumsstrings 'YYYY-MM-DD' → lexikografischer Vergleich = chronologisch.)
+    var cs = (emp && emp.contract && emp.contract.start) || (emp && emp.contract_start) || '';
+    var hd = (emp && emp.hire_date) || '';
+    if (cs && hd) return hd < cs ? hd : cs;
+    return cs || hd || '';
   }
   function toDate(ref) {
     if (!ref) return new Date();
