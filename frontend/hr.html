@@ -12712,6 +12712,10 @@ function SimpleShiftView({employees, projects, team, showToast}){
 
   const projList=(projects||[]).filter(p=>p&&p.id&&p.status!=='inactive');
   const [projId,setProjId]=useState(()=>{try{const s=localStorage.getItem('jsr_shiftplan_proj');if(s&&projList.some(p=>p.id===s))return s;}catch(e){} return (projList[0]&&projList[0].id)||'';});
+  // Leads (projektleiter/teamlead) sehen mehrere Projekte im Wähler, planen aber nur ihr eigenes. Ihre maskierte
+  // Mitarbeiterliste enthält nur ihr Projekt -> darauf vorwählen, sonst bliebe der Plan auf einem Fremdprojekt leer.
+  const _leadProj = (team && isLeadOnlyRoles(team.role_keys)) ? (((employees||[]).find(e=>e&&e.project_id)||{}).project_id||null) : null;
+  useEffect(()=>{ if(_leadProj && projList.some(p=>p.id===_leadProj)) setProjId(_leadProj); }, [_leadProj]);
   const proj=projList.find(p=>p.id===projId)||null;
   const projSkills=(proj&&Array.isArray(proj.skills))?proj.skills:[];
   const [skillSel,setSkillSel]=useState('');
@@ -12823,7 +12827,7 @@ function SimpleShiftView({employees, projects, team, showToast}){
     if(emp && reason!=='terminated'){
       const rec=shiftPartialAbsenceRecord(emp,ds,workedH,absType,{endTime,reason,note});
       const rest=(emp.absences||[]).filter(a=>!(a.from===ds&&(a.to||a.from)===ds));
-      try{ await saveEmployeeToDB({...emp, absences:rec?[...rest,rec]:rest}); }
+      try{ await writeEmpAbsences(emp, rec?[...rest,rec]:rest, team); }
       catch(e){ showToast&&showToast('⚠ Abbruch nicht gespeichert: '+((e&&e.message)||e),'error'); }
     }
     noteShiftChange(); setAbortModal(null);
@@ -12837,7 +12841,7 @@ function SimpleShiftView({employees, projects, team, showToast}){
       const abs=(emp.absences||[]).map(a=>(a.from===ds&&(a.to||a.from)===ds&&a.type!=='sick')
         ? {...a, type:'sick', paid:true, reclassified_from:a.type, reclassified_at:new Date().toISOString(), note:(a.note||'')+' · umgewidmet zu krank'}
         : a);
-      try{ await saveEmployeeToDB({...emp, absences:abs}); }
+      try{ await writeEmpAbsences(emp, abs, team); }
       catch(e){ showToast&&showToast('⚠ Umwidmung nicht gespeichert','error'); return; }
     }
     const newCell={...cell, cancel_reason:'sick'};
@@ -12857,7 +12861,7 @@ function SimpleShiftView({employees, projects, team, showToast}){
     const emp=(employees||[]).find(e=>e.id===empId);
     if(emp){
       const rest=(emp.absences||[]).filter(a=>!(a.from===ds&&(a.to||a.from)===ds));
-      if(rest.length!==(emp.absences||[]).length){ try{ await saveEmployeeToDB({...emp,absences:rest}); }catch(e){} }
+      if(rest.length!==(emp.absences||[]).length){ try{ await writeEmpAbsences(emp, rest, team); }catch(e){} }
     }
     noteShiftChange(); setPop(null);
     showToast&&showToast('Abbruch aufgehoben','success');
@@ -30301,6 +30305,15 @@ async function saveEmployeeToDB(emp){
   if(error) throw error;
   logActivity(_wasNew?'create':'update', 'employee', data.id, ((data.first_name||'')+' '+(data.last_name||'')).trim(), _detail);
   return data;
+}
+// Abwesenheits-Write, leadtauglich: Admins (management/hr/finance) über saveEmployeeToDB (voller Datensatz),
+// Leads (projektleiter/teamlead) über die SECURITY-DEFINER-RPC set_employee_absences — ein direkter
+// employees-Write scheitert für Leads an der RLS (upsert-INSERT + keine SELECT-Sichtbarkeit). Siehe saveAbsences.
+async function writeEmpAbsences(emp, absArr, team){
+  const isAdmin=((team&&team.role_keys)||[]).some(r=>r==='management'||r==='hr'||r==='finance');
+  if(isAdmin) return saveEmployeeToDB({...emp, absences:absArr});
+  const {error}=await sb.rpc('set_employee_absences',{p_employee_id:emp.id, p_absences:absArr}); if(error) throw error;
+  return {...emp, absences:absArr};
 }
 // Bewusst gehalten (2026-07-25): DB-API-Funktion, aktuell nicht verdrahtet. Eine
 // ungenutzte Loeschfunktion bewusst behalten (nicht loeschen) — spaeter einhaengbar.
