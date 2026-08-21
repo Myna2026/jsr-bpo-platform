@@ -34757,7 +34757,7 @@ function RecruitingMarketingView({employees}){
   const cmpLabel = level==='today'?'vs. gestern':level==='week'?'vs. Vorwoche':level==='month'?'vs. Vormonat':'';
 
   const METRICS=[
-    {key:'spend', label:'Ausgaben (Meta)', fmt:eur, good:'neutral', val:r=>sum(metaIn(r),'spend')},
+    {key:'spend', label:'Ausgaben (Meta)', fmt:eur, good:'neutral', val:r=>sum(metaIn(r),'spend'), subFn:r=>{ const s=new Set(); metaIn(r).forEach(x=>{ if((x.spend||0)>0) s.add(x.campaign||'(ohne Name)'); }); const n=s.size; return n>0?(n+' Kampagne'+(n===1?'':'n')):null; }},
     {key:'metaReach', label:'Meta-Reichweite', fmt:int, good:'up', sub:'bezahlt', val:r=>sum(metaIn(r),'reach')},
     {key:'instaReach', label:'Instagram-Reichweite', fmt:int, good:'up', sub:'organisch', val:r=>sum(instaIn(r),'reach')},
     {key:'apps', label:'Bewerbungen', fmt:int, good:'up', val:r=>appsIn(r), subFn:r=>{ const me=appsBy(r,'meta'),sh=appsBy(r,'sheet'),ot=appsBy(r,'other'); const p=[me+' Meta',sh+' Sheet']; if(ot) p.push(ot+' übrige'); return p.join(' · '); }},
@@ -34773,6 +34773,12 @@ function RecruitingMarketingView({employees}){
     if(!c.first||x.date<c.first)c.first=x.date; if(!c.last||x.date>c.last)c.last=x.date; });
   const camps=Object.values(campMap).sort((a,b)=>b.spend-a.spend);
   const nCamp=camps.filter(c=>c.spend>0).length;
+  // Kampagnen-CPC + Summenzeile: CPC je Kampagne (Ausgaben÷Klicks), guenstigste als Referenz (Aufschlag der
+  // anderen sichtbar machen — der Sprung 7ct -> 13ct soll auffallen), plus Gesamtsumme ueber alle Kampagnen.
+  const cpcOf=c=>c.clicks>0?c.spend/c.clicks:null;
+  const campCpcMin=(()=>{ const v=camps.map(cpcOf).filter(x=>x!=null); return v.length?Math.min(...v):null; })();
+  const campTot=camps.reduce((t,c)=>({spend:t.spend+(c.spend||0),impr:t.impr+(c.impr||0),clicks:t.clicks+(c.clicks||0),reach:t.reach+(c.reach||0)}),{spend:0,impr:0,clicks:0,reach:0});
+  const campCpcTot=campTot.clicks>0?campTot.spend/campTot.clicks:null;
   const latestMeta=(rows||[]).reduce((m,x)=>(x.datasource==='facebook'&&(!m||x.date>m))?x.date:m,null);
   // Instagram organisch: tägliche Reichweite im Zeitraum + größter Tagesrückgang.
   const igDays=instaIn(cur).slice().sort((a,b)=>a.date-b.date);
@@ -34844,25 +34850,47 @@ function RecruitingMarketingView({employees}){
           </div>
           {nCamp>1 && <div style={{marginTop:12,padding:'10px 14px',borderRadius:10,background:'#fffbeb',border:'1px solid #fde68a',color:'#b45309',fontSize:12,fontWeight:700}}>⚠ In diesem Zeitraum liefen {nCamp} Kampagnen gleichzeitig — die Kosten je Bewerbung sind dann nur grob, weil sich Bewerbungen nicht einer Kampagne zuordnen lassen.</div>}
           {camps.length>0 && <div style={{marginTop:22}}>
-            <div style={{fontSize:14,fontWeight:800,marginBottom:8}}>Kampagnen</div>
-            <div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:13,minWidth:640}}>
-              <thead><tr style={{color:'var(--muted)'}}>
-                <th style={{textAlign:'left',padding:'6px 8px',fontWeight:700}}>Kampagne</th>
-                <th style={{textAlign:'left',padding:'6px 8px',fontWeight:700}}>Zeitraum</th>
-                {['Ausgaben','Einblendungen','Klicks','Reichweite','Klickpreis'].map(h=><th key={h} style={{textAlign:'right',padding:'6px 8px',fontWeight:700}}>{h}</th>)}
+            <div style={{display:'flex',alignItems:'baseline',gap:10,marginBottom:8,flexWrap:'wrap'}}>
+              <div style={{fontSize:14,fontWeight:800}}>Kampagnen</div>
+              {camps.length>1 && <div style={{fontSize:11,fontWeight:800,color:'#b45309',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:20,padding:'1px 9px'}}>{camps.length} gleichzeitig</div>}
+            </div>
+            <div style={{border:'1px solid var(--border)',borderRadius:14,background:'var(--card)',overflow:'hidden'}}>
+            <div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:13,minWidth:660}}>
+              <thead><tr style={{background:'var(--surface-2)'}}>
+                {[['Kampagne','left'],['Zeitraum','left'],['Ausgaben','right'],['Einblendungen','right'],['Klicks','right'],['Reichweite','right'],['Klickpreis','right']].map(([h,al])=><th key={h} style={{textAlign:al,padding:'9px 12px',fontSize:10.5,fontWeight:800,textTransform:'uppercase',letterSpacing:'.05em',color:'var(--muted)',whiteSpace:'nowrap'}}>{h}</th>)}
               </tr></thead>
-              <tbody>{camps.map((c,i)=>{ const active=c.last&&latestMeta&&c.last.getTime()===latestMeta.getTime(); const cpc=c.clicks>0?c.spend/c.clicks:null;
+              <tbody>
+                {camps.length>1 && <tr style={{borderTop:'1px solid var(--border)',background:'var(--surface-2)',fontWeight:800}}>
+                  <td style={{padding:'10px 12px'}}>Summe · alle Kampagnen</td>
+                  <td style={{padding:'10px 12px',color:'var(--muted)',whiteSpace:'nowrap',fontSize:12}}>{fmtD(camps.reduce((m,c)=>(!m||c.first<m)?c.first:m,null))} – {fmtD(camps.reduce((m,c)=>(!m||c.last>m)?c.last:m,null))}</td>
+                  <td style={{padding:'10px 12px',textAlign:'right',fontFamily:'var(--mono)'}}>{eur(campTot.spend)}</td>
+                  <td style={{padding:'10px 12px',textAlign:'right',fontFamily:'var(--mono)'}}>{int(campTot.impr)}</td>
+                  <td style={{padding:'10px 12px',textAlign:'right',fontFamily:'var(--mono)'}}>{int(campTot.clicks)}</td>
+                  <td style={{padding:'10px 12px',textAlign:'right',fontFamily:'var(--mono)'}}>{int(campTot.reach)}</td>
+                  <td style={{padding:'10px 12px',textAlign:'right',fontFamily:'var(--mono)'}}>{campCpcTot==null?'—':eur(campCpcTot)}</td>
+                </tr>}
+                {camps.map((c,i)=>{ const active=c.last&&latestMeta&&c.last.getTime()===latestMeta.getTime(); const cpc=cpcOf(c);
+                const multi=camps.length>1;
+                const isMin=multi&&cpc!=null&&campCpcMin!=null&&cpc<=campCpcMin*1.001;
+                const cpcCol=(cpc==null||!multi)?'var(--text)':isMin?'#059669':(cpc>=campCpcMin*1.3?'#dc2626':'#b45309');
+                const cpcUp=(multi&&cpc!=null&&campCpcMin!=null&&campCpcMin>0&&!isMin)?('+'+Math.round((cpc/campCpcMin-1)*100)+' %'):null;
+                const pillBg=cpcCol==='#dc2626'?'#fef2f2':'#fffbeb', pillBd=cpcCol==='#dc2626'?'#fecaca':'#fde68a';
                 return <tr key={i} style={{borderTop:'1px solid var(--border)'}}>
-                  <td style={{padding:'6px 8px',fontWeight:700}}>{c.name}{active&&<span style={{marginLeft:8,fontSize:10,fontWeight:800,color:'#059669',background:'#ecfdf5',border:'1px solid #a7f3d0',borderRadius:20,padding:'1px 7px'}}>aktiv</span>}</td>
-                  <td style={{padding:'6px 8px',color:'var(--muted)',whiteSpace:'nowrap'}}>{fmtD(c.first)} – {fmtD(c.last)}</td>
-                  <td style={{padding:'6px 8px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:700}}>{eur(c.spend)}</td>
-                  <td style={{padding:'6px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{int(c.impr)}</td>
-                  <td style={{padding:'6px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{int(c.clicks)}</td>
-                  <td style={{padding:'6px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{int(c.reach)}</td>
-                  <td style={{padding:'6px 8px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:700}}>{cpc==null?'—':eur(cpc)}</td>
+                  <td style={{padding:'10px 12px',fontWeight:700}}>{c.name}{active&&<span style={{marginLeft:8,fontSize:10,fontWeight:800,color:'#059669',background:'#ecfdf5',border:'1px solid #a7f3d0',borderRadius:20,padding:'1px 7px'}}>aktiv</span>}</td>
+                  <td style={{padding:'10px 12px',color:'var(--muted)',whiteSpace:'nowrap',fontSize:12}}>{fmtD(c.first)} – {fmtD(c.last)}</td>
+                  <td style={{padding:'10px 12px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:700}}>{eur(c.spend)}</td>
+                  <td style={{padding:'10px 12px',textAlign:'right',fontFamily:'var(--mono)'}}>{int(c.impr)}</td>
+                  <td style={{padding:'10px 12px',textAlign:'right',fontFamily:'var(--mono)'}}>{int(c.clicks)}</td>
+                  <td style={{padding:'10px 12px',textAlign:'right',fontFamily:'var(--mono)'}}>{int(c.reach)}</td>
+                  <td style={{padding:'10px 12px',textAlign:'right',whiteSpace:'nowrap'}}>
+                    <span style={{fontFamily:'var(--mono)',fontWeight:800,color:cpcCol}}>{cpc==null?'—':eur(cpc)}</span>
+                    {cpcUp&&<span style={{marginLeft:6,fontSize:10,fontWeight:800,color:cpcCol,background:pillBg,border:'1px solid '+pillBd,borderRadius:20,padding:'1px 6px'}}>{cpcUp}</span>}
+                    {isMin&&<span style={{marginLeft:6,fontSize:10,fontWeight:800,color:'#059669',background:'#ecfdf5',border:'1px solid #a7f3d0',borderRadius:20,padding:'1px 6px'}}>günstigste</span>}
+                  </td>
                 </tr>; })}</tbody>
             </table></div>
-            <div style={{fontSize:11,color:'var(--muted)',marginTop:6}}>Klickpreis (CPC) = Ausgaben ÷ Klicks. „aktiv" = Kampagne mit Daten am letzten Importtag ({fmtD(latestMeta)}).</div>
+            </div>
+            <div style={{fontSize:11,color:'var(--muted)',marginTop:8}}>Klickpreis (CPC) = Ausgaben ÷ Klicks. Bei mehreren Kampagnen: <b style={{color:'#059669'}}>grün</b> = günstigste, roter Chip <b>+X %</b> = Aufschlag der teureren gegenüber ihr. „aktiv" = Kampagne mit Daten am letzten Importtag ({fmtD(latestMeta)}).</div>
           </div>}
           {igDays.length>0 && <div style={{marginTop:22}}>
             <div style={{display:'flex',alignItems:'baseline',gap:12,flexWrap:'wrap',marginBottom:8}}>
