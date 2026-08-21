@@ -12730,9 +12730,13 @@ function SimpleShiftView({employees, projects, team, showToast}){
   // Diagnose-Selbsttest: was liefert employees_masked in DIESER Session wirklich? (unabhaengig vom employees-Prop,
   // das ueber den globalen Ladepfad kommt). Trennt "RLS liefert nichts" von "Ladepfad kommt nicht an".
   const [diagProbe,setDiagProbe]=useState(null);
-  useEffect(()=>{ let a=true; (async()=>{
-    try{ const {count,error}=await sb.from('employees_masked').select('id',{count:'exact',head:true});
-      if(a) setDiagProbe(error?{err:(error.message||String(error))}:{count:count});
+  useEffect(()=>{ let a=true;
+    const timeout=new Promise(res=>setTimeout(()=>res({__timeout:true}),5000));
+    (async()=>{
+    try{ const r=await Promise.race([ sb.from('employees_masked').select('id',{count:'exact',head:true}), timeout ]);
+      if(!a) return;
+      if(r&&r.__timeout){ setDiagProbe({err:'keine Antwort nach 5s (Timeout)'}); return; }
+      setDiagProbe(r.error?{err:(r.error.message||String(r.error))}:{count:r.count});
     }catch(e){ if(a) setDiagProbe({err:(e&&e.message)||String(e)}); }
   })(); return ()=>{a=false;}; },[]);
   const [weekStart,setWeekStart]=useState(()=>mondayOf(new Date()));
@@ -29271,11 +29275,18 @@ async function loadEmployeesFromDB(){
   // Über die maskierende View (employees_masked): Management/Finance sehen volle Werte,
   // HR bekommt Gehalt/Bank/Vertrag der geschützten Personen serverseitig als NULL (+ _masked-Flag).
   try{
-    const {data, error} = await sb.from('employees_masked').select('*').order('created_at', {ascending:true});
-    if(error){ console.error('[hr-mask] loadEmployeesFromDB FEHLER (View-Zugriff verweigert?):', error); return null; }
+    // 5s-Zeitgrenze: haengt die View-Abfrage (z. B. teurer Plan), nicht ewig warten — abbrechen und als
+    // Fehler (null) melden, damit der Aufrufer erneut versucht bzw. das sichtbare Banner zeigt statt leerer UI.
+    const ctrl = (typeof AbortController!=='undefined') ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(()=>ctrl.abort(), 5000) : null;
+    let q = sb.from('employees_masked').select('*').order('created_at', {ascending:true});
+    if(ctrl) q = q.abortSignal(ctrl.signal);
+    const {data, error} = await q;
+    if(timer) clearTimeout(timer);
+    if(error){ console.error('[hr-mask] loadEmployeesFromDB FEHLER (View/Timeout/Zugriff?):', error); return null; }
     console.log('[hr-mask] employees_masked geladen:', (data||[]).length, 'Zeilen');   // 0 = View-where (is_hr/mgmt/finance) greift nicht; 66 = ok
     return (data || []).map(empWithExtra);
-  }catch(e){ console.error('[hr-mask] loadEmployeesFromDB', e); return null; }
+  }catch(e){ console.error('[hr-mask] loadEmployeesFromDB (Abbruch/Timeout?)', e); return null; }
 }
 
 // Etappe 2: Projekte relational aus Supabase laden + zum verschachtelten Consumer-Shape
