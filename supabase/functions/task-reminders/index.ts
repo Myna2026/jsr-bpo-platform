@@ -71,6 +71,7 @@ async function cliqDM(email:string|undefined, text:string){ if(!MAKE_CLIQ) retur
 
 Deno.serve(async (req)=>{
   const force = new URL(req.url).searchParams.get('force')==='1';   // manueller Test ausserhalb der Slots
+  const only  = new URL(req.url).searchParams.get('only') || '';    // gezielter Test: nur diese uid ODER E-Mail
   const berlinHour = Number(new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Berlin',hour:'2-digit',hour12:false}).format(new Date()));
   if(![9,12,16].includes(berlinHour) && !force) return json({skipped:'off-hours', berlinHour});
 
@@ -104,6 +105,7 @@ Deno.serve(async (req)=>{
   const results:any[]=[];
   for(const u of (uRes.data||[])){
     if(u.active===false) continue;
+    if(only && u.user_id!==only && (emailBy[u.user_id]||'').toLowerCase()!==only.toLowerCase()) continue;
     const roles=taskRolesOf(u); if(!roles.length) continue;
     const inst=effInstances(u.role_keys||[], (aRes.data||[]).filter((a:any)=>a.user_id===u.user_id)).filter(t=>!t.auto && winActive(t));
     const open=inst.filter(t=>!isDone(u.user_id,t));
