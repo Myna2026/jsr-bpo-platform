@@ -64,6 +64,8 @@ wenn moeglich GENAU als "bereich/unterbereich", sonst nur "bereich". Bereiche un
 Beispiel: "wer war diesen Monat krank" -> areas = ["abwesenheiten/krankheit","mitarbeiter/stammdaten"].
 
 ═══ WAS ES GIBT UND WO ES STEHT (nur diese Tabellen sind erlaubt) ═══
+DATENSTAND: Das System sammelt erst seit wenigen Wochen (Kern KW29-34/2026). Bei Fragen nach langen
+Zeitraeumen/Jahresverlauf, fuer die nur wenige Wochen vorliegen: Abfrage trotzdem bauen, aber 'warning' setzen.
 Bereich MITARBEITER:
 - employees: alle Leute. id, first_name, last_name, status (active=aktiv, training=in Schulung, inactive=pausiert,
   contract=Vertrag unterschrieben, terminated_*=gekuendigt), position (Agent/Senior Agent/ASP/Supervisor/
@@ -88,21 +90,35 @@ Bereich KENNZAHLEN:
 - kpi_config: Definition jeder Kennzahl. id (z.B. 'kpi_1784709865565'), name, skill, project_id, unit,
   level ('agent'=je Person, 'team'=je Team). Die richtige Kennzahl IMMER ueber die id aus dem Glossar unten,
   nie ueber den Namen raten.
-- kpi_entries: Kennzahl-Wert JE PERSON je Woche (emp_id, kpi_id, value, kw, year).
-- kpi_project_entries: Kennzahl-Wert JE TEAM (project_id, skill, kpi_id, value, kw ODER month, year).
-- weekly_hours: gelieferte Stunden je Person/Woche (project_id, employee_id, skill, kw, year, hours, sales_calls).
-- weekly_calls: Call-Zahlen je Person/Woche (employee_id, kw, year, answered, avg_handle_sec, avg_acw_sec).
-- weekly_gauges: CSAT je Person/Woche (employee_id, kw, year, csat, anzahl).
-- report_forecast (fc_hours/planned_hours je Projekt/Skill/KW), report_longterm (12-Monats-Modell, rows jsonb),
-  report_measures (Massnahmen je Projekt/Skill).
+- kpi_entries: Kennzahl-Wert JE PERSON je Woche (emp_id, kpi_id, value, kw, year). Gepflegt ab ~KW29/2026,
+  dicht erst ab KW32. Fragen ueber lange Zeitraeume/Jahresverlauf sind sinnlos -> dann trotzdem bauen + 'warning'.
+- kpi_project_entries: Kennzahl-Wert JE TEAM (project_id, skill, kpi_id, value, kw ODER month, year). Wenige Eintraege.
+- IMPORT-KENNZAHLEN (aus woechentlichen Datei-Importen, gut abfragbar; Zeitachse immer kw + year):
+  - weekly_hours: geleistete Arbeitsstunden je Person/Woche. project_id, employee_id, skill, kw, year,
+    hours (geleistete Stunden), pause_hours (Pausenstunden), sales_calls. Abdeckung ab KW27/2026 (~8 Wochen).
+  - weekly_calls: Anrufe je Person/Woche. answered (angenommene Anrufe), outbound, no_answer,
+    avg_handle_sec (Ø Bearbeitungszeit Sek.), avg_talk_sec (Ø Gespraech), avg_hold_sec (Ø Halten),
+    avg_acw_sec (Ø Nachbearbeitung). NUR KW32-34/2026 (wenige Wochen) -> keine Trends/Jahresverlauf, sonst 'warning'.
+  - weekly_gauges: Kundenzufriedenheit je Person/Woche. csat (CSAT in %), nps, gesamt_pct, anzahl (Anzahl
+    Bewertungen), dauer_sec. NUR KW32-34/2026 -> gleiche Warnung wie weekly_calls.
+- report_forecast: geplante Stunden je Projekt/Skill/KW (fc_hours = Forecast, planned_hours = geplant). Gut gefuellt.
+- report_longterm: 12-Monats-Kapazitaetsmodell, NUR 2 Zeilen (HolidayCheck Sales + Support). KEINE Spalten je
+  Kennzahl! Die 24 Kennzahlen stehen als jsonb-ARRAY in der Spalte rows (wie employees.absences). Jeder
+  Array-Eintrag: label (Name der Zeile, z.B. 'Forecast (Hours)'), m (Array mit 12 Monatswerten ab start_month).
+  Mit jsonb_array_elements(rows) entpacken. Beispiel (Forecast-Stunden, 3. Modellmonat):
+    select project_id, skill, r->>'label' kennzahl, (r->'m'->>2)::numeric wert
+    from report_longterm, jsonb_array_elements(rows) r where r->>'label' = 'Forecast (Hours)';
+  Nur bei ausdruecklichen Langfrist-/Kapazitaetsfragen; sonst report_forecast.
+- report_measures: derzeit LEER (keine Daten) -> Fragen dazu nicht beantwortbar (action='cannot').
 Bereich BEWERBER:
 - cvs: Bewerber im Recruiting-Trichter. first_name, last_name, status, source ('meta'=Anzeigen/'Google Sheet'/
   'HR'/...), cv_date, language_level, available_from. windsor_leads: Rohdaten der Meta-Bewerbungen.
 Bereich SCHICHTEN:
 - shift_assignments: Schichtplan (employee_id, work_date, shift, net_hours). shift_checkins: Ist-Anwesenheit.
 Bereich CALLQUALITAET:
-- call_criteria/call_samples/call_scores: Call-Bewertungen (call_samples.employee_id, sampled_date, kw, year,
-  total_pct, raw_points, compliance_failed).
+- call_criteria: definierte Bewertungskriterien (vorhanden). ABER call_samples UND call_scores sind derzeit
+  LEER — es wurden noch KEINE Calls bewertet. Fragen nach Call-Bewertungen / besten Agenten nach Qualitaet
+  koennen aktuell NICHT beantwortet werden (action='cannot', freundlich erklaeren: noch keine Bewertungen erfasst).
 Bereich IMPORTE:
 - data_imports: Protokoll der Datei-Importe (project_id, source_type, kw, year, status, created_at).
 - upload_schedule: welche Datei in welchem Rhythmus faellig ist.
