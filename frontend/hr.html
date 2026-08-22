@@ -35323,6 +35323,90 @@ const NLQ_KW=new Set(('with select from where group by order having join left ri
   'nullif greatest least cast extract interval date_trunc date_part age now current_date current_timestamp '+
   'true false ilike round floor ceil abs').split(' '));
 const NLQ_COL={comment:'#5b6b86',string:'#7ee7a2',number:'#f5b942',keyword:'#3ec5f0',func:'#c4a7fb',punct:'#8aa0bd',ident:'#dbe4f0'};
+// Optionen/Alternativen der KI robust zu einem String-Array machen: die Edge Function/Claude liefert mal ein
+// Array (aus Strings ODER Objekten {label/text/value}), mal einen einzelnen String ("A | B"), mal null. Ohne
+// Normalisierung crasht .map/.join (Bug 2026-08-22: "stage.options.map is not a function"). Immer sauberes Array.
+function nlqStrList(v){
+  if(v==null) return [];
+  const one=x=>{ if(x==null) return ''; if(typeof x==='string') return x.trim();
+    if(typeof x==='object') return String(x.label||x.text||x.value||x.name||'').trim();
+    return String(x).trim(); };
+  if(Array.isArray(v)) return v.map(one).filter(Boolean);
+  if(typeof v==='string'){ const s=v.trim(); return s?(s.indexOf('|')>=0?s.split('|').map(x=>x.trim()).filter(Boolean):[s]):[]; }
+  if(typeof v==='object') return Object.values(v).map(one).filter(Boolean);
+  return [];
+}
+// Ergebnis-Zahl formatieren (de-DE, Tausendertrennung; Dezimalstellen nach Groesse). Nicht-Zahl -> String.
+function nlqNum(v){
+  if(v==null||v==='') return '';
+  const n=typeof v==='number'?v:((typeof v==='string'&&v.trim()!==''&&!isNaN(Number(v)))?Number(v):null);
+  if(n==null) return String(v);
+  const a=Math.abs(n); const dec=Number.isInteger(n)?0:(a>=100?0:(a>=10?1:2));
+  return n.toLocaleString('de-DE',{minimumFractionDigits:0,maximumFractionDigits:dec});
+}
+// Ist Spalte c ueber ALLE Zeilen numerisch? (Zahl oder numerischer String; mind. ein Wert vorhanden)
+function nlqIsNumCol(rows,c){ let any=false; for(const r of rows){ const v=r[c]; if(v==null||v==='') continue; any=true;
+  if(!(typeof v==='number'||(typeof v==='string'&&v.trim()!==''&&!isNaN(Number(v))))) return false; } return any; }
+// Adaptive Ergebnisdarstellung: richtet sich nach dem, was herauskommt — eine Zahl, eine Rangliste, ein
+// Verlauf, sonst eine (verbesserte) Tabelle. Reines SVG/CSS, funktioniert Desktop + mobil (Karten/Balken
+// stapeln, Diagramm skaliert, nur die Fallback-Tabelle scrollt waagrecht).
+function nlqRenderResult(rows, cols, chart){
+  const numCols=cols.filter(c=>nlqIsNumCol(rows,c));
+  const strCols=cols.filter(c=>numCols.indexOf(c)<0);
+  // 1) Eine Zeile -> grosse Zahl(en) statt Tabelle
+  if(rows.length===1){
+    const r=rows[0];
+    if(cols.length===1){ const c=cols[0], isNum=numCols.length===1;
+      return <div className="nlq-big"><div className="nlq-bigcard solo">
+        <div className="nlq-big-l">{c}</div>
+        <div className={'nlq-big-v'+(isNum?' num':'')} style={{fontSize:'clamp(34px,10vw,54px)'}}>{isNum?nlqNum(r[c]):String(r[c]==null?'':r[c])}</div>
+      </div></div>;
+    }
+    return <div className="nlq-big">{cols.map(c=>{ const isNum=numCols.indexOf(c)>=0;
+      return <div key={c} className="nlq-bigcard">
+        <div className="nlq-big-l">{c}</div>
+        <div className={'nlq-big-v'+(isNum?' num':'')} style={{fontSize:'clamp(20px,6vw,32px)'}}>{isNum?nlqNum(r[c]):String(r[c]==null?'':r[c])}</div>
+      </div>; })}</div>;
+  }
+  // 2) Zeitreihe (KI-Hinweis line) -> Flaechenverlauf
+  if(chart&&chart.type==='line'&&rows.length>1){
+    return <div className="nlq-chartcard">
+      <HoverChart data={rows.map(r=>Number(r[chart.y])||0)} labels={rows.map(r=>String(r[chart.x]))} color="#0F5661" kind="area" h={170} fmt={v=>nlqNum(v)}/>
+      <div className="nlq-chart-cap">{chart.y} über {chart.x}</div>
+    </div>;
+  }
+  // 3) Rangliste: 1 Beschriftung + 1 Zahl -> sortierte Balken, Spitze hervorgehoben
+  if(rows.length>1&&cols.length===2&&numCols.length===1&&strCols.length===1){
+    const lc=strCols[0], vc=numCols[0];
+    const max=Math.max(1,...rows.map(r=>Math.abs(Number(r[vc])||0)));
+    const CAP=25, show=rows.slice(0,CAP);
+    return <div>
+      <div className="nlq-bars">{show.map((r,i)=>{ const v=Number(r[vc])||0, w=Math.max(2,Math.round(Math.abs(v)/max*100));
+        return <div key={i} className={'nlq-bar-row'+(i===0?' top':'')}>
+          <div className="nlq-bar-fill" style={{width:w+'%'}}/>
+          <span className="nlq-bar-rank">{i+1}</span>
+          <span className="nlq-bar-lbl">{String(r[lc]==null?'':r[lc])}</span>
+          <span className="nlq-bar-val">{nlqNum(v)}</span>
+        </div>; })}</div>
+      {rows.length>CAP&&<div style={{fontSize:11,color:'var(--muted)',marginTop:6}}>… und {rows.length-CAP} weitere — vollständig über „Als Excel".</div>}
+    </div>;
+  }
+  // 4) Kategorie-Vergleich (KI-Hinweis bar) -> Balkendiagramm
+  if(chart&&chart.type==='bar'&&rows.length>1){
+    return <div className="nlq-chartcard">
+      <HoverChart data={rows.map(r=>Number(r[chart.y])||0)} labels={rows.map(r=>String(r[chart.x]))} color="#0F5661" kind="bar" h={170} fmt={v=>nlqNum(v)}/>
+      <div className="nlq-chart-cap">{chart.y} über {chart.x}</div>
+    </div>;
+  }
+  // 5) Fallback: verbesserte Tabelle (Zahlen rechts, Tausender, Zebra, sticky Kopf)
+  return <div style={{overflow:'auto',maxHeight:460,border:'1px solid var(--border)',borderRadius:12}}>
+    <table className="nlq-table">
+      <thead><tr>{cols.map(c=><th key={c} className={numCols.indexOf(c)>=0?'num':''}>{c}</th>)}</tr></thead>
+      <tbody>{rows.map((r,i)=><tr key={i}>{cols.map(c=>{ const isNum=numCols.indexOf(c)>=0;
+        return <td key={c} className={isNum?'num':''}>{r[c]==null?'':(isNum?nlqNum(r[c]):(typeof r[c]==='object'?JSON.stringify(r[c]):String(r[c])))}</td>; })}</tr>)}</tbody>
+    </table>
+  </div>;
+}
 function nlqTokenize(sql){
   const out=[]; const re=/(--[^\n]*)|('(?:''|[^'])*')|(\b\d+(?:\.\d+)?\b)|([A-Za-z_][A-Za-z0-9_$]*)|(\s+)|([(),.;:*=<>!+\/%|~^-]+)|([\s\S])/g;
   let m,k=0;
@@ -35366,6 +35450,31 @@ const NLQ_CSS=`
 .nlq-result-t{font-size:15px;font-weight:800;color:var(--text);}
 .nlq-result-n{font-size:12px;color:var(--muted);font-weight:600;}
 .nlq-vorgang-h{font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px;}
+/* Adaptive Ergebnisdarstellung (Praesentationsniveau, SVG/CSS, Desktop + mobil) */
+.nlq-big{display:flex;flex-wrap:wrap;gap:12px;}
+.nlq-bigcard{flex:1 1 150px;min-width:0;border:1px solid var(--border);border-radius:16px;background:var(--card);padding:16px 18px;box-shadow:0 8px 26px rgba(2,6,23,.06);}
+.nlq-bigcard.solo{flex-basis:100%;text-align:center;padding:30px 18px;}
+.nlq-big-l{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:6px;overflow-wrap:anywhere;}
+.nlq-big-v{font-weight:800;line-height:1.05;color:var(--text);font-variant-numeric:tabular-nums;overflow-wrap:anywhere;}
+.nlq-big-v.num{color:#0F5661;}
+.nlq-bars{display:flex;flex-direction:column;gap:3px;border:1px solid var(--border);border-radius:16px;background:var(--card);padding:8px;box-shadow:0 8px 26px rgba(2,6,23,.06);}
+.nlq-bar-row{position:relative;display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:11px;overflow:hidden;}
+.nlq-bar-fill{position:absolute;left:0;top:0;bottom:0;border-radius:11px;background:rgba(14,165,165,.13);z-index:0;transition:width .4s ease;}
+.nlq-bar-row.top .nlq-bar-fill{background:rgba(14,165,165,.24);}
+.nlq-bar-rank{position:relative;z-index:1;flex:0 0 22px;font-size:11.5px;font-weight:800;color:var(--muted);font-variant-numeric:tabular-nums;}
+.nlq-bar-row.top .nlq-bar-rank{color:#0F5661;}
+.nlq-bar-lbl{position:relative;z-index:1;flex:1;min-width:0;font-size:13.5px;font-weight:600;color:var(--text);overflow-wrap:anywhere;}
+.nlq-bar-row.top .nlq-bar-lbl{font-weight:800;}
+.nlq-bar-val{position:relative;z-index:1;flex:0 0 auto;font-size:16px;font-weight:800;color:var(--text);font-variant-numeric:tabular-nums;}
+.nlq-bar-row.top .nlq-bar-val{color:#0F5661;}
+.nlq-chartcard{border:1px solid var(--border);border-radius:16px;background:var(--card);padding:14px 16px;box-shadow:0 8px 26px rgba(2,6,23,.06);}
+.nlq-chart-cap{font-size:11px;color:var(--muted);margin-top:6px;}
+.nlq-table{border-collapse:collapse;font-size:13.5px;width:100%;}
+.nlq-table th{position:sticky;top:0;background:var(--surface-2);padding:9px 12px;text-align:left;font-weight:700;border-bottom:1px solid var(--border);white-space:nowrap;font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);}
+.nlq-table th.num,.nlq-table td.num{text-align:right;font-variant-numeric:tabular-nums;}
+.nlq-table td{padding:9px 12px;white-space:nowrap;border-top:1px solid var(--border);}
+.nlq-table td.num{font-weight:700;}
+.nlq-table tbody tr:nth-child(even){background:rgba(100,116,139,.06);}
 .nlq-code{position:relative;background:#0b1120;border:1px solid #1e2b45;border-radius:14px;overflow:hidden;box-shadow:0 14px 46px rgba(2,6,23,.34);}
 .nlq-hd{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid #1a2540;background:#0d1728;}
 .nlq-dot{width:11px;height:11px;border-radius:50%;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);}
@@ -35676,8 +35785,8 @@ function NlQueryView({team}){
       const handle=ev=>{
         if(ev.t==='areas'){ setAreas(new Set(ev.v||[])); }
         else if(ev.t==='sql_delta'){ liveSql+=(ev.v||''); setStage({kind:'sql',sql:liveSql,streaming:true}); }
-        else if(ev.t==='clarify'||ev.action==='clarify'){ const q=ev.question||'Kannst du das noch etwas genauer sagen?'; const opts=(ev.options||[]); setStage({kind:'clarify',question:q,options:opts}); setMsgs([...nm,{role:'assistant',content:'Rückfrage: '+q+'\nOptionen: '+opts.join(' | ')}]); setTurns(t=>[...t,{who:'ai',text:q}]); }
-        else if(ev.t==='cannot'||ev.action==='cannot'){ const msg=ev.message||'Das lässt sich mit unseren Daten nicht beantworten.'; const alts=(ev.alternatives||[]); setStage({kind:'cannot',message:msg,alternatives:alts}); setMsgs([...nm,{role:'assistant',content:'Nicht beantwortbar: '+msg}]); setTurns(t=>[...t,{who:'ai',text:msg}]); }
+        else if(ev.t==='clarify'||ev.action==='clarify'){ const q=ev.question||'Kannst du das noch etwas genauer sagen?'; const opts=nlqStrList(ev.options); setStage({kind:'clarify',question:q,options:opts}); setMsgs([...nm,{role:'assistant',content:'Rückfrage: '+q+'\nOptionen: '+opts.join(' | ')}]); setTurns(t=>[...t,{who:'ai',text:q}]); }
+        else if(ev.t==='cannot'||ev.action==='cannot'){ const msg=ev.message||'Das lässt sich mit unseren Daten nicht beantworten.'; const alts=nlqStrList(ev.alternatives); setStage({kind:'cannot',message:msg,alternatives:alts}); setMsgs([...nm,{role:'assistant',content:'Nicht beantwortbar: '+msg}]); setTurns(t=>[...t,{who:'ai',text:msg}]); }
         else if(ev.t==='done'||ev.action==='sql'){ liveSql=ev.sql||liveSql; if(ev.areas) setAreas(new Set(ev.areas)); setStage({kind:'sql',sql:liveSql,explanation:ev.explanation||'',warning:ev.warning||null,chart:ev.chart||null,streaming:false}); setMsgs([...nm,{role:'assistant',content:'SQL:\n'+liveSql}]); }
         else if(ev.t==='error'||ev.error){ setErr(ev.error||'Es ist etwas schiefgelaufen.'); }
       };
@@ -35729,11 +35838,11 @@ function NlQueryView({team}){
 
       {stage&&stage.kind==='clarify'&&<div className="nlq-inline">
         <div className="nlq-inlabel">Wähle, was du meinst:</div>
-        {stage.options.map((o,i)=><button key={i} className="nlq-opt" onClick={()=>ask(o,true)} disabled={busy}>{o}</button>)}
+        {(Array.isArray(stage.options)?stage.options:[]).map((o,i)=><button key={i} className="nlq-opt" onClick={()=>ask(o,true)} disabled={busy}>{o}</button>)}
       </div>}
       {stage&&stage.kind==='cannot'&&<div className="nlq-inline">
         <div className="nlq-cannot">{stage.message}</div>
-        {stage.alternatives&&stage.alternatives.length>0&&<React.Fragment>
+        {Array.isArray(stage.alternatives)&&stage.alternatives.length>0&&<React.Fragment>
           <div className="nlq-inlabel">Das können wir dir stattdessen zeigen:</div>
           {stage.alternatives.map((a,i)=><button key={i} className="nlq-opt" onClick={()=>ask(a)} disabled={busy}>{a}</button>)}
         </React.Fragment>}
@@ -35756,17 +35865,8 @@ function NlQueryView({team}){
         {rows.length>0 && <span className="nlq-result-n">{rows.length} Zeile{rows.length!==1?'n':''}{rows.length>=1000?' (max. 1000)':''}</span>}
         {rows.length>0 && <button className="nlq-neu" style={{marginLeft:'auto'}} onClick={exportXlsx}>⬇ Als Excel</button>}
       </div>
-      {chart&&<div style={{border:'1px solid var(--border)',borderRadius:12,padding:'10px 12px',marginBottom:10,background:'var(--card)'}}>
-        <HoverChart data={rows.map(r=>Number(r[chart.y])||0)} labels={rows.map(r=>String(r[chart.x]))} color="#0F5661" kind={chart.type==='line'?'area':'bar'} h={120} fmt={v=>fmtNum(v,1)}/>
-        <div style={{fontSize:10.5,color:'var(--muted)',marginTop:4}}>{chart.y} über {chart.x}</div>
-      </div>}
       {rows.length>0
-        ? <div style={{overflow:'auto',maxHeight:460,border:'1px solid var(--border)',borderRadius:12}}>
-            <table style={{borderCollapse:'collapse',fontSize:12,width:'100%'}}>
-              <thead><tr>{cols.map(c=><th key={c} style={{position:'sticky',top:0,background:'var(--surface-2)',padding:'6px 10px',textAlign:'left',fontWeight:700,borderBottom:'1px solid var(--border)',whiteSpace:'nowrap'}}>{c}</th>)}</tr></thead>
-              <tbody>{rows.map((r,i)=><tr key={i} style={{borderTop:'1px solid var(--border)'}}>{cols.map(c=><td key={c} style={{padding:'5px 10px',whiteSpace:'nowrap',fontFamily:(typeof r[c]==='number')?'var(--mono)':'inherit'}}>{r[c]==null?'':(typeof r[c]==='object'?JSON.stringify(r[c]):String(r[c]))}</td>)}</tr>)}</tbody>
-            </table>
-          </div>
+        ? nlqRenderResult(rows, cols, chart)
         : <div className="sp-empty">Dazu haben wir nichts gefunden. Vielleicht sind für den gewählten Zeitraum noch keine Zahlen erfasst.</div>}
     </div>}
 
