@@ -19,7 +19,9 @@ do $$
 declare t text; tbls text[] := array[
   'employees','kpi_config','kpi_entries','kpi_project_entries','weekly_hours','weekly_calls',
   'weekly_gauges','report_forecast','report_longterm','report_fte','report_measures','cvs',
-  'absences','shift_assignments','call_criteria','call_samples','call_scores','windsor_marketing','projects'];
+  'shift_assignments','call_criteria','call_samples','call_scores','windsor_marketing','projects'];
+  -- 'absences' bewusst NICHT gelistet: es gibt keine Tabelle absences, Abwesenheiten stehen als
+  -- jsonb-Array in employees.absences (ueber das employees-Grant lesbar via jsonb_array_elements).
 begin
   if not exists (select 1 from pg_roles where rolname='nlquery_ro') then create role nlquery_ro nologin; end if;
   execute 'alter role nlquery_ro bypassrls';

@@ -56,7 +56,7 @@ wenn moeglich GENAU als "bereich/unterbereich", sonst nur "bereich". Bereiche un
 - kennzahlen/je_ma (kpi_entries, weekly_hours/calls/gauges), kennzahlen/je_projekt (kpi_project_entries,
   report_forecast), kennzahlen/konfig (kpi_config)
 - bewerber/eingaenge (cvs), bewerber/meta (windsor_leads), bewerber/bewertungen (Tests/Status in cvs)
-- abwesenheiten/urlaub, abwesenheiten/krankheit, abwesenheiten/unbezahlt (Tabelle absences nach type)
+- abwesenheiten/urlaub, abwesenheiten/krankheit, abwesenheiten/unbezahlt (aus employees.absences[].type: vacation/sick/unpaid — KEINE eigene Tabelle)
 - schichten/plan (shift_assignments), schichten/checkin (shift_checkins)
 - callqualitaet/bewertung (call_scores, call_samples), callqualitaet/kriterien (call_criteria)
 - importe/uploads (data_imports), importe/zeitplan (upload_schedule)
@@ -73,9 +73,17 @@ Bereich MITARBEITER:
 - projects: id, name, client, skills, status. Projektname immer aus projects.name (join ueber employees.project_id).
 - report_fte: FTE-Standard je Mitarbeiter (project_id, employee_id, fte).
 Bereich ABWESENHEITEN:
-- absences: Abwesenheiten je Mitarbeiter (employee_id, type 'vacation'=Urlaub/'sick'=krank/'unpaid'=unbezahlt,
-  from, to, days). Krankheitstage/Urlaubstage kommen VON HIER. "oft krank diesen Monat" = absences type='sick'
-  im Monat je Mitarbeiter zaehlen/summieren.
+- Es gibt KEINE Tabelle 'absences' — Abfragen dagegen scheitern ("relation absences does not exist").
+  Abwesenheiten liegen als jsonb-ARRAY in der Spalte employees.absences. Jeder Array-Eintrag hat:
+  type ('vacation'=Urlaub / 'sick'=krank / 'unpaid'=unbezahlt), from (Start 'YYYY-MM-DD'), to (Ende),
+  days (Anzahl Werktage, Zahl), approved (bool).
+  IMMER mit jsonb_array_elements aus employees entpacken (coalesce gegen leere/NULL-Spalte).
+  Beispiel "wer war diesen Monat krank":
+    select e.first_name, e.last_name, sum((a->>'days')::numeric) as krank_tage
+    from employees e, jsonb_array_elements(coalesce(e.absences,'[]'::jsonb)) a
+    where a->>'type' = 'sick' and a->>'from' >= '2026-08-01' and a->>'from' <= '2026-08-31'
+    group by e.id, e.first_name, e.last_name;
+  Urlaub = type='vacation', unbezahlt = type='unpaid'. Krankheits-/Urlaubstage kommen VON HIER.
 Bereich KENNZAHLEN:
 - kpi_config: Definition jeder Kennzahl. id (z.B. 'kpi_1784709865565'), name, skill, project_id, unit,
   level ('agent'=je Person, 'team'=je Team). Die richtige Kennzahl IMMER ueber die id aus dem Glossar unten,
