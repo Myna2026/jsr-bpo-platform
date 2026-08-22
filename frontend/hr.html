@@ -7734,6 +7734,7 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW}){
   const [myAssign,setMyAssign] = useState([]);        // task_assignments des eigenen Zugangs (Overlay)
   const [allUsers,setAllUsers] = useState(null);      // fuer Zusammenschau: alle Zugaenge (role_keys, active, mgmt_external)
   const [allAssign,setAllAssign] = useState([]);      // fuer Zusammenschau: alle task_assignments
+  const [takeover,setTakeover] = useState({});        // Vertretung: task_key|date|orig|project -> {by, byName}
 
   // Erledigt-Merker JE INSTANZ (task_key|date|assignee|project). Legacy-Zeilen (assignee/project NULL) bleiben
   // lesbar -> heutige Alt-Haken erscheinen weiter erledigt, bis die neuen Pro-Person-Zeilen sie ersetzen.
@@ -7741,6 +7742,12 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW}){
   const loadDone = async()=>{
     try{ const {data,error}=await sb.from('daily_tasks_done').select('task_key,date,assignee_user,project_id,done_by_name,done_at').in('date',[today,_monday]);
       if(error) return; const m={}; (data||[]).forEach(r=>{ m[doneKey(r.task_key,r.date,r.assignee_user,r.project_id)]={done_by_name:r.done_by_name,done_at:r.done_at,done_by:r.assignee_user}; }); setDone(m); }catch(e){}
+  };
+  // Vertretung (Schnitt 2b): wer ist fuer welche Instanz eingesprungen.
+  const takeKey=(task_key,date,orig,project)=>task_key+'|'+date+'|'+(orig||'')+'|'+(project||'');
+  const loadTakeover = async()=>{
+    try{ const {data}=await sb.from('task_takeover').select('task_key,date,orig_assignee,project_id,taken_over_by').in('date',[today,_monday]);
+      const m={}; (data||[]).forEach(r=>{ m[takeKey(r.task_key,r.date,r.orig_assignee,r.project_id)]={by:r.taken_over_by}; }); setTakeover(m); }catch(e){}
   };
   // Q4: Auto-Pflichttermine + aktuelles Monats-Vorkommen + Erledigt-Merker aus calendar_overrides laden.
   const loadAuto = async()=>{
@@ -7761,7 +7768,8 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW}){
       if(alive&&myUid){ setUid(myUid); try{ const {data:a}=await sb.from('task_assignments').select('*').eq('user_id',myUid); if(alive) setMyAssign(a||[]); }catch(e){} } }catch(e){} await loadDone(); })();
     loadAuto();
     const chan=sb.channel('daily-tasks').on('postgres_changes',{event:'*',schema:'public',table:'daily_tasks_done'},()=>{ loadDone(); })
-      .on('postgres_changes',{event:'*',schema:'public',table:'calendar_overrides'},()=>{ loadAuto(); }).subscribe();
+      .on('postgres_changes',{event:'*',schema:'public',table:'calendar_overrides'},()=>{ loadAuto(); })
+      .on('postgres_changes',{event:'*',schema:'public',table:'task_takeover'},()=>{ loadTakeover(); }).subscribe();
     (async()=>{ try{ const funnel=['cv_inbound','cv_accepted','cv_confirmed','invited','interview','selection1','selection2']; const {count}=await sb.from('cvs').select('id',{count:'exact',head:true}).in('status',funnel); if(alive) setCvCount(count||0); }catch(e){} })();
     (async()=>{ try{ const {count}=await sb.from('cvs').select('id',{count:'exact',head:true}).eq('status','cv_inbound'); if(alive) setCvInbound(count||0); }catch(e){} })();
     (async()=>{ try{ const {count}=await sb.from('cvs').select('id',{count:'exact',head:true}).in('status',['invited','interview']); if(alive) setCvInterview(count||0); }catch(e){} })();
@@ -7785,6 +7793,7 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW}){
         if(alive){ setStaff(s); setAllUsers(data||[]); }
       }catch(e){ if(alive) setStaff({management:true,hr:true,finance:true}); } })(); // Fallback: keine falsche „nicht besetzt"-Anzeige
       (async()=>{ try{ const {data}=await sb.from('task_assignments').select('*'); if(alive) setAllAssign(data||[]); }catch(e){} })();
+      loadTakeover();
     }
     return ()=>{ alive=false; try{ sb.removeChannel(chan); }catch(e){} };
   },[]);
@@ -7831,6 +7840,16 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW}){
     setBusy('');
   }
   const toggleTask = t => t.auto_key ? toggleAuto(t) : toggle(t);
+  const usersById = React.useMemo(()=>{ const m={}; (allUsers||[]).forEach(u=>{ if(u&&u.user_id) m[u.user_id]=u.full_name||''; }); return m; },[allUsers]);
+  // Vertretung (2b): uebernehmen (sichtbar) bzw. fremde Instanz erledigen/zuruecknehmen — Recht prueft der Server.
+  async function takeOver(u,t){ if(busy) return; setBusy(t.ik+'|'+u.user_id);
+    const {error}=await sb.rpc('task_take_over',{p_task_key:t.key,p_project_id:t.project_id||null,p_date:periodDate(t),p_orig_assignee:u.user_id});
+    if(error) window.alert('Übernehmen nicht möglich: '+(error.message||'DB')); else await loadTakeover();
+    setBusy(''); }
+  async function subDone(u,t,nd){ if(busy) return; setBusy(t.ik+'|'+u.user_id);
+    const {error}=await sb.rpc('task_toggle_done',{p_task_key:t.key,p_date:periodDate(t),p_assignee_user:u.user_id,p_project_id:t.project_id||null,p_done:nd});
+    if(error) window.alert('Nicht möglich: '+(error.message||'DB')); else await loadDone();
+    setBusy(''); }
 
   const counts=React.useMemo(()=>{
     const emp=(employees||[]).filter(e=>e&&['active','training','contract','inactive'].includes(e.status));
@@ -7944,17 +7963,21 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW}){
             <div style={{marginTop:16,padding:'16px',background:'#fff',border:'1px solid var(--border)',borderRadius:14}}>
               <div style={{fontSize:13,fontWeight:800,color:'var(--text)',margin:'0 0 10px'}}>{meta.icon} {meta.label} · heute <span style={{fontWeight:600,color:'var(--muted)'}}>— wer ist zuständig, was ist offen</span></div>
               {a.instances.length===0&&<div style={{fontSize:13,color:'var(--muted)'}}>Keine aktiven Aufgaben.</div>}
-              {a.instances.map((x,i)=>{ const t=x.t, isDone=instDone(x.u.user_id,t), dm=done[doneKey(t.key,periodDate(t),x.u.user_id,t.project_id)]; return (
+              {a.instances.map((x,i)=>{ const t=x.t, isDone=instDone(x.u.user_id,t), dm=done[doneKey(t.key,periodDate(t),x.u.user_id,t.project_id)];
+                const tk=takeover[takeKey(t.key,periodDate(t),x.u.user_id,t.project_id)], isMine=x.u.user_id===uid, bk=t.ik+'|'+x.u.user_id; return (
                 <div key={i} className={"dt-card"+(isDone?" done":"")} style={{marginBottom:8}}>
                   <div style={{flex:1,minWidth:0}}>
                     <div className="dt-title">{t.title}{t.project_id&&<span style={{fontSize:10,fontWeight:700,color:'#0369a1',background:'#f0f9ff',border:'1px solid #bae6fd',borderRadius:6,padding:'1px 6px',marginLeft:6}}>{projName(t.project_id)}</span>}{isWeekly(t)&&<span style={{fontSize:10,fontWeight:700,color:'#0369a1',background:'#f0f9ff',border:'1px solid #bae6fd',borderRadius:6,padding:'1px 6px',marginLeft:6}}>🗓 wöchentlich</span>}</div>
-                    <div className="dt-desc">zuständig: {x.u.full_name||'—'}</div>
+                    <div className="dt-desc">zuständig: {x.u.full_name||'—'}{tk?(' · 🤝 eingesprungen: '+(usersById[tk.by]||'jemand')):''}</div>
                     {isDone&&<div className="dt-doneby">✓ erledigt{dm&&dm.done_by_name?(' von '+dm.done_by_name):''}{dm&&dm.done_at?(', '+fmtTime(dm.done_at)+' Uhr'):''}</div>}
                   </div>
-                  <span style={{fontSize:12,fontWeight:700,color:isDone?'#15803d':'#d97706',whiteSpace:'nowrap',alignSelf:'center'}}>{isDone?'✓ erledigt':'○ offen'}</span>
+                  {isDone
+                    ? <button className="dt-toggle" disabled={busy===bk} onClick={()=>subDone(x.u,t,false)}>↩ Zurücknehmen</button>
+                    : (tk||isMine)
+                        ? <button className="dt-toggle" disabled={busy===bk} onClick={()=>subDone(x.u,t,true)}>✓ Erledigen</button>
+                        : <button className="dt-toggle" disabled={busy===bk} onClick={()=>takeOver(x.u,t)}>○ Übernehmen</button>}
                 </div>
               ); })}
-              <div style={{fontSize:11,color:'var(--muted)',marginTop:6}}>„Übernehmen" kommt mit der Vertretung (nächster Schnitt).</div>
             </div>
           ); })()}
         </div>
