@@ -69,9 +69,79 @@ async function slackDM(email:string|undefined, text:string){ if(!SLACK) return '
 async function cliqDM(email:string|undefined, text:string){ if(!MAKE_CLIQ) return 'no-make-webhook'; if(!email) return 'no-email';
   const r=await fetch(MAKE_CLIQ,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,text})}); return r.ok?'sent':'make:'+r.status; }
 
+// ── Upload-Faelligkeit (Schnitt 5b): originalgetreuer Port von computeUploadStatus/uploadTargetDone aus
+//    frontend/hr.html. Buckets overdue/today/week -> in die Erinnerung; done/upcoming/inactive -> nicht.
+const UPLOAD_LABEL:Record<string,string>={rohdaten:'Rohdaten-Excel',calls:'Call-CSV',gauges:'Gauges-Excel',booking_a:'Booking-Excel (Agent)',booking_week:'Booking-Team Woche',booking_month:'Booking-Team Monat',forecast_sales:'Forecast Woche · Sales',forecast_support:'Forecast Woche · Support',longterm:'Langzeit-Kapazität'};
+const CAL_MONTHS=['Januar','Februar','März','April','Mai','Juni','Juli','August','September','Oktober','November','Dezember'];
+function getISOWeek(date:Date){ const d=new Date(date); d.setHours(0,0,0,0); d.setDate(d.getDate()+4-(d.getDay()||7)); const ys=new Date(d.getFullYear(),0,1); return {kw:Math.ceil(((((+d)-(+ys))/86400000)+1)/7), year:d.getFullYear()}; }
+function isoWeekMonday(y:number,w:number){ const jan4=new Date(y,0,4); const dow=(jan4.getDay()||7); const wk1=new Date(jan4); wk1.setDate(jan4.getDate()-(dow-1)); const mon=new Date(wk1); mon.setDate(wk1.getDate()+(w-1)*7); return mon; }
+function uploadDueDate(iso:any,wd:number){ const mon=isoWeekMonday(iso.year,iso.kw); const d=new Date(mon); d.setDate(mon.getDate()+((wd||1)-1)); d.setHours(0,0,0,0); return d; }
+function uploadPrevWeek(iso:any){ const mon=isoWeekMonday(iso.year,iso.kw); const d=new Date(mon); d.setDate(mon.getDate()-7); return getISOWeek(d); }
+function uploadWeeksOfMonth(Y:number,M:number){ const set=new Set<number>(); const last=new Date(Y,M,0).getDate(); for(let d=1;d<=last;d++){ const w=getISOWeek(new Date(Y,M-1,d)); if(w.year===Y) set.add(w.kw); } return Array.from(set); }
+const dayDiff=(a:Date,b:Date)=>Math.floor(((+b)-(+a))/86400000);
+async function uploadPresent(fn:()=>any){ try{ const {count}=await fn(); return (count||0)>0; }catch(_e){ return false; } }
+async function uploadTargetDone(sb:any,key:string,projId:string,kw:number|null,year:number|null,month:number|null){
+  switch(key){
+    case 'rohdaten': return uploadPresent(()=>sb.from('weekly_hours').select('*',{count:'exact',head:true}).eq('project_id',projId).eq('kw',kw).eq('year',year));
+    case 'calls': return uploadPresent(()=>sb.from('weekly_calls').select('*',{count:'exact',head:true}).eq('project_id',projId).eq('kw',kw).eq('year',year));
+    case 'gauges': return uploadPresent(()=>sb.from('weekly_gauges').select('*',{count:'exact',head:true}).eq('project_id',projId).eq('kw',kw).eq('year',year));
+    case 'booking_a': return uploadPresent(()=>sb.from('kpi_entries').select('*',{count:'exact',head:true}).eq('kw',kw).eq('year',year).eq('source','import').eq('kpi_id','kpi_hc_open_bookings'));
+    case 'booking_week': return uploadPresent(()=>sb.from('kpi_project_entries').select('*',{count:'exact',head:true}).eq('project_id',projId).eq('kw',kw).eq('year',year).eq('source','import'));
+    case 'booking_month': return uploadPresent(()=>sb.from('kpi_project_entries').select('*',{count:'exact',head:true}).eq('project_id',projId).eq('month',month).eq('year',year).eq('source','import'));
+    case 'forecast_sales': return uploadPresent(()=>sb.from('report_forecast').select('*',{count:'exact',head:true}).eq('project_id',projId).eq('skill','sales').eq('kw',kw).eq('year',year));
+    case 'forecast_support': return uploadPresent(()=>sb.from('report_forecast').select('*',{count:'exact',head:true}).eq('project_id',projId).eq('skill','support').eq('kw',kw).eq('year',year));
+    case 'longterm': return uploadPresent(()=>sb.from('report_longterm').select('*',{count:'exact',head:true}).eq('project_id',projId));
+    default: return false;
+  }
+}
+async function computeUploadStatus(sb:any, cfg:any, projId:string, today:Date, lastMap:Record<string,Date>){
+  if(!cfg.active) return {bucket:'inactive',rel:''};
+  const grace=Number(cfg.grace_days)||0; const iso=getISOWeek(today);
+  if(cfg.cadence==='daily'){
+    const last=lastMap[cfg.source_type]||null;
+    if(!last) return {bucket:'overdue',rel:'noch nie geladen'};
+    const ld=new Date(last); ld.setHours(0,0,0,0); const gap=dayDiff(ld,today);
+    if(gap<=0) return {bucket:'done',rel:''};
+    if(gap<=grace) return {bucket:'today',rel:'zuletzt vor '+gap+' Tag'+(gap===1?'':'en')};
+    return {bucket:'overdue',rel:gap+' Tage kein Upload'};
+  }
+  if(cfg.cadence==='weekly_progressive'){
+    const done=await uploadTargetDone(sb,cfg.source_type,projId,iso.kw,iso.year,null); const rel='KW '+iso.kw;
+    if(done) return {bucket:'done',rel:''};
+    const last=lastMap[cfg.source_type]||null; let gap:number|null=null; if(last){ const ld=new Date(last); ld.setHours(0,0,0,0); gap=dayDiff(ld,today); }
+    const dow=(today.getDay()+6)%7;
+    if(dow<=1 || (gap!=null && gap<=grace)) return {bucket:'week',rel:rel+' offen'};
+    return {bucket:'overdue',rel:rel+' fehlt'};
+  }
+  if(cfg.cadence==='weekly_retro'){
+    const prev=uploadPrevWeek(iso); const done=await uploadTargetDone(sb,cfg.source_type,projId,prev.kw,prev.year,null); const rel='KW '+prev.kw; const due=uploadDueDate(iso,cfg.due_weekday);
+    if(done) return {bucket:'done',rel:''};
+    const overdueAt=new Date(due); overdueAt.setDate(due.getDate()+grace);
+    if(today>overdueAt) return {bucket:'overdue',rel};
+    if(today>=due) return {bucket:'today',rel};
+    return {bucket:'week',rel};
+  }
+  if(cfg.cadence==='monthly'){
+    const M=today.getMonth()+1, Y=today.getFullYear(); let done=false;
+    if(cfg.source_type==='booking_month') done=await uploadTargetDone(sb,'booking_month',projId,null,Y,M);
+    else if(cfg.source_type==='longterm') done=await uploadTargetDone(sb,'longterm',projId,null,Y,null);
+    else if(cfg.source_type==='forecast_sales'||cfg.source_type==='forecast_support'){ const kws=uploadWeeksOfMonth(Y,M); const skill=cfg.source_type==='forecast_sales'?'sales':'support'; done=await uploadPresent(()=>sb.from('report_forecast').select('*',{count:'exact',head:true}).eq('project_id',projId).eq('skill',skill).eq('year',Y).in('kw',kws)); }
+    else { const last=lastMap[cfg.source_type]; done=!!(last && last.getFullYear()===Y && last.getMonth()+1===M); }
+    const lastDay=new Date(Y,M,0).getDate(); const dd=Math.min(cfg.due_day||1,lastDay); const due=new Date(Y,M-1,dd); due.setHours(0,0,0,0); const rel=(CAL_MONTHS[M-1]||('Monat '+M));
+    if(done) return {bucket:'done',rel:''};
+    const overdueAt=new Date(due); overdueAt.setDate(due.getDate()+grace);
+    if(today>overdueAt) return {bucket:'overdue',rel};
+    if(today>=due) return {bucket:'today',rel};
+    if(getISOWeek(due).kw===iso.kw) return {bucket:'week',rel};
+    return {bucket:'upcoming',rel};
+  }
+  return {bucket:'inactive',rel:''};
+}
+
 Deno.serve(async (req)=>{
   const force = new URL(req.url).searchParams.get('force')==='1';   // manueller Test ausserhalb der Slots
   const only  = new URL(req.url).searchParams.get('only') || '';    // gezielter Test: nur diese uid ODER E-Mail
+  const dry   = new URL(req.url).searchParams.get('dry')==='1';     // berechnen, aber NICHT senden (Verifikation)
   const berlinHour = Number(new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Berlin',hour:'2-digit',hour12:false}).format(new Date()));
   if(![9,12,16].includes(berlinHour) && !force) return json({skipped:'off-hours', berlinHour});
 
@@ -80,13 +150,15 @@ Deno.serve(async (req)=>{
   const mon=new Date(now); mon.setDate(now.getDate()-((now.getDay()+6)%7)); const monday=isoLocal(mon);
   const monthWeek=Math.ceil(now.getDate()/7);
 
-  const [uRes, aRes, dRes, pRes, cRes, prRes] = await Promise.all([
+  const [uRes, aRes, dRes, pRes, cRes, prRes, usRes, uoRes] = await Promise.all([
     sb.from('app_users').select('user_id,full_name,role_keys,active,mgmt_external'),
     sb.from('task_assignments').select('*'),
     sb.from('daily_tasks_done').select('task_key,date,assignee_user,project_id').in('date',[today,monday]),
     sb.from('notify_prefs').select('user_id,channel'),
     sb.from('app_config').select('value').eq('key','jsr_notify_channel_default').maybeSingle(),
     sb.from('projects').select('id,name'),
+    sb.from('upload_schedule').select('*').eq('active',true),
+    sb.from('upload_project_owner').select('project_id,responsible_user'),
   ]);
   const doneSet=new Set((dRes.data||[]).map((r:any)=>r.task_key+'|'+r.date+'|'+(r.assignee_user||'')+'|'+(r.project_id||'')));
   const prefBy:Record<string,string>={}; (pRes.data||[]).forEach((r:any)=>prefBy[r.user_id]=r.channel);
@@ -101,21 +173,35 @@ Deno.serve(async (req)=>{
   const period=(t:any)=>t.cadence==='weekly'?monday:today;
   const isDone=(uid:string,t:any)=>doneSet.has(t.key+'|'+period(t)+'|'+uid+'|'+(t.project_id||'')) || (!t.project_id && doneSet.has(t.key+'|'+period(t)+'||'));
 
+  // Upload-Faelligkeit vorbereiten: Zustaendigkeit je Projekt/Quelle (config.responsible_user ODER Projekt-Owner)
+  // + Datenstand je Projekt (gecacht). today = Berlin-Kalendertag (fuer korrekte Faelligkeits-Vergleiche).
+  const berlinNow = new Date(new Date().toLocaleString('en-US',{timeZone:'Europe/Berlin'}));
+  const todayDate = new Date(berlinNow); todayDate.setHours(0,0,0,0);
+  const ownerBy:Record<string,string>={}; (uoRes.data||[]).forEach((r:any)=>{ if(r.responsible_user) ownerBy[r.project_id]=r.responsible_user; });
+  const cfgByUser:Record<string,any[]>={}; (usRes.data||[]).forEach((c:any)=>{ const resp=c.responsible_user||ownerBy[c.project_id]||null; if(resp) (cfgByUser[resp]=cfgByUser[resp]||[]).push(c); });
+  const lastMapCache:Record<string,Record<string,Date>>={};
+  async function lastMapFor(pid:string){ if(lastMapCache[pid]) return lastMapCache[pid]; const {data}=await sb.from('data_imports').select('source_type,created_at').eq('project_id',pid).order('created_at',{ascending:false}).limit(300); const m:Record<string,Date>={}; (data||[]).forEach((r:any)=>{ if(!m[r.source_type]) m[r.source_type]=new Date(r.created_at); }); lastMapCache[pid]=m; return m; }
+  async function userDueUploads(uid:string){ const list=cfgByUser[uid]||[]; const out:any[]=[]; for(const c of list){ const lm=await lastMapFor(c.project_id); const st=await computeUploadStatus(sb,c,c.project_id,todayDate,lm); if(st.bucket==='overdue'||st.bucket==='today'||st.bucket==='week'){ out.push({label:UPLOAD_LABEL[c.source_type]||c.source_type, proj:projName[c.project_id]||c.project_id, rel:st.rel, overdue:st.bucket==='overdue'}); } } out.sort((a:any,b:any)=>(a.overdue?0:1)-(b.overdue?0:1)); return out; }
+
   const greet = berlinHour<10 ? 'Guten Morgen!' : berlinHour<13 ? 'Mittags-Erinnerung:' : 'Letzte Erinnerung für heute:';
   const results:any[]=[];
   for(const u of (uRes.data||[])){
     if(u.active===false) continue;
     if(only && u.user_id!==only && (emailBy[u.user_id]||'').toLowerCase()!==only.toLowerCase()) continue;
-    const roles=taskRolesOf(u); if(!roles.length) continue;
-    const inst=effInstances(u.role_keys||[], (aRes.data||[]).filter((a:any)=>a.user_id===u.user_id)).filter(t=>!t.auto && winActive(t));
+    const roles=taskRolesOf(u);
+    const inst= roles.length ? effInstances(u.role_keys||[], (aRes.data||[]).filter((a:any)=>a.user_id===u.user_id)).filter(t=>!t.auto && winActive(t)) : [];
     const open=inst.filter(t=>!isDone(u.user_id,t));
-    if(!open.length) continue;                                   // alles erledigt -> keine Nachricht
+    const dueU=await userDueUploads(u.user_id);
+    if(!open.length && !dueU.length) continue;                   // nichts offen + keine Uploads -> keine Nachricht
     const channel = prefBy[u.user_id] || defChannel;
     if(channel==='none') { results.push({u:u.full_name,skip:'channel-none'}); continue; }
-    const lines=open.map(t=>'• '+t.title+(t.project_id?(' · '+(projName[t.project_id]||t.project_id)):'')+(t.cadence==='weekly'?' (diese Woche)':''));
-    const text=greet+' Du hast '+open.length+' offene Aufgabe'+(open.length===1?'':'n')+':\n'+lines.join('\n')+'\n\nErledigen im HR-Portal: '+PORTAL;
-    const outcome = channel==='cliq' ? await cliqDM(emailBy[u.user_id], text) : await slackDM(emailBy[u.user_id], text);
-    results.push({u:u.full_name, channel, open:open.length, outcome});
+    const parts:string[]=[greet];
+    if(open.length){ parts.push('*Offene Aufgaben ('+open.length+'):*'); open.forEach(t=>parts.push('• '+t.title+(t.project_id?(' · '+(projName[t.project_id]||t.project_id)):'')+(t.cadence==='weekly'?' (diese Woche)':''))); }
+    if(dueU.length){ parts.push('*Uploads:*'); dueU.forEach((x:any)=>parts.push((x.overdue?'🚨 Überfällig: ':'• Fällig: ')+x.label+' · '+x.proj+(x.rel?(' ('+x.rel+')'):''))); }
+    parts.push('\nErledigen im HR-Portal: '+PORTAL);
+    const text=parts.join('\n');
+    const outcome = dry ? 'dry' : (channel==='cliq' ? await cliqDM(emailBy[u.user_id], text) : await slackDM(emailBy[u.user_id], text));
+    results.push({u:u.full_name, channel, open:open.length, uploads:dueU.length, outcome});
   }
   return json({berlinHour, sent:results.filter(r=>r.outcome==='sent').length, results});
 });
