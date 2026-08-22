@@ -7697,7 +7697,20 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW}){
   // teamlead ist (noch) nur wegen Check-in dabei — voller Teamleiter-Aufgabensatz folgt in einem späteren Schnitt.
   const myRoles=['management','hr','finance','teamlead','projektleiter'].filter(r=>roleKeys.includes(r)&&!(r==='management'&&isExt));
   const owners=t=>Array.isArray(t.owner)?t.owner:[t.owner];
-  const TASKS=ROLE_TASKS.filter(t=>owners(t).some(o=>myRoles.includes(o)));
+  // Effektive Aufgaben-INSTANZEN eines Zugangs: Rollen-Vorlage +/- Overlay (task_assignments).
+  // active=false entfernt die Katalog-Aufgabe (je task_key|projekt); active=true fuegt sie hinzu (mit Projekt).
+  // Jede Instanz traegt project_id + ik (eindeutig fuer React-Key + Erledigt-Koernung).
+  const effInstances=(roles,aRows)=>{
+    const rs=roles||[], rows=aRows||[];
+    const removed=new Set(rows.filter(a=>a.active===false).map(a=>a.task_key+'|'+(a.project_id||'')));
+    const out=[], seen=new Set();
+    const push=(t,pid)=>{ const ik=t.key+'|'+(pid||''); if(removed.has(ik)||seen.has(ik)) return; seen.add(ik); out.push({...t, project_id:pid||null, ik}); };
+    ROLE_TASKS.filter(t=>owners(t).some(o=>rs.includes(o))).forEach(t=>push(t,null));
+    rows.filter(a=>a.active!==false).forEach(a=>{ const t=ROLE_TASKS.find(x=>x.key===a.task_key); if(t) push({...t,cadence:a.cadence_override||t.cadence}, a.project_id||null); });
+    return out;
+  };
+  const TASKS=effInstances(myRoles, myAssign);
+  const projName=pid=>{ const p=(projects||[]).find(x=>x&&x.id===pid); return p?p.name:pid; };
   // Zeitfenster: aktuelle Monatswoche (1..5). Aufgaben mit `window` sind nur in ihren Wochen aktiv, sonst gedämpft + gesperrt.
   const monthWeek=Math.ceil(new Date().getDate()/7);
   const windowActive=t=>!t.window||t.window.includes(monthWeek);
@@ -7718,10 +7731,16 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW}){
   const [autoEv,setAutoEv] = useState({});            // Q4: auto_key -> {ev, occ, ov} (Projektion aus calendar_overrides)
   const [clockTick,setClockTick] = useState(0);       // Zeitgeber: 1× zur vollen Stunde re-rendern (Mittags-Umschlag ohne Reload)
   const [showDone,setShowDone] = useState(false);     // aufklappbarer „erledigt"-Bereich (Rückweg)
+  const [myAssign,setMyAssign] = useState([]);        // task_assignments des eigenen Zugangs (Overlay)
+  const [allUsers,setAllUsers] = useState(null);      // fuer Zusammenschau: alle Zugaenge (role_keys, active, mgmt_external)
+  const [allAssign,setAllAssign] = useState([]);      // fuer Zusammenschau: alle task_assignments
 
+  // Erledigt-Merker JE INSTANZ (task_key|date|assignee|project). Legacy-Zeilen (assignee/project NULL) bleiben
+  // lesbar -> heutige Alt-Haken erscheinen weiter erledigt, bis die neuen Pro-Person-Zeilen sie ersetzen.
+  const doneKey=(task_key,date,assignee,project)=>task_key+'|'+date+'|'+(assignee||'')+'|'+(project||'');
   const loadDone = async()=>{
-    try{ const {data,error}=await sb.from('daily_tasks_done').select('task_key,date,done_by_name,done_at').in('date',[today,_monday]);
-      if(error) return; const m={}; (data||[]).forEach(r=>{ m[r.task_key+'|'+r.date]={done_by_name:r.done_by_name,done_at:r.done_at}; }); setDone(m); }catch(e){}
+    try{ const {data,error}=await sb.from('daily_tasks_done').select('task_key,date,assignee_user,project_id,done_by_name,done_at').in('date',[today,_monday]);
+      if(error) return; const m={}; (data||[]).forEach(r=>{ m[doneKey(r.task_key,r.date,r.assignee_user,r.project_id)]={done_by_name:r.done_by_name,done_at:r.done_at,done_by:r.assignee_user}; }); setDone(m); }catch(e){}
   };
   // Q4: Auto-Pflichttermine + aktuelles Monats-Vorkommen + Erledigt-Merker aus calendar_overrides laden.
   const loadAuto = async()=>{
@@ -7738,7 +7757,8 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW}){
   useEffect(()=>{ let a=true; (async()=>{ try{ const {count}=await sb.from('vacation_requests').select('id',{count:'exact',head:true}).eq('status','pending'); if(a) setVacreqOpen(count||0); }catch(e){} })(); return ()=>{a=false;}; },[]);
   useEffect(()=>{
     let alive=true;
-    (async()=>{ try{ const {data}=await sb.auth.getUser(); if(alive&&data&&data.user) setUid(data.user.id); }catch(e){} await loadDone(); })();
+    (async()=>{ try{ const {data}=await sb.auth.getUser(); const myUid=data&&data.user&&data.user.id;
+      if(alive&&myUid){ setUid(myUid); try{ const {data:a}=await sb.from('task_assignments').select('*').eq('user_id',myUid); if(alive) setMyAssign(a||[]); }catch(e){} } }catch(e){} await loadDone(); })();
     loadAuto();
     const chan=sb.channel('daily-tasks').on('postgres_changes',{event:'*',schema:'public',table:'daily_tasks_done'},()=>{ loadDone(); })
       .on('postgres_changes',{event:'*',schema:'public',table:'calendar_overrides'},()=>{ loadAuto(); }).subscribe();
@@ -7759,11 +7779,12 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW}){
     // Rollen-Besetzung für die Zusammenschau: welche Rolle hat mind. einen aktiven app_user?
     if(roleKeys.includes('management')){
       (async()=>{ try{
-        const {data}=await sb.from('app_users').select('role_keys,active');
+        const {data}=await sb.from('app_users').select('user_id,full_name,role_keys,active,mgmt_external');
         const s={management:false,hr:false,finance:false};
         (data||[]).forEach(u=>{ if(u.active!==false)(u.role_keys||[]).forEach(r=>{ if(r in s) s[r]=true; }); });
-        if(alive) setStaff(s);
+        if(alive){ setStaff(s); setAllUsers(data||[]); }
       }catch(e){ if(alive) setStaff({management:true,hr:true,finance:true}); } })(); // Fallback: keine falsche „nicht besetzt"-Anzeige
+      (async()=>{ try{ const {data}=await sb.from('task_assignments').select('*'); if(alive) setAllAssign(data||[]); }catch(e){} })();
     }
     return ()=>{ alive=false; try{ sb.removeChannel(chan); }catch(e){} };
   },[]);
@@ -7775,28 +7796,33 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW}){
   },[]);
 
   async function toggle(t){
-    if(busy) return; const key=t.key, d=periodDate(t), mk=key+'|'+d; setBusy(key);
+    if(busy) return; const d=periodDate(t), proj=t.project_id||null, mk=doneKey(t.key,d,uid,proj); setBusy(t.ik);
     const isDone=!!done[mk], prev=done;
     if(isDone){
       setDone(p=>{ const n={...p}; delete n[mk]; return n; });
-      const {error}=await sb.from('daily_tasks_done').delete().eq('task_key',key).eq('date',d);
+      let q=sb.from('daily_tasks_done').delete().eq('task_key',t.key).eq('date',d).eq('assignee_user',uid);
+      q = proj===null ? q.is('project_id',null) : q.eq('project_id',proj);
+      const {error}=await q;
       if(error){ setDone(prev); window.alert('Konnte nicht zurücksetzen: '+(error.message||'DB')); }
     } else {
       const name=(team&&(team.full_name||team.name))||'jemand', at=new Date().toISOString();
-      setDone(p=>({...p,[mk]:{done_by_name:name,done_at:at}}));
-      const {error}=await sb.from('daily_tasks_done').upsert({task_key:key,date:d,done_by:uid,done_by_name:name,done_at:at});
+      setDone(p=>({...p,[mk]:{done_by_name:name,done_at:at,done_by:uid}}));
+      const {error}=await sb.from('daily_tasks_done').upsert({task_key:t.key,date:d,assignee_user:uid,project_id:proj,done_by:uid,done_by_name:name,done_at:at},{onConflict:'task_key,date,assignee_user,project_id'});
       if(error){ setDone(prev); window.alert('Konnte nicht speichern: '+(error.message||'DB')); }
     }
     setBusy('');
   }
   // Q4-Projektion: Aufgaben mit auto_key lesen/schreiben den Erledigt-Merker im Kalender (calendar_overrides),
   // NICHT in daily_tasks_done. Einmal abhaken -> in Tagesaufgaben UND Kalender erledigt.
-  const taskDone = t => t.auto_key ? !!(autoEv[t.auto_key]&&autoEv[t.auto_key].ov&&autoEv[t.auto_key].ov.done) : !!done[t.key+'|'+periodDate(t)];
-  const taskMeta = t => { if(t.auto_key){ const a=autoEv[t.auto_key]; return a&&a.ov&&a.ov.done?{done_by_name:a.ov.done_by_name,done_at:a.ov.done_at}:null; } return done[t.key+'|'+periodDate(t)]; };
+  // Eigene Instanz (assignee=ich, Projekt) + Legacy-Fallback (globale Alt-Zeile assignee/projekt NULL) nur bei
+  // projektlosen Aufgaben -> heutige Alt-Haken bleiben sichtbar, bis die neuen Pro-Person-Zeilen greifen.
+  const ownDone = t => { const d=periodDate(t); return done[doneKey(t.key,d,uid,t.project_id)] || (!t.project_id ? done[doneKey(t.key,d,null,null)] : null); };
+  const taskDone = t => t.auto_key ? !!(autoEv[t.auto_key]&&autoEv[t.auto_key].ov&&autoEv[t.auto_key].ov.done) : !!ownDone(t);
+  const taskMeta = t => { if(t.auto_key){ const a=autoEv[t.auto_key]; return a&&a.ov&&a.ov.done?{done_by_name:a.ov.done_by_name,done_at:a.ov.done_at}:null; } return ownDone(t); };
   async function toggleAuto(t){
     if(busy) return; const a=autoEv[t.auto_key];
     if(!a||!a.occ){ window.alert('Kein Kalendertermin für diese Pflicht gefunden.'); return; }
-    setBusy(t.key);
+    setBusy(t.ik);
     const cur=a.ov, nd=!(cur&&cur.done), name=(team&&(team.full_name||team.name))||'jemand';
     const row={event_id:a.ev.id, occurrence_date:a.occ, done:nd, done_by:uid||null, done_by_name:nd?name:null, done_at:nd?new Date().toISOString():null, hidden:cur?cur.hidden:false, updated_at:new Date().toISOString()};
     setAutoEv(p=>({...p,[t.auto_key]:{...a,ov:{...(a.ov||{}),...row}}}));
@@ -7846,13 +7872,21 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW}){
 
   // Zusammenschau: je Rolle Zustand aus AKTIVEN Aufgaben + Besetzung. (teamlead bewusst raus — nur Check-in.)
   const OV_ROLES=[{key:'management',label:'Management',icon:'🎯'},{key:'hr',label:'HR',icon:'👥'},{key:'finance',label:'Finance',icon:'💶'}];
+  // Erledigt-Pruefung JE INSTANZ (Nutzer+Aufgabe+Projekt) inkl. auto_key (Kalender) + Legacy-Fallback.
+  const instDone=(userId,t)=>{ const d=periodDate(t);
+    if(t.auto_key){ const a=autoEv[t.auto_key]; return !!(a&&a.ov&&a.ov.done); }
+    return !!(done[doneKey(t.key,d,userId,t.project_id)] || (!t.project_id&&done[doneKey(t.key,d,null,null)])); };
+  // Zusammenschau PRO PERSON: Instanzen ALLER aktiven Mitglieder der Rolle (Rollen-Vorlage +/- ihr Overlay).
   const roleAgg=role=>{
-    const ts=ROLE_TASKS.filter(t=>owners(t).includes(role)).filter(windowActive);
-    const doneN=ts.filter(taskDone).length;
-    const doneBy=[...new Set(ts.filter(taskDone).map(t=>{ const m=taskMeta(t); return (m&&m.done_by_name)||'jemand'; }))];
     const staffed=staff==null?null:!!staff[role];
-    const state=staffed===false?'unstaffed':ts.length===0?'none':doneN===ts.length?'done':'open';
-    return {tasks:ts,doneN,total:ts.length,staffed,state,doneBy};
+    const members=(allUsers||[]).filter(u=>u.active!==false && (u.role_keys||[]).includes(role) && !(role==='management'&&u.mgmt_external));
+    const inst=[];
+    members.forEach(u=>{ effInstances((u.role_keys||[]), (allAssign||[]).filter(a=>a.user_id===u.user_id))
+      .forEach(t=>{ if(owners(t).includes(role) && windowActive(t)) inst.push({u,t}); }); });
+    const doneInst=inst.filter(x=>instDone(x.u.user_id,x.t));
+    const doneBy=[...new Set(doneInst.map(x=>{ const dm=done[doneKey(x.t.key,periodDate(x.t),x.u.user_id,x.t.project_id)]; return (dm&&dm.done_by_name)||x.u.full_name||'jemand'; }))];
+    const state=staffed===false?'unstaffed':(allUsers===null?'none':inst.length===0?'none':doneInst.length===inst.length?'done':'open');
+    return {instances:inst, doneN:doneInst.length, total:inst.length, staffed, state, doneBy};
   };
 
   return (
@@ -7908,18 +7942,19 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW}){
           </div>
           {ovOpen&&(()=>{ const a=roleAgg(ovOpen); const meta=OV_ROLES.find(x=>x.key===ovOpen); return (
             <div style={{marginTop:16,padding:'16px',background:'#fff',border:'1px solid var(--border)',borderRadius:14}}>
-              <div style={{fontSize:13,fontWeight:800,color:'var(--text)',margin:'0 0 10px'}}>{meta.icon} {meta.label} · Aufgaben heute <span style={{fontWeight:600,color:'var(--muted)'}}>— im Notfall hier übernehmen und abhaken</span></div>
-              {a.tasks.map(t=>{ const dm=taskMeta(t); const isDone=taskDone(t); const c=countFor(t.count); return (
-                <div key={t.key} className={"dt-card"+(isDone?" done":"")} style={{marginBottom:8}}>
+              <div style={{fontSize:13,fontWeight:800,color:'var(--text)',margin:'0 0 10px'}}>{meta.icon} {meta.label} · heute <span style={{fontWeight:600,color:'var(--muted)'}}>— wer ist zuständig, was ist offen</span></div>
+              {a.instances.length===0&&<div style={{fontSize:13,color:'var(--muted)'}}>Keine aktiven Aufgaben.</div>}
+              {a.instances.map((x,i)=>{ const t=x.t, isDone=instDone(x.u.user_id,t), dm=done[doneKey(t.key,periodDate(t),x.u.user_id,t.project_id)]; return (
+                <div key={i} className={"dt-card"+(isDone?" done":"")} style={{marginBottom:8}}>
                   <div style={{flex:1,minWidth:0}}>
-                    <div className="dt-title">{t.title}{t.auto_key&&<span style={{fontSize:10,fontWeight:700,color:'#b45309',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:6,padding:'1px 6px',marginLeft:6}}>📆 Pflichttermin</span>}{isWeekly(t)&&<span style={{fontSize:10,fontWeight:700,color:'#0369a1',background:'#f0f9ff',border:'1px solid #bae6fd',borderRadius:6,padding:'1px 6px',marginLeft:6}}>🗓 wöchentlich</span>}</div>
-                    <div className="dt-desc">{t.desc}</div>
-                    {c&&<div className="dt-actions"><span className="dt-pill">{c.n} {c.l}</span></div>}
-                    {dm&&<div className="dt-doneby">✓ erledigt von {dm.done_by_name||'jemandem'}{dm.done_at?', '+fmtTime(dm.done_at)+' Uhr':''}</div>}
+                    <div className="dt-title">{t.title}{t.project_id&&<span style={{fontSize:10,fontWeight:700,color:'#0369a1',background:'#f0f9ff',border:'1px solid #bae6fd',borderRadius:6,padding:'1px 6px',marginLeft:6}}>{projName(t.project_id)}</span>}{isWeekly(t)&&<span style={{fontSize:10,fontWeight:700,color:'#0369a1',background:'#f0f9ff',border:'1px solid #bae6fd',borderRadius:6,padding:'1px 6px',marginLeft:6}}>🗓 wöchentlich</span>}</div>
+                    <div className="dt-desc">zuständig: {x.u.full_name||'—'}</div>
+                    {isDone&&<div className="dt-doneby">✓ erledigt{dm&&dm.done_by_name?(' von '+dm.done_by_name):''}{dm&&dm.done_at?(', '+fmtTime(dm.done_at)+' Uhr'):''}</div>}
                   </div>
-                  <button className="dt-toggle" disabled={busy===t.key} onClick={()=>toggleTask(t)}>{isDone?'✓ Erledigt':'○ Übernehmen'}</button>
+                  <span style={{fontSize:12,fontWeight:700,color:isDone?'#15803d':'#d97706',whiteSpace:'nowrap',alignSelf:'center'}}>{isDone?'✓ erledigt':'○ offen'}</span>
                 </div>
               ); })}
+              <div style={{fontSize:11,color:'var(--muted)',marginTop:6}}>„Übernehmen" kommt mit der Vertretung (nächster Schnitt).</div>
             </div>
           ); })()}
         </div>
@@ -7937,10 +7972,10 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW}){
         </div>
       )}
       {mainTasks.map((t,i)=>{ const dm=taskMeta(t); const isDone=taskDone(t); const act=windowActive(t); const c=act?countFor(t.count):null; return (
-        <div key={t.key} className={"dt-card"+(isDone?" done":"")} style={{animationDelay:(i*60)+'ms',opacity:act?1:0.55,...(act&&!isDone?{background:OPEN_COL.bg,borderLeft:'4px solid '+OPEN_COL.fg}:{})}}>
+        <div key={t.ik} className={"dt-card"+(isDone?" done":"")} style={{animationDelay:(i*60)+'ms',opacity:act?1:0.55,...(act&&!isDone?{background:OPEN_COL.bg,borderLeft:'4px solid '+OPEN_COL.fg}:{})}}>
           <div className="dt-num">{i+1}</div>
           <div style={{flex:1,minWidth:0}}>
-            <div className="dt-title">{t.title}{t.auto_key&&<span style={{fontSize:10,fontWeight:700,color:'#b45309',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:6,padding:'1px 6px',marginLeft:6}}>📆 Pflichttermin</span>}{isWeekly(t)&&<span style={{fontSize:10,fontWeight:700,color:'#0369a1',background:'#f0f9ff',border:'1px solid #bae6fd',borderRadius:6,padding:'1px 6px',marginLeft:6}}>🗓 wöchentlich</span>}</div>
+            <div className="dt-title">{t.title}{t.project_id&&<span style={{fontSize:10,fontWeight:700,color:'#0369a1',background:'#f0f9ff',border:'1px solid #bae6fd',borderRadius:6,padding:'1px 6px',marginLeft:6}}>{projName(t.project_id)}</span>}{t.auto_key&&<span style={{fontSize:10,fontWeight:700,color:'#b45309',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:6,padding:'1px 6px',marginLeft:6}}>📆 Pflichttermin</span>}{isWeekly(t)&&<span style={{fontSize:10,fontWeight:700,color:'#0369a1',background:'#f0f9ff',border:'1px solid #bae6fd',borderRadius:6,padding:'1px 6px',marginLeft:6}}>🗓 wöchentlich</span>}</div>
             <div className="dt-desc">{t.desc}</div>
             {act?(
               <div className="dt-actions">
@@ -7953,7 +7988,7 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW}){
             {dm&&<div className="dt-doneby">✓ erledigt von {dm.done_by_name||'jemandem'}{dm.done_at?', '+fmtTime(dm.done_at)+' Uhr':''}</div>}
           </div>
           {act
-            ? <button className="dt-toggle" disabled={busy===t.key} onClick={()=>toggleTask(t)}>{isDone?'✓ Erledigt':'○ Erledigen'}</button>
+            ? <button className="dt-toggle" disabled={busy===t.ik} onClick={()=>toggleTask(t)}>{isDone?'✓ Erledigt':'○ Erledigen'}</button>
             : <button className="dt-toggle" disabled style={{opacity:0.5,cursor:'not-allowed'}}>gesperrt</button>}
         </div>
       ); })}
@@ -7966,12 +8001,12 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW}){
             <span style={{fontSize:12,fontWeight:600}}>{showDone?'▾ ausblenden':'▸ anzeigen'}</span>
           </button>
           {showDone&&doneTasks.map(t=>{ const dm=taskMeta(t); return (
-            <div key={t.key} className="dt-card done" style={{marginTop:8,opacity:.9}}>
+            <div key={t.ik} className="dt-card done" style={{marginTop:8,opacity:.9}}>
               <div style={{flex:1,minWidth:0}}>
-                <div className="dt-title" style={{textDecoration:'line-through',color:'var(--muted)'}}>{t.title}{t.auto_key&&<span style={{fontSize:10,fontWeight:700,color:'#b45309',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:6,padding:'1px 6px',marginLeft:6}}>📆 Pflichttermin</span>}</div>
+                <div className="dt-title" style={{textDecoration:'line-through',color:'var(--muted)'}}>{t.title}{t.project_id&&<span style={{fontSize:10,fontWeight:700,color:'#0369a1',background:'#f0f9ff',border:'1px solid #bae6fd',borderRadius:6,padding:'1px 6px',marginLeft:6}}>{projName(t.project_id)}</span>}{t.auto_key&&<span style={{fontSize:10,fontWeight:700,color:'#b45309',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:6,padding:'1px 6px',marginLeft:6}}>📆 Pflichttermin</span>}</div>
                 {dm&&<div className="dt-doneby">✓ erledigt von {dm.done_by_name||'jemandem'}{dm.done_at?', '+fmtTime(dm.done_at)+' Uhr':''}</div>}
               </div>
-              <button className="dt-toggle" disabled={busy===t.key} onClick={()=>toggleTask(t)}>↩ Rückgängig</button>
+              <button className="dt-toggle" disabled={busy===t.ik} onClick={()=>toggleTask(t)}>↩ Rückgängig</button>
             </div>
           ); })}
         </div>
