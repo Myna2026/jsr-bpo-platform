@@ -7784,6 +7784,80 @@ function TaskAdminView({team, projects}){
     </div>
   </div>;
 }
+// Sperrbildschirm (Schnitt 4): beim Oeffnen offene, faellige Tagesaufgaben zeigen — erledigen oder verschieben,
+// bevor es weitergeht. Nur 08-18 Uhr, nur wenn etwas offen ist. Drei feste Ausnahmen; Admin sieht 1x Vorschau.
+const TASKLOCK_EXEMPT = ['939dfd7c-f4ba-4a9e-aa2f-b3048544bffc','14a5001c-9efb-4f76-b8f8-145e24b4be5f','b7cbd0b3-961d-41e2-b358-cc13806b3fe3']; // Admin, Rajner, Thorsten
+const TASKLOCK_PREVIEW_UID = '939dfd7c-f4ba-4a9e-aa2f-b3048544bffc'; // Admin: einmalige Vorschau
+function TaskLockScreen({team, uid, projects, preview, onClose}){
+  const _iso=d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+  const today=_iso(new Date());
+  const monday=(()=>{ const x=new Date(); const off=(x.getDay()+6)%7; x.setDate(x.getDate()-off); return _iso(x); })();
+  const [assign,setAssign]=useState([]),[done,setDone]=useState({}),[snz,setSnz]=useState({}),[busy,setBusy]=useState(''),[ready,setReady]=useState(false),[openSnooze,setOpenSnooze]=useState(null);
+  const load=async()=>{ try{
+    const [aRes,dRes,sRes]=await Promise.all([
+      sb.from('task_assignments').select('*').eq('user_id',uid),
+      sb.from('daily_tasks_done').select('task_key,date,assignee_user,project_id').in('date',[today,monday]),
+      sb.from('task_snooze').select('task_key,date,project_id,snooze_until').eq('user_id',uid).in('date',[today,monday]),
+    ]);
+    const dm={}; (dRes.data||[]).forEach(r=>{ dm[taskDoneKey(r.task_key,r.date,r.assignee_user,r.project_id)]=true; });
+    const sm={}; (sRes.data||[]).forEach(r=>{ sm[r.task_key+'|'+r.date+'|'+(r.project_id||'')]=r.snooze_until; });
+    setAssign(aRes.data||[]); setDone(dm); setSnz(sm); setReady(true);
+  }catch(e){ setReady(true); } };
+  useEffect(()=>{ load(); },[]);
+  const myRoles=taskRolesOf(team);
+  const monthWeek=Math.ceil(new Date().getDate()/7);
+  const winActive=t=>!t.window||t.window.includes(monthWeek);
+  const periodDate=t=>(t&&t.cadence==='weekly')?monday:today;
+  const projName=pid=>{ const p=(projects||[]).find(x=>x&&x.id===pid); return p?p.name:pid; };
+  const bdg={fontSize:10,fontWeight:700,color:'#0369a1',background:'#f0f9ff',border:'1px solid #bae6fd',borderRadius:6,padding:'1px 6px',marginLeft:6};
+  const nowMs=Date.now();
+  // Faellig-offen: aktive, projekt-/rollen-eigene, nicht erledigt, nicht auf spaeter verschoben. (auto_key/Kalender
+  // bleibt aussen vor — monatliche Pflichttermine sind kein taeglicher Sperrgrund.)
+  const dueOpen=taskEffInstances(myRoles,assign).filter(t=>!t.auto_key && winActive(t)).filter(t=>{ const d=periodDate(t);
+    if(done[taskDoneKey(t.key,d,uid,t.project_id)]||(!t.project_id&&done[taskDoneKey(t.key,d,null,null)])) return false;
+    const s=snz[t.key+'|'+d+'|'+(t.project_id||'')]; if(s && new Date(s).getTime()>nowMs) return false; return true; });
+  useEffect(()=>{ if(ready && !preview && dueOpen.length===0) onClose(); },[ready,dueOpen.length]);
+  if(!ready) return null;
+  if(!preview && dueOpen.length===0) return null;
+  async function erledigen(t){ if(busy) return; setBusy(t.ik);
+    const {error}=await sb.rpc('task_toggle_done',{p_task_key:t.key,p_date:periodDate(t),p_assignee_user:uid,p_project_id:t.project_id||null,p_done:true});
+    if(error) window.alert('Fehler: '+(error.message||'DB')); else await load(); setBusy(''); }
+  async function verschieben(t,when){ if(busy) return; setBusy(t.ik);
+    const {error}=await sb.from('task_snooze').upsert({user_id:uid,task_key:t.key,project_id:t.project_id||null,date:periodDate(t),snooze_until:when.toISOString()},{onConflict:'user_id,task_key,project_id,date'});
+    if(error) window.alert('Fehler: '+(error.message||'DB')); else { setOpenSnooze(null); await load(); } setBusy(''); }
+  const nowH=new Date().getHours();
+  const at=(h)=>{ const x=new Date(); x.setHours(h,0,0,0); return x; };
+  const snoozeOpts=[{l:'+1 Std',d:new Date(nowMs+3600000)},{l:'+2 Std',d:new Date(nowMs+7200000)},
+    ...(nowH<13?[{l:'13:00',d:at(13)}]:[]),...(nowH<16?[{l:'16:00',d:at(16)}]:[])];
+  const dismissPreview=()=>{ try{ localStorage.setItem('jsr_tasklock_preview_'+uid,'1'); }catch(e){} onClose(); };
+  return <div style={{position:'fixed',inset:0,zIndex:100000,background:'rgba(8,12,20,.92)',display:'flex',alignItems:'flex-start',justifyContent:'center',padding:16,overflowY:'auto'}}>
+    <div style={{width:'100%',maxWidth:520,margin:'auto',background:'var(--card,#fff)',borderRadius:18,padding:'22px 22px 18px',boxShadow:'0 24px 80px rgba(0,0,0,.5)'}}>
+      {preview&&<div style={{fontSize:11.5,fontWeight:800,color:'#b45309',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:8,padding:'7px 11px',marginBottom:14}}>Vorschau — diesen Bildschirm siehst du (als Admin) nur dieses eine Mal.</div>}
+      <div style={{fontSize:30,lineHeight:1,textAlign:'center'}}>✅</div>
+      <div style={{fontSize:20,fontWeight:800,textAlign:'center',marginTop:8}}>{dueOpen.length>0?'Deine offenen Aufgaben':'Nichts offen'}</div>
+      <div style={{fontSize:13,color:'var(--muted)',textAlign:'center',margin:'6px 0 16px',lineHeight:1.5}}>{dueOpen.length>0?'Erledige sie oder verschiebe sie auf später — dann geht es weiter.':'Aktuell hättest du keine offenen Aufgaben.'}</div>
+      <div style={{display:'flex',flexDirection:'column',gap:8}}>
+        {dueOpen.map(t=>(
+          <div key={t.ik} style={{border:'1px solid var(--border)',borderRadius:12,padding:'11px 13px',background:'var(--surface-2)'}}>
+            <div style={{fontSize:14,fontWeight:700}}>{t.title}{t.project_id&&<span style={bdg}>{projName(t.project_id)}</span>}{t.cadence==='weekly'&&<span style={bdg}>🗓 wöchentlich</span>}</div>
+            <div style={{fontSize:12,color:'var(--muted)',marginTop:2,lineHeight:1.45}}>{t.desc}</div>
+            {openSnooze===t.ik
+              ? <div style={{display:'flex',gap:6,flexWrap:'wrap',marginTop:10,alignItems:'center'}}>
+                  <span style={{fontSize:12,color:'var(--muted)'}}>Auf später:</span>
+                  {snoozeOpts.map((o,i)=><button key={i} className="btn btn-sm" disabled={busy===t.ik} onClick={()=>verschieben(t,o.d)}>{o.l}</button>)}
+                  <button className="btn btn-sm" onClick={()=>setOpenSnooze(null)}>zurück</button>
+                </div>
+              : <div style={{display:'flex',gap:8,marginTop:10}}>
+                  <button className="btn btn-sm btn-primary" disabled={busy===t.ik} onClick={()=>erledigen(t)}>✓ Erledigt</button>
+                  <button className="btn btn-sm" disabled={busy===t.ik} onClick={()=>setOpenSnooze(t.ik)}>🕒 Später</button>
+                </div>}
+          </div>
+        ))}
+      </div>
+      {preview&&<button className="btn btn-primary" style={{width:'100%',marginTop:16}} onClick={dismissPreview}>Verstanden, weiter</button>}
+    </div>
+  </div>;
+}
 function DailyTasksView({employees, projects, onNavigate, team, isMobileW}){
   const _iso = d => d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
   const today = _iso(new Date());
@@ -38480,6 +38554,7 @@ function PresentationsView({projects, employees, team, showToast}){
 function App(){
   migrateProjectData();
   const [loggedIn, setLoggedIn] = useState(false);
+  const [lockCleared, setLockCleared] = useState(false);   // Sperrbildschirm fuer diese Sitzung erledigt/weggeklickt
   const [isMobileW,setIsMobileW]=useState(()=>window.innerWidth<768);   // reaktiv für reduzierte Mobile-Nav
   useEffect(()=>{ const h=()=>setIsMobileW(window.innerWidth<768); window.addEventListener('resize',h); return ()=>window.removeEventListener('resize',h); },[]);
   const [authMsg, setAuthMsg] = useState(null);
@@ -39289,10 +39364,18 @@ function App(){
   if(pendingPw) return <ForcePasswordChange info={pendingPw} onDone={(login)=>{ setPendingPw(null); handleLogin(login); }} onCancel={async()=>{ setPendingPw(null); try{ await sb.auth.signOut(); }catch(e){} }}/>;
   if(!loggedIn) return <LoginScreen authMsg={authMsg} portalDenied={portalDenied} myPortals={myPortals}/>;
 
+  // Sperrbildschirm-Gate: nur eingeloggt; Vorschau (Admin, 1x) ignoriert die Uhrzeit, der echte Sperrbildschirm
+  // nur 08-18 Uhr und nur fuer NICHT-Ausgenommene. TaskLockScreen schliesst sich selbst, wenn nichts faellig ist.
+  const _lockUid = team && team.user_id;
+  const _lockSeen = (()=>{ try{ return !!localStorage.getItem('jsr_tasklock_preview_'+_lockUid); }catch(e){ return false; } })();
+  const _lockPreview = _lockUid===TASKLOCK_PREVIEW_UID && !_lockSeen;
+  const _lockHours = (()=>{ const h=new Date().getHours(); return h>=8 && h<18; })();
+  const showLock = !!_lockUid && !lockCleared && (_lockPreview || (!TASKLOCK_EXEMPT.includes(_lockUid) && _lockHours));
 
   return(
     <div className="layout">
       <WelcomePopup firstName={firstName}/>
+      {showLock && <TaskLockScreen team={team} uid={_lockUid} projects={projects} preview={_lockPreview} onClose={()=>setLockCleared(true)}/>}
       {empLoadError && (
         <div style={{position:'fixed',top:0,left:0,right:0,zIndex:9999,background:'var(--red-bg)',borderBottom:'1px solid var(--red)',color:'var(--red)',padding:'8px 14px',fontSize:12,textAlign:'center',fontWeight:600,display:'flex',alignItems:'center',justifyContent:'center',gap:12,flexWrap:'wrap'}}>
           <span>⚠ Mitarbeiterdaten konnten nicht geladen werden (Verbindung oder Berechtigung). Das Anlegen von Bewerbern ist davon nicht betroffen.</span>
