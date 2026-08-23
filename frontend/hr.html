@@ -8683,25 +8683,6 @@ function TrendTile({label, value, sub, color, chart, nav, onNavigate}){
   </div>;
 }
 // KPI-Korridor: farbige Schwellen-Segmente + Marker, wo der Wert im Korridor liegt (Ampel sichtbar, nicht nur Zahlfarbe).
-function KpiCorridor({kpi, value}){
-  const seg=(kpi&&Array.isArray(kpi.thresholds))?kpi.thresholds.filter(s=>s&&isFinite(s.min)&&isFinite(s.max)).slice().sort((a,b)=>a.min-b.min):[];
-  if(seg.length<2) return null;
-  const bounds=[]; seg.forEach(s=>{ bounds.push(s.min,s.max); });
-  const sorted=[...new Set(bounds)].sort((a,b)=>a-b);
-  let lo=sorted[0], hi=sorted[sorted.length-1];
-  // Sentinel-Deckelung: ein „offenes" Ende (z.B. max 999) weit über dem Rest wird auf den zweithöchsten Wert gekappt.
-  if(sorted.length>=3){ const top=sorted[sorted.length-1], sec=sorted[sorted.length-2]; if(top>sec*2 && (top-sec)>(sec-lo)) hi=sec; }
-  const v=(value==null||value==='')?null:parseFloat(value);
-  if(v!=null&&!isNaN(v)){ if(v>hi) hi=v; if(v<lo) lo=v; }
-  if(hi<=lo) hi=lo+1; const span=hi-lo;
-  const pos=(v!=null&&!isNaN(v))?Math.max(0,Math.min(100,(v-lo)/span*100)):null;
-  return <div style={{marginTop:7,position:'relative',height:9,borderRadius:5,border:'1px solid var(--border)',background:'var(--surface-2)'}}>
-    <div style={{position:'absolute',inset:0,borderRadius:5,overflow:'hidden',display:'flex'}}>
-      {seg.map((s,i)=>{ const a=Math.max(lo,Math.min(hi,s.min)), b=Math.max(lo,Math.min(hi,s.max)); const w=(b-a)/span*100; if(w<=0.01) return null; return <div key={i} title={(s.label||'')+' ('+s.min+'–'+s.max+')'} style={{width:w+'%',background:s.color,opacity:0.8}}/>; })}
-    </div>
-    {pos!=null&&<div style={{position:'absolute',left:pos+'%',top:-2,bottom:-2,transform:'translateX(-50%)',width:'2.5px',background:'var(--text)',borderRadius:2,boxShadow:'0 0 0 1.5px var(--surface)'}}/>}
-  </div>;
-}
 // ── KPIs je Projekt·Skill im Cockpit (Desktop + mobil), automatisch für Management/HR ──
 // Sichtbar, sobald KPIs konfiguriert sind (wie die Tagesberichte). Geteilte Definitionen (kpi_config),
 // Werte aus kpi_project_entries (manueller Kundenwert, NICHT abgeleitet). Laufende Woche + Vorwoche,
@@ -8825,44 +8806,50 @@ function CockpitProjectKpis({projects, team, mobile}){
       <div style={{fontSize:10,color:'var(--muted)',marginTop:6,lineHeight:1.5}}>Kundenwert je KPI, laufende Woche (KW {cw.kw}); „Vorw." = Vorwoche. Schwellenfarbe wie in der Performance-Ansicht. <b>∑</b> = kein gepflegter Teamwert, aus den Personenwerten gerechnet (AHT gewichtet nach Anzahl, CSAT nach n, Mengen summiert).</div>
     </div>
   );
-  // Desktop: Karten-Raster (3 pro Reihe), volle Breite — je Projekt·Skill eine Karte.
-  // Je KPI: laufende KW groß + Vorwoche klein + Trendpfeil, Schwellen-Korridor mit Marker, 8-Wochen-Verlauf (Hover).
-  const cardRow=(kpi,c,first,pcolor)=>{ const cc=cellVal(kpi,c,cw), cp=cellVal(kpi,c,pw); const cur=cc.v, prev=cp.v, comp=cc.computed;
-    const t=cur!=null?evalKpi(kpi,cur):null, tp=prev!=null?evalKpi(kpi,prev):null;
-    const arrow=(cur!=null&&prev!=null)?(cur>prev?'↑':cur<prev?'↓':'→'):null;
-    const pts=weeks8.map(w=>{ const cv=cellVal(kpi,c,w); return {v:cv.v, kw:w.kw}; }).filter(p=>p.v!=null);
-    const hasCorr=Array.isArray(kpi.thresholds)&&kpi.thresholds.length>=2;
-    return <div key={kpi.id} style={{padding:'8px 0',borderTop:first?'none':'1px solid var(--border)'}}>
-      <div style={{fontSize:11.5,color:'var(--muted)',fontWeight:600,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',marginBottom:4}}>{kpi.name}</div>
-      <div style={{display:'flex',alignItems:'flex-end',gap:8}}>
-        <div>
-          <div style={{fontSize:8.5,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.04em',marginBottom:1}}>KW {cw.kw}</div>
-          <div style={{display:'inline-flex',alignItems:'center',gap:3,fontSize:19,fontWeight:800,fontFamily:'var(--mono)',lineHeight:1.05,padding:cur!=null?'1px 6px':'0',borderRadius:6,background:t?t.bg:'transparent',color:t?t.color:(cur!=null?'var(--text)':'var(--muted)')}}>{cur!=null?fmtCell(kpi,cur):'—'}{comp&&<sup style={{fontSize:9,fontWeight:800,color:'var(--muted)'}} title="aus Personenwerten gerechnet">∑</sup>}{t&&<span style={{fontSize:11}}>{t.icon}</span>}</div>
-        </div>
-        {arrow&&<span style={{fontSize:15,fontWeight:800,color:'var(--muted)',paddingBottom:3}}>{arrow}</span>}
-        <div>
-          <div style={{fontSize:8.5,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.04em',marginBottom:1}}>KW {pw.kw}</div>
-          <div style={{fontSize:14,fontWeight:700,fontFamily:'var(--mono)',lineHeight:1.05,color:tp?tp.color:'var(--muted)',paddingBottom:1}}>{prev!=null?fmtCell(kpi,prev):'—'}</div>
-        </div>
+  // Desktop: je Projekt EINE Box über die volle Breite, horizontal aufgeteilt (wie die Auswertung), statt 3er-Raster.
+  // KPI-Zelle: Name + Einheit (eindeutig, was die Zahl bedeutet), laufende Woche groß, Vorwoche + Pfeil klein.
+  const byProjCk={}; combos.forEach(c=>{ (byProjCk[c.pid]=byProjCk[c.pid]||[]).push(c); });
+  const projIdsCk=Object.keys(byProjCk).sort((a,b)=>projName(a).localeCompare(projName(b),'de'));
+  const kpiCellCk=(kpi,c)=>{ const cc=cellVal(kpi,c,cw), cp=cellVal(kpi,c,pw); const cur=cc.v, prev=cp.v, comp=cc.computed;
+    const t=cur!=null?evalKpi(kpi,cur):null;
+    const lowerBetter=kpi.unit==='min';
+    const delta=(cur!=null&&prev!=null)?(cur-prev):null;
+    const arrow=delta==null?null:(delta>0?'↑':delta<0?'↓':'→');
+    const good=(delta==null||delta===0)?null:(lowerBetter?delta<0:delta>0);
+    const aCol=good==null?'var(--muted)':(good?'#059669':'#dc2626');
+    const unitHint=kpi.unit==='min'?'mm:ss':(kpi.unit||'');
+    return <div key={kpi.id} style={{minWidth:118,flex:'1 1 132px',border:'1px solid var(--border)',borderRadius:10,padding:'10px 12px',background:'var(--surface-2)'}}>
+      <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{kpi.name}{unitHint?<span style={{fontWeight:500}}> · {unitHint}</span>:null}</div>
+      <div style={{display:'flex',alignItems:'baseline',gap:5,marginTop:3}}>
+        <span style={{fontSize:20,fontWeight:800,fontFamily:'var(--mono)',padding:cur!=null?'0 6px':'0',borderRadius:6,background:t?t.bg:'transparent',color:t?t.color:(cur!=null?'var(--text)':'var(--muted)')}}>{cur!=null?fmtCell(kpi,cur):'—'}</span>
+        {comp&&<span style={{fontSize:9,fontWeight:800,color:'var(--muted)'}} title="aus Personenwerten gerechnet">∑</span>}
+        {t&&<span style={{fontSize:11}}>{t.icon}</span>}
       </div>
-      {hasCorr&&cur!=null&&<KpiCorridor kpi={kpi} value={cur}/>}
-      {pts.length>=2&&<div style={{marginTop:7}}><HoverChart data={pts.map(p=>p.v)} labels={pts.map(p=>'KW '+p.kw)} color={pcolor} kind="area" h={38} fmt={v=>fmtCell(kpi,v)}/></div>}
+      <div style={{fontSize:10.5,color:'var(--muted)',marginTop:2,whiteSpace:'nowrap'}}>Vorw. (KW {pw.kw}): {prev!=null?fmtCell(kpi,prev):'—'} {arrow&&<span style={{fontWeight:800,color:aCol}}>{arrow}</span>}</div>
     </div>;
   };
   const deckGrid=(
     <div style={{padding:14}}>
-      <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:12}}>
-        {combos.map(c=>{ const kpis=comboKpis(c.pid,c.skill); if(!kpis.length) return null;
-          return <div key={c.pid+'|'+c.skill} style={{border:'1px solid var(--border)',borderRadius:12,padding:'11px 13px',background:'var(--card)'}}>
-            <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:8}}>
-              <span style={{width:8,height:8,borderRadius:3,background:projColor(c.pid),flexShrink:0}}/>
-              <span style={{fontSize:12.5,fontWeight:700,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{projName(c.pid)}{c.skill?<span style={{color:'var(--muted)',fontWeight:600}}> · {c.skill}</span>:null}</span>
+      <div style={{display:'flex',flexDirection:'column',gap:14}}>
+        {projIdsCk.map(pid=>{ const pcombos=byProjCk[pid].slice().sort((a,b)=>(a.skill||'').localeCompare(b.skill||'','de'));
+          if(!pcombos.some(c=>comboKpis(c.pid,c.skill).length)) return null;
+          return <div key={pid} style={{border:'1px solid var(--border)',borderRadius:14,background:'var(--card)',padding:'14px 16px'}}>
+            <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10}}>
+              <span style={{width:10,height:10,borderRadius:3,background:projColor(pid),flexShrink:0}}/>
+              <span style={{fontSize:15,fontWeight:800}}>{projName(pid)}</span>
             </div>
-            <div>{kpis.map((kpi,ki)=>cardRow(kpi, c, ki===0, projColor(c.pid)))}</div>
+            <div style={{display:'flex',flexDirection:'column',gap:12}}>
+              {pcombos.map(c=>{ const kpis=comboKpis(c.pid,c.skill); if(!kpis.length) return null;
+                return <div key={c.pid+'|'+c.skill}>
+                  {c.skill && <div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.05em',color:'var(--muted)',marginBottom:6}}>{c.skill}</div>}
+                  <div style={{display:'flex',flexWrap:'wrap',gap:8}}>{kpis.map(kpi=>kpiCellCk(kpi,c))}</div>
+                </div>;
+              })}
+            </div>
           </div>;
         })}
       </div>
-      <div style={{fontSize:10,color:'var(--muted)',marginTop:10,lineHeight:1.5}}>Je KPI: laufende Woche (KW {cw.kw}) groß, Vorwoche (KW {pw.kw}) klein, Pfeil = Trend. Farbbalken = Lage im Schwellen-Korridor (Marker = aktueller Wert). Verlauf = letzte 8 Wochen, Wert beim Darüberfahren. <b>∑</b> = kein gepflegter Teamwert, aus den Personenwerten gerechnet (AHT gewichtet nach Anzahl, CSAT nach n, Mengen summiert, CR aus Σ(Offene+OSL)/ΣSales-Calls).</div>
+      <div style={{fontSize:10,color:'var(--muted)',marginTop:10,lineHeight:1.5}}>Kundenwert je KPI, laufende Woche (KW {cw.kw}); „Vorw." = Vorwoche (Pfeil = Veränderung, grün = besser: bei Zeiten niedriger, sonst höher). Schwellenfarbe wie in der Performance-Ansicht. <b>∑</b> = kein gepflegter Teamwert, aus den Personenwerten gerechnet (AHT gewichtet nach Anzahl, CSAT nach n, Mengen summiert).</div>
     </div>
   );
   return mobile
@@ -9054,6 +9041,7 @@ function CockpitForecastIst({projects, team, mobile}){
 function CockpitLongterm({projects, team, mobile}){
   const isMgmt=((team&&team.role_keys)||[]).some(r=>r==='management');
   const [data,setData]=useState(null);
+  const [showAll,setShowAll]=useState(false);   // Standard: nur die Forecast-Stunden-Zeile; Rest der 24 Kennzahlen auf Klick
   useEffect(()=>{ if(!isMgmt){ setData([]); return; } let alive=true;
     const load=async()=>{
       try{ const {data:rows}=await sb.from('report_longterm').select('project_id,skill,start_year,start_month,rows');
@@ -9072,6 +9060,7 @@ function CockpitLongterm({projects, team, mobile}){
   const projColor=id=>{ const p=(projects||[]).find(x=>x&&x.id===id); return (p&&p.color)||'#0F5661'; };
   const skLabel=s=> s==='sales'?'Sales':s==='support'?'Support':(s||'');
   const isCalc=r=>{ if(r.calc!=null) return !!r.calc; return /working ?net|in ?office|eom|needed|productive hour|coverage|over.?under|net ?difference|netto|produktiv/.test(String(r.label||'').toLowerCase()); };
+  const isFcHours=r=>/forecast/i.test(r&&r.label||'')&&/hour|stund/i.test(r&&r.label||'');   // „Forecast (Hours)"
   const nowY=new Date().getFullYear(), nowM=new Date().getMonth()+1;
   items.sort((a,b)=>projName(a.project_id).localeCompare(projName(b.project_id),'de')||String(a.skill).localeCompare(String(b.skill),'de'));
   const ACC='#0369a1';
@@ -9091,7 +9080,7 @@ function CockpitLongterm({projects, team, mobile}){
             {months.map((mo,i)=><th key={i} style={{padding:'6px 8px',textAlign:'center',fontWeight:700,color:mo.cur?ACC:'var(--muted)',whiteSpace:'nowrap',background:mo.cur?'var(--blue-bg)':'transparent'}}>{MN[mo.m]}{mo.m===0?<span style={{fontWeight:400,opacity:.7}}> {String(mo.y).slice(2)}</span>:null}</th>)}
           </tr></thead>
           <tbody>
-            {it.rows.map((r,ri)=>{ const calc=isCalc(r);
+            {(showAll ? it.rows : (it.rows.filter(isFcHours).length ? it.rows.filter(isFcHours) : it.rows.slice(0,1))).map((r,ri)=>{ const calc=isCalc(r);
               return <tr key={ri} style={{borderBottom:'1px solid var(--border)',background:calc?'var(--surface-2)':'transparent'}}>
                 <td style={{padding:'5px 10px',position:'sticky',left:0,background:calc?'var(--surface-2)':'var(--card)',fontWeight:calc?800:600,color:calc?ACC:'var(--text)',borderLeft:'3px solid '+(calc?ACC:'transparent'),whiteSpace:'nowrap',zIndex:1}}>{r.label||''}</td>
                 {months.map((mo,i)=>{ const v=(r.m||[])[i]; return <td key={i} style={{padding:'5px 8px',textAlign:'center',fontFamily:'var(--mono)',fontWeight:calc?700:400,color:(v===''||v==null)?'var(--muted)':(calc?ACC:'var(--text)'),background:mo.cur?'var(--blue-bg)':'transparent'}}>{(v===''||v==null)?'·':v}</td>; })}
@@ -9102,9 +9091,12 @@ function CockpitLongterm({projects, team, mobile}){
       </div>
     </div>;
   };
+  const nRows=(items[0]&&items[0].rows||[]).length;
   const body=<div style={{padding:mobile?'2px 0 4px':14}}>
     {items.map(table)}
-    <div style={{fontSize:10,color:'var(--muted)',lineHeight:1.5}}>Langzeit-Kapazitätsmodell aus dem Auftraggeber-Import. Gerechnete Ergebnis-Zeilen sind abgesetzt, der laufende Monat ist hervorgehoben.</div>
+    {nRows>1 && <button onClick={()=>setShowAll(v=>!v)} style={{display:'inline-flex',alignItems:'center',gap:6,border:'1px solid var(--border)',background:'var(--surface-2)',color:ACC,borderRadius:8,padding:'6px 12px',fontSize:12,fontWeight:700,cursor:'pointer',marginBottom:8}}>
+      {showAll ? '▲ Nur Forecast-Stunden' : '▼ Alle '+nRows+' Kennzahlen anzeigen'}</button>}
+    <div style={{fontSize:10,color:'var(--muted)',lineHeight:1.5}}>Langzeit-Kapazitätsmodell aus dem Auftraggeber-Import. Standard: Forecast-Stunden je Monat; aufgeklappt alle Kennzahlen (gerechnete Ergebnis-Zeilen abgesetzt, laufender Monat hervorgehoben).</div>
   </div>;
   return mobile
     ? <div className="ckm-card" style={{borderLeft:'4px solid '+ACC}}><div className="ckm-h" style={{color:ACC}}>📆 Langzeit-Kapazität</div>{body}</div>
@@ -9599,38 +9591,35 @@ function CockpitTasksBlock({team, projects, onNavigate, mobile}){
 // Schnitt 6: Übergabe einer getippten Frage vom Cockpit-Suchfeld an die Datenabfrage-View (NlQueryView liest
 // sie beim Mounten aus und stellt sie sofort). Modul-Singleton statt Prop-Durchreichung durch den View-Switch.
 let NLQ_PREFILL=null;
-// Schlankes, einklappbares Cockpit-Suchfeld (Management-only). Frage eingeben → springt in die Datenabfrage und
-// stellt sie dort (mit Denk-Animation). Kollabiert = eine Zeile; „einfacher gewinnt".
+// Cockpit-Suchfeld = sichtbares Werkzeug (Management-only). Immer offen, teal abgesetzt, mit Beispiel-Chips, damit
+// auffällt, dass man hier fragen kann. Frage → springt in die Datenabfrage und stellt sie dort (Denk-Animation).
 function CockpitSearchBar({team, onNavigate, mobile}){
   const isMgmt=((team&&team.role_keys)||[]).some(r=>r==='management');
-  const [open,setOpen]=useState(false);
   const [q,setQ]=useState('');
   const [thinking,setThinking]=useState(false);
-  const inRef=useRef(null);
-  useEffect(()=>{ if(open&&inRef.current) inRef.current.focus(); },[open]);
   if(!isMgmt) return null;
-  const submit=()=>{ const t=q.trim(); if(!t||thinking) return; setThinking(true); NLQ_PREFILL=t;
+  const submit=(text)=>{ const t=(text!=null?text:q).trim(); if(!t||thinking) return; setThinking(true); NLQ_PREFILL=t;
     setTimeout(()=>{ onNavigate&&onNavigate({kind:'view',view:'nlquery'}); }, 450); };
-  const wrap={marginBottom:14};
-  if(!open) return <div style={wrap}>
-    <div onClick={()=>setOpen(true)} style={{display:'flex',alignItems:'center',gap:10,padding:'10px 14px',background:'var(--surface)',border:'1px solid var(--border)',borderRadius:12,cursor:'text',color:'var(--muted)',boxShadow:'var(--shadow-xs)'}}>
-      <span style={{fontSize:15}}>🔎</span><span style={{flex:1,fontSize:13}}>Frag deine Daten …</span>
-      <span style={{fontSize:10.5,fontWeight:700,textTransform:'uppercase',letterSpacing:'.05em',opacity:.7}}>Datenabfrage</span>
-    </div></div>;
-  return <div style={wrap}>
-    <div style={{display:'flex',alignItems:'center',gap:8,padding:'8px 12px',background:'var(--surface)',border:'1.5px solid #0d9488',borderRadius:12,boxShadow:'var(--shadow-xs)'}}>
-      <span style={{fontSize:15,color:'#0d9488'}}>🔎</span>
-      <input ref={inRef} value={q} onChange={e=>setQ(e.target.value)} disabled={thinking}
-        onKeyDown={e=>{ if(e.key==='Enter') submit(); if(e.key==='Escape') setOpen(false); }}
+  const EX=['Bewerbungen diesen Monat','Krank je Projekt','Gelieferte Stunden je Skill'];
+  return <div style={{marginBottom:14,background:'var(--surface)',border:'1.5px solid #0d9488',borderRadius:14,padding:mobile?'11px 12px':'13px 15px',boxShadow:'0 1px 3px rgba(13,148,136,.12)'}}>
+    <div style={{display:'flex',alignItems:'center',gap:9,marginBottom:9}}>
+      <span style={{display:'inline-flex',alignItems:'center',justifyContent:'center',width:26,height:26,borderRadius:8,background:'#0d9488',color:'#fff',fontSize:14,flexShrink:0}}>🔎</span>
+      <span style={{fontSize:14,fontWeight:800,color:'var(--text)'}}>Frag deine Daten</span>
+      <span style={{marginLeft:'auto',fontSize:10,fontWeight:700,textTransform:'uppercase',letterSpacing:'.06em',color:'#0d9488'}}>Datenabfrage</span>
+    </div>
+    <div style={{display:'flex',alignItems:'center',gap:8,background:'var(--surface-2)',border:'1px solid var(--border)',borderRadius:10,padding:'7px 10px'}}>
+      <input value={q} onChange={e=>setQ(e.target.value)} disabled={thinking}
+        onKeyDown={e=>{ if(e.key==='Enter') submit(); }}
         placeholder="z. B. Wie viele Bewerbungen kamen diesen Monat?"
         style={{flex:1,minWidth:0,border:'none',outline:'none',background:'transparent',fontSize:13.5,color:'var(--text)'}}/>
       {thinking
-        ? <span className="ck-think" style={{color:'#0d9488'}}><span/><span/><span/></span>
-        : <React.Fragment>
-            <button onClick={submit} disabled={!q.trim()} title="Fragen" style={{border:'none',background:q.trim()?'#0d9488':'var(--border)',color:'#fff',borderRadius:8,width:28,height:28,cursor:q.trim()?'pointer':'default',fontSize:15,lineHeight:1}}>→</button>
-            <button onClick={()=>{setOpen(false);setQ('');}} title="Schließen" style={{border:'none',background:'transparent',color:'var(--muted)',cursor:'pointer',fontSize:15,lineHeight:1}}>✕</button>
-          </React.Fragment>}
-    </div></div>;
+        ? <span className="ck-think" style={{color:'#0d9488',paddingRight:4}}><span/><span/><span/></span>
+        : <button onClick={()=>submit()} disabled={!q.trim()} style={{border:'none',background:q.trim()?'#0d9488':'var(--border)',color:'#fff',borderRadius:8,padding:'6px 14px',fontWeight:700,fontSize:13,cursor:q.trim()?'pointer':'default',whiteSpace:'nowrap'}}>Fragen →</button>}
+    </div>
+    {!thinking && <div style={{display:'flex',flexWrap:'wrap',gap:6,marginTop:9}}>
+      {EX.map((x,i)=><button key={i} onClick={()=>{setQ(x);submit(x);}} style={{border:'1px solid var(--border)',background:'var(--surface)',color:'var(--muted)',borderRadius:20,padding:'3px 11px',fontSize:11.5,cursor:'pointer'}}>{x}</button>)}
+    </div>}
+  </div>;
 }
 // Geteilte Prädikate für „Heute zu erledigen": EINE Wahrheit für die Zählung (computeCockpitTasks)
 // UND das Vorfiltern der Zielansicht (Sprung mit Filter-Banner). Sonst driftet „welche 3" auseinander.
