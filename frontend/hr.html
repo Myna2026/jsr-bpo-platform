@@ -8603,31 +8603,45 @@ let SPARK_SEQ=0;
 // Marge-Ring: Donut mit Prozent in der Mitte, Farbe nach Schwelle.
 // Schnitt 5: respektiert die System-Einstellung „Bewegung reduzieren" — dann keine Animation (statisch).
 function ckReduceMotion(){ try{ return !!(window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches); }catch(e){ return false; } }
-// Zahl zählt beim Erscheinen hoch (dezent, ~600ms, ease-out). Bei „Bewegung reduzieren" sofort der Zielwert.
-// Von-Wert = vorherige Anzeige (Monatswechsel zählt sauber weiter statt von 0 zu springen).
+// „Einmal sichtbar geworden": true, sobald das Element per IntersectionObserver in den Viewport scrollt — und bleibt
+// true (Observer wird getrennt). So starten Animationen erst beim Hinscrollen und laufen NICHT bei jedem Hoch-/Runter-
+// scrollen neu. Bei „Bewegung reduzieren" oder ohne IntersectionObserver sofort true (Endzustand, keine Animation).
+function useInViewOnce(){
+  const ref=useRef(null);
+  const [seen,setSeen]=useState(false);
+  useEffect(()=>{ if(seen) return; const el=ref.current; if(!el) return;
+    if(ckReduceMotion() || typeof IntersectionObserver==='undefined'){ setSeen(true); return; }
+    const io=new IntersectionObserver(es=>{ es.forEach(e=>{ if(e.isIntersecting){ setSeen(true); io.disconnect(); } }); },{threshold:0.2});
+    io.observe(el); return ()=>io.disconnect();
+  },[seen]);
+  return [ref, seen];
+}
+// Zahl zählt hoch, sobald der Block sichtbar wird (dezent, ~600ms, ease-out). Bei „Bewegung reduzieren" sofort der
+// Zielwert. Von-Wert = vorherige Anzeige (Monatswechsel zählt sauber weiter statt von 0 zu springen).
 function CountUp({value}){
   const num=(typeof value==='number'&&isFinite(value))?value:null;
+  const [ref,seen]=useInViewOnce();
   const prev=useRef(ckReduceMotion()||num==null?num:0);
   const [d,setD]=useState(prev.current);
   useEffect(()=>{ if(num==null) return; if(ckReduceMotion()){ setD(num); prev.current=num; return; }
+    if(!seen) return;   // erst hochzählen, wenn der Block sichtbar geworden ist
     const from=prev.current==null?0:prev.current, to=num, dur=600, t0=performance.now(); let raf;
     const step=now=>{ const p=Math.min(1,(now-t0)/dur); const e=1-Math.pow(1-p,3); setD(from+(to-from)*e); if(p<1) raf=requestAnimationFrame(step); else { setD(to); prev.current=to; } };
     raf=requestAnimationFrame(step); return ()=>cancelAnimationFrame(raf);
-  },[num]);
+  },[num, seen]);
   if(num==null) return <React.Fragment>{value}</React.Fragment>;
-  return <React.Fragment>{Number.isInteger(num)?Math.round(d):Math.round(d*10)/10}</React.Fragment>;
+  return <span ref={ref}>{Number.isInteger(num)?Math.round(d):Math.round(d*10)/10}</span>;
 }
 function MarginRing({pct, size=62, stroke=8}){
   const has=pct!=null&&isFinite(pct);
   const p=has?Math.max(0,Math.min(100,pct)):0;
   const col=!has?'#94a3b8':pct>=20?'#059669':pct>=10?'#d97706':'#dc2626';
   const r=(size-stroke)/2, c=2*Math.PI*r, off=c*(1-p/100);
-  // Ring füllt sich beim Erscheinen von leer auf den Zielwert (Kreise füllen); reduzierte Bewegung -> sofort.
-  const [mounted,setMounted]=useState(ckReduceMotion());
-  useEffect(()=>{ if(mounted) return; const raf=requestAnimationFrame(()=>setMounted(true)); return ()=>cancelAnimationFrame(raf); },[]);
-  return <svg width={size} height={size} style={{display:'block',flexShrink:0}}>
+  // Ring füllt sich, sobald er sichtbar wird, von leer auf den Zielwert (Kreise füllen); reduzierte Bewegung -> sofort.
+  const [ref,seen]=useInViewOnce();
+  return <svg ref={ref} width={size} height={size} style={{display:'block',flexShrink:0}}>
     <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="var(--border)" strokeWidth={stroke}/>
-    <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={col} strokeWidth={stroke} strokeLinecap="round" strokeDasharray={c} strokeDashoffset={mounted?off:c} transform={'rotate(-90 '+(size/2)+' '+(size/2)+')'} style={{transition:ckReduceMotion()?'none':'stroke-dashoffset .9s cubic-bezier(.22,1,.36,1)'}}/>
+    <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={col} strokeWidth={stroke} strokeLinecap="round" strokeDasharray={c} strokeDashoffset={seen?off:c} transform={'rotate(-90 '+(size/2)+' '+(size/2)+')'} style={{transition:ckReduceMotion()?'none':'stroke-dashoffset .9s cubic-bezier(.22,1,.36,1)'}}/>
     <text x="50%" y="50%" textAnchor="middle" dominantBaseline="central" style={{fontSize:size*0.25,fontWeight:800,fontFamily:'var(--mono)',fill:col}}>{has?Math.round(pct)+'%':'—'}</text>
   </svg>;
 }
@@ -8637,6 +8651,7 @@ function HoverChart({data, labels, color, kind='area', h=48, fmt, tips}){
   const [hi,setHi]=useState(null);
   const idRef=useRef(null); if(!idRef.current) idRef.current='hc'+(SPARK_SEQ++);
   const wrapRef=useRef(null);
+  const [ivRef,seen]=useInViewOnce();   // Balken wachsen erst, wenn das Diagramm sichtbar wird (einmalig)
   // Touch: Antippen/Wischen zeigt den Wert (Hover gibt es am Telefon nicht). Nächster Datenpunkt zum Finger.
   const touchIdx=e=>{ const el=wrapRef.current, t=e.touches&&e.touches[0]; if(!el||!t) return; const r=el.getBoundingClientRect(); if(!r.width) return; const idx=Math.max(0,Math.min((data||[]).length-1,Math.floor((t.clientX-r.left)/r.width*(data||[]).length))); setHi(idx); };
   const vals=(data||[]).map(v=>+v||0); const n=vals.length;
@@ -8650,14 +8665,14 @@ function HoverChart({data, labels, color, kind='area', h=48, fmt, tips}){
   const tipX = kind==='bar' ? (hi==null?0:(i=>((i*(bw+gap))+bw/2)/W*100)(hi)) : (n===1?50:(hi==null?0:(hi/(n-1))*100));
   let inner;
   if(kind==='bar'){
-    inner=vals.map((v,i)=>{ const bh=v>0?Math.max(1.5,v/(max||1)*ih):0; const on=hi===i; return <rect key={i} className="ck-bar" style={{animationDelay:(i*16)+'ms'}} x={i*(bw+gap)} y={padY+ih-bh} width={bw} height={bh} rx="0.5" fill={color} opacity={on?1:(0.3+0.55*(v/(max||1)))}/>; });
+    inner=vals.map((v,i)=>{ const bh=v>0?Math.max(1.5,v/(max||1)*ih):0; const on=hi===i; return <rect key={i} className={seen?'ck-bar':undefined} style={{animationDelay:(i*16)+'ms'}} x={i*(bw+gap)} y={padY+ih-bh} width={bw} height={bh} rx="0.5" fill={color} opacity={on?1:(0.3+0.55*(v/(max||1)))}/>; });
   } else {
     const pts=vals.map((v,i)=>[xL(i),yV(v)]);
     const line=pts.map((p,i)=>(i?'L':'M')+p[0].toFixed(2)+' '+p[1].toFixed(2)).join(' ');
     const area=line+' L'+xL(n-1).toFixed(2)+' '+(h-padY)+' L'+xL(0).toFixed(2)+' '+(h-padY)+' Z';
     inner=[<path key="a" d={area} fill={'url(#'+idRef.current+')'}/>, <path key="l" d={line} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke"/>];
   }
-  return <div ref={wrapRef} style={{position:'relative',touchAction:'pan-y'}} onMouseLeave={()=>setHi(null)} onTouchStart={touchIdx} onTouchMove={touchIdx} onTouchEnd={()=>setTimeout(()=>setHi(null),1400)}>
+  return <div ref={el=>{ wrapRef.current=el; ivRef.current=el; }} style={{position:'relative',touchAction:'pan-y'}} onMouseLeave={()=>setHi(null)} onTouchStart={touchIdx} onTouchMove={touchIdx} onTouchEnd={()=>setTimeout(()=>setHi(null),1400)}>
     <svg width="100%" height={h} viewBox={'0 0 '+W+' '+h} preserveAspectRatio="none" style={{display:'block'}}>
       {kind!=='bar'&&<defs><linearGradient id={idRef.current} x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor={color} stopOpacity="0.24"/><stop offset="1" stopColor={color} stopOpacity="0"/></linearGradient></defs>}
       {inner}
@@ -39948,7 +39963,7 @@ function App(){
             <React.Fragment key={sec}>
               <div className="nav-section" onClick={()=>setOpenNavSecs(p=>{ const nx=new Set(p); nx.has(sec)?nx.delete(sec):nx.add(sec); return nx; })} style={{cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'space-between',userSelect:'none'}}>
                 <span>{sec}</span>
-                <span style={{display:'inline-flex',alignItems:'center',gap:6}}>{!_open&&_hasBadge&&<span style={{width:6,height:6,borderRadius:'50%',background:'var(--accent,#2563eb)'}}/>}<span style={{fontSize:10,opacity:.55}}>{_open?'▾':'▸'}</span></span>
+                <span style={{display:'inline-flex',alignItems:'center',gap:6}}>{!_open&&_hasBadge&&<span style={{width:6,height:6,borderRadius:'50%',background:'var(--accent,#2563eb)'}}/>}<span style={{fontSize:12,color:'var(--muted)',display:'inline-block',lineHeight:1,transition:'transform .2s ease',transform:_open?'rotate(180deg)':'rotate(0deg)'}}>▾</span></span>
               </div>
               {_open && vis.map(n=>(
                 <div key={n.key} className={`ni ${view===n.key?'active':''}`} onClick={()=>{setView(n.key);if(isMobile())setSidebarOpen(false);}}>
