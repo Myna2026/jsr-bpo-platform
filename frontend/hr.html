@@ -7850,7 +7850,6 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW, catal
   const myRoles=['management','hr','finance','teamlead','projektleiter'].filter(r=>roleKeys.includes(r)&&!(r==='management'&&isExt));
   const owners=taskOwners;
   const effInstances=(roles,rows)=>taskEffInstances(roles,rows,catalog);
-  const TASKS=effInstances(myRoles, myAssign);
   const projName=pid=>{ const p=(projects||[]).find(x=>x&&x.id===pid); return p?p.name:pid; };
   // Zeitfenster: aktuelle Monatswoche (1..5). Aufgaben mit `window` sind nur in ihren Wochen aktiv, sonst gedämpft + gesperrt.
   const monthWeek=Math.ceil(new Date().getDate()/7);
@@ -7876,6 +7875,8 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW, catal
   const [allUsers,setAllUsers] = useState(null);      // fuer Zusammenschau: alle Zugaenge (role_keys, active, mgmt_external)
   const [allAssign,setAllAssign] = useState([]);      // fuer Zusammenschau: alle task_assignments
   const [takeover,setTakeover] = useState({});        // Vertretung: task_key|date|orig|project -> {by, byName}
+  // TASKS erst HIER: haengt an myAssign (oben als useState deklariert) -> Berechnung davor = TDZ-Crash (Cannot access before init).
+  const TASKS=effInstances(myRoles, myAssign);
 
   // Erledigt-Merker JE INSTANZ (task_key|date|assignee|project). Legacy-Zeilen (assignee/project NULL) bleiben
   // lesbar -> heutige Alt-Haken erscheinen weiter erledigt, bis die neuen Pro-Person-Zeilen sie ersetzen.
@@ -34901,6 +34902,7 @@ function RecruitingMarketingView({employees}){
   const [rows,setRows]=useState(null);   // null=lädt, []=leer/Fehler, [...]=Daten
   const [err,setErr]=useState('');
   const [cvs,setCvs]=useState([]);
+  const [wlDups,setWlDups]=useState([]);   // windsor_leads-Kollisionen (Wiederholer): dup/discarded/auto_discarded
   const [level,setLevel]=useState('month');
   const [leadsTs,setLeadsTs]=useState(undefined);   // Meta-Bewerbungen: max windsor_leads.inserted_at (undefined=lädt, null=keine)
   const [googleTs,setGoogleTs]=useState(undefined); // Google-Sheet-Sync: jsr_cv_sync_config_v1.last_sync_at
@@ -34917,6 +34919,9 @@ function RecruitingMarketingView({employees}){
     }catch(e){ if(alive){ setErr(e.message||'Ladefehler'); setRows([]); } }
   })(); return ()=>{alive=false;}; },[]);
   useEffect(()=>{ let alive=true; (async()=>{ try{ const {data}=await sb.from('cvs').select('id,cv_date,source'); if(alive) setCvs(data||[]); }catch(e){} })(); return ()=>{alive=false;}; },[]);
+  // Wiederholer = Meta-Leads, deren Telefon schon im Bestand lag (nie als Bewerbung angelegt). Nach created_time
+  // ins Zeitfenster gebucht wie die neuen Bewerbungen (cv_date), damit beide vergleichbar sind.
+  useEffect(()=>{ let alive=true; (async()=>{ try{ const {data}=await sb.from('windsor_leads').select('created_time,status_review').in('status_review',['dup','discarded','auto_discarded']); if(alive) setWlDups(data||[]); }catch(e){} })(); return ()=>{alive=false;}; },[]);
   // Aktualitaet je Anbindung: Meta-Bewerbungen aus windsor_leads (echter Schreibzeitpunkt inserted_at),
   // Google-Sheet-Sync aus dem Lauf-Marker in der Sync-Config (bei jedem Lauf gesetzt, auch ohne neue Zeilen).
   useEffect(()=>{ let alive=true; (async()=>{
@@ -34943,6 +34948,7 @@ function RecruitingMarketingView({employees}){
   // Herkunft je CV-Eingang: 'meta' (Anzeigen), 'sheet' (Google-Sync), 'other' (Rest). Split für die Trennung.
   const cvOrigin=c=>{ const s=String((c&&c.source)||'').toLowerCase(); if(s==='meta') return 'meta'; if(s.indexOf('sheet')>=0||s.indexOf('google')>=0) return 'sheet'; return 'other'; };
   const appsBy=(r,orig)=>r?(cvs||[]).filter(c=>c&&cvOrigin(c)===orig&&inR(wmDate(c.cv_date),r)).length:0;
+  const repeatersIn=r=>r?(wlDups||[]).filter(l=>inR(wmDate(l.created_time),r)).length:0;   // Wiederholer im Zeitraum (Meta-Telefon-Kollisionen)
   const rowsCur=[...metaIn(cur),...instaIn(cur)];
 
   const eur=n=>n==null?'—':n.toLocaleString('de-DE',{minimumFractionDigits:2,maximumFractionDigits:2})+' €';
@@ -34961,8 +34967,8 @@ function RecruitingMarketingView({employees}){
     {key:'spend', label:'Ausgaben (Meta)', fmt:eur, good:'neutral', val:r=>sum(metaIn(r),'spend'), subFn:r=>{ const s=new Set(); metaIn(r).forEach(x=>{ if((x.spend||0)>0) s.add(x.campaign||'(ohne Name)'); }); const n=s.size; return n>0?(n+' Kampagne'+(n===1?'':'n')):null; }},
     {key:'metaReach', label:'Meta-Reichweite', fmt:int, good:'up', sub:'bezahlt', val:r=>sum(metaIn(r),'reach')},
     {key:'instaReach', label:'Instagram-Reichweite', fmt:int, good:'up', sub:'organisch', val:r=>sum(instaIn(r),'reach')},
-    {key:'apps', label:'Bewerbungen', fmt:int, good:'up', val:r=>appsIn(r), subFn:r=>{ const me=appsBy(r,'meta'),sh=appsBy(r,'sheet'),ot=appsBy(r,'other'); const p=[me+' Meta',sh+' Sheet']; if(ot) p.push(ot+' übrige'); return p.join(' · '); }},
-    {key:'cpa', label:'Kosten je Bewerbung', fmt:eur, good:'down', sub:(firstSpendDate?('nur Meta · seit '+fmtD(firstSpendDate)):'nur Meta'), val:r=>{ const a=metaAppsSinceSpend(r); return a>0? sum(metaIn(r),'spend')/a : null; }},
+    {key:'apps', label:'Bewerbungen', fmt:int, good:'up', val:r=>appsIn(r), subFn:r=>{ const me=appsBy(r,'meta'),sh=appsBy(r,'sheet'),ot=appsBy(r,'other'); const p=[me+' Meta',sh+' Sheet']; if(ot) p.push(ot+' übrige'); const rp=repeatersIn(r); if(rp) p.push(rp+' Wiederholer'); return p.join(' · '); }},
+    {key:'cpa', label:'Kosten je neue Bewerbung', fmt:eur, good:'down', sub:(firstSpendDate?('nur Meta · seit '+fmtD(firstSpendDate)):'nur Meta'), val:r=>{ const a=metaAppsSinceSpend(r); return a>0? sum(metaIn(r),'spend')/a : null; }},
   ];
   const chip=(c,p,good)=>{ if(c==null||p==null) return null;
     if(p===0) return c>0?{txt:'neu',color:'var(--muted)'}:null;
@@ -34992,6 +34998,8 @@ function RecruitingMarketingView({employees}){
   const appsMetaTot=(cvs||[]).filter(c=>c&&c.source==='meta'&&inR(wmDate(c.cv_date),{from:cpaFrom,to:cur.to})).length;
   const appsSheetTot=appsBy({from:cpaFrom,to:cur.to},'sheet');
   const spendCur=sum(metaIn(cur),'spend'); const cpaCur=appsMetaTot>0?spendCur/appsMetaTot:null;
+  const repeatCur=repeatersIn({from:cpaFrom,to:cur.to}); const totContacts=appsMetaTot+repeatCur; const cpaContact=totContacts>0?spendCur/totContacts:null;
+  const repeatPct=totContacts>0?Math.round(repeatCur/totContacts*100):0;
   const box=(bg,bd,col,txt)=><div style={{padding:'12px 16px',borderRadius:10,background:bg,border:'1px solid '+bd,color:col,fontSize:13,fontWeight:700}}>{txt}</div>;
 
   // Aktualitaet je Anbindung. windsor_marketing hat KEINEN Schreibzeitpunkt -> juengstes Daten-Datum je
@@ -35115,16 +35123,21 @@ function RecruitingMarketingView({employees}){
             <div style={{display:'flex',alignItems:'center',gap:18,flexWrap:'wrap',padding:'14px 18px',border:'1px solid var(--border)',borderRadius:12,background:'var(--card)'}}>
               <div><div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)'}}>Meta-Ausgaben</div><div style={{fontSize:22,fontWeight:800}}>{eur(spendCur)}</div></div>
               <div style={{fontSize:20,fontWeight:800,color:'var(--muted)'}}>÷</div>
-              <div><div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)'}}>Meta-Bewerbungen</div><div style={{fontSize:22,fontWeight:800}}>{int(appsMetaTot)}</div><div style={{fontSize:11,color:'var(--muted)'}}>nur source=meta{firstSpendDate?(' · seit '+fmtD(firstSpendDate)):''}</div></div>
+              <div><div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)'}}>Neue Bewerbungen</div><div style={{fontSize:22,fontWeight:800}}>{int(appsMetaTot)}</div><div style={{fontSize:11,color:'var(--muted)'}}>nur source=meta{firstSpendDate?(' · seit '+fmtD(firstSpendDate)):''}</div></div>
               <div style={{fontSize:20,fontWeight:800,color:'var(--muted)'}}>=</div>
-              <div><div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)'}}>Kosten je Meta-Bewerbung</div><div style={{fontSize:26,fontWeight:800,color:'var(--accent,#2563eb)'}}>{cpaCur==null?'—':eur(cpaCur)}</div></div>
+              <div><div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)'}}>Kosten je neue Bewerbung</div><div style={{fontSize:26,fontWeight:800,color:'var(--accent,#2563eb)'}}>{cpaCur==null?'—':eur(cpaCur)}</div></div>
             </div>
-            <div style={{fontSize:11,color:'var(--muted)',marginTop:8,lineHeight:1.6}}><b>Echte Zuordnung.</b> Seit dem Meta-Import trägt jede Anzeigen-Bewerbung die Herkunft <b>source=meta</b> — gezählt werden nur diese, nicht mehr alle CV-Eingänge. Keine Näherung mehr. {appsSheetTot>0?('Im Zeitraum kamen zusätzlich '+appsSheetTot+' Bewerbung'+(appsSheetTot===1?'':'en')+' über den Google-Sheet-Sync (ohne Werbung) — die bleiben hier außen vor. '):''}{nCamp>1?('Bei '+nCamp+' gleichzeitigen Kampagnen lässt sich eine einzelne Bewerbung keiner bestimmten Kampagne zuordnen, die Gesamtkosten je Meta-Bewerbung stimmen aber. '):''}{cpaCur==null?'(Keine Meta-Bewerbungen im Zeitraum → keine Angabe.)':''}</div>
+            {totContacts>0&&<div style={{display:'flex',flexWrap:'wrap',gap:20,alignItems:'center',padding:'11px 16px',marginTop:10,border:'1px solid '+(repeatCur>0?'#fde68a':'var(--border)'),borderRadius:10,background:repeatCur>0?'#fffbeb':'var(--surface-2)'}}>
+              <div><div style={{fontSize:10,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)'}}>Meta-Kontakte gesamt</div><div style={{fontSize:19,fontWeight:800}}>{int(totContacts)}</div></div>
+              <div style={{color:repeatCur>0?'#b45309':'var(--muted)'}}><div style={{fontSize:10,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em'}}>davon Wiederholer</div><div style={{fontSize:19,fontWeight:800}}>{int(repeatCur)}{repeatCur>0?(' · '+repeatPct+' %'):''}</div><div style={{fontSize:10,fontWeight:600}}>bereits bekannt</div></div>
+              <div><div style={{fontSize:10,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)'}}>Kosten je Kontakt (alle)</div><div style={{fontSize:19,fontWeight:800}}>{cpaContact==null?'—':eur(cpaContact)}</div></div>
+            </div>}
+            <div style={{fontSize:11,color:'var(--muted)',marginTop:8,lineHeight:1.6}}><b>Echte Zuordnung.</b> Seit dem Meta-Import trägt jede Anzeigen-Bewerbung die Herkunft <b>source=meta</b> — gezählt werden nur diese, nicht mehr alle CV-Eingänge. Keine Näherung mehr. {repeatCur>0?('Zusätzlich meldeten sich '+repeatCur+' Wiederholer (Telefon schon im Bestand) — die werden gar nicht erst als Bewerbung angelegt und zählen bei „je neue Bewerbung" nicht mit; „je Kontakt (alle)" schließt sie ein. '):''}{appsSheetTot>0?('Im Zeitraum kamen zusätzlich '+appsSheetTot+' Bewerbung'+(appsSheetTot===1?'':'en')+' über den Google-Sheet-Sync (ohne Werbung) — die bleiben hier außen vor. '):''}{nCamp>1?('Bei '+nCamp+' gleichzeitigen Kampagnen lässt sich eine einzelne Bewerbung keiner bestimmten Kampagne zuordnen, die Gesamtkosten je Meta-Bewerbung stimmen aber. '):''}{cpaCur==null?'(Keine Meta-Bewerbungen im Zeitraum → keine Angabe.)':''}</div>
           </div>
           <div style={{fontSize:11,color:'var(--muted)',marginTop:12,lineHeight:1.6}}>
             Reichweite = Summe der Tageswerte (nicht deduplizierte Unique-Reichweite); Meta (bezahlt) und Instagram (organisch) getrennt.
-            Bewerbungen = CV-Eingänge im Zeitraum, getrennt nach Herkunft (Meta-Anzeigen · Google-Sheet · übrige).
-            Kosten je Meta-Bewerbung = Meta-Ausgaben ÷ Bewerbungen mit source=meta — <b>echte Zuordnung</b> über die Herkunftskennzeichnung, keine Näherung.
+            Bewerbungen = CV-Eingänge im Zeitraum, getrennt nach Herkunft (Meta-Anzeigen · Google-Sheet · übrige); Wiederholer sind bereits bekannte Personen, die sich erneut über Meta gemeldet haben.
+            Kosten je neue Bewerbung = Meta-Ausgaben ÷ neue Bewerbungen (source=meta), Wiederholer bleiben außen vor. Kosten je Kontakt (alle) teilt dieselben Ausgaben durch alle Meta-Kontakte inklusive Wiederholer.
             {cmpLabel?(' Vergleich '+cmpLabel+': gleich langer Ausschnitt der Vorperiode.'):''}
           </div>
         </div>}
@@ -36782,11 +36795,12 @@ async function callApplicantImport(source){
   if(!r.ok&&!j.error) j.error='Fehler '+r.status; return j;
 }
 function MetaImportPanel({setCvList}){
-  const [pending,setPending]=useState(null); const [dupCount,setDupCount]=useState(0);
+  const [pending,setPending]=useState(null); const [dupCount,setDupCount]=useState(0); const [autoCount,setAutoCount]=useState(0);
   const [busy,setBusy]=useState(false); const [res,setRes]=useState(null); const [err,setErr]=useState('');
   const loadCounts=async()=>{
     try{ const {count}=await sb.from('windsor_leads').select('id',{count:'exact',head:true}).eq('imported',false).is('status_review',null); setPending(count||0); }catch(e){ setPending(null); }
     try{ const {count}=await sb.from('windsor_leads').select('id',{count:'exact',head:true}).eq('status_review','dup'); setDupCount(count||0); }catch(e){}
+    try{ const {count}=await sb.from('windsor_leads').select('id',{count:'exact',head:true}).eq('status_review','auto_discarded'); setAutoCount(count||0); }catch(e){}
   };
   useEffect(()=>{ loadCounts(); },[]);
   async function run(){ setBusy(true); setErr(''); setRes(null);
@@ -36815,12 +36829,16 @@ function MetaImportPanel({setCvList}){
 function DuplicatesView({team, setCvList}){
   const roles=(team&&team.role_keys)||[]; const allow=roles.some(r=>r==='management'||r==='hr');
   const [pairs,setPairs]=useState(null); const [groups,setGroups]=useState(null); const [busy,setBusy]=useState('');
+  const [autoPairs,setAutoPairs]=useState(null); const [showAuto,setShowAuto]=useState(false);
   const norm=x=>String(x||'').trim().toLowerCase();
   const load=async()=>{
-    let leads=[]; try{ const {data}=await sb.from('windsor_leads').select('*').eq('status_review','dup'); leads=data||[]; }catch(e){}
+    let leads=[]; try{ const {data}=await sb.from('windsor_leads').select('*').in('status_review',['dup','auto_discarded']); leads=data||[]; }catch(e){}
     const ids=leads.map(l=>l.imported_cv_id).filter(Boolean); const cvById={};
     if(ids.length){ try{ const {data}=await sb.from('cvs').select('*').in('id',ids); (data||[]).forEach(c=>cvById[c.id]=c); }catch(e){} }
-    setPairs(leads.map(l=>({lead:l, cv:cvById[l.imported_cv_id]||null})));
+    const mk=l=>({lead:l, cv:cvById[l.imported_cv_id]||null});
+    // dup = Bestand noch aktiv im Trichter (echte Entscheidung); auto_discarded = Bestand terminal abgelehnt (Trigger).
+    setPairs(leads.filter(l=>l.status_review==='dup').map(mk));
+    setAutoPairs(leads.filter(l=>l.status_review==='auto_discarded').map(mk));
     let all=[]; try{ const {data}=await sb.from('cvs').select('id,first_name,last_name,cv_date,phone,source,status'); all=data||[]; }catch(e){}
     const gm={}; all.forEach(c=>{ const nm=norm(c.first_name)+' '+norm(c.last_name); const k=nm.trim()+'|'+String(c.cv_date||'').slice(0,10); if(!nm.trim()) return; (gm[k]=gm[k]||[]).push(c); });
     setGroups(Object.values(gm).filter(g=>g.length>1));
@@ -36851,7 +36869,8 @@ function DuplicatesView({team, setCvList}){
     <div style={{fontSize:13,color:'var(--muted)',marginBottom:14}}>Telefon-Kollisionen aus dem Meta-Import und mehrfach vorhandene Bewerber. Nichts wird automatisch gelöscht, du entscheidest.</div>
     <div style={{marginBottom:12}}><button className="btn btn-sm" onClick={load}>↻ Aktualisieren</button></div>
 
-    <div style={{fontSize:12,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)',marginBottom:8}}>Telefon-Kollisionen · Meta ↔ Bestand {pairs?('('+pairs.length+')'):''}</div>
+    <div style={{fontSize:12,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)',marginBottom:4}}>Zu entscheiden · Bestand noch aktiv {pairs?('('+pairs.length+')'):''}</div>
+    <div style={{fontSize:12,color:'var(--muted)',marginBottom:8,lineHeight:1.5}}>Nur Kollisionen mit noch aktivem Bestand landen hier, denn die neue Bewerbung könnte aktuellere Angaben tragen. Fälle, deren Bestand bereits endgültig abgelehnt ist (Blacklist, kein Kontakt, abgelehnt), werden automatisch verworfen (siehe unten).</div>
     {pairs===null ? <div className="sp-empty">Lädt…</div>
      : pairs.length===0 ? <div style={{fontSize:13,color:'var(--muted)',marginBottom:18}}>Keine offenen Telefon-Kollisionen.</div>
      : <div style={{display:'flex',flexDirection:'column',gap:12,marginBottom:22}}>{pairs.map(p=><div key={p.lead.id} style={{border:'1px solid #fde68a',borderRadius:12,background:'#fffbeb',padding:'12px 14px'}}>
@@ -36866,6 +36885,7 @@ function DuplicatesView({team, setCvList}){
             <div style={{fontSize:10,fontWeight:800,textTransform:'uppercase',color:'var(--muted)'}}>Bestand</div>
             <div style={{fontSize:14,fontWeight:700}}>{p.cv?nm(p.cv):'(nicht mehr vorhanden)'}</div>
             {p.cv&&<div style={{fontSize:12,color:'var(--muted)'}}>{p.cv.phone||'—'} · {String(p.cv.cv_date||'').slice(0,10)||'—'} · Quelle {p.cv.source||'—'}</div>}
+            {p.cv&&<div style={{marginTop:5}}><span style={{fontSize:11,fontWeight:700,padding:'2px 9px',borderRadius:20,border:'1px solid '+statusColor(p.cv.status),color:statusColor(p.cv.status)}}>{statusIcon(p.cv.status)} {statusLabel(p.cv.status)}</span></div>}
           </div>
         </div>
         <div style={{display:'flex',gap:8,marginTop:10}}>
@@ -36873,6 +36893,21 @@ function DuplicatesView({team, setCvList}){
           <button className="btn btn-sm" disabled={busy===p.lead.id} onClick={()=>discardMeta(p)}>Meta verwerfen</button>
         </div>
       </div>)}</div>}
+
+    {autoPairs&&autoPairs.length>0&&<div style={{marginBottom:22}}>
+      <button className="btn btn-sm" onClick={()=>setShowAuto(v=>!v)}>{showAuto?'▾':'▸'} Automatisch verworfen · Bestand bereits abgelehnt ({autoPairs.length})</button>
+      {showAuto&&<div style={{display:'flex',flexDirection:'column',gap:6,marginTop:10}}>
+        <div style={{fontSize:12,color:'var(--muted)',marginBottom:2,lineHeight:1.5}}>Diese Wiederholungsbewerbungen wurden automatisch verworfen, weil der Bestand endgültig abgelehnt ist (Blacklist, kein Kontakt, von uns/vom Bewerber abgelehnt). Nichts zu tun. Nur im Ausnahmefall „Meta doch übernehmen".</div>
+        {autoPairs.map(p=><div key={p.lead.id} style={{display:'flex',alignItems:'center',gap:10,fontSize:12,padding:'8px 11px',border:'1px solid var(--border)',borderRadius:8,background:'var(--surface-2)'}}>
+          <span style={{flex:1,minWidth:0}}>
+            <b>{metaField(p.lead,'vor-_und_nachname','full_name')||'—'}</b>
+            <span style={{color:'var(--muted)'}}> → Bestand: {p.cv?nm(p.cv):'(nicht mehr vorhanden)'}</span>
+            {p.cv&&<span style={{marginLeft:8,fontWeight:700,color:statusColor(p.cv.status)}}>{statusIcon(p.cv.status)} {statusLabel(p.cv.status)}</span>}
+          </span>
+          <button className="btn btn-sm" disabled={busy===p.lead.id} onClick={()=>takeMeta(p)}>Meta doch übernehmen</button>
+        </div>)}
+      </div>}
+    </div>}
 
     <div style={{fontSize:12,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)',marginBottom:8}}>Gleicher Name + Datum im Bestand {groups?('('+groups.length+')'):''}</div>
     {groups===null ? <div className="sp-empty">Lädt…</div>
