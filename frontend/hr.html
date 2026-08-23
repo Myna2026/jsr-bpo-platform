@@ -8624,6 +8624,8 @@ function CockpitProjectKpis({projects, team, mobile}){
   const isMgmt=roles.some(r=>r==='management');
   const [cfg,setCfg]=useState(null);
   const [emap,setEmap]=useState({});
+  const [pent,setPent]=useState({});   // kpi_entries je kpi_id -> {y-kw:[{e,v}]} (Personenwerte fuer gerechnete Teamwerte)
+  const [wgt,setWgt]=useState({});     // Gewichte je emp|y-kw: {a:answered (AHT/Anzahl), n:anzahl (CSAT)}
   const now=new Date(); const cw=getISOWeek(now);
   const pd=new Date(now.getFullYear(),now.getMonth(),now.getDate()-7); const pw=getISOWeek(pd);
   // Letzte 8 ISO-Wochen (alt→neu) für den Verlauf; cw = letzte, pw = vorletzte.
@@ -8632,20 +8634,53 @@ function CockpitProjectKpis({projects, team, mobile}){
   useEffect(()=>{ if(!isMgmt){ setCfg([]); return; } let alive=true;
     const load=async()=>{
       try{
-        const c=await sb.from('kpi_config').select('*');
         const orC=weeks8.map(w=>`and(year.eq.${w.year},kw.eq.${w.kw})`).join(',');
-        const e=await sb.from('kpi_project_entries').select('*').or(orC);
+        const [c,e,pe,wc,wg]=await Promise.all([
+          sb.from('kpi_config').select('*'),
+          sb.from('kpi_project_entries').select('*').or(orC),
+          sb.from('kpi_entries').select('emp_id,kpi_id,value,kw,year').or(orC),          // Personenwerte
+          sb.from('weekly_calls').select('employee_id,kw,year,answered').or(orC),        // AHT-Gewicht: Anzahl (answered)
+          sb.from('weekly_gauges').select('employee_id,kw,year,anzahl').or(orC),         // CSAT-Gewicht: n (anzahl)
+        ]);
         if(!alive) return;
         setCfg(c.data||[]);
         const m={}; (e.data||[]).forEach(r=>{ const k=r.project_id+'|'+(r.skill||'')+'|'+r.kpi_id; (m[k]=m[k]||{})[r.year+'-'+r.kw]=Number(r.value); }); setEmap(m);
+        const pm={}; (pe.data||[]).forEach(r=>{ const wk=r.year+'-'+r.kw; (pm[r.kpi_id]=pm[r.kpi_id]||{}); (pm[r.kpi_id][wk]=pm[r.kpi_id][wk]||[]).push({e:r.emp_id, v:Number(r.value)}); }); setPent(pm);
+        const wm={}; (wc.data||[]).forEach(r=>{ const k=r.employee_id+'|'+r.year+'-'+r.kw; (wm[k]=wm[k]||{}).a=Number(r.answered)||0; }); (wg.data||[]).forEach(r=>{ const k=r.employee_id+'|'+r.year+'-'+r.kw; (wm[k]=wm[k]||{}).n=Number(r.anzahl)||0; }); setWgt(wm);
       }catch(err){ if(alive) setCfg([]); }
     };
     load();
-    const ch=sb.channel('cockpit-proj-kpis').on('postgres_changes',{event:'*',schema:'public',table:'kpi_project_entries'},load).subscribe();
+    const ch=sb.channel('cockpit-proj-kpis')
+      .on('postgres_changes',{event:'*',schema:'public',table:'kpi_project_entries'},load)
+      .on('postgres_changes',{event:'*',schema:'public',table:'kpi_entries'},load).subscribe();
     return ()=>{ alive=false; try{ sb.removeChannel(ch); }catch(e){} };
   },[isMgmt]);
   if(!isMgmt || cfg===null) return null;
   const comboKpis=(pid,skill)=> cfg.filter(k=> (!k.project_id||k.project_id===pid) && (!k.skill || (skill && k.skill===skill)) );
+  // ── Fehlende Teamwerte aus den Personenwerten (kpi_entries) rechnen — wie auf den Berichtsfolien:
+  //    AHT/ACW (Minuten) gewichtet nach Anzahl (answered), CSAT gewichtet nach n (anzahl), Mengen summiert,
+  //    CR aus Σ(Offene+OSL)/ΣSales-Calls. Rest (QM, Mails/h) einfacher Ø. Nur wenn kein gepflegter Teamwert da ist.
+  const QSUM=new Set(['Buchungen','Sales Calls','Offene Buchungen','OSL-Buchungen']);
+  const aggType=k=>{ const n=(k.name||'').toLowerCase(); if(k.unit==='min') return 'wavg_a'; if(n==='csat') return 'wavg_n'; if(n==='cr') return 'cr'; if(QSUM.has(k.name)) return 'sum'; return 'avg'; };
+  const plist=(kid,wk)=> (pent[kid]&&pent[kid][wk])||[];
+  const avgOf=a=>a.length?a.reduce((s,x)=>s+x,0)/a.length:null;
+  const wavgOf=(L,wf)=>{ let ts=0,tw=0; L.forEach(x=>{ if(x.v==null) return; const w=wf(x); const ww=(w&&w>0)?w:1; ts+=x.v*ww; tw+=ww; }); return tw?ts/tw:null; };
+  const crCompute=(c,wk)=>{ const find=nm=>{ const k=comboKpis(c.pid,c.skill).find(x=>(x.name||'')===nm); return k?k.id:null; };
+    const oI=find('Offene Buchungen'),sI=find('OSL-Buchungen'),cI=find('Sales Calls'); if(!oI||!sI||!cI) return null;
+    const s=id=>plist(id,wk).reduce((a,x)=>a+(x.v||0),0); const calls=s(cI); if(!calls) return null;
+    return Math.round((s(oI)+s(sI))/calls*10000)/100; };
+  const computeTeam=(kpi,c,wk)=>{ const t=aggType(kpi); const L=plist(kpi.id,wk);
+    if(t==='cr'){ const cr=crCompute(c,wk); if(cr!=null) return cr; return L.length?Math.round(avgOf(L.map(x=>x.v))*100)/100:null; }
+    if(!L.length) return null;
+    if(t==='sum') return Math.round(L.reduce((a,x)=>a+(x.v||0),0)*100)/100;
+    if(t==='wavg_a') return wavgOf(L,x=>(wgt[x.e+'|'+wk]&&wgt[x.e+'|'+wk].a)||0);
+    if(t==='wavg_n') return wavgOf(L,x=>(wgt[x.e+'|'+wk]&&wgt[x.e+'|'+wk].n)||0);
+    return Math.round(avgOf(L.map(x=>x.v))*100)/100;   // QM, Mails/h, Rest: einfacher Ø
+  };
+  // Zellwert: gepflegter Teamwert (kpi_project_entries) hat Vorrang; sonst gerechnet aus Personenwerten.
+  const cellVal=(kpi,c,w)=>{ const rec=emap[c.pid+'|'+(c.skill||'')+'|'+kpi.id]; const k=wkey(w);
+    if(rec&&rec[k]!=null) return {v:rec[k], computed:false};
+    const cv=computeTeam(kpi,c,k); return {v:(cv==null||isNaN(cv))?null:cv, computed:cv!=null&&!isNaN(cv)}; };
   const seen={}, combos=[];
   cfg.forEach(k=>{ if(!k.project_id) return; const skill=k.skill||''; const key=k.project_id+'|'+skill; if(seen[key]) return; seen[key]=1; combos.push({pid:k.project_id, skill}); });
   if(!combos.length) return null;
@@ -8653,8 +8688,8 @@ function CockpitProjectKpis({projects, team, mobile}){
   const projColor=id=>{ const p=(projects||[]).find(x=>x&&x.id===id); return (p&&p.color)||'#0F5661'; };
   combos.sort((a,b)=>projName(a.pid).localeCompare(projName(b.pid),'de')||a.skill.localeCompare(b.skill,'de'));
 
-  const kpiRow=(kpi, rec)=>{
-    const cur=(rec&&rec[wkey(cw)]!=null)?rec[wkey(cw)]:null, prev=(rec&&rec[wkey(pw)]!=null)?rec[wkey(pw)]:null;
+  const kpiRow=(kpi, c)=>{
+    const cc=cellVal(kpi,c,cw), cp=cellVal(kpi,c,pw); const cur=cc.v, prev=cp.v, comp=cc.computed;
     const t=cur!=null?evalKpi(kpi,cur):null;   // dieselbe Ampel-Einstufung wie beim MA (geteilt)
     const tPrev=prev!=null?evalKpi(kpi,prev):null;
     const arrow=(cur!=null&&prev!=null)?(cur>prev?'↑':cur<prev?'↓':'→'):null;
@@ -8662,7 +8697,7 @@ function CockpitProjectKpis({projects, team, mobile}){
       <div key={kpi.id} style={{display:'flex',alignItems:'center',gap:8,padding:'3px 0',flexWrap:'wrap'}}>
         <span style={{width:118,fontSize:11,color:'var(--muted)',flexShrink:0}}>{kpi.name}</span>
         {/* kräftige Zahl (t.color) auf dezentem Tint (t.bg) — gut lesbar, nicht farbig-auf-farbig */}
-        <span style={{fontSize:14,fontWeight:800,minWidth:54,textAlign:'center',padding:'1px 8px',borderRadius:6,background:t?t.bg:'transparent',color:t?t.color:'var(--text)'}}>{cur!=null?kpiFmt(cur,kpi.unit):'—'}</span>
+        <span style={{fontSize:14,fontWeight:800,minWidth:54,textAlign:'center',padding:'1px 8px',borderRadius:6,background:t?t.bg:'transparent',color:t?t.color:'var(--text)'}}>{cur!=null?kpiFmt(cur,kpi.unit):'—'}{comp&&<sup style={{fontSize:8,fontWeight:800,color:'var(--muted)',marginLeft:1}} title="aus Personenwerten gerechnet">∑</sup>}</span>
         {t&&<span style={{fontSize:11}}>{t.icon}</span>}
         {arrow&&<span style={{fontWeight:800,color:'var(--muted)',width:12,textAlign:'center'}}>{arrow}</span>}
         <span style={{fontSize:10,color:'var(--muted)'}}>Vorw. {prev!=null?<span style={{fontWeight:700,color:tPrev?tPrev.color:'var(--muted)'}}>{kpiFmt(prev,kpi.unit)}</span>:'—'}</span>
@@ -8679,26 +8714,26 @@ function CockpitProjectKpis({projects, team, mobile}){
               <span style={{width:8,height:8,borderRadius:3,background:projColor(c.pid),flexShrink:0}}/>
               <span style={{fontSize:12.5,fontWeight:700}}>{projName(c.pid)}{c.skill?<span style={{color:'var(--muted)',fontWeight:600}}> · {c.skill}</span>:null}</span>
             </div>
-            <div style={{paddingLeft:14}}>{kpis.map(kpi=>kpiRow(kpi, emap[c.pid+'|'+c.skill+'|'+kpi.id]))}</div>
+            <div style={{paddingLeft:14}}>{kpis.map(kpi=>kpiRow(kpi, c))}</div>
           </div>
         );
       })}
-      <div style={{fontSize:10,color:'var(--muted)',marginTop:6,lineHeight:1.5}}>Kundenwert je KPI, laufende Woche (KW {cw.kw}); „Vorw." = Vorwoche. Schwellenfarbe wie in der Performance-Ansicht.</div>
+      <div style={{fontSize:10,color:'var(--muted)',marginTop:6,lineHeight:1.5}}>Kundenwert je KPI, laufende Woche (KW {cw.kw}); „Vorw." = Vorwoche. Schwellenfarbe wie in der Performance-Ansicht. <b>∑</b> = kein gepflegter Teamwert, aus den Personenwerten gerechnet (AHT gewichtet nach Anzahl, CSAT nach n, Mengen summiert).</div>
     </div>
   );
   // Desktop: Karten-Raster (3 pro Reihe), volle Breite — je Projekt·Skill eine Karte.
   // Je KPI: laufende KW groß + Vorwoche klein + Trendpfeil, Schwellen-Korridor mit Marker, 8-Wochen-Verlauf (Hover).
-  const cardRow=(kpi,rec,first,pcolor)=>{ const cur=(rec&&rec[wkey(cw)]!=null)?rec[wkey(cw)]:null, prev=(rec&&rec[wkey(pw)]!=null)?rec[wkey(pw)]:null;
+  const cardRow=(kpi,c,first,pcolor)=>{ const cc=cellVal(kpi,c,cw), cp=cellVal(kpi,c,pw); const cur=cc.v, prev=cp.v, comp=cc.computed;
     const t=cur!=null?evalKpi(kpi,cur):null, tp=prev!=null?evalKpi(kpi,prev):null;
     const arrow=(cur!=null&&prev!=null)?(cur>prev?'↑':cur<prev?'↓':'→'):null;
-    const pts=weeks8.map(w=>({v:(rec&&rec[wkey(w)]!=null)?rec[wkey(w)]:null, kw:w.kw})).filter(p=>p.v!=null);
+    const pts=weeks8.map(w=>{ const cv=cellVal(kpi,c,w); return {v:cv.v, kw:w.kw}; }).filter(p=>p.v!=null);
     const hasCorr=Array.isArray(kpi.thresholds)&&kpi.thresholds.length>=2;
     return <div key={kpi.id} style={{padding:'8px 0',borderTop:first?'none':'1px solid var(--border)'}}>
       <div style={{fontSize:11.5,color:'var(--muted)',fontWeight:600,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',marginBottom:4}}>{kpi.name}</div>
       <div style={{display:'flex',alignItems:'flex-end',gap:8}}>
         <div>
           <div style={{fontSize:8.5,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.04em',marginBottom:1}}>KW {cw.kw}</div>
-          <div style={{display:'inline-flex',alignItems:'center',gap:3,fontSize:19,fontWeight:800,fontFamily:'var(--mono)',lineHeight:1.05,padding:cur!=null?'1px 6px':'0',borderRadius:6,background:t?t.bg:'transparent',color:t?t.color:(cur!=null?'var(--text)':'var(--muted)')}}>{cur!=null?kpiFmt(cur,kpi.unit):'—'}{t&&<span style={{fontSize:11}}>{t.icon}</span>}</div>
+          <div style={{display:'inline-flex',alignItems:'center',gap:3,fontSize:19,fontWeight:800,fontFamily:'var(--mono)',lineHeight:1.05,padding:cur!=null?'1px 6px':'0',borderRadius:6,background:t?t.bg:'transparent',color:t?t.color:(cur!=null?'var(--text)':'var(--muted)')}}>{cur!=null?kpiFmt(cur,kpi.unit):'—'}{comp&&<sup style={{fontSize:9,fontWeight:800,color:'var(--muted)'}} title="aus Personenwerten gerechnet">∑</sup>}{t&&<span style={{fontSize:11}}>{t.icon}</span>}</div>
         </div>
         {arrow&&<span style={{fontSize:15,fontWeight:800,color:'var(--muted)',paddingBottom:3}}>{arrow}</span>}
         <div>
@@ -8719,11 +8754,11 @@ function CockpitProjectKpis({projects, team, mobile}){
               <span style={{width:8,height:8,borderRadius:3,background:projColor(c.pid),flexShrink:0}}/>
               <span style={{fontSize:12.5,fontWeight:700,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{projName(c.pid)}{c.skill?<span style={{color:'var(--muted)',fontWeight:600}}> · {c.skill}</span>:null}</span>
             </div>
-            <div>{kpis.map((kpi,ki)=>cardRow(kpi, emap[c.pid+'|'+c.skill+'|'+kpi.id], ki===0, projColor(c.pid)))}</div>
+            <div>{kpis.map((kpi,ki)=>cardRow(kpi, c, ki===0, projColor(c.pid)))}</div>
           </div>;
         })}
       </div>
-      <div style={{fontSize:10,color:'var(--muted)',marginTop:10,lineHeight:1.5}}>Je KPI: laufende Woche (KW {cw.kw}) groß, Vorwoche (KW {pw.kw}) klein, Pfeil = Trend. Farbbalken = Lage im Schwellen-Korridor (Marker = aktueller Wert). Verlauf = letzte 8 Wochen, Wert beim Darüberfahren.</div>
+      <div style={{fontSize:10,color:'var(--muted)',marginTop:10,lineHeight:1.5}}>Je KPI: laufende Woche (KW {cw.kw}) groß, Vorwoche (KW {pw.kw}) klein, Pfeil = Trend. Farbbalken = Lage im Schwellen-Korridor (Marker = aktueller Wert). Verlauf = letzte 8 Wochen, Wert beim Darüberfahren. <b>∑</b> = kein gepflegter Teamwert, aus den Personenwerten gerechnet (AHT gewichtet nach Anzahl, CSAT nach n, Mengen summiert, CR aus Σ(Offene+OSL)/ΣSales-Calls).</div>
     </div>
   );
   return mobile
