@@ -9346,18 +9346,9 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
         {_fxInfoMob.mode!=='ok'&&<div style={{margin:'0 10px 6px',padding:'7px 10px',borderRadius:8,fontSize:11,fontWeight:600,color:_fxInfoMob.mode==='stale'?'#b45309':'var(--red)',background:_fxInfoMob.mode==='stale'?'#fffbeb':'var(--red-bg)',border:'1px solid '+(_fxInfoMob.mode==='stale'?'#f59e0b':'var(--red)')}}>{_fxInfoMob.note} System → 💱 Wechselkurse.</div>}
         <div className="ckm-projlist">
           {projects.map(p=>{
-            const projActive=(employees||[]).filter(e=>e&&e.status==='active'&&empProjShare(e,p.id)>0);   // Köpfe inkl. Mehrprojekt
-            const n=projActive.length;
-            const t=projectStaff(employees,p.id,['training']).heads;
-            const _fte=projectStaff(employees,p.id,['active']).fte;   // Kapazität = FTE (teilt sich bei Mehrprojekt)
+            const {n,t,fte:_fte,bySkill,rev,wf:_wf,mg}=cockpitProjectData(p,employees,projects,_planRev,ym);
             if(n+t===0) return null;
-            const bySkill={};
-            projActive.forEach(e=>{ const a=empAssignments(e).find(x=>x.project_id===p.id); const k=(a&&a.skill)||'—'; bySkill[k]=(bySkill[k]||0)+1; });
             const skLabel=k=>{ const s=(p.skills||[]).find(x=>x.key===k); return s?(s.label||s.key):k; };
-            const rev=Math.round((_planRev[p.id]&&_planRev[p.id].revenue)||0);
-            const _ac=projectAutoCostsForMonth(p.id, ym, employees, projects);   // Vollkosten inkl. Umlagen
-            const _wf=projectDbWaterfall(_ac, rev);
-            const mg=_wf.mgIV;
             const _lekP=(employees||[]).some(e=>e&&['active','training'].includes(e.status)&&e.project_id===p.id&&salaryCurrency(e)==='ALL');
             const _lekMiss=_lekP&&_fxInfoMob.mode==='missing'; const _lekStale=_lekP&&_fxInfoMob.mode==='stale';
             return (
@@ -9633,8 +9624,7 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
       <div style={{padding:'10px 14px',borderBottom:'1px solid var(--border)',fontSize:12,fontWeight:600}}>Projekte</div>
       {_fxInfoCk.mode!=='ok'&&<div style={{padding:'8px 14px',borderBottom:'1px solid var(--border)',fontSize:11,fontWeight:600,color:_fxInfoCk.mode==='stale'?'#b45309':'var(--red)',background:_fxInfoCk.mode==='stale'?'#fffbeb':'var(--red-bg)'}}>{_fxInfoCk.note} System → 💱 Wechselkurse.</div>}
       <div style={{padding:12,display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(230px,1fr))',gap:12}}>
-        {projects.map(p=>{ const n=projectStaff(employees,p.id,['active']).heads; const t=projectStaff(employees,p.id,['training']).heads; const _fte=projectStaff(employees,p.id,['active']).fte;
-          const rev=Math.round((_planRevMap[p.id]&&_planRevMap[p.id].revenue)||0); const _ac=projectAutoCostsForMonth(p.id,_cockpitYm,employees,projects); const _wf=projectDbWaterfall(_ac,rev); const mg=_wf.mgIV;
+        {projects.map(p=>{ const {n,t,fte:_fte,mg}=cockpitProjectData(p,employees,projects,_planRevMap,_cockpitYm);
           const accent=p.color||'#0F5661';
           return(<div key={p.id} onClick={()=>onNavigate&&onNavigate({kind:'view',view:'profitability',projSel:p.id})} title="Zur Wirtschaftlichkeit" style={{padding:'14px 16px',background:'var(--card)',border:'1px solid var(--border)',borderRadius:14,display:'flex',alignItems:'center',gap:14,cursor:'pointer'}}>
             <div style={{flex:1,minWidth:0}}>
@@ -9884,13 +9874,7 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
           {/* Redesign: große Kacheln, auf einen Blick — Besetzung groß, Marge als Ampel; keine Roh-€ */}
           <div style={{padding:12,display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(150px,1fr))',gap:10}}>
             {projects.map(p=>{
-              const n=projectStaff(employees,p.id,['active']).heads;
-              const t=projectStaff(employees,p.id,['training']).heads;
-              const _fte=projectStaff(employees,p.id,['active']).fte;
-              const rev=Math.round((_planRevMap[p.id]&&_planRevMap[p.id].revenue)||0);
-              const _ac=projectAutoCostsForMonth(p.id, _cockpitYm, employees, projects);   // Vollkosten inkl. Umlagen
-              const _wf=projectDbWaterfall(_ac, rev);
-              const mg=_wf.mgIV;
+              const {n,t,fte:_fte,rev,wf:_wf,mg}=cockpitProjectData(p,employees,projects,_planRevMap,_cockpitYm);
               const mgColor=mg==null?'var(--muted)':mg>=20?'#059669':mg>=10?'#d97706':'#dc2626';
               return(
                 <div key={p.id} onClick={()=>onNavigate&&onNavigate({kind:'view',view:'profitability',projSel:p.id})} title="Zur Wirtschaftlichkeit"
@@ -12457,6 +12441,15 @@ function projectStaff(employees, pid, statuses){
 }
 // FTE für Anzeige: „2", „2,5" (deutsche Dezimalkomma, max 1 Nachkommastelle).
 function fteFmt(v){ return (Math.round((Number(v)||0)*10)/10).toLocaleString('de-DE',{maximumFractionDigits:1}); }
+// Cockpit-Projektzeile: die 3× kopierte Rechnung (Köpfe/FTE/Umsatz/Vollkosten/Marge) an EINER Stelle. Markup bleibt
+// je Aufrufer (Layout konvergiert in 4c). n = aktive Köpfe (Mehrprojekt zählt), t = Schulung, bySkill = Köpfe je Skill.
+function cockpitProjectData(p, employees, projects, planRevMap, ym){
+  const projActive=(employees||[]).filter(e=>e&&e.status==='active'&&empProjShare(e,p.id)>0);
+  const bySkill={}; projActive.forEach(e=>{ const a=empAssignments(e).find(x=>x.project_id===p.id); const k=(a&&a.skill)||'—'; bySkill[k]=(bySkill[k]||0)+1; });
+  const rev=Math.round(((planRevMap||{})[p.id]&&planRevMap[p.id].revenue)||0);
+  const wf=projectDbWaterfall(projectAutoCostsForMonth(p.id, ym, employees, projects), rev);
+  return { n:projActive.length, t:projectStaff(employees,p.id,['training']).heads, fte:projectStaff(employees,p.id,['active']).fte, bySkill, rev, wf, mg:wf.mgIV };
+}
 
 // ── VOLLKOSTEN je MA/Monat (Arbeitgeber-Gesamtkosten, EUR) ───────────────────────
 // Reuse von calcFullPayslip mit leerem Record (deduction_absence_days:0 → KEIN Doppel-Abzug bei
