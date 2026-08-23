@@ -121,7 +121,7 @@ Deno.serve(async (req)=>{
   const mon=new Date(now); mon.setDate(now.getDate()-((now.getDay()+6)%7)); const monday=isoLocal(mon);
   const monthWeek=Math.ceil(now.getDate()/7);
 
-  const [uRes, aRes, dRes, pRes, cRes, prRes, usRes, uoRes, tcRes] = await Promise.all([
+  const [uRes, aRes, dRes, pRes, cRes, prRes, usRes, uoRes, tcRes, ocRes] = await Promise.all([
     sb.from('app_users').select('user_id,full_name,role_keys,active,mgmt_external'),
     sb.from('task_assignments').select('*'),
     sb.from('daily_tasks_done').select('task_key,date,assignee_user,project_id').in('date',[today,monday]),
@@ -130,11 +130,16 @@ Deno.serve(async (req)=>{
     sb.from('projects').select('id,name'),
     sb.from('upload_schedule').select('*').eq('active',true),
     sb.from('upload_project_owner').select('project_id,responsible_user'),
-    sb.from('task_catalog').select('key,owner,title,cadence,window_weeks,auto_key').eq('active',true).order('seq'),
+    sb.from('task_catalog').select('key,owner,title,cadence,window_weeks,auto_key,count_key,data_gated').eq('active',true).order('seq'),
+    sb.rpc('task_open_counts'),
   ]);
-  // Katalog aus DB in die erwartete Form (window <- window_weeks, auto <- auto_key vorhanden).
-  ROLE_TASKS = (tcRes.data||[]).map((r:any)=>({ key:r.key, owner:r.owner, title:r.title, cadence:r.cadence, window:r.window_weeks, auto:r.auto_key!=null }));
+  // Katalog aus DB in die erwartete Form (window <- window_weeks, auto <- auto_key vorhanden). count/data_gated fuer das Gating.
+  ROLE_TASKS = (tcRes.data||[]).map((r:any)=>({ key:r.key, owner:r.owner, title:r.title, cadence:r.cadence, window:r.window_weeks, auto:r.auto_key!=null, count:r.count_key, data_gated:r.data_gated }));
   if(!ROLE_TASKS.length) return json({ error:'task_catalog leer oder nicht lesbar' }, 500);
+  // Geteilte Zaehler (task_open_counts) — DIESELBE Wahrheit wie das Frontend. Datengetriebene Aufgaben nur bei n>0.
+  const ocMap:Record<string,number>={}; (ocRes.data||[]).forEach((r:any)=>{ ocMap[r.count_key+'|'+(r.project_id||'')]=Number(r.n)||0; });
+  const gateCount=(t:any)=>{ const pk=t.count+'|'+(t.project_id||''); if(pk in ocMap) return ocMap[pk]; const gk=t.count+'|'; return (gk in ocMap)?ocMap[gk]:0; };
+  const gatePass=(t:any)=>!t.data_gated || gateCount(t)>0;
   const doneSet=new Set((dRes.data||[]).map((r:any)=>r.task_key+'|'+r.date+'|'+(r.assignee_user||'')+'|'+(r.project_id||'')));
   const prefBy:Record<string,string>={}; (pRes.data||[]).forEach((r:any)=>prefBy[r.user_id]=r.channel);
   const projName:Record<string,string>={}; (prRes.data||[]).forEach((p:any)=>projName[p.id]=p.name);
@@ -164,7 +169,7 @@ Deno.serve(async (req)=>{
     if(u.active===false) continue;
     if(only && u.user_id!==only && (emailBy[u.user_id]||'').toLowerCase()!==only.toLowerCase()) continue;
     const roles=taskRolesOf(u);
-    const inst= roles.length ? effInstances(u.role_keys||[], (aRes.data||[]).filter((a:any)=>a.user_id===u.user_id)).filter(t=>!t.auto && winActive(t)) : [];
+    const inst= roles.length ? effInstances(u.role_keys||[], (aRes.data||[]).filter((a:any)=>a.user_id===u.user_id)).filter(t=>!t.auto && winActive(t) && gatePass(t)) : [];
     const open=inst.filter(t=>!isDone(u.user_id,t));
     const dueU=await userDueUploads(u.user_id);
     if(!open.length && !dueU.length) continue;                   // nichts offen + keine Uploads -> keine Nachricht

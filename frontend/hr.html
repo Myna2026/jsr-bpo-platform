@@ -7656,9 +7656,22 @@ async function loadTaskCatalog(){
   try{
     const {data,error}=await sb.from('task_catalog').select('*').eq('active',true).order('seq');
     if(error) throw error;
-    return (data||[]).map(r=>({ key:r.key, owner:r.owner, title:r.title, desc:r.descr, view:r.view_key, count:r.count_key, cadence:r.cadence, window:r.window_weeks, auto_key:r.auto_key, nav:r.nav }));
+    return (data||[]).map(r=>({ key:r.key, owner:r.owner, title:r.title, desc:r.descr, view:r.view_key, count:r.count_key, cadence:r.cadence, window:r.window_weeks, auto_key:r.auto_key, nav:r.nav, data_gated:r.data_gated }));
   }catch(e){ console.error('[task_catalog] load fehlgeschlagen', e); return []; }
 }
+// Geteilte Zähler für datengetriebene Aufgaben (task_open_counts-RPC) — DIESELBE Wahrheit wie die Edge Function
+// task-reminders, statt den Zähler-Code doppelt zu halten. Map-Key = count_key|project_id ('' = global).
+async function loadTaskOpenCounts(){
+  try{ const {data,error}=await sb.rpc('task_open_counts'); if(error) throw error;
+    const m={}; (data||[]).forEach(r=>{ m[r.count_key+'|'+(r.project_id||'')]=Number(r.n)||0; }); return m;
+  }catch(e){ console.error('[task_open_counts] load fehlgeschlagen', e); return {}; }
+}
+// Zähler einer Aufgabe: exakt-Projekt zuerst, sonst global. Fehlt der Schlüssel → 0.
+function taskGateCount(t, ocMap){ if(!t||!ocMap) return 0; const pk=t.count+'|'+(t.project_id||''); if(pk in ocMap) return ocMap[pk]; const gk=t.count+'|'; return (gk in ocMap)?ocMap[gk]:0; }
+// Datengetriebene Aufgabe sichtbar? Nicht-datengetrieben immer; datengetrieben nur bei Zähler > 0.
+function taskGatePass(t, ocMap){ if(!t||!t.data_gated) return true; return taskGateCount(t, ocMap)>0; }
+// Kurz-Beschriftung am Zähler-Badge datengetriebener Aufgaben (count_key → Text).
+const GATE_TASK_LABEL={cv_stuck:'ohne Aktion', contract_gap:'laufen in 30 T. aus', vacreq_open:'zu entscheiden', fx_missing:'Kurs fehlt'};
 // Hat dieser Zugang eine gefüllte Tagesaufgaben-Ansicht? Rollen mit eigenen ROLE_TASKS (management, hr,
 // finance, teamlead). „management" deckt auch EXTERNES Management ab (mgmt_external): eigene Liste leer,
 // aber die Zusammenschau „Stand aller Rollen" ist die Ansicht. Bei true wird die Startseite durch die
@@ -7688,18 +7701,24 @@ function TaskAdminView({team, projects, catalog}){
   const _iso=d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
   const today=_iso(new Date());
   const monday=(()=>{ const x=new Date(); const off=(x.getDay()+6)%7; x.setDate(x.getDate()-off); return _iso(x); })();
-  const [users,setUsers]=useState(null),[assign,setAssign]=useState([]),[doneMap,setDoneMap]=useState({}),[busy,setBusy]=useState('');
+  const [users,setUsers]=useState(null),[assign,setAssign]=useState([]),[doneMap,setDoneMap]=useState({}),[busy,setBusy]=useState(''),[cat2,setCat2]=useState([]);
   const [pick,setPick]=useState(null),[pkTask,setPkTask]=useState(''),[pkProj,setPkProj]=useState('');
   const load=async()=>{
-    try{ const [uRes,aRes,dRes]=await Promise.all([
+    try{ const [uRes,aRes,dRes,cRes]=await Promise.all([
         sb.from('app_users').select('user_id,full_name,role_keys,active,mgmt_external'),
         sb.from('task_assignments').select('*'),
         sb.from('daily_tasks_done').select('task_key,date,assignee_user,project_id').in('date',[today,monday]),
+        sb.from('task_catalog').select('key,title,owner,count_key,data_gated,seq').eq('active',true).order('seq'),
       ]);
       const m={}; (dRes.data||[]).forEach(r=>{ m[taskDoneKey(r.task_key,r.date,r.assignee_user,r.project_id)]=true; });
-      setUsers(uRes.data||[]); setAssign(aRes.data||[]); setDoneMap(m);
+      setUsers(uRes.data||[]); setAssign(aRes.data||[]); setDoneMap(m); setCat2(cRes.data||[]);
     }catch(e){ setUsers([]); }
   };
+  // Katalog-Eigenschaft „datengetrieben" umschalten (nur sinnvoll mit count_key, sonst ist der Zähler immer 0).
+  async function toggleGated(t){ if(busy) return; setBusy('gate|'+t.key);
+    const {error}=await sb.from('task_catalog').update({data_gated:!t.data_gated, updated_at:new Date().toISOString()}).eq('key',t.key);
+    if(error) window.alert('Fehler: '+(error.message||'DB')); else await load(); setBusy('');
+  }
   useEffect(()=>{ if(isMgmt) load(); const ch=sb.channel('taskadmin').on('postgres_changes',{event:'*',schema:'public',table:'task_assignments'},()=>{ if(isMgmt) load(); }).subscribe(); return ()=>{ try{ sb.removeChannel(ch); }catch(e){} }; },[]);
   if(!isMgmt) return <div className="sp-empty">Nur für Management.</div>;
   if(users===null) return <div className="sp-empty">Lädt…</div>;
@@ -7766,6 +7785,24 @@ function TaskAdminView({team, projects, catalog}){
         </div>;
       })}
     </div>
+
+    {/* Aufgaben-Art: datengetrieben = erscheint nur, solange der Zähler > 0 ist, und verschwindet, wenn erledigt.
+        Nur für Aufgaben mit Zähler sinnvoll (ohne Zähler wäre sie dauerhaft unsichtbar). */}
+    <div style={{marginTop:24,border:'1px solid var(--border)',borderRadius:14,background:'var(--card)',padding:'14px 16px'}}>
+      <div style={{fontSize:15,fontWeight:800,marginBottom:2}}>Datengetriebene Aufgaben</div>
+      <div style={{fontSize:12.5,color:'var(--muted)',marginBottom:12}}>Datengetrieben heißt: Die Aufgabe entsteht aus den Daten, erscheint nur, wenn es tatsächlich etwas zu tun gibt, und verschwindet, wenn erledigt. Feste Aufgaben bleiben als tägliche Checkliste stehen.</div>
+      <div style={{display:'flex',flexDirection:'column',gap:6}}>
+        {cat2.filter(t=>t.count_key).map(t=>(
+          <div key={t.key} style={{display:'flex',alignItems:'center',gap:10,padding:'8px 10px',borderRadius:9,background:'var(--surface-2)'}}>
+            <span style={{fontSize:13,fontWeight:600,flex:1,minWidth:0}}>{t.title}
+              <span style={bdg('#f8fafc','#e2e8f0','#64748b')}>{(Array.isArray(t.owner)?t.owner:[t.owner]).map(r=>ROLE_LABELS[r]||r).join(', ')}</span></span>
+            <button onClick={()=>toggleGated(t)} disabled={busy==='gate|'+t.key}
+              style={{border:'1px solid '+(t.data_gated?'#0369a1':'var(--border)'),background:t.data_gated?'#0369a1':'transparent',color:t.data_gated?'#fff':'var(--muted)',borderRadius:20,padding:'3px 12px',fontSize:12,fontWeight:700,cursor:'pointer'}}>
+              {t.data_gated?'✓ datengetrieben':'feste Aufgabe'}</button>
+          </div>
+        ))}
+      </div>
+    </div>
   </div>;
 }
 // Sperrbildschirm (Schnitt 4): beim Oeffnen offene, faellige Tagesaufgaben zeigen — erledigen oder verschieben,
@@ -7776,16 +7813,17 @@ function TaskLockScreen({team, uid, projects, preview, onClose, catalog}){
   const _iso=d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
   const today=_iso(new Date());
   const monday=(()=>{ const x=new Date(); const off=(x.getDay()+6)%7; x.setDate(x.getDate()-off); return _iso(x); })();
-  const [assign,setAssign]=useState([]),[done,setDone]=useState({}),[snz,setSnz]=useState({}),[busy,setBusy]=useState(''),[ready,setReady]=useState(false),[openSnooze,setOpenSnooze]=useState(null);
+  const [assign,setAssign]=useState([]),[done,setDone]=useState({}),[snz,setSnz]=useState({}),[busy,setBusy]=useState(''),[ready,setReady]=useState(false),[openSnooze,setOpenSnooze]=useState(null),[oc,setOc]=useState({});
   const load=async()=>{ try{
-    const [aRes,dRes,sRes]=await Promise.all([
+    const [aRes,dRes,sRes,ocMap]=await Promise.all([
       sb.from('task_assignments').select('*').eq('user_id',uid),
       sb.from('daily_tasks_done').select('task_key,date,assignee_user,project_id').in('date',[today,monday]),
       sb.from('task_snooze').select('task_key,date,project_id,snooze_until').eq('user_id',uid).in('date',[today,monday]),
+      loadTaskOpenCounts(),
     ]);
     const dm={}; (dRes.data||[]).forEach(r=>{ dm[taskDoneKey(r.task_key,r.date,r.assignee_user,r.project_id)]=true; });
     const sm={}; (sRes.data||[]).forEach(r=>{ sm[r.task_key+'|'+r.date+'|'+(r.project_id||'')]=r.snooze_until; });
-    setAssign(aRes.data||[]); setDone(dm); setSnz(sm); setReady(true);
+    setAssign(aRes.data||[]); setDone(dm); setSnz(sm); setOc(ocMap||{}); setReady(true);
   }catch(e){ setReady(true); } };
   useEffect(()=>{ load(); },[]);
   const myRoles=taskRolesOf(team);
@@ -7797,7 +7835,7 @@ function TaskLockScreen({team, uid, projects, preview, onClose, catalog}){
   const nowMs=Date.now();
   // Faellig-offen: aktive, projekt-/rollen-eigene, nicht erledigt, nicht auf spaeter verschoben. (auto_key/Kalender
   // bleibt aussen vor — monatliche Pflichttermine sind kein taeglicher Sperrgrund.)
-  const dueOpen=taskEffInstances(myRoles,assign,catalog).filter(t=>!t.auto_key && winActive(t)).filter(t=>{ const d=periodDate(t);
+  const dueOpen=taskEffInstances(myRoles,assign,catalog).filter(t=>!t.auto_key && winActive(t) && taskGatePass(t,oc)).filter(t=>{ const d=periodDate(t);
     if(done[taskDoneKey(t.key,d,uid,t.project_id)]||(!t.project_id&&done[taskDoneKey(t.key,d,null,null)])) return false;
     const s=snz[t.key+'|'+d+'|'+(t.project_id||'')]; if(s && new Date(s).getTime()>nowMs) return false; return true; });
   // Katalog kommt async aus der DB. Bis er da ist, NICHT vorzeitig schliessen (sonst dueOpen faelschlich 0).
@@ -7887,8 +7925,10 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW, catal
   const [allUsers,setAllUsers] = useState(null);      // fuer Zusammenschau: alle Zugaenge (role_keys, active, mgmt_external)
   const [allAssign,setAllAssign] = useState([]);      // fuer Zusammenschau: alle task_assignments
   const [takeover,setTakeover] = useState({});        // Vertretung: task_key|date|orig|project -> {by, byName}
+  const [oc,setOc] = useState({});                     // task_open_counts: datengetriebene Aufgaben nur bei Zähler>0
   // TASKS erst HIER: haengt an myAssign (oben als useState deklariert) -> Berechnung davor = TDZ-Crash (Cannot access before init).
-  const TASKS=effInstances(myRoles, myAssign);
+  // Datengetriebene Aufgaben (data_gated) erscheinen nur, solange ihr Zähler > 0 ist -> eine Liste, kein zweites System.
+  const TASKS=effInstances(myRoles, myAssign).filter(t=>taskGatePass(t, oc));
 
   // Erledigt-Merker JE INSTANZ (task_key|date|assignee|project). Legacy-Zeilen (assignee/project NULL) bleiben
   // lesbar -> heutige Alt-Haken erscheinen weiter erledigt, bis die neuen Pro-Person-Zeilen sie ersetzen.
@@ -7916,6 +7956,8 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW, catal
   };
   // Offene Urlaubsanträge (RLS liefert Leads nur ihr Projekt, HR/Management alle) — Zähler für lead_vacreq.
   useEffect(()=>{ let a=true; (async()=>{ try{ const {count}=await sb.from('vacation_requests').select('id',{count:'exact',head:true}).eq('status','pending'); if(a) setVacreqOpen(count||0); }catch(e){} })(); return ()=>{a=false;}; },[]);
+  // Geteilte Zähler für datengetriebene Aufgaben (dieselbe RPC wie die Slack-Erinnerung).
+  useEffect(()=>{ let a=true; loadTaskOpenCounts().then(m=>{ if(a) setOc(m||{}); }); return ()=>{a=false;}; },[]);
   useEffect(()=>{
     let alive=true;
     (async()=>{ try{ const {data}=await sb.auth.getUser(); const myUid=data&&data.user&&data.user.id;
@@ -8019,6 +8061,8 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW, catal
   // customer_due [Kalender/Schnitt 5], cv_stuck, cv_comm, hw_missing) bleibt reines Häkchen (count→null).
   const countFor=k=>{
     if(k==='cv_funnel')       return cvCount>0?{n:cvCount,l:'im Funnel'}:null;
+    if(k==='cv_stuck')        { const n=taskGateCount({count:'cv_stuck'},oc); return n>0?{n,l:'ohne Aktion'}:null; }
+    if(k==='fx_missing')      { const n=taskGateCount({count:'fx_missing'},oc); return n>0?{n,l:'Kurs fehlt'}:null; }
     if(k==='cv_inbound')      return cvInbound>0?{n:cvInbound,l:'in Bewerbungen'}:null;
     if(k==='cv_interview')    return cvInterview>0?{n:cvInterview,l:'Gespräche anstehend'}:null;
     if(k==='emp_no_iban')     return counts.noIban>0?{n:counts.noIban,l:'ohne IBAN'}:null;
@@ -8055,7 +8099,7 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW, catal
     const members=(allUsers||[]).filter(u=>u.active!==false && (u.role_keys||[]).includes(role) && !(role==='management'&&u.mgmt_external));
     const inst=[];
     members.forEach(u=>{ effInstances((u.role_keys||[]), (allAssign||[]).filter(a=>a.user_id===u.user_id))
-      .forEach(t=>{ if(owners(t).includes(role) && windowActive(t)) inst.push({u,t}); }); });
+      .forEach(t=>{ if(owners(t).includes(role) && windowActive(t) && taskGatePass(t,oc)) inst.push({u,t}); }); });
     const doneInst=inst.filter(x=>instDone(x.u.user_id,x.t));
     const doneBy=[...new Set(doneInst.map(x=>{ const dm=done[doneKey(x.t.key,periodDate(x.t),x.u.user_id,x.t.project_id)]; return (dm&&dm.done_by_name)||x.u.full_name||'jemand'; }))];
     const state=staffed===false?'unstaffed':(allUsers===null?'none':inst.length===0?'none':doneInst.length===inst.length?'done':'open');
@@ -8148,7 +8192,9 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW, catal
           <div style={{fontSize:13,color:'#16a34a',marginTop:2}}>Super gemacht, morgen früh geht's wieder los.</div>
         </div>
       )}
-      {mainTasks.map((t,i)=>{ const dm=taskMeta(t); const isDone=taskDone(t); const act=windowActive(t); const c=act?countFor(t.count):null; return (
+      {mainTasks.map((t,i)=>{ const dm=taskMeta(t); const isDone=taskDone(t); const act=windowActive(t);
+        // Datengetriebene Aufgaben zeigen ihren Zähler aus der geteilten View (dieselbe Wahrheit wie die Sichtbarkeit); sonst der lokale Zähler.
+        const c=!act?null:(t.data_gated?{n:taskGateCount(t,oc),l:GATE_TASK_LABEL[t.count]||''}:countFor(t.count)); return (
         <div key={t.ik} className={"dt-card"+(isDone?" done":"")} style={{animationDelay:(i*60)+'ms',opacity:act?1:0.55,...(act&&!isDone?{background:OPEN_COL.bg,borderLeft:'4px solid '+OPEN_COL.fg}:{})}}>
           <div className="dt-num">{i+1}</div>
           <div style={{flex:1,minWidth:0}}>
@@ -9304,7 +9350,6 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
     });
   });
   const _planRev=planRevenueByProject(employees, projects, ym);
-  const tasks=computeCockpitTasks({employees,projects,cvsDb,payslipsDb,feedbackTodayDb});
   // Eingangsdatum tolerant (cv_date kann Zeitstempel sein → auf Datum kürzen) + LOKALE Grenzen (kein UTC-Off-by-one).
   const _cvd=c=>String((c&&c.cv_date)||'').slice(0,10);
   const _cvT=isoLocal(new Date()), _cvYd=isoLocal(new Date(Date.now()-864e5)), _cv7f=isoLocal(new Date(Date.now()-6*864e5));
@@ -9455,24 +9500,70 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
 
 
 
-      {/* 6) Heute zu erledigen */}
-      {tasks.length>0 && (
-        <div className="ckm-card">
-          <div className="ckm-h">Heute zu erledigen</div>
-          {tasks.map((t,i)=>(
-            <div key={i} className="ckm-task" onClick={()=>onNavigate&&onNavigate(t.nav||{kind:'view',view:t.tab,navFilter:t.filter?{...t.filter,label:t.label}:null})}>
-              <span style={{fontSize:17}}>{t.icon}</span>
-              <span style={{flex:1,fontWeight:600,color:t.color}}>{t.label}</span>
-              <span className="ckm-arrow">→</span>
-            </div>
-          ))}
-        </div>
-      )}
+      {/* 6) Deine offenen Aufgaben — eine Liste (Katalog), datengetriebene nur wenn live */}
+      <CockpitTasksBlock team={team} projects={projects} onNavigate={onNavigate} mobile={true}/>
 
     </div>
   );
 }
 
+// Cockpit-Aufgabenliste = die EIGENEN offenen Tagesaufgaben (task_catalog), NICHT mehr abgeleitete Hinweise.
+// Eine Liste, eine Quelle: dieselben Instanzen wie Startseite/Sperrbildschirm, datengetriebene nur wenn live.
+// Klick springt in die Zielansicht der Aufgabe (view_key + nav). Aktionen (erledigen/schlummern) in den Tagesaufgaben.
+function CockpitTasksBlock({team, projects, onNavigate, mobile}){
+  const uid=team&&team.user_id;
+  const myRoles=taskRolesOf(team);
+  const _iso=d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+  const today=_iso(new Date());
+  const monday=(()=>{ const x=new Date(); const off=(x.getDay()+6)%7; x.setDate(x.getDate()-off); return _iso(x); })();
+  const [cat,setCat]=useState(null),[assign,setAssign]=useState([]),[done,setDone]=useState({}),[snz,setSnz]=useState({}),[oc,setOc]=useState(null);
+  useEffect(()=>{ if(!uid){ setCat([]); setOc({}); return; } let alive=true;
+    const load=async()=>{
+      try{ const [c,a,d,s,o]=await Promise.all([
+          loadTaskCatalog(),
+          sb.from('task_assignments').select('*').eq('user_id',uid),
+          sb.from('daily_tasks_done').select('task_key,date,assignee_user,project_id').in('date',[today,monday]),
+          sb.from('task_snooze').select('task_key,date,project_id,snooze_until').eq('user_id',uid).in('date',[today,monday]),
+          loadTaskOpenCounts(),
+        ]);
+        if(!alive) return;
+        const dm={}; (d.data||[]).forEach(r=>{ dm[taskDoneKey(r.task_key,r.date,r.assignee_user,r.project_id)]=true; });
+        const sm={}; (s.data||[]).forEach(r=>{ sm[r.task_key+'|'+r.date+'|'+(r.project_id||'')]=r.snooze_until; });
+        setCat(c); setAssign(a.data||[]); setDone(dm); setSnz(sm); setOc(o||{});
+      }catch(e){ if(alive){ setCat([]); setOc({}); } }
+    };
+    load();
+    const ch=sb.channel('cockpit-tasks').on('postgres_changes',{event:'*',schema:'public',table:'daily_tasks_done'},load)
+      .on('postgres_changes',{event:'*',schema:'public',table:'task_snooze'},load).subscribe();
+    return ()=>{ alive=false; try{ sb.removeChannel(ch); }catch(e){} };
+  },[uid]);
+  if(cat===null||oc===null) return null;
+  const monthWeek=Math.ceil(new Date().getDate()/7);
+  const winActive=t=>!t.window||t.window.includes(monthWeek);
+  const periodDate=t=>(t&&t.cadence==='weekly')?monday:today;
+  const nowMs=Date.now();
+  const open=taskEffInstances(myRoles,assign,cat).filter(t=>!t.auto_key && winActive(t) && taskGatePass(t,oc)).filter(t=>{ const d=periodDate(t);
+    if(done[taskDoneKey(t.key,d,uid,t.project_id)]||(!t.project_id&&done[taskDoneKey(t.key,d,null,null)])) return false;
+    const s=snz[t.key+'|'+d+'|'+(t.project_id||'')]; if(s&&new Date(s).getTime()>nowMs) return false; return true; });
+  if(!open.length) return null;
+  const projName=pid=>{ const p=(projects||[]).find(x=>x&&x.id===pid); return p?p.name:pid; };
+  const navFor=t=>{ const n=t.nav||{}; return { kind:'view', view:t.view||'daily_tasks',
+    ...(n.type?{navFilter:{...n, label:n.label||t.title}}:{}), ...(n.sysSection?{sysSection:n.sysSection}:{}) }; };
+  const afterNoon=new Date().getHours()>=12; const ACC=afterNoon?'#dc2626':'#d97706';
+  const rows=open.map((t,i)=>{ const n=t.data_gated?taskGateCount(t,oc):0; const gl=t.data_gated?(GATE_TASK_LABEL[t.count]||''):'';
+    return <div key={t.ik||i} onClick={()=>onNavigate&&onNavigate(navFor(t))} style={{display:'flex',alignItems:'center',gap:10,padding:'9px 16px',borderTop:i?'1px solid var(--border)':'none',cursor:'pointer'}}>
+      <span style={{width:7,height:7,borderRadius:4,background:t.data_gated?ACC:'var(--muted)',flexShrink:0}}/>
+      <span style={{flex:1,fontSize:13,fontWeight:600,color:'var(--text)'}}>{t.title}{t.project_id?<span style={{color:'var(--muted)',fontWeight:500}}> · {projName(t.project_id)}</span>:null}{t.cadence==='weekly'?<span style={{color:'var(--muted)',fontWeight:500}}> · diese Woche</span>:null}</span>
+      {t.data_gated&&n>0?<span style={{fontSize:11,fontWeight:700,color:ACC,fontFamily:'var(--mono)'}}>{n}{gl?<span style={{fontWeight:500,color:'var(--muted)'}}> {gl}</span>:null}</span>:null}
+      <span style={{color:'var(--muted)'}}>→</span></div>;
+  });
+  const head=<div style={{padding:'10px 16px',borderBottom:'1px solid var(--border)',fontWeight:700,fontSize:12,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em',display:'flex',alignItems:'center',gap:8}}>
+    <span style={{flex:1}}>Deine offenen Aufgaben</span>
+    <span onClick={()=>onNavigate&&onNavigate({kind:'view',view:'daily_tasks'})} style={{cursor:'pointer',color:ACC,textTransform:'none',letterSpacing:0,fontSize:11}}>alle →</span></div>;
+  return mobile
+    ? <div className="ckm-card" style={{borderLeft:'4px solid '+ACC,padding:0,overflow:'hidden'}}>{head}{rows}</div>
+    : <div style={{marginBottom:14,background:'var(--card)',borderRadius:'var(--r)',border:'1px solid var(--border)',overflow:'hidden'}}>{head}{rows}</div>;
+}
 // Geteilte Prädikate für „Heute zu erledigen": EINE Wahrheit für die Zählung (computeCockpitTasks)
 // UND das Vorfiltern der Zielansicht (Sprung mit Filter-Banner). Sonst driftet „welche 3" auseinander.
 // emp_*: Prädikat über einen Mitarbeiter · cv_*: über einen CV.
@@ -9733,12 +9824,8 @@ function CockpitLegacy({employees, projects, plans, forecast, onAbsence, team, o
     // M (Monatsmetriken) MUSS vor cveingang/tiles6 stehen — beide nutzen M.dCv/M.krankM. Sonst TDZ (Cockpit-Crash).
     const M=cockpitMonthMetrics(employees, cvsDb, _selY, _selM0);
     // 4c gepinnt (nur unified): eigene offene Aufgaben — der Grund, morgens hinzuschauen.
-    const _uTasks = unified ? computeCockpitTasks({employees,projects,cvsDb,payslipsDb,feedbackTodayDb}) : [];
-    const tasksNode = (unified && _uTasks.length) ? <div style={{marginBottom:14,background:'var(--card)',borderRadius:'var(--r)',border:'1px solid var(--border)',overflow:'hidden'}}>
-      <div style={{padding:'10px 16px',borderBottom:'1px solid var(--border)',fontWeight:700,fontSize:12,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em'}}>Deine offenen Aufgaben</div>
-      {_uTasks.map((t,i)=><div key={i} onClick={()=>onNavigate&&onNavigate(t.nav||{kind:'view',view:t.tab,navFilter:t.filter?{...t.filter,label:t.label}:null})} style={{display:'flex',alignItems:'center',gap:10,padding:'9px 16px',borderTop:i?'1px solid var(--border)':'none',cursor:'pointer'}}>
-        <span style={{fontSize:16}}>{t.icon}</span><span style={{flex:1,fontSize:13,fontWeight:600,color:t.color||'var(--text)'}}>{t.label}</span><span style={{color:'var(--muted)'}}>→</span></div>)}
-    </div> : null;
+    // 4d/Aufgaben-Konsolidierung: eine Liste = die eigenen offenen Tagesaufgaben (Katalog), keine abgeleiteten Hinweise mehr.
+    const tasksNode = unified ? <CockpitTasksBlock team={team} projects={projects} onNavigate={onNavigate}/> : null;
     const wblock=(key,node)=><div className="card" style={{marginBottom:14,overflow:'hidden'}}>
       <div style={{padding:'10px 14px',borderBottom:'1px solid var(--border)',fontSize:12,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em'}}>{(WIDGETS[key]||{}).label||key}</div>
       <div style={{padding:14}}>{node}</div>
