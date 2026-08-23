@@ -8637,6 +8637,11 @@ function KpiCorridor({kpi, value}){
 function kpiTeamAgg(cfg, emap, pent, wgt){
   const wkey=w=>w.year+'-'+w.kw;
   const comboKpis=(pid,skill)=> (cfg||[]).filter(k=> (!k.project_id||k.project_id===pid) && (!k.skill || (skill && k.skill===skill)) );
+  // ANZEIGE: pro Name nur EINE KPI (Team-Wert bevorzugt) — sonst erscheint z.B. „Sales Calls" doppelt (team gepflegt
+  // + agent gerechnet). Reihenfolge = erste Erscheinung. (crCompute nutzt weiter comboKpis mit den Agent-KPIs.)
+  const comboKpisView=(pid,skill)=>{ const all=comboKpis(pid,skill); const best={};
+    all.forEach(k=>{ const ex=best[k.name]; if(!ex || (k.level==='team' && ex.level!=='team')) best[k.name]=k; });
+    const seen=new Set(), out=[]; all.forEach(k=>{ if(seen.has(k.name)) return; seen.add(k.name); out.push(best[k.name]); }); return out; };
   const QSUM=new Set(['Buchungen','Sales Calls','Offene Buchungen','OSL-Buchungen']);
   const aggType=k=>{ const n=(k.name||'').toLowerCase(); if(k.unit==='min') return 'wavg_a'; if(n==='csat') return 'wavg_n'; if(n==='cr') return 'cr'; if(QSUM.has(k.name)) return 'sum'; return 'avg'; };
   const plist=(kid,wk)=> ((pent||{})[kid]&&pent[kid][wk])||[];
@@ -8659,7 +8664,7 @@ function kpiTeamAgg(cfg, emap, pent, wgt){
     const cv=computeTeam(kpi,c,k); return {v:(cv==null||isNaN(cv))?null:cv, computed:cv!=null&&!isNaN(cv)}; };
   const roundForKpi=(kpi,v)=>{ if(v==null||isNaN(v)) return v; if(kpi.unit==='min') return v; if(aggType(kpi)==='sum') return Math.round(v); return Math.round(v*10)/10; };
   const fmtCell=(kpi,v)=>kpiFmt(roundForKpi(kpi,v),kpi.unit);
-  return {comboKpis, aggType, computeTeam, cellVal, roundForKpi, fmtCell, wkey};
+  return {comboKpis, comboKpisView, aggType, computeTeam, cellVal, roundForKpi, fmtCell, wkey};
 }
 function CockpitProjectKpis({projects, team, mobile}){
   const roles=(team&&team.role_keys)||[];
@@ -8701,7 +8706,8 @@ function CockpitProjectKpis({projects, team, mobile}){
   },[isMgmt]);
   if(!isMgmt || cfg===null) return null;
   // Team-KPI-Aggregation aus der geteilten Fabrik (EINE Wahrheit, auch für die Auswertung).
-  const {comboKpis, cellVal, fmtCell} = kpiTeamAgg(cfg, emap, pent, wgt);
+  const {comboKpisView, cellVal, fmtCell} = kpiTeamAgg(cfg, emap, pent, wgt);
+  const comboKpis=comboKpisView;   // Anzeige entdupliziert (team bevorzugt); Rechnung intern nutzt weiter alle KPIs
   const seen={}, combos=[];
   cfg.forEach(k=>{ if(!k.project_id) return; const skill=k.skill||''; const key=k.project_id+'|'+skill; if(seen[key]) return; seen[key]=1; combos.push({pid:k.project_id, skill}); });
   if(!combos.length) return null;
@@ -8867,7 +8873,7 @@ function AuswertungView({projects, team}){
               <span style={{fontSize:15,fontWeight:800}}>{projName(pid)}</span>
             </div>
             <div style={{display:'flex',flexDirection:'column',gap:12}}>
-              {pcombos.map(c=>{ const kpis=agg.comboKpis(c.pid,c.skill); if(!kpis.length) return null;
+              {pcombos.map(c=>{ const kpis=agg.comboKpisView(c.pid,c.skill); if(!kpis.length) return null;
                 return <div key={c.pid+'|'+c.skill}>
                   {c.skill && <div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.05em',color:'var(--muted)',marginBottom:6}}>{c.skill}</div>}
                   <div style={{display:'flex',flexWrap:'wrap',gap:8}}>{kpis.map(kpi=>kpiCell(kpi,c))}</div>
@@ -9497,21 +9503,23 @@ function computeCockpitTasks({employees, projects, cvsDb, payslipsDb, feedbackTo
 // ── 4c: EINE Cockpit-Fassung mit Rückweg. `Cockpit` wählt Renderer nach Schalter (URL ?cockpit=new|legacy oder
 //    localStorage). Standard = 'legacy', bis die vereinheitlichte Fassung je Rolle geprüft ist. Legacy bleibt als
 //    kompletter Rückweg im Code (12 Leute landen hier — ein Fehler sperrt alle aus). ──
+// Schalter-Parameter BEIM LADEN abfangen (vor einem evtl. Login-Redirect, der ?cockpit verliert) -> localStorage.
+(function(){ try{ const u=new URLSearchParams(window.location.search).get('cockpit'); if(u==='new'||u==='legacy') localStorage.setItem('jsr_cockpit_mode',u); }catch(e){} })();
 function cockpitMode(){
   try{ const u=new URLSearchParams(window.location.search).get('cockpit'); if(u==='new'||u==='legacy'){ try{ localStorage.setItem('jsr_cockpit_mode',u); }catch(e){} return u; } }catch(e){}
   try{ const s=localStorage.getItem('jsr_cockpit_mode'); if(s==='new'||s==='legacy') return s; }catch(e){}
   return 'legacy';
 }
 // Rollen-Standard (4c, User-Vorgabe). GEPINNT ganz oben bei ALLEN (nicht in dieser Liste): eigene offene Aufgaben
-// (tasks) + Upload-Ampel (upload) — der Grund, morgens hinzuschauen. Danach je Rolle:
+// (tasks) + Upload-Ampel (upload). Kalender oben (morgens zuerst gebraucht). Danach je Rolle:
 const COCKPIT_ORDER = {
-  management: ['tiles','projekte','forecast_ist','kpis','marketing','quote','ma','cveingang','abwesend','vertraege','training','fabletics','kalender','presentations'],
-  hr:         ['cveingang','tiles','abwesend','vertraege','training','ma','quote','fabletics','presentations'],
-  lead:       ['shiftplan','abwesend','kpis','tiles','cveingang','training','quote'],
-  default:    ['tiles','cveingang','abwesend','vertraege','training','quote'],
+  management: ['kalender','tiles','projekte','forecast_ist','kpis','marketing','quote','ma','cveingang','abwesend','vertraege','training','fabletics','presentations'],
+  hr:         ['kalender','cveingang','tiles','abwesend','vertraege','training','ma','quote','fabletics','presentations'],
+  lead:       ['kalender','shiftplan','abwesend','kpis','tiles','cveingang','training','quote'],
+  default:    ['kalender','tiles','cveingang','abwesend','vertraege','training','quote'],
 };
 // Was eine Rolle NICHT sieht: Wirtschaftlichkeit/Kosten für HR und Leads („gar nicht" / „keine Kosten").
-const COCKPIT_HIDE = { hr:['projekte','forecast_ist','marketing'], lead:['projekte','forecast_ist','marketing','fabletics','kalender'] };
+const COCKPIT_HIDE = { hr:['projekte','forecast_ist','marketing'], lead:['projekte','forecast_ist','marketing','fabletics'] };
 function cockpitRoleOf(team){ const rk=(team&&team.role_keys)||[];
   if(rk.includes('management')) return 'management';
   if(rk.includes('hr')) return 'hr';
@@ -9555,8 +9563,10 @@ function CockpitLegacy({employees, projects, plans, forecast, onAbsence, team, o
   const [ckMonthOff,setCkMonthOff]=useState(0);   // 4b: globaler Zeitraum (Monats-Offset, 0 = laufender Monat) für die monatsbasierten Zahlen
   // S1b: per-User Reihenfolge + Ausblenden der Management-Cockpit-Blöcke (jsr_mgmt_cockpit_v1[user_id]={order,hidden}).
   const [mgmtCk,setMgmtCk]=useState(null); const [mgmtEdit,setMgmtEdit]=useState(false); const [mgmtDrag,setMgmtDrag]=useState(null);
-  useEffect(()=>{ let alive=true; (async()=>{ try{ const c=await loadConfigFromDB('jsr_mgmt_cockpit_v1'); const uid=team&&team.user_id; const e=(c&&uid&&c[uid])||{}; if(alive) setMgmtCk({order:Array.isArray(e.order)?e.order:null,hidden:Array.isArray(e.hidden)?e.hidden:[]}); }catch(err){ if(alive) setMgmtCk({order:null,hidden:[]}); } })(); return ()=>{alive=false;}; },[team]);
-  const saveMgmtCk=async(next)=>{ setMgmtCk(next); const uid=team&&team.user_id; if(!uid) return; try{ const c=(await loadConfigFromDB('jsr_mgmt_cockpit_v1'))||{}; c[uid]=next; await saveConfigToDB('jsr_mgmt_cockpit_v1',c); }catch(e){} };
+  // 4c: unified nutzt EIGENEN Konfig-Schlüssel (frisch = Rollen-Standard); Legacy behält den alten Management-Schlüssel.
+  const _ckKey = unified ? 'jsr_cockpit_v2' : 'jsr_mgmt_cockpit_v1';
+  useEffect(()=>{ let alive=true; (async()=>{ try{ const c=await loadConfigFromDB(_ckKey); const uid=team&&team.user_id; const e=(c&&uid&&c[uid])||{}; if(alive) setMgmtCk({order:Array.isArray(e.order)?e.order:null,hidden:Array.isArray(e.hidden)?e.hidden:[]}); }catch(err){ if(alive) setMgmtCk({order:null,hidden:[]}); } })(); return ()=>{alive=false;}; },[team]);
+  const saveMgmtCk=async(next)=>{ setMgmtCk(next); const uid=team&&team.user_id; if(!uid) return; try{ const c=(await loadConfigFromDB(_ckKey))||{}; c[uid]=next; await saveConfigToDB(_ckKey,c); }catch(e){} };
   // Mobile: feste, kuratierte Reihenfolge statt der Desktop-Widget-Konfiguration (auf schmalem Screen
   // unbrauchbar). Gilt für ALLE mobilen Viewports; die Desktop-Konfig (jsr_user_cockpits_v1) bleibt unberührt.
   if(isMobileW) return <CockpitMobile employees={employees} projects={projects} plans={plans} team={team}
@@ -12505,13 +12515,16 @@ function empAssignments(emp){
 }
 // Kopf-Anteil eines MA auf einem Projekt (Σ share_pct der Zuweisungen auf pid)/100.
 function empProjShare(emp, pid){ return empAssignments(emp).filter(a=>a.project_id===pid).reduce((s,a)=>s+(Number(a.share_pct)||0),0)/100; }
+// Arbeitszeit-Anteil eines MA: Halbtagskraft (4h) = 0,5. Vollzeit = 8h/Tag als Basis (so gepflegt: Vollzeit 8,
+// Teilzeit 50% = 4, 75% = 6). FTE = Arbeitszeit-Anteil × Projekt-Anteil — sonst zählt eine Halbtagskraft als 1,0.
+function empWorkFrac(emp){ const h=parseFloat(emp&&emp.work_hours); return (!isNaN(h)&&h>0)?Math.max(0.1,Math.min(1,h/8)):1; }
 // EINE WAHRHEIT für Projekt-Personal: KÖPFE (Personen; ein Mehrprojekt-MA zählt bei JEDEM seiner Projekte als 1)
 // und FTE (Σ Anteile; teilt sich auf). Regel (User 2026-08-23): Kosten/Kapazität/Auslastung rechnen FTE,
 // Personen zählen Köpfe, die Beschriftung sagt WELCHES. Default active+training (Schulung kostet + belegt Platz +
 // wird bald produktiv); für Produktiv-Sichten (Auslastung telefoniert) statuses=['active'] übergeben.
 function projectStaff(employees, pid, statuses){
   const st=statuses||['active','training']; let heads=0, fte=0;
-  (employees||[]).forEach(e=>{ if(!e||!st.includes(e.status)) return; const sh=empProjShare(e,pid); if(sh>0){ heads++; fte+=sh; } });
+  (employees||[]).forEach(e=>{ if(!e||!st.includes(e.status)) return; const sh=empProjShare(e,pid); if(sh>0){ heads++; fte+=sh*empWorkFrac(e); } });
   return {heads, fte:Math.round(fte*100)/100};
 }
 // FTE für Anzeige: „2", „2,5" (deutsche Dezimalkomma, max 1 Nachkommastelle).
@@ -39447,6 +39460,10 @@ function App(){
       {key:'datacheck',label:'Daten-Checks',icon:'🩺'},
       {key:'productivity',label:'Produktivität',icon:'📊'},
     ]},
+    {sec:'Werkzeuge', items:[   // täglich gebrauchte Werkzeuge, nicht unter „Hilfe" versteckt
+      {key:'wissen_system',label:'Wissen',icon:'📖'},
+      ...((team&&(team.role_keys||[]).some(r=>r==='management')) ? [{key:'nlquery',label:'Datenabfrage',icon:'🔎'}] : []),   // Management-only
+    ]},
     {sec:'Workforce', items:[
       {key:'shiftplan',label:'Schichtplanung',icon:'🗓'},
       {key:'checkin',label:'Check-in',icon:'🙋'},
@@ -39475,16 +39492,6 @@ function App(){
       ...((team&&(team.role_keys||[]).some(r=>r==='management')) ? [{key:'recmkt',label:'Recruiting Marketing',icon:'📣'}] : []),   // Management-only (Werbung = Recruiting, nicht Business)
       {key:'showcase',label:'Showcases',icon:'🌟'},
     ]},
-    {sec:'Akademie', items:[
-      {key:'training_plans',label:'Schulungsplanung',icon:'📚'},
-      {key:'timeline',label:'Timeline',icon:'📅'},
-      {key:'skillmatrix',  label:'Skill Matrix',  icon:'🎯'},
-      {key:'elearning',    label:'E-Learning',    icon:'🎓'},
-      {key:'knowledge',    label:'Wissensbasis',  icon:'💡'},
-      {key:'languagetest', label:'Wissenstest',   icon:'📝'},
-      {key:'test_editor',  label:'Test Editor',   icon:'✏️'},
-      {key:'test_preview', label:'Test Vorschau', icon:'👁'},
-    ]},
     {sec:'Kunden', items:[   // alles rund um den Auftraggeber: Projekte, Kommunikation, Datenlieferung
       {key:'projects',label:'Projekte',icon:'📁'},
       ...((team&&((team.role_keys||[]).some(r=>r==='management')||isLeadOnlyRoles(team.role_keys))) ? [{key:'praesentation',label:'Präsentationen',icon:'📊'}] : []),   // Kundenkommunikation (Management + Projektleiter)
@@ -39511,9 +39518,15 @@ function App(){
       ...((team&&(team.role_keys||[]).some(r=>r==='management')) ? [{key:'useractivity',label:'Nutzung & Aktivität',icon:'📊'}] : []),   // Management-only
       ...((team&&(team.role_keys||[]).some(r=>r==='management')) ? [{key:'taskadmin',label:'Aufgaben-Verwaltung',icon:'🗂'}] : []),   // Management-only
     ]},
-    {sec:'Hilfe', items:[
-      {key:'wissen_system',label:'Wissen System',icon:'📖'},
-      ...((team&&(team.role_keys||[]).some(r=>r==='management')) ? [{key:'nlquery',label:'Datenabfrage',icon:'🔎'}] : []),   // Management-only
+    {sec:'Akademie', items:[   // ganz unten: Schulung + Wissen/Tests
+      {key:'training_plans',label:'Schulungsplanung',icon:'📚'},
+      {key:'timeline',label:'Timeline',icon:'📅'},
+      {key:'skillmatrix',  label:'Skill Matrix',  icon:'🎯'},
+      {key:'elearning',    label:'E-Learning',    icon:'🎓'},
+      {key:'knowledge',    label:'Wissensbasis',  icon:'💡'},
+      {key:'languagetest', label:'Wissenstest',   icon:'📝'},
+      {key:'test_editor',  label:'Test Editor',   icon:'✏️'},
+      {key:'test_preview', label:'Test Vorschau', icon:'👁'},
     ]},
   ];
 
