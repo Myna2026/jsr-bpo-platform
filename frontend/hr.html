@@ -34994,7 +34994,7 @@ function RecruitingMarketingView({employees}){
       if(alive) setRows(parsed);
     }catch(e){ if(alive){ setErr(e.message||'Ladefehler'); setRows([]); } }
   })(); return ()=>{alive=false;}; },[]);
-  useEffect(()=>{ let alive=true; (async()=>{ try{ const {data}=await sb.from('cvs').select('id,cv_date,source'); if(alive) setCvs(data||[]); }catch(e){} })(); return ()=>{alive=false;}; },[]);
+  useEffect(()=>{ let alive=true; (async()=>{ try{ const {data}=await sb.from('cvs').select('id,cv_date,source,extra'); if(alive) setCvs(data||[]); }catch(e){} })(); return ()=>{alive=false;}; },[]);
   // Wiederholer = Meta-Leads, deren Telefon schon im Bestand lag (nie als Bewerbung angelegt). Nach created_time
   // ins Zeitfenster gebucht wie die neuen Bewerbungen (cv_date), damit beide vergleichbar sind.
   useEffect(()=>{ let alive=true; (async()=>{ try{ const {data}=await sb.from('windsor_leads').select('created_time,status_review').in('status_review',['dup','discarded','auto_discarded']); if(alive) setWlDups(data||[]); }catch(e){} })(); return ()=>{alive=false;}; },[]);
@@ -35076,6 +35076,18 @@ function RecruitingMarketingView({employees}){
   const spendCur=sum(metaIn(cur),'spend'); const cpaCur=appsMetaTot>0?spendCur/appsMetaTot:null;
   const repeatCur=repeatersIn({from:cpaFrom,to:cur.to}); const totContacts=appsMetaTot+repeatCur; const cpaContact=totContacts>0?spendCur/totContacts:null;
   const repeatPct=totContacts>0?Math.round(repeatCur/totContacts*100):0;
+  // Bewerbungen je Tag (Stückzahl, direkt lesbar) — meta-Anteil getrennt. Bei Zeiträumen >70 Tagen nur Tage mit Eingang.
+  const appsDaily=(()=>{ if(!cur||!cur.from||!cur.to) return [];
+    const m={}, mm={}; (cvs||[]).forEach(c=>{ if(!c) return; const d=wmDate(c.cv_date); if(!inR(d,cur)) return; const k=isoLocal(d); m[k]=(m[k]||0)+1; if(c.source==='meta') mm[k]=(mm[k]||0)+1; });
+    const d0=new Date(cur.from); d0.setHours(0,0,0,0); const dE=new Date(cur.to); dE.setHours(0,0,0,0);
+    const span=Math.round((dE-d0)/86400000)+1; const out=[];
+    if(span>0&&span<=70){ for(let x=new Date(d0); x<=dE; x.setDate(x.getDate()+1)){ const k=isoLocal(x); out.push({date:new Date(x), n:m[k]||0, meta:mm[k]||0}); } }
+    else { Object.keys(m).sort().forEach(k=>out.push({date:new Date(k+'T00:00:00'), n:m[k], meta:mm[k]||0})); }
+    return out; })();
+  const appsDMax=appsDaily.reduce((mx,d)=>Math.max(mx,d.n),0)||1;
+  // Bewerber je Kampagne: cvs.extra.campaign == windsor_marketing.campaign (Namen stimmen exakt überein).
+  const campApps=(name)=>(cvs||[]).filter(c=>c&&c.source==='meta'&&c.extra&&c.extra.campaign===name&&inR(wmDate(c.cv_date),cur)).length;
+  const campAppsTot=camps.reduce((s,c)=>s+campApps(c.name),0);
   const box=(bg,bd,col,txt)=><div style={{padding:'12px 16px',borderRadius:10,background:bg,border:'1px solid '+bd,color:col,fontSize:13,fontWeight:700}}>{txt}</div>;
 
   // Aktualitaet je Anbindung. windsor_marketing hat KEINEN Schreibzeitpunkt -> juengstes Daten-Datum je
@@ -35133,16 +35145,33 @@ function RecruitingMarketingView({employees}){
                 </div>
               </div>; })}
           </div>
-          {nCamp>1 && <div style={{marginTop:12,padding:'10px 14px',borderRadius:10,background:'#fffbeb',border:'1px solid #fde68a',color:'#b45309',fontSize:12,fontWeight:700}}>⚠ In diesem Zeitraum liefen {nCamp} Kampagnen gleichzeitig — die Kosten je Bewerbung sind dann nur grob, weil sich Bewerbungen nicht einer Kampagne zuordnen lassen.</div>}
+          {appsDaily.length>0 && <div style={{marginTop:22}}>
+            <div style={{display:'flex',alignItems:'baseline',gap:12,flexWrap:'wrap',marginBottom:8}}>
+              <div style={{fontSize:14,fontWeight:800}}>Bewerbungen je Tag</div>
+              <div style={{fontSize:11,color:'var(--muted)'}}><span style={{display:'inline-block',width:9,height:9,borderRadius:2,background:'var(--accent,#2563eb)',verticalAlign:-1,marginRight:4}}/>Meta-Anzeigen<span style={{display:'inline-block',width:9,height:9,borderRadius:2,background:'var(--border)',verticalAlign:-1,margin:'0 4px 0 12px'}}/>übrige Quellen</div>
+            </div>
+            <div style={{display:'flex',alignItems:'flex-end',gap:4,height:120,padding:'0 2px',overflowX:'auto'}}>
+              {appsDaily.map((d,i)=>{ const h=Math.max(d.n>0?6:2, Math.round(d.n/appsDMax*100)); const mf=d.n>0?d.meta/d.n:0;
+                return <div key={i} style={{flex:'1 0 26px',minWidth:26,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'flex-end',height:'100%'}}>
+                  <div style={{fontSize:10,fontFamily:'var(--mono)',color:d.n>0?'var(--text)':'transparent',marginBottom:2,fontWeight:800}}>{d.n||'0'}</div>
+                  <div style={{width:'72%',height:h+'%',borderRadius:'3px 3px 0 0',background:'var(--border)',display:'flex',flexDirection:'column',justifyContent:'flex-end',overflow:'hidden'}}>
+                    <div style={{height:(mf*100)+'%',background:'var(--accent,#2563eb)'}}/>
+                  </div>
+                  <div style={{fontSize:9,color:'var(--muted)',marginTop:3,whiteSpace:'nowrap'}}>{d.date.toLocaleDateString('de-DE',{day:'numeric',month:'numeric'})}</div>
+                </div>; })}
+            </div>
+            <div style={{fontSize:11,color:'var(--muted)',marginTop:6}}>Zahl über dem Balken = Bewerbungen des Tages. Blau = aus Meta-Anzeigen, grau = übrige Quellen.</div>
+          </div>}
+          {nCamp>1 && <div style={{marginTop:12,padding:'10px 14px',borderRadius:10,background:'var(--surface-2)',border:'1px solid var(--border)',color:'var(--muted)',fontSize:12}}>In diesem Zeitraum liefen <b style={{color:'var(--text)'}}>{nCamp}</b> Kampagnen gleichzeitig — Bewerbungen und Kosten je Bewerbung stehen jetzt <b style={{color:'var(--text)'}}>je Kampagne</b> in der Tabelle (echte Zuordnung über die Kampagne am Bewerber).</div>}
           {camps.length>0 && <div style={{marginTop:22}}>
             <div style={{display:'flex',alignItems:'baseline',gap:10,marginBottom:8,flexWrap:'wrap'}}>
               <div style={{fontSize:14,fontWeight:800}}>Kampagnen</div>
               {camps.length>1 && <div style={{fontSize:11,fontWeight:800,color:'#b45309',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:20,padding:'1px 9px'}}>{camps.length} gleichzeitig</div>}
             </div>
             <div style={{border:'1px solid var(--border)',borderRadius:14,background:'var(--card)',overflow:'hidden'}}>
-            <div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:13,minWidth:660}}>
+            <div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:13,minWidth:820}}>
               <thead><tr style={{background:'var(--surface-2)'}}>
-                {[['Kampagne','left'],['Zeitraum','left'],['Ausgaben','right'],['Einblendungen','right'],['Klicks','right'],['Reichweite','right'],['Klickpreis','right']].map(([h,al])=><th key={h} style={{textAlign:al,padding:'9px 12px',fontSize:10.5,fontWeight:800,textTransform:'uppercase',letterSpacing:'.05em',color:'var(--muted)',whiteSpace:'nowrap'}}>{h}</th>)}
+                {[['Kampagne','left'],['Zeitraum','left'],['Ausgaben','right'],['Einblendungen','right'],['Klicks','right'],['Reichweite','right'],['Klickpreis','right'],['Bewerbungen','right'],['Kosten/Bew.','right']].map(([h,al])=><th key={h} style={{textAlign:al,padding:'9px 12px',fontSize:10.5,fontWeight:800,textTransform:'uppercase',letterSpacing:'.05em',color:'var(--muted)',whiteSpace:'nowrap'}}>{h}</th>)}
               </tr></thead>
               <tbody>
                 {camps.length>1 && <tr style={{borderTop:'1px solid var(--border)',background:'var(--surface-2)',fontWeight:800}}>
@@ -35153,8 +35182,11 @@ function RecruitingMarketingView({employees}){
                   <td style={{padding:'10px 12px',textAlign:'right',fontFamily:'var(--mono)'}}>{int(campTot.clicks)}</td>
                   <td style={{padding:'10px 12px',textAlign:'right',fontFamily:'var(--mono)'}}>{int(campTot.reach)}</td>
                   <td style={{padding:'10px 12px',textAlign:'right',fontFamily:'var(--mono)'}}>{campCpcTot==null?'—':eur(campCpcTot)}</td>
+                  <td style={{padding:'10px 12px',textAlign:'right',fontFamily:'var(--mono)'}}>{int(campAppsTot)}</td>
+                  <td style={{padding:'10px 12px',textAlign:'right',fontFamily:'var(--mono)'}}>{campAppsTot>0?eur(campTot.spend/campAppsTot):'—'}</td>
                 </tr>}
                 {camps.map((c,i)=>{ const active=c.last&&latestMeta&&c.last.getTime()===latestMeta.getTime(); const cpc=cpcOf(c);
+                const capps=campApps(c.name); const ccpa=capps>0?c.spend/capps:null;
                 const multi=camps.length>1;
                 const isMin=multi&&cpc!=null&&campCpcMin!=null&&cpc<=campCpcMin*1.001;
                 const cpcCol=(cpc==null||!multi)?'var(--text)':isMin?'#059669':(cpc>=campCpcMin*1.3?'#dc2626':'#b45309');
@@ -35172,10 +35204,12 @@ function RecruitingMarketingView({employees}){
                     {cpcUp&&<span style={{marginLeft:6,fontSize:10,fontWeight:800,color:cpcCol,background:pillBg,border:'1px solid '+pillBd,borderRadius:20,padding:'1px 6px'}}>{cpcUp}</span>}
                     {isMin&&<span style={{marginLeft:6,fontSize:10,fontWeight:800,color:'#059669',background:'#ecfdf5',border:'1px solid #a7f3d0',borderRadius:20,padding:'1px 6px'}}>günstigste</span>}
                   </td>
+                  <td style={{padding:'10px 12px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:700}}>{int(capps)}</td>
+                  <td style={{padding:'10px 12px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:800,color:ccpa==null?'var(--muted)':'var(--accent,#2563eb)'}}>{ccpa==null?'—':eur(ccpa)}</td>
                 </tr>; })}</tbody>
             </table></div>
             </div>
-            <div style={{fontSize:11,color:'var(--muted)',marginTop:8}}>Klickpreis (CPC) = Ausgaben ÷ Klicks. Bei mehreren Kampagnen: <b style={{color:'#059669'}}>grün</b> = günstigste, roter Chip <b>+X %</b> = Aufschlag der teureren gegenüber ihr. „aktiv" = Kampagne mit Daten am letzten Importtag ({fmtD(latestMeta)}).</div>
+            <div style={{fontSize:11,color:'var(--muted)',marginTop:8}}>Klickpreis (CPC) = Ausgaben ÷ Klicks. <b>Bewerbungen</b> = Bewerber, die diese Kampagne tragen (source=meta, im Zeitraum); <b>Kosten/Bew.</b> = Ausgaben ÷ Bewerbungen der Kampagne. Bei mehreren Kampagnen: <b style={{color:'#059669'}}>grün</b> = günstigste, roter Chip <b>+X %</b> = Aufschlag der teureren gegenüber ihr. „aktiv" = Kampagne mit Daten am letzten Importtag ({fmtD(latestMeta)}).</div>
           </div>}
           {igDays.length>0 && <div style={{marginTop:22}}>
             <div style={{display:'flex',alignItems:'baseline',gap:12,flexWrap:'wrap',marginBottom:8}}>
@@ -35208,7 +35242,7 @@ function RecruitingMarketingView({employees}){
               <div style={{color:repeatCur>0?'#b45309':'var(--muted)'}}><div style={{fontSize:10,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em'}}>davon Wiederholer</div><div style={{fontSize:19,fontWeight:800}}>{int(repeatCur)}{repeatCur>0?(' · '+repeatPct+' %'):''}</div><div style={{fontSize:10,fontWeight:600}}>bereits bekannt</div></div>
               <div><div style={{fontSize:10,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)'}}>Kosten je Kontakt (alle)</div><div style={{fontSize:19,fontWeight:800}}>{cpaContact==null?'—':eur(cpaContact)}</div></div>
             </div>}
-            <div style={{fontSize:11,color:'var(--muted)',marginTop:8,lineHeight:1.6}}><b>Echte Zuordnung.</b> Seit dem Meta-Import trägt jede Anzeigen-Bewerbung die Herkunft <b>source=meta</b> — gezählt werden nur diese, nicht mehr alle CV-Eingänge. Keine Näherung mehr. {repeatCur>0?('Zusätzlich meldeten sich '+repeatCur+' Wiederholer (Telefon schon im Bestand) — die werden gar nicht erst als Bewerbung angelegt und zählen bei „je neue Bewerbung" nicht mit; „je Kontakt (alle)" schließt sie ein. '):''}{appsSheetTot>0?('Im Zeitraum kamen zusätzlich '+appsSheetTot+' Bewerbung'+(appsSheetTot===1?'':'en')+' über den Google-Sheet-Sync (ohne Werbung) — die bleiben hier außen vor. '):''}{nCamp>1?('Bei '+nCamp+' gleichzeitigen Kampagnen lässt sich eine einzelne Bewerbung keiner bestimmten Kampagne zuordnen, die Gesamtkosten je Meta-Bewerbung stimmen aber. '):''}{cpaCur==null?'(Keine Meta-Bewerbungen im Zeitraum → keine Angabe.)':''}</div>
+            <div style={{fontSize:11,color:'var(--muted)',marginTop:8,lineHeight:1.6}}><b>Echte Zuordnung.</b> Seit dem Meta-Import trägt jede Anzeigen-Bewerbung die Herkunft <b>source=meta</b> — gezählt werden nur diese, nicht mehr alle CV-Eingänge. Keine Näherung mehr. {repeatCur>0?('Zusätzlich meldeten sich '+repeatCur+' Wiederholer (Telefon schon im Bestand) — die werden gar nicht erst als Bewerbung angelegt und zählen bei „je neue Bewerbung" nicht mit; „je Kontakt (alle)" schließt sie ein. '):''}{appsSheetTot>0?('Im Zeitraum kamen zusätzlich '+appsSheetTot+' Bewerbung'+(appsSheetTot===1?'':'en')+' über den Google-Sheet-Sync (ohne Werbung) — die bleiben hier außen vor. '):''}{nCamp>1?('Je Kampagne ist die Zuordnung in der Kampagnen-Tabelle oben aufgeschlüsselt (Bewerbungen und Kosten je Bewerbung). '):''}{cpaCur==null?'(Keine Meta-Bewerbungen im Zeitraum → keine Angabe.)':''}</div>
           </div>
           <div style={{fontSize:11,color:'var(--muted)',marginTop:12,lineHeight:1.6}}>
             Reichweite = Summe der Tageswerte (nicht deduplizierte Unique-Reichweite); Meta (bezahlt) und Instagram (organisch) getrennt.
