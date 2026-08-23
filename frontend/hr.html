@@ -1308,7 +1308,7 @@ const MENU_BADGES_DEFAULT = { assignments:{
 const MENU_BADGE_MAIN_ITEMS = [
   {key:'start',label:'Start'},{key:'daily_tasks',label:'Tagesaufgaben'},{key:'datacheck',label:'Daten-Checks'},
   {key:'wissen_system',label:'Wissen System'},{key:'cockpit',label:'Cockpit'},{key:'productivity',label:'Produktivität'},
-  {key:'performance',label:'Performance'},{key:'callqa',label:'Call-Qualität'},{key:'shiftplan',label:'Schichtplanung'},{key:'checkin',label:'Check-in'},{key:'workforce',label:'Workforce (Beta)'},{key:'employees',label:'Mitarbeiter'},
+  {key:'performance',label:'Performance'},{key:'auswertung',label:'Auswertung'},{key:'callqa',label:'Call-Qualität'},{key:'shiftplan',label:'Schichtplanung'},{key:'checkin',label:'Check-in'},{key:'workforce',label:'Workforce (Beta)'},{key:'employees',label:'Mitarbeiter'},
   {key:'timetracking',label:'Zeiterfassung'},{key:'locations',label:'Standorte'},{key:'spaces',label:'Spaces & Seats'},
   {key:'payroll',label:'Löhne'},{key:'orgchart',label:'Organigramm'},{key:'absences',label:'Abwesenheiten'},{key:'calendar',label:'Kalender'},
   {key:'urlaubantraege',label:'Urlaubsanträge'},{key:'feedback',label:'Feedbackgespräche'},{key:'kanban',label:'Recruiting'},{key:'funnel',label:'Bewerber-Trichter'},{key:'onboarding',label:'Onboarding'},
@@ -7050,7 +7050,7 @@ function saveUserCockpits(obj){ const o=obj||{}; localStorage.setItem('jsr_user_
 // über jsr_mobile_full_v1 = { [user_id]: true } (analog Tab-Sperren) -> voller mobiler Zugriff.
 // Kern-Operatives + unterwegs Gebrauchtes (Zahlen ansehen, Urlaub genehmigen). recmkt/fcist/nlquery bleiben
 // menue-seitig management-only -> mobil sehen sie nur Manager. useractivity/projects/forecast bewusst NUR Desktop.
-const MOBILE_NAV_KEYS = ['start','cockpit','daily_tasks','calendar','cvs','funnel','checkin','employees','shiftplan','absences','urlaubantraege','performance','callqa','nlquery','recmkt','fcist'];
+const MOBILE_NAV_KEYS = ['start','cockpit','daily_tasks','calendar','cvs','funnel','checkin','employees','shiftplan','absences','urlaubantraege','performance','auswertung','callqa','nlquery','recmkt','fcist'];
 // Gelesen wird der Flag frisch aus der DB (loadConfigFromDB) beim Login + in der Matrix; hier nur Schreiben.
 function saveMobileFull(obj){ const o=obj||{}; localStorage.setItem('jsr_mobile_full_v1', JSON.stringify(o)); saveConfigToDB('jsr_mobile_full_v1', o); }
 // MA-Import-Berechtigung pro Nutzer über jsr_ma_import_v1 = { [user_id]: true } (analog Tab-Sperren).
@@ -8629,6 +8629,38 @@ function KpiCorridor({kpi, value}){
 // Sichtbar, sobald KPIs konfiguriert sind (wie die Tagesberichte). Geteilte Definitionen (kpi_config),
 // Werte aus kpi_project_entries (manueller Kundenwert, NICHT abgeleitet). Laufende Woche + Vorwoche,
 // Schwellenfarbe über evalKpi, Format über kpiFmt (inkl. mm:ss). Konfig aus der DB (nicht Mount-localStorage).
+// Team-KPI-Aggregation als EINE Wahrheit (Cockpit-Block + Auswertung teilen sie, keine dritte Kopie): gepflegter
+// Teamwert (kpi_project_entries) hat Vorrang, sonst aus den Personenwerten (kpi_entries) gerechnet wie auf den
+// Berichtsfolien — AHT/ACW (min) gewichtet nach Anzahl (answered), CSAT nach n (anzahl), Mengen summiert, CR aus
+// Σ(Offene+OSL)/ΣSales-Calls, Rest Ø. Anzeige-Rundung per Typ (min→mm:ss, Mengen ganz, sonst 1 NK; entrauscht auch
+// gespeicherte Werte). cfg/emap/pent/wgt kommen aus dem jeweiligen Loader.
+function kpiTeamAgg(cfg, emap, pent, wgt){
+  const wkey=w=>w.year+'-'+w.kw;
+  const comboKpis=(pid,skill)=> (cfg||[]).filter(k=> (!k.project_id||k.project_id===pid) && (!k.skill || (skill && k.skill===skill)) );
+  const QSUM=new Set(['Buchungen','Sales Calls','Offene Buchungen','OSL-Buchungen']);
+  const aggType=k=>{ const n=(k.name||'').toLowerCase(); if(k.unit==='min') return 'wavg_a'; if(n==='csat') return 'wavg_n'; if(n==='cr') return 'cr'; if(QSUM.has(k.name)) return 'sum'; return 'avg'; };
+  const plist=(kid,wk)=> ((pent||{})[kid]&&pent[kid][wk])||[];
+  const avgOf=a=>a.length?a.reduce((s,x)=>s+x,0)/a.length:null;
+  const wavgOf=(L,wf)=>{ let ts=0,tw=0; L.forEach(x=>{ if(x.v==null) return; const w=wf(x); const ww=(w&&w>0)?w:1; ts+=x.v*ww; tw+=ww; }); return tw?ts/tw:null; };
+  const crCompute=(c,wk)=>{ const find=nm=>{ const k=comboKpis(c.pid,c.skill).find(x=>(x.name||'')===nm); return k?k.id:null; };
+    const oI=find('Offene Buchungen'),sI=find('OSL-Buchungen'),cI=find('Sales Calls'); if(!oI||!sI||!cI) return null;
+    const s=id=>plist(id,wk).reduce((a,x)=>a+(x.v||0),0); const calls=s(cI); if(!calls) return null;
+    return Math.round((s(oI)+s(sI))/calls*10000)/100; };
+  const computeTeam=(kpi,c,wk)=>{ const t=aggType(kpi); const L=plist(kpi.id,wk);
+    if(t==='cr'){ const cr=crCompute(c,wk); if(cr!=null) return cr; return L.length?Math.round(avgOf(L.map(x=>x.v))*100)/100:null; }
+    if(!L.length) return null;
+    if(t==='sum') return Math.round(L.reduce((a,x)=>a+(x.v||0),0)*100)/100;
+    if(t==='wavg_a') return wavgOf(L,x=>((wgt||{})[x.e+'|'+wk]&&wgt[x.e+'|'+wk].a)||0);
+    if(t==='wavg_n') return wavgOf(L,x=>((wgt||{})[x.e+'|'+wk]&&wgt[x.e+'|'+wk].n)||0);
+    return Math.round(avgOf(L.map(x=>x.v))*100)/100;
+  };
+  const cellVal=(kpi,c,w)=>{ const rec=(emap||{})[c.pid+'|'+(c.skill||'')+'|'+kpi.id]; const k=wkey(w);
+    if(rec&&rec[k]!=null) return {v:rec[k], computed:false};
+    const cv=computeTeam(kpi,c,k); return {v:(cv==null||isNaN(cv))?null:cv, computed:cv!=null&&!isNaN(cv)}; };
+  const roundForKpi=(kpi,v)=>{ if(v==null||isNaN(v)) return v; if(kpi.unit==='min') return v; if(aggType(kpi)==='sum') return Math.round(v); return Math.round(v*10)/10; };
+  const fmtCell=(kpi,v)=>kpiFmt(roundForKpi(kpi,v),kpi.unit);
+  return {comboKpis, aggType, computeTeam, cellVal, roundForKpi, fmtCell, wkey};
+}
 function CockpitProjectKpis({projects, team, mobile}){
   const roles=(team&&team.role_keys)||[];
   // NUR Management (keine Admin-Rolle im System; is_management, NICHT is_admin). KPIs sind
@@ -8668,36 +8700,8 @@ function CockpitProjectKpis({projects, team, mobile}){
     return ()=>{ alive=false; try{ sb.removeChannel(ch); }catch(e){} };
   },[isMgmt]);
   if(!isMgmt || cfg===null) return null;
-  const comboKpis=(pid,skill)=> cfg.filter(k=> (!k.project_id||k.project_id===pid) && (!k.skill || (skill && k.skill===skill)) );
-  // ── Fehlende Teamwerte aus den Personenwerten (kpi_entries) rechnen — wie auf den Berichtsfolien:
-  //    AHT/ACW (Minuten) gewichtet nach Anzahl (answered), CSAT gewichtet nach n (anzahl), Mengen summiert,
-  //    CR aus Σ(Offene+OSL)/ΣSales-Calls. Rest (QM, Mails/h) einfacher Ø. Nur wenn kein gepflegter Teamwert da ist.
-  const QSUM=new Set(['Buchungen','Sales Calls','Offene Buchungen','OSL-Buchungen']);
-  const aggType=k=>{ const n=(k.name||'').toLowerCase(); if(k.unit==='min') return 'wavg_a'; if(n==='csat') return 'wavg_n'; if(n==='cr') return 'cr'; if(QSUM.has(k.name)) return 'sum'; return 'avg'; };
-  const plist=(kid,wk)=> (pent[kid]&&pent[kid][wk])||[];
-  const avgOf=a=>a.length?a.reduce((s,x)=>s+x,0)/a.length:null;
-  const wavgOf=(L,wf)=>{ let ts=0,tw=0; L.forEach(x=>{ if(x.v==null) return; const w=wf(x); const ww=(w&&w>0)?w:1; ts+=x.v*ww; tw+=ww; }); return tw?ts/tw:null; };
-  const crCompute=(c,wk)=>{ const find=nm=>{ const k=comboKpis(c.pid,c.skill).find(x=>(x.name||'')===nm); return k?k.id:null; };
-    const oI=find('Offene Buchungen'),sI=find('OSL-Buchungen'),cI=find('Sales Calls'); if(!oI||!sI||!cI) return null;
-    const s=id=>plist(id,wk).reduce((a,x)=>a+(x.v||0),0); const calls=s(cI); if(!calls) return null;
-    return Math.round((s(oI)+s(sI))/calls*10000)/100; };
-  const computeTeam=(kpi,c,wk)=>{ const t=aggType(kpi); const L=plist(kpi.id,wk);
-    if(t==='cr'){ const cr=crCompute(c,wk); if(cr!=null) return cr; return L.length?Math.round(avgOf(L.map(x=>x.v))*100)/100:null; }
-    if(!L.length) return null;
-    if(t==='sum') return Math.round(L.reduce((a,x)=>a+(x.v||0),0)*100)/100;
-    if(t==='wavg_a') return wavgOf(L,x=>(wgt[x.e+'|'+wk]&&wgt[x.e+'|'+wk].a)||0);
-    if(t==='wavg_n') return wavgOf(L,x=>(wgt[x.e+'|'+wk]&&wgt[x.e+'|'+wk].n)||0);
-    return Math.round(avgOf(L.map(x=>x.v))*100)/100;   // QM, Mails/h, Rest: einfacher Ø
-  };
-  // Zellwert: gepflegter Teamwert (kpi_project_entries) hat Vorrang; sonst gerechnet aus Personenwerten.
-  const cellVal=(kpi,c,w)=>{ const rec=emap[c.pid+'|'+(c.skill||'')+'|'+kpi.id]; const k=wkey(w);
-    if(rec&&rec[k]!=null) return {v:rec[k], computed:false};
-    const cv=computeTeam(kpi,c,k); return {v:(cv==null||isNaN(cv))?null:cv, computed:cv!=null&&!isNaN(cv)}; };
-  // Anzeige-Rundung nach Konvention (kpiFmt selbst rundet nur min->mm:ss, sonst String(value) roh): Minuten (AHT/ACW)
-  // -> mm:ss; Mengen -> ganzzahlig; Rest (CSAT, Conversion, QM, Mails/h) -> 1 Nachkommastelle. Greift fuer gerechnete
-  // UND gepflegte Werte (auch importierte tragen Float-Rauschen wie 206.60000000000002).
-  const roundForKpi=(kpi,v)=>{ if(v==null||isNaN(v)) return v; if(kpi.unit==='min') return v; if(aggType(kpi)==='sum') return Math.round(v); return Math.round(v*10)/10; };
-  const fmtCell=(kpi,v)=>kpiFmt(roundForKpi(kpi,v),kpi.unit);
+  // Team-KPI-Aggregation aus der geteilten Fabrik (EINE Wahrheit, auch für die Auswertung).
+  const {comboKpis, cellVal, fmtCell} = kpiTeamAgg(cfg, emap, pent, wgt);
   const seen={}, combos=[];
   cfg.forEach(k=>{ if(!k.project_id) return; const skill=k.skill||''; const key=k.project_id+'|'+skill; if(seen[key]) return; seen[key]=1; combos.push({pid:k.project_id, skill}); });
   if(!combos.length) return null;
@@ -8781,6 +8785,100 @@ function CockpitProjectKpis({projects, team, mobile}){
   return mobile
     ? <div className="ckm-card" style={{borderLeft:'4px solid #0d9488'}}><div className="ckm-h" style={{color:'#0d9488'}}>📊 KPIs je Projekt·Skill</div>{inner}</div>
     : <div className="card" style={{marginBottom:12}}><div style={{padding:'12px 14px 0',fontSize:14,fontWeight:800}}>📊 KPIs je Projekt·Skill</div>{deckGrid}</div>;
+}
+// ── Auswertung: alle Team-KPIs je Projekt·Skill, Woche wählbar + KW-vs-KW-Vergleich (Management). Nur Lesen —
+//    die Pflege läuft in Performance (Eingabe). Nutzt die geteilte kpiTeamAgg-Fabrik. Volle Breite je Projekt. ──
+function AuswertungView({projects, team}){
+  const isMgmt=((team&&team.role_keys)||[]).some(r=>r==='management');
+  const [cfg,setCfg]=useState(null), [emap,setEmap]=useState({}), [pent,setPent]=useState({}), [wgt,setWgt]=useState({});
+  const now=new Date(); const cwNow=getISOWeek(now);
+  const pwNow=getISOWeek(new Date(now.getFullYear(),now.getMonth(),now.getDate()-7));
+  const [sel,setSel]=useState(cwNow.year+'-'+cwNow.kw);
+  const [cmp,setCmp]=useState(pwNow.year+'-'+pwNow.kw);
+  useEffect(()=>{ if(!isMgmt){ setCfg([]); return; } let alive=true;
+    const load=async()=>{ try{
+      const [c,e,pe,wc,wg]=await Promise.all([
+        sb.from('kpi_config').select('*'),
+        sb.from('kpi_project_entries').select('*'),
+        sb.from('kpi_entries').select('emp_id,kpi_id,value,kw,year'),
+        sb.from('weekly_calls').select('employee_id,kw,year,answered'),
+        sb.from('weekly_gauges').select('employee_id,kw,year,anzahl'),
+      ]);
+      if(!alive) return;
+      setCfg(c.data||[]);
+      const m={}; (e.data||[]).forEach(r=>{ const k=r.project_id+'|'+(r.skill||'')+'|'+r.kpi_id; (m[k]=m[k]||{})[r.year+'-'+r.kw]=Number(r.value); }); setEmap(m);
+      const pm={}; (pe.data||[]).forEach(r=>{ const wk=r.year+'-'+r.kw; (pm[r.kpi_id]=pm[r.kpi_id]||{}); (pm[r.kpi_id][wk]=pm[r.kpi_id][wk]||[]).push({e:r.emp_id, v:Number(r.value)}); }); setPent(pm);
+      const wm={}; (wc.data||[]).forEach(r=>{ const k=r.employee_id+'|'+r.year+'-'+r.kw; (wm[k]=wm[k]||{}).a=Number(r.answered)||0; }); (wg.data||[]).forEach(r=>{ const k=r.employee_id+'|'+r.year+'-'+r.kw; (wm[k]=wm[k]||{}).n=Number(r.anzahl)||0; }); setWgt(wm);
+    }catch(err){ if(alive) setCfg([]); } };
+    load();
+    const ch=sb.channel('auswertung-kpis').on('postgres_changes',{event:'*',schema:'public',table:'kpi_project_entries'},load).on('postgres_changes',{event:'*',schema:'public',table:'kpi_entries'},load).subscribe();
+    return ()=>{ alive=false; try{ sb.removeChannel(ch); }catch(e){} };
+  },[isMgmt]);
+  if(!isMgmt) return <div className="sp-empty">Nur für Management.</div>;
+  if(cfg===null) return <div className="sp-empty">Lädt…</div>;
+  const agg=kpiTeamAgg(cfg, emap, pent, wgt);
+  const parseW=k=>{ const p=String(k).split('-').map(Number); return {key:k, year:p[0], kw:p[1]}; };
+  const wkSet=new Set([cwNow.year+'-'+cwNow.kw]);
+  Object.values(emap).forEach(rec=>Object.keys(rec).forEach(k=>wkSet.add(k)));
+  Object.values(pent).forEach(byW=>Object.keys(byW).forEach(k=>wkSet.add(k)));
+  const availWeeks=[...wkSet].map(parseW).sort((a,b)=> b.year-a.year || b.kw-a.kw);
+  const selW=parseW(sel); const cmpW=cmp?parseW(cmp):null;
+  const wLabel=w=>'KW '+w.kw+(w.year!==cwNow.year?('/'+String(w.year).slice(2)):'');
+  const combos=[]; const seenC={};
+  cfg.forEach(k=>{ if(!k.project_id) return; const skill=k.skill||''; const key=k.project_id+'|'+skill; if(seenC[key]) return; seenC[key]=1; combos.push({pid:k.project_id, skill}); });
+  const projName=id=>{ const p=(projects||[]).find(x=>x&&x.id===id); return p?p.name:id; };
+  const projColor=id=>{ const p=(projects||[]).find(x=>x&&x.id===id); return (p&&p.color)||'#0F5661'; };
+  const byProj={}; combos.forEach(c=>{ (byProj[c.pid]=byProj[c.pid]||[]).push(c); });
+  const projIds=Object.keys(byProj).sort((a,b)=>projName(a).localeCompare(projName(b),'de'));
+  const kpiCell=(kpi,c)=>{
+    const cur=agg.cellVal(kpi,c,selW);
+    const cmpv=cmpW?agg.cellVal(kpi,c,cmpW):{v:null,computed:false};
+    const t=cur.v!=null?evalKpi(kpi,cur.v):null;
+    const lowerBetter=kpi.unit==='min';
+    const delta=(cur.v!=null&&cmpv.v!=null)?(cur.v-cmpv.v):null;
+    const arrow=delta==null?null:(delta>0?'↑':delta<0?'↓':'→');
+    const good=(delta==null||delta===0)?null:(lowerBetter?delta<0:delta>0);
+    const aCol=good==null?'var(--muted)':(good?'#059669':'#dc2626');
+    const unitHint=kpi.unit==='min'?'mm:ss':(kpi.unit||'');
+    return <div key={kpi.id} style={{minWidth:118,flex:'1 1 130px',border:'1px solid var(--border)',borderRadius:10,padding:'10px 12px',background:'var(--surface-2)'}}>
+      <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{kpi.name}{unitHint?<span style={{fontWeight:500}}> · {unitHint}</span>:null}</div>
+      <div style={{display:'flex',alignItems:'baseline',gap:5,marginTop:3}}>
+        <span style={{fontSize:20,fontWeight:800,fontFamily:'var(--mono)',padding:cur.v!=null?'0 6px':'0',borderRadius:6,background:t?t.bg:'transparent',color:t?t.color:(cur.v!=null?'var(--text)':'var(--muted)')}}>{cur.v!=null?agg.fmtCell(kpi,cur.v):'—'}</span>
+        {cur.computed&&<span style={{fontSize:9,fontWeight:800,color:'var(--muted)'}} title="aus Personenwerten gerechnet">∑</span>}
+        {t&&<span style={{fontSize:11}}>{t.icon}</span>}
+      </div>
+      {cmpW && <div style={{fontSize:10.5,color:'var(--muted)',marginTop:2,whiteSpace:'nowrap'}}>{wLabel(cmpW)}: {cmpv.v!=null?agg.fmtCell(kpi,cmpv.v):'—'} {arrow&&<span style={{fontWeight:800,color:aCol}}>{arrow}</span>}</div>}
+    </div>;
+  };
+  const selStyle={padding:'6px 10px',border:'1px solid var(--border)',borderRadius:8,fontSize:13,fontWeight:700,background:'var(--card)'};
+  return <div style={{maxWidth:1200}}>
+    <div style={{fontSize:20,fontWeight:800,marginBottom:2}}>📊 Auswertung</div>
+    <div style={{fontSize:13,color:'var(--muted)',marginBottom:14}}>Alle Kennzahlen je Projekt und Skill — Kundenwert wenn gepflegt, sonst aus den Personenwerten gerechnet (<b>∑</b>). Woche wählbar, Vergleich Woche gegen Woche.</div>
+    <div style={{display:'flex',gap:14,flexWrap:'wrap',alignItems:'center',marginBottom:16}}>
+      <label style={{fontSize:12,color:'var(--muted)',fontWeight:700}}>Woche <select value={sel} onChange={e=>setSel(e.target.value)} style={selStyle}>{availWeeks.map(w=><option key={w.key} value={w.key}>{wLabel(w)}</option>)}</select></label>
+      <label style={{fontSize:12,color:'var(--muted)',fontWeight:700}}>Vergleich mit <select value={cmp} onChange={e=>setCmp(e.target.value)} style={selStyle}><option value="">— keiner —</option>{availWeeks.map(w=><option key={w.key} value={w.key}>{wLabel(w)}</option>)}</select></label>
+    </div>
+    {!projIds.length ? <div className="sp-empty">Keine KPIs konfiguriert.</div>
+     : <div style={{display:'flex',flexDirection:'column',gap:14}}>
+        {projIds.map(pid=>{ const pcombos=byProj[pid].slice().sort((a,b)=>(a.skill||'').localeCompare(b.skill||'','de'));
+          return <div key={pid} style={{border:'1px solid var(--border)',borderRadius:14,background:'var(--card)',padding:'14px 16px'}}>
+            <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10}}>
+              <span style={{width:10,height:10,borderRadius:3,background:projColor(pid),flexShrink:0}}/>
+              <span style={{fontSize:15,fontWeight:800}}>{projName(pid)}</span>
+            </div>
+            <div style={{display:'flex',flexDirection:'column',gap:12}}>
+              {pcombos.map(c=>{ const kpis=agg.comboKpis(c.pid,c.skill); if(!kpis.length) return null;
+                return <div key={c.pid+'|'+c.skill}>
+                  {c.skill && <div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.05em',color:'var(--muted)',marginBottom:6}}>{c.skill}</div>}
+                  <div style={{display:'flex',flexWrap:'wrap',gap:8}}>{kpis.map(kpi=>kpiCell(kpi,c))}</div>
+                </div>;
+              })}
+            </div>
+          </div>;
+        })}
+      </div>}
+    <div style={{fontSize:11,color:'var(--muted)',marginTop:14,lineHeight:1.6}}>Schwellenfarbe wie in der Performance-Ansicht. <b>∑</b> = kein gepflegter Teamwert, aus den Personenwerten gerechnet (AHT/ACW gewichtet nach Anzahl, CSAT nach n, Mengen summiert). Pfeil = Veränderung gegenüber der Vergleichswoche (grün = besser: bei Zeiten niedriger, sonst höher).</div>
+  </div>;
 }
 // ── Forecast vs. Ist je Projekt·Skill (Management-only, Cockpit) ──
 // Gelieferte Stunden (weekly_hours) gegen Auftraggeber-Forecast (report_forecast), letzte 8 Wochen.
@@ -39314,6 +39412,7 @@ function App(){
       {key:'employees',label:'Mitarbeiter',icon:'👥'},
       {key:'orgchart',label:'Organigramm',icon:'⬡'},
       {key:'performance',label:'Performance',icon:'🏆'},
+      ...((team&&(team.role_keys||[]).some(r=>r==='management')) ? [{key:'auswertung',label:'Auswertung',icon:'📊'}] : []),   // Management-only (Lese-Auswertung, KW wählbar)
       {key:'feedback',label:'Feedbackgespräche',icon:'💬'},
       {key:'callqa',label:'Call-Qualität',icon:'📞'},
       {key:'payroll',label:'Löhne',icon:'💶'},
@@ -39424,6 +39523,7 @@ function App(){
       'uploads':'<path d="M5.85 3.5a.75.75 0 0 0-1.117-1 9.719 9.719 0 0 0-2.348 4.876.75.75 0 0 0 1.479.248A8.219 8.219 0 0 1 5.85 3.5ZM19.267 2.5a.75.75 0 1 0-1.118 1 8.22 8.22 0 0 1 2.135 4.373.75.75 0 0 0 1.48-.248A9.72 9.72 0 0 0 19.266 2.5Z"/><path fill-rule="evenodd" d="M12 2.25A6.75 6.75 0 0 0 5.25 9v.75a8.217 8.217 0 0 1-2.119 5.52.75.75 0 0 0 .298 1.206c1.544.57 3.16.99 4.831 1.243a3.75 3.75 0 1 0 7.48 0 24.583 24.583 0 0 0 4.83-1.244.75.75 0 0 0 .298-1.205 8.217 8.217 0 0 1-2.118-5.52V9A6.75 6.75 0 0 0 12 2.25ZM9.75 18c0-.034 0-.067.002-.1a25.05 25.05 0 0 0 4.496 0l.002.1a2.25 2.25 0 1 1-4.5 0Z" clip-rule="evenodd"/>',
       'uploadmatrix':'<path fill-rule="evenodd" d="M2.25 6a3 3 0 0 1 3-3h13.5a3 3 0 0 1 3 3v12a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3V6Zm3.97.97a.75.75 0 0 1 1.06 0l2.25 2.25a.75.75 0 0 1 0 1.06l-2.25 2.25a.75.75 0 0 1-1.06-1.06l1.72-1.72-1.72-1.72a.75.75 0 0 1 0-1.06Zm4.28 4.28a.75.75 0 0 0 0 1.5h3a.75.75 0 0 0 0-1.5h-3Z" clip-rule="evenodd"/>',
       'recmkt':'<path d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 0 1 3 19.875v-6.75ZM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V8.625ZM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V4.125Z"/>',
+      'auswertung':'<path d="M18.375 2.25c-1.035 0-1.875.84-1.875 1.875v15.75c0 1.035.84 1.875 1.875 1.875h.75c1.035 0 1.875-.84 1.875-1.875V4.125c0-1.036-.84-1.875-1.875-1.875h-.75ZM9.75 8.625c0-1.036.84-1.875 1.875-1.875h.75c1.036 0 1.875.84 1.875 1.875v11.25c0 1.035-.84 1.875-1.875 1.875h-.75a1.875 1.875 0 0 1-1.875-1.875V8.625ZM3 13.125c0-1.036.84-1.875 1.875-1.875h.75c1.036 0 1.875.84 1.875 1.875v6.75c0 1.035-.84 1.875-1.875 1.875h-.75A1.875 1.875 0 0 1 3 19.875v-6.75Z"/>',
       'nlquery':'<path fill-rule="evenodd" d="M10.5 3.75a6.75 6.75 0 1 0 0 13.5 6.75 6.75 0 0 0 0-13.5ZM2.25 10.5a8.25 8.25 0 1 1 14.59 5.28l4.69 4.69a.75.75 0 1 1-1.06 1.06l-4.69-4.69A8.25 8.25 0 0 1 2.25 10.5Z" clip-rule="evenodd"/>',
       'superadmin':'<path fill-rule="evenodd" d="M11.078 2.25c-.917 0-1.699.663-1.85 1.567L9.05 4.889c-.02.12-.115.26-.297.348a7.493 7.493 0 0 0-.986.57c-.166.115-.334.126-.45.083L6.3 5.508a1.875 1.875 0 0 0-2.282.819l-.922 1.597a1.875 1.875 0 0 0 .432 2.385l.84.692c.095.078.17.229.154.43a7.598 7.598 0 0 0 0 1.139c.015.2-.059.352-.153.43l-.841.692a1.875 1.875 0 0 0-.432 2.385l.922 1.597a1.875 1.875 0 0 0 2.282.818l1.019-.382c.115-.043.283-.031.45.082.312.214.641.405.985.57.182.088.277.228.297.35l.178 1.071c.151.904.933 1.567 1.85 1.567h1.844c.916 0 1.699-.663 1.85-1.567l.178-1.072c.02-.12.114-.26.297-.349.344-.165.673-.356.985-.57.167-.114.335-.125.45-.082l1.02.382a1.875 1.875 0 0 0 2.28-.819l.923-1.597a1.875 1.875 0 0 0-.432-2.385l-.84-.692c-.095-.078-.17-.229-.154-.43a7.614 7.614 0 0 0 0-1.139c-.016-.2.059-.352.153-.43l.84-.692c.708-.582.891-1.59.433-2.385l-.922-1.597a1.875 1.875 0 0 0-2.282-.818l-1.02.382c-.114.043-.282.031-.449-.083a7.49 7.49 0 0 0-.985-.57c-.183-.087-.277-.227-.297-.348l-.179-1.072a1.875 1.875 0 0 0-1.85-1.567h-1.843ZM12 15.75a3.75 3.75 0 1 0 0-7.5 3.75 3.75 0 0 0 0 7.5Z" clip-rule="evenodd"/>',
       'skillmatrix':'<path fill-rule="evenodd" d="M1.5 5.625c0-1.036.84-1.875 1.875-1.875h17.25c1.035 0 1.875.84 1.875 1.875v12.75c0 1.035-.84 1.875-1.875 1.875H3.375A1.875 1.875 0 0 1 1.5 18.375V5.625ZM21 9.375A.375.375 0 0 0 20.625 9h-7.5a.375.375 0 0 0-.375.375v1.5c0 .207.168.375.375.375h7.5a.375.375 0 0 0 .375-.375v-1.5Zm0 3.75a.375.375 0 0 0-.375-.375h-7.5a.375.375 0 0 0-.375.375v1.5c0 .207.168.375.375.375h7.5a.375.375 0 0 0 .375-.375v-1.5Zm0 3.75a.375.375 0 0 0-.375-.375h-7.5a.375.375 0 0 0-.375.375v1.5c0 .207.168.375.375.375h7.5a.375.375 0 0 0 .375-.375v-1.5ZM10.875 18.75a.375.375 0 0 0 .375-.375v-1.5a.375.375 0 0 0-.375-.375h-7.5a.375.375 0 0 0-.375.375v1.5c0 .207.168.375.375.375h7.5ZM3.375 15h7.5a.375.375 0 0 0 .375-.375v-1.5a.375.375 0 0 0-.375-.375h-7.5a.375.375 0 0 0-.375.375v1.5c0 .207.168.375.375.375Zm0-3.75h7.5a.375.375 0 0 0 .375-.375v-1.5A.375.375 0 0 0 10.875 9h-7.5A.375.375 0 0 0 3 9.375v1.5c0 .207.168.375.375.375Z" clip-rule="evenodd"/>',
@@ -39472,7 +39572,7 @@ function App(){
   useEffect(()=>{ const mgmt=(team&&(team.role_keys||[]).some(r=>r==='management'));
     const lead=(team&&isLeadOnlyRoles(team.role_keys));
     if(!mgmt && !lead && (view==='praesentation'||view==='dataimport'||view==='uploads')) setView('cockpit');
-    if(!mgmt && (view==='recmkt'||view==='fcist'||view==='nlquery'||view==='uploadplan'||view==='useractivity'||view==='taskadmin')) setView('cockpit'); },[view]);
+    if(!mgmt && (view==='recmkt'||view==='fcist'||view==='auswertung'||view==='nlquery'||view==='uploadplan'||view==='useractivity'||view==='taskadmin')) setView('cockpit'); },[view]);
   const allNavSections = isEmpUser
     ? [{sec:'Mein Bereich', items:[{key:'mein-plan',label:'Mein Schichtplan',icon:'📋'}]}, ...navSections]
     : navSections;
@@ -39626,6 +39726,7 @@ function App(){
           {view==='activity_log'&&<ActivityLogView employees={employees}/>}
           {view==='productivity'&&<ProductivityView employees={employees} projects={projects} setEmployees={setEmployees}/>}
       {view==='performance'&&<PerformanceView employees={employees} projects={projects}/>}
+      {view==='auswertung'&&<AuswertungView employees={employees} projects={projects} team={team}/>}
           {view==='mein-plan'&&isEmpUser&&myEmployee&&(
             <MeinPlanView employee={myEmployee} employees={employees} projects={projects}/>
           )}
