@@ -11,38 +11,9 @@ const SLACK     = Deno.env.get('SLACK_BOT_TOKEN') || '';
 const MAKE_CLIQ = Deno.env.get('MAKE_CLIQ_WEBHOOK') || '';   // Zoho Cliq via Make (5b/spaeter aktiv)
 const PORTAL = 'https://hr.tive360.de';
 
-// WICHTIG: kompaktes Spiegelbild von ROLE_TASKS aus frontend/hr.html — bei Katalog-Aenderungen HIER mitziehen.
-// auto (Kalender-Pflichttermine) werden fuer Erinnerungen ausgelassen (monatlich, kein taeglicher Anstoss).
-const ROLE_TASKS = [
-  { key:'mgr_checkin', owner:['management','teamlead','projektleiter'], title:'Check-in: Anwesenheit bestätigen' },
-  { key:'mgr_cv_abgleich', owner:'management', title:'CV-Abgleich HR' },
-  { key:'mgr_cv_funnel', owner:'management', title:'CV-Funnel prüfen' },
-  { key:'mgr_kunden', owner:'management', title:'Kundentelefonate & Wochen-Updates' },
-  { key:'mgr_kpi', owner:'management', title:'KPI-Pflege je Skill', cadence:'weekly' },
-  { key:'mgr_rechnung', owner:'management', title:'Rechnungserstellung', window:[1], auto:true },
-  { key:'mgr_lohn', owner:'management', title:'Lohnlauf & Überweisung', window:[1], auto:true },
-  { key:'hr_cv_select', owner:'hr', title:'Eingehende CVs selektieren' },
-  { key:'hr_cv_phase', owner:'hr', title:'CVs in die richtige Phase' },
-  { key:'hr_kommunikation', owner:'hr', title:'Bewerber-Kommunikation' },
-  { key:'hr_interview', owner:'hr', title:'Vorstellungsgespräche' },
-  { key:'hr_stammdaten', owner:'hr', title:'Stammdatenpflege', cadence:'weekly' },
-  { key:'hr_vertraege', owner:'hr', title:'Arbeitsverträge', cadence:'weekly' },
-  { key:'hr_hardware', owner:'hr', title:'Hardware-Koordination', cadence:'weekly' },
-  { key:'hr_onboarding', owner:'hr', title:'Onboarding-Pflege' },
-  { key:'hr_feedback', owner:'hr', title:'Mitarbeitergespräche' },
-  { key:'hr_bonus', owner:'hr', title:'Bonuspflege', window:[1,2] },
-  { key:'fin_re_in', owner:'finance', title:'Rechnungseingang' },
-  { key:'fin_re_out', owner:'finance', title:'Rechnungsausgang' },
-  { key:'fin_buchungen', owner:'finance', title:'Buchungen Buchhaltung' },
-  { key:'fin_lohn', owner:'finance', title:'Gehaltsabrechnung & Löhne', window:[1], auto:true },
-  { key:'fin_bwa', owner:'finance', title:'Monatsabschluss BWA', window:[1,2] },
-  { key:'lead_shift', owner:['projektleiter','teamlead'], title:'Schichtplan aktuell halten' },
-  { key:'lead_absence', owner:['projektleiter','teamlead'], title:'Abwesenheiten & Krankmeldungen' },
-  { key:'lead_vacreq', owner:['projektleiter','teamlead'], title:'Urlaubsanträge entscheiden' },
-  { key:'pl_kpi', owner:'projektleiter', title:'Kennzahlen des Projekts pflegen', cadence:'weekly' },
-  { key:'pl_perf', owner:'projektleiter', title:'Team-Performance prüfen', cadence:'weekly' },
-  { key:'pl_bericht', owner:'projektleiter', title:'Wochenbericht vorbereiten', cadence:'weekly' },
-];
+// Aufgaben-Katalog kommt aus der DB (task_catalog) — EINE Wahrheit, kein hr.html-Spiegel mehr. Pro Request
+// geladen (siehe handler). auto (Kalender-Pflichttermine) werden fuer Erinnerungen ausgelassen.
+let ROLE_TASKS: any[] = [];
 const owners = (t: any) => Array.isArray(t.owner) ? t.owner : [t.owner];
 const taskRolesOf = (u: any) => { const rk=u.role_keys||[]; const ext=!!u.mgmt_external;
   return ['management','hr','finance','teamlead','projektleiter'].filter(r=>rk.includes(r)&&!(r==='management'&&ext)); };
@@ -150,7 +121,7 @@ Deno.serve(async (req)=>{
   const mon=new Date(now); mon.setDate(now.getDate()-((now.getDay()+6)%7)); const monday=isoLocal(mon);
   const monthWeek=Math.ceil(now.getDate()/7);
 
-  const [uRes, aRes, dRes, pRes, cRes, prRes, usRes, uoRes] = await Promise.all([
+  const [uRes, aRes, dRes, pRes, cRes, prRes, usRes, uoRes, tcRes] = await Promise.all([
     sb.from('app_users').select('user_id,full_name,role_keys,active,mgmt_external'),
     sb.from('task_assignments').select('*'),
     sb.from('daily_tasks_done').select('task_key,date,assignee_user,project_id').in('date',[today,monday]),
@@ -159,7 +130,11 @@ Deno.serve(async (req)=>{
     sb.from('projects').select('id,name'),
     sb.from('upload_schedule').select('*').eq('active',true),
     sb.from('upload_project_owner').select('project_id,responsible_user'),
+    sb.from('task_catalog').select('key,owner,title,cadence,window_weeks,auto_key').eq('active',true).order('seq'),
   ]);
+  // Katalog aus DB in die erwartete Form (window <- window_weeks, auto <- auto_key vorhanden).
+  ROLE_TASKS = (tcRes.data||[]).map((r:any)=>({ key:r.key, owner:r.owner, title:r.title, cadence:r.cadence, window:r.window_weeks, auto:r.auto_key!=null }));
+  if(!ROLE_TASKS.length) return json({ error:'task_catalog leer oder nicht lesbar' }, 500);
   const doneSet=new Set((dRes.data||[]).map((r:any)=>r.task_key+'|'+r.date+'|'+(r.assignee_user||'')+'|'+(r.project_id||'')));
   const prefBy:Record<string,string>={}; (pRes.data||[]).forEach((r:any)=>prefBy[r.user_id]=r.channel);
   const projName:Record<string,string>={}; (prRes.data||[]).forEach((p:any)=>projName[p.id]=p.name);
