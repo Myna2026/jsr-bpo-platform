@@ -7107,20 +7107,15 @@ function loadHrAccessRoles(){
 function saveHrAccessRoles(arr){ if(!Array.isArray(arr)||!arr.length)arr=['management']; if(arr.indexOf('management')<0)arr.unshift('management'); localStorage.setItem('jsr_hr_access_roles', JSON.stringify(arr)); saveConfigToDB('jsr_hr_access_roles', arr); }
 
 function Widget_MaPerProject({employees, projects}){
-  const active=(employees||[]).filter(e=>e&&e.status==='active');
-  const projIds=new Set((projects||[]).map(p=>p.id));
-  const rows=(projects||[]).map(p=>{
-    const emps=active.filter(e=>e.project_id===p.id);
-    const bySkill={};
-    emps.forEach(e=>{const s=e.project_skill||e.primary_skill||'—';bySkill[s]=(bySkill[s]||0)+1;});
-    return {name:p.name, count:emps.length, bySkill};
-  }).filter(r=>r.count>0);
-  // "Ohne Projekt"-Topf: aktive MA ohne (gültige) Projektzuweisung — v.a. Firmenfunktionen
-  // (CEO/HR/…). Damit die Summe der Zeilen wieder dem Headcount entspricht.
-  const noProj=active.filter(e=>!e.project_id||!projIds.has(e.project_id));
-  const noProjBy={}; noProj.forEach(e=>{const s=e.position||'—';noProjBy[s]=(noProjBy[s]||0)+1;});
-  const all=(projects||[]).map(p=>{ const emps=active.filter(e=>e.project_id===p.id); if(!emps.length) return null; const bySkill={}; emps.forEach(e=>{const s=e.project_skill||e.primary_skill||'—';bySkill[s]=(bySkill[s]||0)+1;}); return {name:p.name,color:p.color||'#0F5661',count:emps.length,bySkill}; }).filter(Boolean);
-  if(noProj.length) all.push({name:'Ohne Projekt',color:'#94a3b8',count:noProj.length,bySkill:noProjBy});
+  // KÖPFE (Personen): active + Schulung; ein Mehrprojekt-MA zählt bei JEDEM seiner Projekte als 1. Skill je Projekt
+  // aus der Zuweisung (nicht dem flachen Feld). Zeilensumme kann > Gesamt-Headcount sein (Köpfe je Projekt) — gewollt.
+  const pop=(employees||[]).filter(e=>e&&['active','training'].includes(e.status));
+  const skillOn=(e,pid)=>{ const a=empAssignments(e).find(x=>x.project_id===pid); return (a&&a.skill)||'—'; };
+  const all=(projects||[]).map(p=>{ const emps=pop.filter(e=>empProjShare(e,p.id)>0); if(!emps.length) return null;
+    const bySkill={}; emps.forEach(e=>{ const s=skillOn(e,p.id); bySkill[s]=(bySkill[s]||0)+1; });
+    return {name:p.name,color:p.color||'#0F5661',count:emps.length,bySkill}; }).filter(Boolean);
+  const noProj=pop.filter(e=>!empAssignments(e).length);   // Firmenfunktionen ohne jede Zuweisung
+  if(noProj.length){ const noProjBy={}; noProj.forEach(e=>{const s=e.position||'—';noProjBy[s]=(noProjBy[s]||0)+1;}); all.push({name:'Ohne Projekt',color:'#94a3b8',count:noProj.length,bySkill:noProjBy}); }
   if(!all.length) return <div className="w-empty">Keine Zuordnungen.</div>;
   const max=Math.max(...all.map(r=>r.count),1);
   return <div style={{display:'flex',flexDirection:'column',gap:12}}>
@@ -7344,19 +7339,21 @@ function Widget_Fluktuation({employees}){
 }
 // Widget_TimeToHire entfernt (2026-07-27, RAUS lt. Cockpit-Überarbeitung).
 function Widget_Auslastung({employees, projects, forecast, onNavigate}){
-  const active=(employees||[]).filter(e=>e&&e.status==='active');
-  const staffing=loadStaffingAll();   // Sollbesetzung (jsr_staffing_target_v1, app_config)
+  const staffing=loadStaffingAll();   // Sollbesetzung (jsr_staffing_target_v1, DB via app_config)
   // Tages-Peak als Soll: max Kopfzahl in irgendeinem Zeitfenster, je Skill summiert.
   const projSoll=(p)=>{
     const skills=(Array.isArray(p.skills)&&p.skills.length)?p.skills.map(s=>s.key):['all'];
     return skills.reduce((sum,sk)=>{ const cfg=staffing[staffingKeyFor(p.id, sk)]||{}; let peak=0;
       STAFFING_DAYS.forEach(([dk])=>{ (cfg[dk]||[]).forEach(w=>{ peak=Math.max(peak, parseInt(w.count)||0); }); }); return sum+peak; }, 0);
   };
+  // Auslastung ist Kapazität -> FTE. Produktiv (telefoniert) = FTE der Aktiven; Schulung getrennt (noch nicht
+  // produktiv, würde die Quote sonst schönen). Soll bleibt der gepflegte Kopf-Peak (Sollbesetzung).
   const rows=(projects||[]).map(p=>{
-    const ist=active.filter(e=>e.project_id===p.id).length;
+    const ist=projectStaff(employees,p.id,['active']).fte;
+    const tr=projectStaff(employees,p.id,['training']).fte;
     const soll=projSoll(p);
-    return {name:p.name, ist, soll};
-  }).filter(r=>r.ist>0||r.soll>0);
+    return {name:p.name, ist, soll, tr};
+  }).filter(r=>r.ist>0||r.soll>0||r.tr>0);
   if(!rows.length) return <WidgetPlaceholder text="Keine Projektdaten."/>;
   const anySoll=rows.some(r=>r.soll>0);
   const max=Math.max(1,...rows.map(r=>Math.max(r.ist,r.soll||0)));
@@ -7367,7 +7364,7 @@ function Widget_Auslastung({employees, projects, forecast, onNavigate}){
       const barPct = r.soll>0 ? Math.min(1, r.ist/r.soll)*100 : (r.ist/max*100);
       return (
         <div key={i} style={{marginBottom:8}}>
-          <div className="widget-row" style={{borderBottom:'none',padding:'2px 0'}}><span>{r.name}</span><span className="num">{r.ist}{r.soll>0?' / '+r.soll:''}</span></div>
+          <div className="widget-row" style={{borderBottom:'none',padding:'2px 0'}}><span>{r.name}</span><span className="num">{fteFmt(r.ist)} FTE{r.soll>0?' / '+r.soll+' Soll':''}{r.tr>0?' · +'+fteFmt(r.tr)+' Schulung':''}</span></div>
           <div className="widget-bar"><span style={{width:barPct+'%',background:barColor}}/></div>
         </div>
       );
@@ -9251,12 +9248,13 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
         {_fxInfoMob.mode!=='ok'&&<div style={{margin:'0 10px 6px',padding:'7px 10px',borderRadius:8,fontSize:11,fontWeight:600,color:_fxInfoMob.mode==='stale'?'#b45309':'var(--red)',background:_fxInfoMob.mode==='stale'?'#fffbeb':'var(--red-bg)',border:'1px solid '+(_fxInfoMob.mode==='stale'?'#f59e0b':'var(--red)')}}>{_fxInfoMob.note} System → 💱 Wechselkurse.</div>}
         <div className="ckm-projlist">
           {projects.map(p=>{
-            const projActive=active.filter(e=>e.project_id===p.id);
+            const projActive=(employees||[]).filter(e=>e&&e.status==='active'&&empProjShare(e,p.id)>0);   // Köpfe inkl. Mehrprojekt
             const n=projActive.length;
-            const t=inTraining.filter(e=>e.project_id===p.id).length;
+            const t=projectStaff(employees,p.id,['training']).heads;
+            const _fte=projectStaff(employees,p.id,['active']).fte;   // Kapazität = FTE (teilt sich bei Mehrprojekt)
             if(n+t===0) return null;
             const bySkill={};
-            projActive.forEach(e=>{ const k=e.project_skill||'—'; bySkill[k]=(bySkill[k]||0)+1; });
+            projActive.forEach(e=>{ const a=empAssignments(e).find(x=>x.project_id===p.id); const k=(a&&a.skill)||'—'; bySkill[k]=(bySkill[k]||0)+1; });
             const skLabel=k=>{ const s=(p.skills||[]).find(x=>x.key===k); return s?(s.label||s.key):k; };
             const rev=Math.round((_planRev[p.id]&&_planRev[p.id].revenue)||0);
             const _ac=projectAutoCostsForMonth(p.id, ym, employees, projects);   // Vollkosten inkl. Umlagen
@@ -9269,7 +9267,7 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
                 <div className="ckm-projrow-top">
                   <div>
                     <div className="ckm-proj-name">{p.name} <span className="ckm-arrow">→</span></div>
-                    <div><span className="ckm-proj-n">{n}</span> <span className="ckm-proj-sub">aktiv{t>0?' · +'+t+' Schulung':''}</span></div>
+                    <div><span className="ckm-proj-n">{n}</span> <span className="ckm-proj-sub">aktiv · {fteFmt(_fte)} FTE{t>0?' · +'+t+' Schulung':''}</span></div>
                   </div>
                   {isFullFin&&(_lekMiss
                     ? <span className="ckm-marge" style={{background:'var(--red-bg)',color:'var(--red)'}} title="EUR/LEK-Kurs fehlt">Marge — · Kurs fehlt</span>
@@ -9540,14 +9538,14 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
       <div style={{padding:'10px 14px',borderBottom:'1px solid var(--border)',fontSize:12,fontWeight:600}}>Projekte</div>
       {_fxInfoCk.mode!=='ok'&&<div style={{padding:'8px 14px',borderBottom:'1px solid var(--border)',fontSize:11,fontWeight:600,color:_fxInfoCk.mode==='stale'?'#b45309':'var(--red)',background:_fxInfoCk.mode==='stale'?'#fffbeb':'var(--red-bg)'}}>{_fxInfoCk.note} System → 💱 Wechselkurse.</div>}
       <div style={{padding:12,display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(230px,1fr))',gap:12}}>
-        {projects.map(p=>{ const n=active.filter(e=>e.project_id===p.id).length; const t=inTraining.filter(e=>e.project_id===p.id).length;
+        {projects.map(p=>{ const n=projectStaff(employees,p.id,['active']).heads; const t=projectStaff(employees,p.id,['training']).heads; const _fte=projectStaff(employees,p.id,['active']).fte;
           const rev=Math.round((_planRevMap[p.id]&&_planRevMap[p.id].revenue)||0); const _ac=projectAutoCostsForMonth(p.id,_cockpitYm,employees,projects); const _wf=projectDbWaterfall(_ac,rev); const mg=_wf.mgIV;
           const accent=p.color||'#0F5661';
           return(<div key={p.id} onClick={()=>onNavigate&&onNavigate({kind:'view',view:'profitability',projSel:p.id})} title="Zur Wirtschaftlichkeit" style={{padding:'14px 16px',background:'var(--card)',border:'1px solid var(--border)',borderRadius:14,display:'flex',alignItems:'center',gap:14,cursor:'pointer'}}>
             <div style={{flex:1,minWidth:0}}>
               <div style={{fontSize:12.5,fontWeight:700,lineHeight:1.2,marginBottom:8,display:'flex',justifyContent:'space-between',gap:6,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{p.name}<span style={{color:'var(--muted)',fontWeight:400,flexShrink:0}}>→</span></div>
               <div style={{display:'flex',alignItems:'baseline',gap:6}}><span style={{fontSize:34,fontWeight:800,color:accent,lineHeight:1,fontFamily:'var(--mono)',letterSpacing:'-.02em'}}>{n}</span><span style={{fontSize:11,color:'var(--muted)'}}>aktiv</span></div>
-              <div style={{fontSize:10.5,color:'var(--muted)',marginTop:3}}>{t>0?'+ '+t+' in Schulung':' '}</div>
+              <div style={{fontSize:10.5,color:'var(--muted)',marginTop:3}}>{fteFmt(_fte)+' FTE'+(t>0?' · + '+t+' Schulung':'')}</div>
             </div>
             {isFullFin&&<div style={{textAlign:'center'}}><MarginRing pct={mg} size={60}/><div style={{fontSize:9,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',marginTop:3}}>Marge</div></div>}
           </div>);
@@ -9809,8 +9807,9 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
           {/* Redesign: große Kacheln, auf einen Blick — Besetzung groß, Marge als Ampel; keine Roh-€ */}
           <div style={{padding:12,display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(150px,1fr))',gap:10}}>
             {projects.map(p=>{
-              const n=active.filter(e=>e.project_id===p.id).length;
-              const t=inTraining.filter(e=>e.project_id===p.id).length;
+              const n=projectStaff(employees,p.id,['active']).heads;
+              const t=projectStaff(employees,p.id,['training']).heads;
+              const _fte=projectStaff(employees,p.id,['active']).fte;
               const rev=Math.round((_planRevMap[p.id]&&_planRevMap[p.id].revenue)||0);
               const _ac=projectAutoCostsForMonth(p.id, _cockpitYm, employees, projects);   // Vollkosten inkl. Umlagen
               const _wf=projectDbWaterfall(_ac, rev);
@@ -9822,7 +9821,7 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
                   <div style={{fontSize:13,fontWeight:700,lineHeight:1.2,display:'flex',justifyContent:'space-between',gap:6}}>{p.name} <span style={{color:'var(--muted)',fontWeight:400}}>→</span></div>
                   <div style={{display:'flex',alignItems:'baseline',gap:6}}>
                     <span style={{fontSize:30,fontWeight:800,color:'#0F5661',lineHeight:1,fontFamily:'var(--mono)'}}>{n}</span>
-                    <span style={{fontSize:11,color:'var(--muted)'}}>aktiv{t>0?' · +'+t+' Schulung':''}</span>
+                    <span style={{fontSize:11,color:'var(--muted)'}}>aktiv · {fteFmt(_fte)} FTE{t>0?' · +'+t+' Schulung':''}</span>
                   </div>
                   {isFullFin&&(()=>{ const lek=_projLek(p); const miss=lek&&_fxInfoCk.mode==='missing'; const stale=lek&&_fxInfoCk.mode==='stale';
                     if(miss) return <span style={{alignSelf:'flex-start',fontSize:12,fontWeight:800,padding:'2px 10px',borderRadius:99,background:'var(--red-bg)',color:'var(--red)'}} title="EUR/LEK-Kurs für den Monat fehlt">Marge — · Kurs fehlt</span>;
@@ -12370,6 +12369,17 @@ function empAssignments(emp){
 }
 // Kopf-Anteil eines MA auf einem Projekt (Σ share_pct der Zuweisungen auf pid)/100.
 function empProjShare(emp, pid){ return empAssignments(emp).filter(a=>a.project_id===pid).reduce((s,a)=>s+(Number(a.share_pct)||0),0)/100; }
+// EINE WAHRHEIT für Projekt-Personal: KÖPFE (Personen; ein Mehrprojekt-MA zählt bei JEDEM seiner Projekte als 1)
+// und FTE (Σ Anteile; teilt sich auf). Regel (User 2026-08-23): Kosten/Kapazität/Auslastung rechnen FTE,
+// Personen zählen Köpfe, die Beschriftung sagt WELCHES. Default active+training (Schulung kostet + belegt Platz +
+// wird bald produktiv); für Produktiv-Sichten (Auslastung telefoniert) statuses=['active'] übergeben.
+function projectStaff(employees, pid, statuses){
+  const st=statuses||['active','training']; let heads=0, fte=0;
+  (employees||[]).forEach(e=>{ if(!e||!st.includes(e.status)) return; const sh=empProjShare(e,pid); if(sh>0){ heads++; fte+=sh; } });
+  return {heads, fte:Math.round(fte*100)/100};
+}
+// FTE für Anzeige: „2", „2,5" (deutsche Dezimalkomma, max 1 Nachkommastelle).
+function fteFmt(v){ return (Math.round((Number(v)||0)*10)/10).toLocaleString('de-DE',{maximumFractionDigits:1}); }
 
 // ── VOLLKOSTEN je MA/Monat (Arbeitgeber-Gesamtkosten, EUR) ───────────────────────
 // Reuse von calcFullPayslip mit leerem Record (deduction_absence_days:0 → KEIN Doppel-Abzug bei
