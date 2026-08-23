@@ -533,6 +533,11 @@ textarea.form-input{resize:vertical;min-height:70px}
 @keyframes welcomeFade{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
 @keyframes welcomePop{from{opacity:0;transform:scale(.9)}to{opacity:1;transform:scale(1)}}
 @keyframes welcomeRise{from{opacity:0;transform:translateY(18px)}to{opacity:1;transform:none}}
+/* Schnitt 5: dezente Cockpit-Bewegung — Balken wachsen aus dem Boden. Nur wenn der Nutzer Bewegung zulaesst. */
+@keyframes ckBarGrow{from{transform:scaleY(0)}to{transform:scaleY(1)}}
+@media (prefers-reduced-motion: no-preference){
+  .ck-bar{transform-box:fill-box;transform-origin:bottom;animation:ckBarGrow .5s cubic-bezier(.22,1,.36,1) both}
+}
 .welcome-wrap{position:relative;padding:60px 24px 80px;text-align:center;overflow:hidden;animation:welcomeFade .5s ease}
 .welcome-wrap::before{content:'';position:absolute;inset:0;pointer-events:none;z-index:0;background:radial-gradient(1100px 460px at 50% -6%, rgba(15,86,97,.10), transparent 60%),radial-gradient(820px 400px at 92% 116%, rgba(13,148,136,.09), transparent 58%)}
 .welcome-inner{position:relative;z-index:1;max-width:940px;margin:0 auto}
@@ -8589,14 +8594,33 @@ function CockpitCalendar4Weeks({onNavigate, projects}){
 // ── SVG-Primitives fürs Management-Cockpit (reines SVG/CSS, keine Bibliothek). ──
 let SPARK_SEQ=0;
 // Marge-Ring: Donut mit Prozent in der Mitte, Farbe nach Schwelle.
+// Schnitt 5: respektiert die System-Einstellung „Bewegung reduzieren" — dann keine Animation (statisch).
+function ckReduceMotion(){ try{ return !!(window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches); }catch(e){ return false; } }
+// Zahl zählt beim Erscheinen hoch (dezent, ~600ms, ease-out). Bei „Bewegung reduzieren" sofort der Zielwert.
+// Von-Wert = vorherige Anzeige (Monatswechsel zählt sauber weiter statt von 0 zu springen).
+function CountUp({value}){
+  const num=(typeof value==='number'&&isFinite(value))?value:null;
+  const prev=useRef(ckReduceMotion()||num==null?num:0);
+  const [d,setD]=useState(prev.current);
+  useEffect(()=>{ if(num==null) return; if(ckReduceMotion()){ setD(num); prev.current=num; return; }
+    const from=prev.current==null?0:prev.current, to=num, dur=600, t0=performance.now(); let raf;
+    const step=now=>{ const p=Math.min(1,(now-t0)/dur); const e=1-Math.pow(1-p,3); setD(from+(to-from)*e); if(p<1) raf=requestAnimationFrame(step); else { setD(to); prev.current=to; } };
+    raf=requestAnimationFrame(step); return ()=>cancelAnimationFrame(raf);
+  },[num]);
+  if(num==null) return <React.Fragment>{value}</React.Fragment>;
+  return <React.Fragment>{Number.isInteger(num)?Math.round(d):Math.round(d*10)/10}</React.Fragment>;
+}
 function MarginRing({pct, size=62, stroke=8}){
   const has=pct!=null&&isFinite(pct);
   const p=has?Math.max(0,Math.min(100,pct)):0;
   const col=!has?'#94a3b8':pct>=20?'#059669':pct>=10?'#d97706':'#dc2626';
   const r=(size-stroke)/2, c=2*Math.PI*r, off=c*(1-p/100);
+  // Ring füllt sich beim Erscheinen von leer auf den Zielwert (Kreise füllen); reduzierte Bewegung -> sofort.
+  const [mounted,setMounted]=useState(ckReduceMotion());
+  useEffect(()=>{ if(mounted) return; const raf=requestAnimationFrame(()=>setMounted(true)); return ()=>cancelAnimationFrame(raf); },[]);
   return <svg width={size} height={size} style={{display:'block',flexShrink:0}}>
     <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="var(--border)" strokeWidth={stroke}/>
-    <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={col} strokeWidth={stroke} strokeLinecap="round" strokeDasharray={c} strokeDashoffset={off} transform={'rotate(-90 '+(size/2)+' '+(size/2)+')'}/>
+    <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={col} strokeWidth={stroke} strokeLinecap="round" strokeDasharray={c} strokeDashoffset={mounted?off:c} transform={'rotate(-90 '+(size/2)+' '+(size/2)+')'} style={{transition:ckReduceMotion()?'none':'stroke-dashoffset .9s cubic-bezier(.22,1,.36,1)'}}/>
     <text x="50%" y="50%" textAnchor="middle" dominantBaseline="central" style={{fontSize:size*0.25,fontWeight:800,fontFamily:'var(--mono)',fill:col}}>{has?Math.round(pct)+'%':'—'}</text>
   </svg>;
 }
@@ -8619,7 +8643,7 @@ function HoverChart({data, labels, color, kind='area', h=48, fmt, tips}){
   const tipX = kind==='bar' ? (hi==null?0:(i=>((i*(bw+gap))+bw/2)/W*100)(hi)) : (n===1?50:(hi==null?0:(hi/(n-1))*100));
   let inner;
   if(kind==='bar'){
-    inner=vals.map((v,i)=>{ const bh=v>0?Math.max(1.5,v/(max||1)*ih):0; const on=hi===i; return <rect key={i} x={i*(bw+gap)} y={padY+ih-bh} width={bw} height={bh} rx="0.5" fill={color} opacity={on?1:(0.3+0.55*(v/(max||1)))}/>; });
+    inner=vals.map((v,i)=>{ const bh=v>0?Math.max(1.5,v/(max||1)*ih):0; const on=hi===i; return <rect key={i} className="ck-bar" style={{animationDelay:(i*16)+'ms'}} x={i*(bw+gap)} y={padY+ih-bh} width={bw} height={bh} rx="0.5" fill={color} opacity={on?1:(0.3+0.55*(v/(max||1)))}/>; });
   } else {
     const pts=vals.map((v,i)=>[xL(i),yV(v)]);
     const line=pts.map((p,i)=>(i?'L':'M')+p[0].toFixed(2)+' '+p[1].toFixed(2)).join(' ');
@@ -8645,7 +8669,7 @@ function TrendTile({label, value, sub, color, chart, nav, onNavigate}){
     style={{position:'relative',background:'var(--surface)',border:'1px solid var(--border)',borderRadius:16,padding:chart?'15px 16px 0':'15px 16px 16px',boxShadow:'var(--shadow-xs)',cursor:nav?'pointer':undefined,overflow:'hidden',display:'flex',flexDirection:'column',minHeight:chart?132:96}}>
     <div style={{fontSize:10.5,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em'}}>{label}{nav?' →':''}</div>
     <div style={{display:'flex',alignItems:'baseline',gap:6,marginTop:8}}>
-      <span style={{fontSize:34,fontWeight:800,color:color,fontFamily:'var(--mono)',lineHeight:1,letterSpacing:'-.02em'}}>{value}</span>
+      <span style={{fontSize:34,fontWeight:800,color:color,fontFamily:'var(--mono)',lineHeight:1,letterSpacing:'-.02em'}}><CountUp value={value}/></span>
       <span style={{fontSize:10.5,color:'var(--muted)'}}>{sub}</span>
     </div>
     {chart?<div style={{marginTop:'auto',marginLeft:-16,marginRight:-16}}>{chart}</div>:null}
@@ -9859,7 +9883,7 @@ function CockpitLegacy({employees, projects, plans, forecast, onAbsence, team, o
           return(<div key={p.id} onClick={()=>onNavigate&&onNavigate({kind:'view',view:'profitability',projSel:p.id})} title="Zur Wirtschaftlichkeit" style={{padding:'14px 16px',background:'var(--card)',border:'1px solid var(--border)',borderRadius:14,display:'flex',alignItems:'center',gap:14,cursor:'pointer'}}>
             <div style={{flex:1,minWidth:0}}>
               <div style={{fontSize:12.5,fontWeight:700,lineHeight:1.2,marginBottom:8,display:'flex',justifyContent:'space-between',gap:6,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{p.name}<span style={{color:'var(--muted)',fontWeight:400,flexShrink:0}}>→</span></div>
-              <div style={{display:'flex',alignItems:'baseline',gap:6}}><span style={{fontSize:34,fontWeight:800,color:accent,lineHeight:1,fontFamily:'var(--mono)',letterSpacing:'-.02em'}}>{n}</span><span style={{fontSize:11,color:'var(--muted)'}}>aktiv</span></div>
+              <div style={{display:'flex',alignItems:'baseline',gap:6}}><span style={{fontSize:34,fontWeight:800,color:accent,lineHeight:1,fontFamily:'var(--mono)',letterSpacing:'-.02em'}}><CountUp value={n}/></span><span style={{fontSize:11,color:'var(--muted)'}}>aktiv</span></div>
               <div style={{fontSize:10.5,color:'var(--muted)',marginTop:3}}>{fteFmt(_fte)+' FTE'+(t>0?' · + '+t+' Schulung':'')}</div>
             </div>
             {isFullFin&&<div style={{textAlign:'center'}}><MarginRing pct={mg} size={60}/><div style={{fontSize:9,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',marginTop:3}}>Marge</div></div>}
