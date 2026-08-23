@@ -9505,13 +9505,13 @@ function cockpitMode(){
 // Rollen-Standard (4c, User-Vorgabe). GEPINNT ganz oben bei ALLEN (nicht in dieser Liste): eigene offene Aufgaben
 // (tasks) + Upload-Ampel (upload) — der Grund, morgens hinzuschauen. Danach je Rolle:
 const COCKPIT_ORDER = {
-  management: ['tiles','projekte','forecast_ist','kpis','marketing','quote','ma','cveingang','abwesend','vertraege','training','fabletics','calendar','presentations'],
+  management: ['tiles','projekte','forecast_ist','kpis','marketing','quote','ma','cveingang','abwesend','vertraege','training','fabletics','kalender','presentations'],
   hr:         ['cveingang','tiles','abwesend','vertraege','training','ma','quote','fabletics','presentations'],
   lead:       ['shiftplan','abwesend','kpis','tiles','cveingang','training','quote'],
   default:    ['tiles','cveingang','abwesend','vertraege','training','quote'],
 };
 // Was eine Rolle NICHT sieht: Wirtschaftlichkeit/Kosten für HR und Leads („gar nicht" / „keine Kosten").
-const COCKPIT_HIDE = { hr:['projekte','forecast_ist','marketing'], lead:['projekte','forecast_ist','marketing','fabletics','calendar'] };
+const COCKPIT_HIDE = { hr:['projekte','forecast_ist','marketing'], lead:['projekte','forecast_ist','marketing','fabletics','kalender'] };
 function cockpitRoleOf(team){ const rk=(team&&team.role_keys)||[];
   if(rk.includes('management')) return 'management';
   if(rk.includes('hr')) return 'hr';
@@ -9521,10 +9521,10 @@ function cockpitRoleOf(team){ const rk=(team&&team.role_keys)||[];
 function Cockpit(props){
   return cockpitMode()==='new' ? <CockpitUnified {...props}/> : <CockpitLegacy {...props}/>;
 }
-// TODO 4c: echter vereinheitlichter Renderer. Stub delegiert an Legacy, damit 'new' schon sicher ist (= Legacy),
-// bis der Registry-Renderer für alle Rollen steht.
-function CockpitUnified(props){ return <CockpitLegacy {...props}/>; }
-function CockpitLegacy({employees, projects, plans, forecast, onAbsence, team, onNavigate, isMobileW, setEmployees, showToast}){
+// 4c: vereinheitlichter Renderer = der bewährte Registry-Renderer, per unified-Flag auf alle Rollen verallgemeinert
+// (rollenabhängige Reihenfolge/Ausblendung, gepinnte Aufgaben+Upload). Mobil bleibt CockpitMobile (eigene Fassung).
+function CockpitUnified(props){ return <CockpitLegacy {...props} unified={true}/>; }
+function CockpitLegacy({employees, projects, plans, forecast, onAbsence, team, onNavigate, isMobileW, setEmployees, showToast, unified}){
   // Personalkosten/Marge sind Management/Finance-Sache — für HR ausblenden (sonst falsche Summen aus maskierten Gehältern).
   const isFullFin=(team&&(team.role_keys||[]).some(r=>r==='management'||r==='finance'));
   // 27e: Payslips liegen in Supabase (Legacy-localStorage-Store nach Cleanup leer). Einmaliger Load fuer den Task-Count.
@@ -9660,7 +9660,15 @@ function CockpitLegacy({employees, projects, plans, forecast, onAbsence, team, o
   // ═══ S1: Neues Standard-Cockpit für MANAGEMENT — feste Reihenfolge, volle Breite, data-gated ═══
   // Nur Rolle 'management'. HR/Finance/Teamleiter behalten den bestehenden Render (eigene Anordnung später).
   const isMgmtCk=(team&&(team.role_keys||[]).some(r=>r==='management'));
-  if(isMgmtCk){
+  if(isMgmtCk || unified){
+    const _role=cockpitRoleOf(team);   // 4c: rollenabhängige Standard-Reihenfolge/Ausblendung (nur im unified-Pfad)
+    // 4c gepinnt (nur unified): eigene offene Aufgaben — der Grund, morgens hinzuschauen.
+    const _uTasks = unified ? computeCockpitTasks({employees,projects,cvsDb,payslipsDb,feedbackTodayDb}) : [];
+    const tasksNode = (unified && _uTasks.length) ? <div style={{marginBottom:14,background:'var(--card)',borderRadius:'var(--r)',border:'1px solid var(--border)',overflow:'hidden'}}>
+      <div style={{padding:'10px 16px',borderBottom:'1px solid var(--border)',fontWeight:700,fontSize:12,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em'}}>Deine offenen Aufgaben</div>
+      {_uTasks.map((t,i)=><div key={i} onClick={()=>onNavigate&&onNavigate(t.nav||{kind:'view',view:t.tab,navFilter:t.filter?{...t.filter,label:t.label}:null})} style={{display:'flex',alignItems:'center',gap:10,padding:'9px 16px',borderTop:i?'1px solid var(--border)':'none',cursor:'pointer'}}>
+        <span style={{fontSize:16}}>{t.icon}</span><span style={{flex:1,fontSize:13,fontWeight:600,color:t.color||'var(--text)'}}>{t.label}</span><span style={{color:'var(--muted)'}}>→</span></div>)}
+    </div> : null;
     const wblock=(key,node)=><div className="card" style={{marginBottom:14,overflow:'hidden'}}>
       <div style={{padding:'10px 14px',borderBottom:'1px solid var(--border)',fontSize:12,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em'}}>{(WIDGETS[key]||{}).label||key}</div>
       <div style={{padding:14}}>{node}</div>
@@ -9739,13 +9747,19 @@ function CockpitLegacy({employees, projects, plans, forecast, onAbsence, team, o
       fabletics: <Widget_DailyReports employees={employees} projects={projects} team={team}/>,
       kpis: <CockpitProjectKpis projects={projects} team={team} mobile={false}/>,
       forecast_ist: <CockpitForecastIst projects={projects} team={team} mobile={false}/>,
+      shiftplan: <Widget_Schichtplan employees={employees} projects={projects} onNavigate={onNavigate}/>,
+      presentations: <CockpitPresentationComments projects={projects} team={team} mobile={false}/>,
     };
-    const BLOCK_LABELS={kalender:'Kalender · 4 Wochen',tiles:'Kennzahlen-Kacheln',cveingang:'CV-Eingang',marketing:'Recruiting Marketing',projekte:'Projekte',quote:'Krank-/Urlaubsquote',abwesend:'Abwesenheiten heute',ma:'MA je Projekt·Skill',vertraege:'Vertrags-Auslauf',training:'Schulungen',fabletics:'Fabletics-Berichte',kpis:'KPIs je Projekt·Skill',forecast_ist:'Forecast vs. Ist'};
-    const DEF_ORDER=['kalender','tiles','cveingang','marketing','projekte','quote','abwesend','ma','vertraege','training','fabletics','kpis','forecast_ist'];
+    const BLOCK_LABELS={kalender:'Kalender · 4 Wochen',tiles:'Kennzahlen-Kacheln',cveingang:'CV-Eingang',marketing:'Recruiting Marketing',projekte:'Projekte',quote:'Krank-/Urlaubsquote',abwesend:'Abwesenheiten heute',ma:'MA je Projekt·Skill',vertraege:'Vertrags-Auslauf',training:'Schulungen',fabletics:'Fabletics-Berichte',kpis:'KPIs je Projekt·Skill',forecast_ist:'Forecast vs. Ist',shiftplan:'Schichtplan',presentations:'Präsentationen'};
+    // 4c: rollenabhängige Standard-Reihenfolge (unified) — sonst die bewährte Management-Reihenfolge (unverändert).
+    const DEF_ORDER = unified ? ((COCKPIT_ORDER[_role]||COCKPIT_ORDER.default).filter(k=>blockNodes[k]!==undefined))
+      : ['kalender','tiles','cveingang','marketing','projekte','quote','abwesend','ma','vertraege','training','fabletics','kpis','forecast_ist'];
     const _ck=mgmtCk||{order:null,hidden:[]};
     const _ord=(Array.isArray(_ck.order)?_ck.order:DEF_ORDER).filter(k=>DEF_ORDER.includes(k));
     const order=_ord.concat(DEF_ORDER.filter(k=>!_ord.includes(k)));   // neue Blöcke ans Ende
-    const hiddenSet=new Set(_ck.hidden||[]);
+    // 4c: hat der Nutzer noch nichts konfiguriert, gilt die Rollen-Standard-Ausblendung (HR/Leads ohne Kosten).
+    const _hasCfg = (Array.isArray(_ck.order)&&_ck.order.length) || (Array.isArray(_ck.hidden)&&_ck.hidden.length);
+    const hiddenSet=new Set(_hasCfg ? (_ck.hidden||[]) : (unified?(COCKPIT_HIDE[_role]||[]):[]));
     const toggleHide=(k)=>{ const h=new Set(hiddenSet); h.has(k)?h.delete(k):h.add(k); saveMgmtCk({order,hidden:[...h]}); };
     const onDropBlk=(k)=>{ if(mgmtDrag&&mgmtDrag!==k){ const ord=order.slice(); const fi=ord.indexOf(mgmtDrag),ti=ord.indexOf(k); if(fi>=0&&ti>=0){ ord.splice(fi,1); ord.splice(ti,0,mgmtDrag); saveMgmtCk({order:ord,hidden:[...hiddenSet]}); } } setMgmtDrag(null); };
     const isDefault=(!_ck.order||JSON.stringify(order)===JSON.stringify(DEF_ORDER))&&hiddenSet.size===0;
@@ -9753,6 +9767,7 @@ function CockpitLegacy({employees, projects, plans, forecast, onAbsence, team, o
       <CockpitTodayEvents mobile={false} onNavigate={onNavigate}/>
       <CockpitUploadTile team={team} projects={projects} onNavigate={onNavigate}/>
       {periodBar}
+      {tasksNode}
       <div style={{display:'flex',justifyContent:'flex-end',gap:8,marginBottom:10}}>
         {mgmtEdit&&!isDefault&&<button className="btn btn-sm" style={{background:'transparent',color:'var(--muted)'}} onClick={()=>saveMgmtCk({order:null,hidden:[]})} title="Standard-Anordnung wiederherstellen">↩ Standard</button>}
         <button className="btn btn-sm" onClick={()=>setMgmtEdit(!mgmtEdit)} style={mgmtEdit?{background:'#fffbeb',color:'#b45309',border:'1.5px solid #f59e0b'}:undefined} title="Blöcke umsortieren und aus-/einblenden">{mgmtEdit?'✓ Fertig':'✏ Anordnen'}</button>
