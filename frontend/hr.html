@@ -9148,9 +9148,10 @@ function Widget_DailyReports({employees, projects, team}){
 }
 // Monatsmetriken + Tagesverläufe fürs Cockpit (Desktop wie Mobile identisch). Krank/Urlaub = laufender Monat
 // (Werktags-Personentage je Tag), Kündigungen = termination_date im Monat, Bewerbungen = cv_date/cv_received_at (30 Tage).
-function cockpitMonthMetrics(employees, cvsDb){
+function cockpitMonthMetrics(employees, cvsDb, selYear, selM0){
   const MON=['Jan','Feb','Mär','Apr','Mai','Jun','Jul','Aug','Sep','Okt','Nov','Dez'];
-  const now=new Date(), year=now.getFullYear(), todayM=now.getMonth();
+  // Monatsarrays (Krank/Urlaub/Kündigung) folgen dem gewählten Monat; die 30-Tage-CV-Kurve bleibt rollierend (now).
+  const now=new Date(); const year=(selYear!=null)?selYear:now.getFullYear(); const todayM=(selM0!=null)?selM0:now.getMonth();
   const isWD=d=>{ const w=d.getDay(); return w>=1&&w<=5; };
   const covers=(a,d)=>{ if(!a||!a.from) return false; const f=new Date(a.from+'T00:00:00'), t=new Date((a.to||a.from)+'T00:00:00'); return d>=f&&d<=t; };
   const sameDay=(x,d)=>x.getFullYear()===d.getFullYear()&&x.getMonth()===d.getMonth()&&x.getDate()===d.getDate();
@@ -9510,6 +9511,7 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
   },[]);
   const [selfEdit,setSelfEdit]=useState(false);   // eigenes Cockpit anpassen (jsr_user_cockpits_v1[user_id])
   const [cockpitVer,setCockpitVer]=useState(0);   // Re-Render nach Reset auf Rollen-Vorlage
+  const [ckMonthOff,setCkMonthOff]=useState(0);   // 4b: globaler Zeitraum (Monats-Offset, 0 = laufender Monat) für die monatsbasierten Zahlen
   // S1b: per-User Reihenfolge + Ausblenden der Management-Cockpit-Blöcke (jsr_mgmt_cockpit_v1[user_id]={order,hidden}).
   const [mgmtCk,setMgmtCk]=useState(null); const [mgmtEdit,setMgmtEdit]=useState(false); const [mgmtDrag,setMgmtDrag]=useState(null);
   useEffect(()=>{ let alive=true; (async()=>{ try{ const c=await loadConfigFromDB('jsr_mgmt_cockpit_v1'); const uid=team&&team.user_id; const e=(c&&uid&&c[uid])||{}; if(alive) setMgmtCk({order:Array.isArray(e.order)?e.order:null,hidden:Array.isArray(e.hidden)?e.hidden:[]}); }catch(err){ if(alive) setMgmtCk({order:null,hidden:[]}); } })(); return ()=>{alive=false;}; },[team]);
@@ -9518,7 +9520,7 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
   // unbrauchbar). Gilt für ALLE mobilen Viewports; die Desktop-Konfig (jsr_user_cockpits_v1) bleibt unberührt.
   if(isMobileW) return <CockpitMobile employees={employees} projects={projects} plans={plans} team={team}
     onNavigate={onNavigate} onAbsence={onAbsence} cvsDb={cvsDb} payslipsDb={payslipsDb}
-    feedbackTodayDb={feedbackTodayDb} setEmployees={setEmployees} showToast={showToast}/>;
+    feedbackTodayDb={feedbackTodayDb} setEmployees={setEmployees} showToast={showToast} monthOff={ckMonthOff} setMonthOff={setCkMonthOff}/>;
   const active=employees.filter(e=>e&&e.status==='active');
   const inTraining=employees.filter(e=>e&&e.status==='training');
   // 4a-4: Pipeline-Kandidaten aus cvs-DB (CV-Funnel-Phasen), nicht mehr aus employees mit Legacy-Status.
@@ -9537,7 +9539,21 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
 
   // Umsatz = geplanter Monatsumsatz aus der geteilten Billing-Logik (productiveHours × Satz) — identisch zum Forecast.
   // Ersetzt die alte Pauschale n × rate_active × 160 × 0,85 (letzte doppelte Wahrheit in der Kalkulation).
-  const _cockpitYm = year+'-'+String(todayM+1).padStart(2,'0');
+  // 4b: gewählter Monat (Offset ggü. laufendem) treibt die monatsbasierten Zahlen (Marge/Kosten via _cockpitYm,
+  // Krank-/Urlaubstage via cockpitMonthMetrics). „Heute"-Blöcke, laufende Woche und die 30-Tage-CV-Kurve bleiben aktuell.
+  const _selD = new Date(year, todayM+ckMonthOff, 1); const _selY=_selD.getFullYear(); const _selM0=_selD.getMonth();
+  const _selMonLabel = _selD.toLocaleDateString('de-DE',{month:'long',year:'numeric'});
+  const _cockpitYm = _selY+'-'+String(_selM0+1).padStart(2,'0');
+  const periodBar = (
+    <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap',marginBottom:14,padding:'8px 12px',border:'1px solid var(--border)',borderRadius:10,background:'var(--surface-2)'}}>
+      <span style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.05em',color:'var(--muted)'}}>Zeitraum</span>
+      <button className="btn btn-sm" onClick={()=>setCkMonthOff(o=>o-1)} title="Monat zurück">◀</button>
+      <span style={{fontSize:13,fontWeight:800,minWidth:132,textAlign:'center'}}>{_selMonLabel}</span>
+      <button className="btn btn-sm" disabled={ckMonthOff>=0} onClick={()=>setCkMonthOff(o=>Math.min(0,o+1))} title="Monat vor">▶</button>
+      {ckMonthOff!==0 && <button className="btn btn-sm" onClick={()=>setCkMonthOff(0)}>heute</button>}
+      {ckMonthOff!==0 && <span style={{fontSize:11,color:'var(--muted)'}}>Marge, Kosten und Krank-/Urlaubstage folgen dem Monat · „Heute" und laufende Woche bleiben aktuell.</span>}
+    </div>
+  );
   const _planRevMap = planRevenueByProject(employees, projects, _cockpitYm);   // für Projekte-Karte (Marge)
   // Kosten in EUR über empCostEur (Währungs-Umrechnung + Fixgehalt korrekt); kein 1400/900-Schätz-Fallback mehr.
   const _fxInfoCk = fxInfoFor(employees, _cockpitYm);   // {mode:'ok'|'stale'|'missing', note}
@@ -9652,8 +9668,8 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
     </details>) : null;
     const _today2=isoLocal(new Date()); const hasTraining=(plans||[]).some(p=>p&&p.start_date&&p.start_date>=_today2);
     // S2: 6 Kacheln (2×3). Krankheit/Urlaub = Absence-Werktage im laufenden Monat; Kündigungen = termination_date im Monat.
-    // Monatsmetriken aus der GETEILTEN Funktion (mobil nutzt sie schon) — kein Nachbau mehr (4a-Extraktion).
-    const M=cockpitMonthMetrics(employees, cvsDb);
+    // Monatsmetriken aus der GETEILTEN Funktion (4a); Krank/Urlaub/Kündigung folgen dem gewählten Monat (4b).
+    const M=cockpitMonthMetrics(employees, cvsDb, _selY, _selM0);
     const _uPer=v=>v+(v===1?' Person':' Personen'), _uCv=v=>v+(v===1?' Bewerbung':' Bewerbungen'), _uKu=v=>v+(v===1?' Kündigung':' Kündigungen');
     const tiles6=[
       {val:active.length,label:'Aktiv',sub:'Mitarbeiter',color:'#0F5661'},
@@ -9695,6 +9711,7 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
     return(<React.Fragment>
       <CockpitTodayEvents mobile={false} onNavigate={onNavigate}/>
       <CockpitUploadTile team={team} projects={projects} onNavigate={onNavigate}/>
+      {periodBar}
       <div style={{display:'flex',justifyContent:'flex-end',gap:8,marginBottom:10}}>
         {mgmtEdit&&!isDefault&&<button className="btn btn-sm" style={{background:'transparent',color:'var(--muted)'}} onClick={()=>saveMgmtCk({order:null,hidden:[]})} title="Standard-Anordnung wiederherstellen">↩ Standard</button>}
         <button className="btn btn-sm" onClick={()=>setMgmtEdit(!mgmtEdit)} style={mgmtEdit?{background:'#fffbeb',color:'#b45309',border:'1.5px solid #f59e0b'}:undefined} title="Blöcke umsortieren und aus-/einblenden">{mgmtEdit?'✓ Fertig':'✏ Anordnen'}</button>
@@ -9718,6 +9735,7 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
 
       {/* Termine heute — ganz oben, noch vor den Kennzahlen. Für alle HR-Portal-Nutzer, Sichtbarkeit über RLS. */}
       <CockpitTodayEvents mobile={false} onNavigate={onNavigate}/>
+      {periodBar}
 
       {/* Selbst-Konfiguration: eigenes Cockpit zusammenstellen (Last-Write-Wins mit Admin-Matrix) */}
       <div style={{display:'flex',justifyContent:'flex-end',gap:8,marginBottom:10}}>
