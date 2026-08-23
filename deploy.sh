@@ -58,6 +58,7 @@ else
   run_check "macheck.js   (mitarbeiter.html)"  node    "$CHECKS/macheck.js"
   run_check "fieldcheck.py (Felder/Migration)" python3 "$CHECKS/fieldcheck.py"
   run_check "eslintcheck.js (hr.html no-undef)" node    "$CHECKS/eslintcheck.js"
+  run_check "tdzcheck.js  (hr.html eager-TDZ)"  node    "$CHECKS/tdzcheck.js"
   run_check "sharedcheck.js (shared/jsr-calc.js)" node  "$CHECKS/sharedcheck.js"
   run_check "statuscheck.js (STATUS_FLOW ↔ cvs_status_valid)" node "$CHECKS/statuscheck.js"
   run_check "menucheck.js (Menue ↔ HR-Tab-Sperren-Katalog)" node "$CHECKS/menucheck.js"
