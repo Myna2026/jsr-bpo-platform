@@ -1659,6 +1659,10 @@ function mmssToDec(str){
   if(isNaN(mm)) mm=0; if(isNaN(ss)) ss=0;
   return mm + ss/60;
 }
+// KPI-Wert VOR dem Schreiben entrauschen: 4 Nachkommastellen killen Float-Muell (206.60000000000002,
+// mm:ss-Umrechnungen wie 13.216666...) und erhalten echte Dezimalen. Die Anzeige-Konvention (Mengen ganz,
+// CSAT/Conversion 1 Stelle) ist eine EIGENE Ebene (fmtCell/kpiFmt); hier geht es nur um saubere Persistenz.
+function kpiRound(v){ if(v===null||v===undefined) return v; const n=Number(v); return isNaN(n)?v:Math.round(n*10000)/10000; }
 // ── Präsentations-Helfer: EINE Zahl-/Rechenlogik (verhindert die Alt-Fehler: #DIV/0!, Komma/Punkt,
 //    doppeltes Vorzeichen). Rechenwerte werden gerechnet, nie getippt. ──
 function fmtNum(v, dec){ dec=dec||0; if(v===''||v==null||isNaN(Number(v))) return '—';
@@ -1673,7 +1677,10 @@ function sumCol(rows, key){ let s=0; (rows||[]).forEach(r=>{ s+=numOr(r&&r[key],
 function kpiFmt(value, unit){
   if(value===null||value===undefined||value==='') return '';
   if(unit==='min'){ const v=parseFloat(value); return isNaN(v)?String(value):decToMmss(v); }
-  return String(value)+(unit||'');
+  // Netz gegen Float-Rauschen (206.60000000000002): numerische Werte auf 2 Nachkommastellen entrauschen.
+  // Die per-Typ-Konvention (Mengen ganz, CSAT/Conversion 1 Stelle) liegt bei den Aufrufern (fmtCell/Auswertung).
+  const n=Number(value); const shown=(typeof value!=='boolean' && value!=='' && !isNaN(n)) ? String(Math.round(n*100)/100) : String(value);
+  return shown+(unit||'');
 }
 
 // Get KPIs relevant for an employee (by project + skills)
@@ -2046,7 +2053,7 @@ function PerformanceView({employees, projects}){
     const rows=[], dels=[];
     comboKpis(pid,skill).forEach(kpi=>{ const raw=vals[kpi.id];
       if(raw!==undefined && String(raw).trim()!==''){ const dec=kpi.unit==='min'?mmssToDec(raw):parseFloat(raw);
-        if(!isNaN(dec)){ const row={project_id:pid, skill:skill||'', year, kpi_id:kpi.id, value:dec, entered_by:by, ts:new Date().toISOString()}; if(isMonth) row.month=no; else row.kw=no; rows.push(row); }
+        if(!isNaN(dec)){ const row={project_id:pid, skill:skill||'', year, kpi_id:kpi.id, value:kpiRound(dec), entered_by:by, ts:new Date().toISOString()}; if(isMonth) row.month=no; else row.kw=no; rows.push(row); }
       } else { dels.push(kpi.id); }   // geleertes Feld → Eintrag entfernen
     });
     if(isMonth){
@@ -7159,9 +7166,13 @@ function Widget_ForecastKosten({employees}){
 function Widget_KrankheitMonth({employees}){
   const now=new Date(), ym=now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0');
   const pm=new Date(now.getFullYear(),now.getMonth()-1,1), pym=pm.getFullYear()+'-'+String(pm.getMonth()+1).padStart(2,'0');
+  // Kranke WERKTAGE im Monat zählen (nicht Krankmeldungen): eine 5-Tage-Krankmeldung = 5, nicht 1; ein Zeitraum,
+  // der über den Monatswechsel läuft, wird tageweise dem richtigen Monat zugeordnet (Fehler vorher: nur Startmonat).
+  const sickDaysIn=(a,ymX)=>{ if(!a.from) return 0; let n=0; const s=new Date(a.from), e=new Date(a.to||a.from);
+    for(let d=new Date(s); d<=e; d.setDate(d.getDate()+1)){ const k=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); if(k!==ymX) continue; const wd=d.getDay(); if(wd>=1&&wd<=5) n++; } return n; };
   let cur=0, prev=0;
   (employees||[]).forEach(e=>(e.absences||[]).forEach(a=>{
-    if(a.type!=='sick')return; const d=a.from||''; if(d.slice(0,7)===ym)cur++; else if(d.slice(0,7)===pym)prev++;
+    if(a.type!=='sick')return; cur+=sickDaysIn(a,ym); prev+=sickDaysIn(a,pym);
   }));
   const diff=cur-prev, arrow=diff>0?'↑':diff<0?'↓':'→', cls=diff>0?'widget-trend-up':diff<0?'widget-trend-down':'widget-trend-neutral';
   return <div>
@@ -7176,11 +7187,13 @@ function Widget_UrlaubBottleneck({employees}){
   // Urlaubskonto/Quote (JSRCalc.vacationConsumed filtert ebenfalls nur type==='vacation'). approved!==false
   // = tolerant, damit HR-Direkteinträge (approved oft undefined) und der Listen-Import mitzählen.
   const vac=[];
-  (employees||[]).forEach(e=>{ if(!e) return; (e.absences||[]).forEach(a=>{ if(a&&a.type==='vacation'&&a.approved!==false&&a.from){ vac.push({from:String(a.from).slice(0,10), to:String(a.to||a.from).slice(0,10)}); } }); });
+  (employees||[]).forEach(e=>{ if(!e) return; (e.absences||[]).forEach(a=>{ if(a&&a.type==='vacation'&&a.approved!==false&&a.from){ vac.push({emp:e.id, from:String(a.from).slice(0,10), to:String(a.to||a.from).slice(0,10)}); } }); });
   if(!vac.length) return <div className="w-empty">Kein eingetragener Urlaub.</div>;
   const now=new Date(); const months=[];
   for(let i=0;i<6;i++){const d=new Date(now.getFullYear(),now.getMonth()+i,1);months.push({ym:d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'),label:d.toLocaleString('de-AT',{month:'short',year:'2-digit'}),count:0});}
-  vac.forEach(r=>{months.forEach(m=>{if(r.from.slice(0,7)<=m.ym&&r.to.slice(0,7)>=m.ym)m.count++;});});
+  // Distinkte KÖPFE je Monat (nicht Urlaubs-Einträge): zwei Urlaube derselben Person im selben Monat = 1 Kopf,
+  // damit die Rot-Schwelle (>=3) wirklich „3 Personen gleichzeitig weg" bedeutet.
+  months.forEach(m=>{ const set=new Set(); vac.forEach(r=>{ if(r.from.slice(0,7)<=m.ym&&r.to.slice(0,7)>=m.ym) set.add(r.emp); }); m.count=set.size; });
   const max=Math.max(1,...months.map(m=>m.count));
   return <div>{months.map((m,i)=>(
     <div key={i} style={{display:'flex',alignItems:'center',gap:8,fontSize:12,padding:'3px 0'}}>
@@ -7350,10 +7363,12 @@ function Widget_Auslastung({employees, projects, forecast, onNavigate}){
   return <div>
     {rows.map((r,i)=>{
       const barColor = r.soll>0 ? (staffingUnder(r.ist,r.soll)?'#dc2626':(staffingOver(r.ist,r.soll)?'#d97706':'#059669')) : '#0F5661';
+      // Balken = Deckung gegen Soll (voll = besetzt), nicht Ist/Größtwert — sonst sehen 3/10 und 3/3 gleich aus.
+      const barPct = r.soll>0 ? Math.min(1, r.ist/r.soll)*100 : (r.ist/max*100);
       return (
         <div key={i} style={{marginBottom:8}}>
           <div className="widget-row" style={{borderBottom:'none',padding:'2px 0'}}><span>{r.name}</span><span className="num">{r.ist}{r.soll>0?' / '+r.soll:''}</span></div>
-          <div className="widget-bar"><span style={{width:(r.ist/max*100)+'%',background:barColor}}/></div>
+          <div className="widget-bar"><span style={{width:barPct+'%',background:barColor}}/></div>
         </div>
       );
     })}
@@ -9054,14 +9069,14 @@ function cockpitMonthMetrics(employees, cvsDb){
   const labels30=days30.map(d=>d.getDate()+'. '+MON[d.getMonth()]);
   const dCv=days30.map(d=>cvDates.filter(x=>sameDay(x,d)).length);
   const absMon=a=>{ if(!a||!a.from) return 0; const from=new Date(a.from+'T00:00:00'), to=new Date((a.to||a.from)+'T00:00:00'); const ms=new Date(year,todayM,1), me=new Date(year,todayM+1,0); let s=from<ms?ms:from, e=to>me?me:to; if(s>e) return 0; let n=0,g=0,d=new Date(s.getFullYear(),s.getMonth(),s.getDate()); const end=new Date(e.getFullYear(),e.getMonth(),e.getDate()); while(d<=end&&g<400){ const dw=d.getDay(); if(dw>=1&&dw<=5)n++; d.setDate(d.getDate()+1); g++; } return n; };
-  let krankM=0,urlaubM=0; (employees||[]).forEach(e=>{ (e.absences||[]).forEach(a=>{ if(a&&a.type==='sick')krankM+=absMon(a); else if(a&&a.type==='vacation')urlaubM+=absMon(a); }); });
+  let krankM=0,urlaubM=0; (employees||[]).forEach(e=>{ if(!e||String(e.status||'').startsWith('terminated')||e.status==='inactive') return; (e.absences||[]).forEach(a=>{ if(a&&a.type==='sick')krankM+=absMon(a); else if(a&&a.type==='vacation'&&a.approved!==false)urlaubM+=absMon(a); }); });
   const kuendM=(employees||[]).filter(e=>{ const td=e&&e.termination_date; if(!td) return false; const d=new Date(td); return d.getFullYear()===year&&d.getMonth()===todayM; }).length;
   return {monLabels,dSick,dVac,dKuend,labels30,dCv,krankM,urlaubM,kuendM};
 }
 function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence, cvsDb, payslipsDb, feedbackTodayDb, setEmployees, showToast}){
   const isFullFin=(team&&(team.role_keys||[]).some(r=>r==='management'||r==='finance'));   // Personalkosten/Marge nur Management/Finance
   const now=new Date();
-  const todayStr=now.toISOString().slice(0,10);
+  const todayStr=isoLocal(now);   // LOKALES Datum (nicht UTC) — sonst nahe Mitternacht ein Tag daneben
   const ym=todayStr.slice(0,7);
   const _fxInfoMob=fxInfoFor(employees, ym);   // {mode:'ok'|'stale'|'missing', note}
   const fmtDe=s=>{ if(!s) return ''; const p=String(s).slice(0,10).split('-'); return p.length===3?(p[2]+'.'+p[1]+'.'):s; };
@@ -9295,7 +9310,7 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
 // emp_*: Prädikat über einen Mitarbeiter · cv_*: über einen CV.
 const COCKPIT_FILTERS = {
   emp_contract_expiring: e=>{ const ce=e&&((e.contract&&e.contract.end)||e.contract_end); if(!ce||e.status==='terminated'||e.status==='inactive') return false; const cM=parseInt(localStorage.getItem('jsr_contract_reminder_months')||'1'); const cut=new Date(); cut.setMonth(cut.getMonth()+cM); const end=new Date(ce); return end>=new Date()&&end<=cut; },
-  emp_no_salary: e=>!!e&&e.status==='active'&&!parseFloat(e.hourly_rate||0),
+  emp_no_salary: e=>!!e&&e.status==='active'&&!parseFloat(e.hourly_rate||0)&&!parseFloat(e.fixed_salary||0),
   cv_new: c=>{ const wk=new Date(Date.now()-7*864e5).toISOString().slice(0,10); return !!c&&c.cv_date>=wk&&c.status==='cv_inbound'; },
   cv_stuck: c=>{ if(!c) return false; if(['active',...REJECT_STATUS_KEYS].includes(c.status)) return false; const last=c.status_changed_at||c.cv_date; if(!last) return false; return Math.round((new Date()-new Date(last))/(864e5))>7; },
   cv_inbox: c=>{ if(!c) return false; const s=c.status; return s==='cv_inbound'||s==='new'||s==='test_sent'; },   // Posteingang (Tagesaufgaben-Sprung „CVs selektieren")
@@ -9429,7 +9444,7 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
   const cvEin7=cvsDb.filter(c=>{const d=_cvd(c);return d&&d>=_cv7&&d<=_cvT;}).length;
   const cvEinMonth=cvsDb.filter(c=>{const d=_cvd(c);return d&&d.slice(0,7)===_cvT.slice(0,7);}).length;
   const now=new Date();
-  const todayStr=now.toISOString().slice(0,10);
+  const todayStr=isoLocal(now);   // LOKALES Datum (nicht UTC) — sonst nahe Mitternacht ein Tag daneben
   const year=now.getFullYear();
   const todayM=now.getMonth();
 
@@ -9442,8 +9457,10 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
   // Projekt mit LEK-Gehältern? Nur dort wirkt der Kurs auf die Marge.
   const _projLek = p => (employees||[]).some(e=>e&&['active','training'].includes(e.status)&&e.project_id===(p&&p.id)&&salaryCurrency(e)==='ALL');
 
-  const todayAbsent=employees.filter(e=>(e.absences||[]).some(a=>a.type==='sick'&&absCoversDay(a,todayStr)));
-  const todayVac=employees.filter(e=>(e.absences||[]).some(a=>a.type==='vacation'&&absCoversDay(a,todayStr)));
+  // Nur beschäftigte MA (keine gekündigten/inaktiven mit Alt-Abwesenheit); Urlaub nur genehmigt.
+  const _employed=e=>e&&!(String(e.status||'').startsWith('terminated'))&&e.status!=='inactive';
+  const todayAbsent=employees.filter(e=>_employed(e)&&(e.absences||[]).some(a=>a.type==='sick'&&absCoversDay(a,todayStr)));
+  const todayVac=employees.filter(e=>_employed(e)&&(e.absences||[]).some(a=>a.type==='vacation'&&a.approved!==false&&absCoversDay(a,todayStr)));
   const safePlans = plans.filter(p=>p!=null&&p.planned_count!=null);
   const urgentPlans=safePlans.filter(p=>{
     if(!p||!p.start_date) return false;
@@ -9553,7 +9570,7 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
     const _today2=isoLocal(new Date()); const hasTraining=(plans||[]).some(p=>p&&p.start_date&&p.start_date>=_today2);
     // S2: 6 Kacheln (2×3). Krankheit/Urlaub = Absence-Werktage im laufenden Monat; Kündigungen = termination_date im Monat.
     const _absDaysInMonth=(a)=>{ if(!a||!a.from) return 0; const from=new Date(a.from+'T00:00:00'); const to=new Date((a.to||a.from)+'T00:00:00'); const ms=new Date(year,todayM,1), me=new Date(year,todayM+1,0); let s=from<ms?ms:from, e=to>me?me:to; if(s>e) return 0; let n=0,g=0,d=new Date(s); while(d<=e&&g<400){ const dw=d.getDay(); if(dw>=1&&dw<=5)n++; d.setDate(d.getDate()+1); g++; } return n; };
-    let _krankM=0,_urlaubM=0; (employees||[]).forEach(e=>{ (e.absences||[]).forEach(a=>{ if(a&&a.type==='sick')_krankM+=_absDaysInMonth(a); else if(a&&a.type==='vacation')_urlaubM+=_absDaysInMonth(a); }); });
+    let _krankM=0,_urlaubM=0; (employees||[]).forEach(e=>{ if(!e||String(e.status||'').startsWith('terminated')||e.status==='inactive') return; (e.absences||[]).forEach(a=>{ if(a&&a.type==='sick')_krankM+=_absDaysInMonth(a); else if(a&&a.type==='vacation'&&a.approved!==false)_urlaubM+=_absDaysInMonth(a); }); });
     const _kuendM=(employees||[]).filter(e=>{ const td=e&&e.termination_date; if(!td) return false; const d=new Date(td); return d.getFullYear()===year&&d.getMonth()===todayM; }).length;
     // Tagesverläufe (nur wo ein Verlauf Sinn ergibt: Krank/Urlaub/Kündig/Bewerbung).
     const _MON=['Jan','Feb','Mär','Apr','Mai','Jun','Jul','Aug','Sep','Okt','Nov','Dez'];
@@ -29697,7 +29714,7 @@ async function savePerfEntryToDB(empId, kw, year, changes){
   for(const ch of (changes||[])){
     const del=await sb.from('kpi_entries').delete().eq('emp_id',empId).eq('kpi_id',ch.kpi_id).eq('kw',kw).eq('year',year);
     if(del.error){ console.error('[perf] savePerfEntryToDB delete', del.error); return false; }
-    if(ch.value!=null){ const ins=await sb.from('kpi_entries').insert({emp_id:empId, kpi_id:ch.kpi_id, value:ch.value, kw, year, source:'manual', entered_by:ch.entered_by??null}); if(ins.error){ console.error('[perf] savePerfEntryToDB insert', ins.error); return false; } }
+    if(ch.value!=null){ const ins=await sb.from('kpi_entries').insert({emp_id:empId, kpi_id:ch.kpi_id, value:kpiRound(ch.value), kw, year, source:'manual', entered_by:ch.entered_by??null}); if(ins.error){ console.error('[perf] savePerfEntryToDB insert', ins.error); return false; } }
   }
   return true;
 }
@@ -34470,7 +34487,7 @@ function PivotImport({projId, employees, source, fields, table, accept, hint, on
       const empSkill={}; (employees||[]).forEach(e=>{ if(e) empSkill[e.id]=(e.project_skill||e.primary_skill||''); });
       const kRows=[]; const usedIds=new Set(); const empIds=result.facts.map(f=>f.employee_id);
       result.facts.forEach(f=>{ const sk=empSkill[f.employee_id];
-        kpiTargets.forEach(t=>{ const raw=f.vals[t.field]; if(raw==null) return; const kid=kpiFor(t.name,sk); if(!kid) return; const val=t.fn?t.fn(raw):raw; if(val==null||isNaN(val)) return; kRows.push({emp_id:f.employee_id, kpi_id:kid, value:val, kw:Number(kw), year:Number(year), source:'import', entered_by:uname}); usedIds.add(kid); }); });
+        kpiTargets.forEach(t=>{ const raw=f.vals[t.field]; if(raw==null) return; const kid=kpiFor(t.name,sk); if(!kid) return; const val=t.fn?t.fn(raw):raw; if(val==null||isNaN(val)) return; kRows.push({emp_id:f.employee_id, kpi_id:kid, value:kpiRound(val), kw:Number(kw), year:Number(year), source:'import', entered_by:uname}); usedIds.add(kid); }); });
       if(kRows.length){
         const kd=await sb.from('kpi_entries').delete().eq('kw',Number(kw)).eq('year',Number(year)).in('kpi_id',[...usedIds]).in('emp_id',empIds);
         if(kd.error){ setBusy(false); setErr('KPI-Werte: alte nicht ersetzbar: '+(kd.error.message||kd.error)); return; }
@@ -34652,7 +34669,7 @@ function BookingImportAgent({projId, employees, onSaved, initKw, initYear}){
       const empIds=result.facts.map(f=>f.employee_id); const allK=[kpiIds.cr,kpiIds.open,kpiIds.osl,kpiIds.calls];
       let uid=null,uname=null; try{ const u=await sb.auth.getUser(); uid=u&&u.data&&u.data.user&&u.data.user.id||null; if(uid){ const nr=await sb.from('app_users').select('full_name').eq('user_id',uid).single(); uname=nr&&nr.data&&nr.data.full_name||null; } }catch(e){}
       const rows=[]; result.facts.forEach(f=>{
-        const put=(kpi_id,value)=>{ if(value!=null&&!isNaN(value)) rows.push({emp_id:f.employee_id, kpi_id, value, kw:Number(kw), year:Number(year), source:'import', entered_by:uname}); };
+        const put=(kpi_id,value)=>{ if(value!=null&&!isNaN(value)) rows.push({emp_id:f.employee_id, kpi_id, value:kpiRound(value), kw:Number(kw), year:Number(year), source:'import', entered_by:uname}); };
         put(kpiIds.cr, f.cr); put(kpiIds.open, f.open); put(kpiIds.osl, f.osl); put(kpiIds.calls, f.sales_calls);
       });
       if(!rows.length) throw new Error('Keine Werte zum Speichern (alle Felder leer?).');
@@ -34838,7 +34855,7 @@ function BookingImportTeam({projId, expectMode, onSaved}){
       const skill=kpiIds.skill; const teamKpis=[kpiIds.cr,kpiIds.buchungen,kpiIds.calls];
       const rows=[]; const byYearKw={}, byYearMonth={};
       result.facts.forEach(f=>{ const periodCol=f.mode==='kw'?{kw:f.n}:{month:f.n};
-        const put=(kpi_id,value)=>{ if(value!=null&&!isNaN(value)) rows.push({project_id:projId, skill, year:f.year, ...periodCol, kpi_id, value, source:'import', entered_by:uname}); };
+        const put=(kpi_id,value)=>{ if(value!=null&&!isNaN(value)) rows.push({project_id:projId, skill, year:f.year, ...periodCol, kpi_id, value:kpiRound(value), source:'import', entered_by:uname}); };
         put(kpiIds.cr,f.cr); put(kpiIds.buchungen,f.buchungen); put(kpiIds.calls,f.calls);
         if(f.mode==='kw'){ (byYearKw[f.year]=byYearKw[f.year]||new Set()).add(f.n); } else { (byYearMonth[f.year]=byYearMonth[f.year]||new Set()).add(f.n); }
       });
@@ -38802,6 +38819,13 @@ function App(){
       if(times) localStorage.setItem('jsr_time_v1', JSON.stringify(times));
       // C2: alle app_config-Zeilen in den localStorage-Cache spiegeln (ein Aufruf)
       await loadAllConfigsFromDB();
+      // Auslastungs-Soll: DB ist maszgeblich (oben in den Cache gespiegelt). Legacy-Fall — Soll lag nur im lokalen
+      // Browser, nie in der DB (vor der DB-Save-Zeile eingetragen) -> einmalig in die DB heben, damit ab dann JEDES
+      // Geraet denselben Wert sieht statt geraetespezifisch. Danach verteilt die Hydration den Wert an alle.
+      try{ const _stDb=await loadConfigFromDB('jsr_staffing_target_v1');
+        if(!_stDb || !Object.keys(_stDb).length){ let _stLoc=null; try{ _stLoc=JSON.parse(localStorage.getItem('jsr_staffing_target_v1')||'null'); }catch(_e){}
+          if(_stLoc && typeof _stLoc==='object' && Object.keys(_stLoc).length){ await _saveConfigNow('jsr_staffing_target_v1', _stLoc); console.log('[staffing] Legacy-Soll aus localStorage in die DB gehoben'); } }
+      }catch(e){ console.error('[staffing] Seed-Reconcile', e); }
       // L2: Standorte (locations + location_monthly + spaces) in den Cache spiegeln
       const locData = await loadLocationsFromDB();
       if(locData){
