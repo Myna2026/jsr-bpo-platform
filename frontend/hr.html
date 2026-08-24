@@ -2561,7 +2561,7 @@ function PerformanceView({employees, projects}){
 
   // Month summary — Eintraege, die den angezeigten Monat berueren (Zeitraum-aware)
   const ymView = year+'-'+String(month+1).padStart(2,'0');
-  const monthTypeDays = (k)=>absences.filter(a=>a.type===k).reduce((s,a)=>s+absDaysInMonth(a, ymView),0);
+  const monthTypeDays = (k)=>absences.filter(a=>a.type===k).reduce((s,a)=>s+absDaysInMonth(a, ymView, emp),0);
 
   // All years in absences
   const years = [...new Set(absences.map(a=>parseInt(String(a.from||'').slice(0,4))).filter(Boolean))].sort().reverse();
@@ -2631,7 +2631,7 @@ function PerformanceView({employees, projects}){
                 return(
                   <div key={dateStr}
                     className={`cal-day${absClass?' '+absClass:''}${isToday?' today':''}${isWeekend?' weekend':''}`}
-                    onClick={()=>!isWeekend&&toggleDay(d)}
+                    onClick={()=>toggleDay(d)}
                     title={absence?`${ABSENCE_TYPES[absence.type]?.label}${absence.type==='unpaid'?' (unbezahlt)':''}${absence.note?': '+absence.note:''}`:''}>
                     <span style={{fontSize:12}}>{d.getDate()}</span>
                     {absence&&<span style={{fontSize:9}}>{ABSENCE_TYPES[absence.type]?.icon}{absence.type==='unpaid'?'❌':''}</span>}
@@ -2719,7 +2719,7 @@ function PerformanceView({employees, projects}){
                 <tbody>
                   {Array.from({length:12},(_,mi)=>{
                     const ymMo=currentYear+'-'+String(mi+1).padStart(2,'0');
-                    const moDays=(pred)=>absences.filter(pred).reduce((s,a)=>s+absDaysInMonth(a,ymMo),0);
+                    const moDays=(pred)=>absences.filter(pred).reduce((s,a)=>s+absDaysInMonth(a,ymMo,emp),0);
                     const sick=moDays(a=>a.type==='sick');
                     const vac=moDays(a=>a.type==='vacation');
                     const unpaidP=moDays(a=>!['sick','vacation','unpaid'].includes(a.type));
@@ -6404,9 +6404,9 @@ function calcFullPayslip(emp, month, salaryRec, employees, absences){
   const vacLeft  = vacCalc.remaining;
   // Absences stored in emp.absences[] within jsr_emp_v3 - no separate key
   const absRec = (emp.absences||[]);
-  const vacMonth= absRec.filter(a=>a.type==='vacation').reduce((s,a)=>s+absDaysInMonth(a,month),0);           // beide Formate, Werktage
+  const vacMonth= absRec.filter(a=>a.type==='vacation').reduce((s,a)=>s+absDaysInMonth(a,month,emp),0);           // Mo–Fr + gearbeitete Sa/So
   const sickYear= absRec.filter(a=>a.type==='sick').reduce((s,a)=>s+absDaysInYear(a,month.slice(0,4)),0);
-  const sickMonth=absRec.filter(a=>a.type==='sick').reduce((s,a)=>s+absDaysInMonth(a,month),0);
+  const sickMonth=absRec.filter(a=>a.type==='sick').reduce((s,a)=>s+absDaysInMonth(a,month,emp),0);
 
   return {
     // Meta
@@ -7218,19 +7218,30 @@ function Widget_UrlaubBottleneck({employees}){
 // So bleibt der Urlaub sichtbar (Urlauber stehen nicht im Plan → über Kapazität), und je gepflegter der
 // Plan, desto mehr wandert der Nenner Richtung Plan-Stunden — ohne dass jemand etwas umstellt.
 // VERLÄSSLICHKEIT je Zeile über den Plan-Anteil am Nenner: >=80% „Plan", <20% „Kapazität", sonst „gemischt".
-function Widget_KrankUrlaubQuote({employees, projects, mobile}){
+function Widget_KrankUrlaubQuote({employees, projects, mobile, selY, selM0}){
   const isoD=isoLocal;
   const addDays=(d,n)=>{ const x=new Date(d.getFullYear(),d.getMonth(),d.getDate()); x.setDate(x.getDate()+n); return x; };
   const mondayOf=d=>{ const x=new Date(d.getFullYear(),d.getMonth(),d.getDate()); x.setDate(x.getDate()-((x.getDay()+6)%7)); return x; };
-  const DOWk=['Mo','Di','Mi','Do','Fr','Sa','So'];
-  const today=new Date();
-  const thisMon=mondayOf(today), prevMon=addDays(thisMon,-7);
-  const rangeStart=isoD(prevMon), rangeEnd=isoD(today);
+  const nowD=new Date(); const today=new Date(nowD.getFullYear(),nowD.getMonth(),nowD.getDate());
+  const wkey=w=>w.year+'-'+w.kw;
+  // Master-Periode = Monatswähler oben; die Quote-Woche folgt: Standard = letzte VOLLSTÄNDIGE Woche im gewählten
+  // Monat (laufender Monat -> Vorwoche, da die laufende unvollständig ist), daneben per KW-Dropdown fein wählbar.
+  const _isCur = selY==null || (selY===today.getFullYear() && selM0===today.getMonth());
+  const _defBase = _isCur ? today : new Date(selY, selM0+1, 0);
+  const _defMon = mondayOf(_defBase);
+  const _useDate = (addDays(_defMon,6) <= today) ? _defBase : addDays(_defMon,-7);   // unvollständige Woche -> Vorwoche
+  const _defW = getISOWeek(_useDate);
+  const [sel,setSel]=useState(wkey(_defW));
+  React.useEffect(()=>{ setSel(wkey(_defW)); },[selY,selM0]);   // Monatswechsel -> Woche folgt
+  const availWeeks=(()=>{ const a=[]; const base=mondayOf(_useDate); for(let i=0;i<12;i++){ const d=addDays(base,-7*i); a.push(getISOWeek(d)); } return a; })();
+  const wLabel=w=>'KW '+w.kw+(w.year!==today.getFullYear()?('/'+String(w.year).slice(2)):'');
+  const [_sy,_sk]=sel.split('-').map(Number);
+  const selMon=mondayOf(isoWeekMonday(_sy,_sk)); const prevMon=addDays(selMon,-7); const selEnd=addDays(selMon,6);
+  const selWLabel=wLabel(getISOWeek(selMon));
+  const rangeStart=isoD(prevMon), rangeEnd=isoD(selEnd);
   const daysBetween=(a,b)=>{ const out=[]; let d=new Date(a.getFullYear(),a.getMonth(),a.getDate()); const e=new Date(b.getFullYear(),b.getMonth(),b.getDate()); while(d<=e){ out.push({ds:isoD(d),dow:d.getDay()}); d=addDays(d,1); } return out; };
-  const prevDays=daysBetween(prevMon, addDays(thisMon,-1));   // Vorwoche Mo–So (vollständig)
-  const curDays=daysBetween(thisMon, today);                  // laufend Mo–heute (nur vergangene Tage)
-  const curIdx=(today.getDay()+6)%7;                          // 0=Mo
-  const curLabel=curIdx===0?'Mo':('Mo–'+DOWk[curIdx]);
+  const prevDays=daysBetween(prevMon, addDays(selMon,-1));   // Vergleichswoche (davor), Mo–So
+  const curDays=daysBetween(selMon, selEnd);                 // gewählte Woche, Mo–So
 
   // Geplante Netto-Stunden je (MA, Tag) aus shift_assignments — Ableitung wie im Weg-A-Code (cell.net
   // bzw. shiftHours(value).net), keine zweite Logik.
@@ -7287,10 +7298,10 @@ function Widget_KrankUrlaubQuote({employees, projects, mobile}){
     if(share<0.2)  return {label:'Kapazität',color:'var(--muted)',bg:'transparent',bd:'var(--border)'};
     return {label:'gemischt',color:'#b45309',bg:'var(--amber-bg)',bd:'var(--amber)'}; };
 
-  // Massgebliche Woche je Zeile: bevorzugt die vollständige Vorwoche, sonst die laufende.
+  // Hauptwert je Zeile = die gewählte Woche; Vergleich = Vorwoche (Trendpfeil).
   const rows=keys.map(k=>{ const i=k.indexOf('|'); const pid=k.slice(0,i), sk=k.slice(i+1);
       const p=prev[k]||null, c=cur[k]||null;
-      const feat = has(p) ? {w:p,tag:'Vorwoche',other:has(c)?c:null} : has(c) ? {w:c,tag:curLabel,other:null} : null;
+      const feat = has(c) ? {w:c,tag:selWLabel,other:has(p)?p:null} : has(p) ? {w:p,tag:selWLabel,other:null} : null;
       return { name:(projById[pid]&&projById[pid].name)||pid, color:(projById[pid]&&projById[pid].color)||'#0F5661', skill:skillLabel(pid,sk), feat }; })
     .filter(r=>r.feat)
     .sort((a,b)=>a.name.localeCompare(b.name,'de')||String(a.skill).localeCompare(String(b.skill),'de'));
@@ -7303,7 +7314,7 @@ function Widget_KrankUrlaubQuote({employees, projects, mobile}){
     const main=rate(feat.w,kind), hi=maxV>0 && main>=maxV-EPS;
     let arrow=null, acol='var(--muted)', atitle='';
     if(feat.other){ const o=rate(feat.other,kind); const d=o-main; arrow=d>TREND?'↑':d<-TREND?'↓':'→';
-      acol=arrow==='↑'?'var(--amber)':arrow==='↓'?'var(--green)':'var(--muted)'; atitle=' · laufend '+pct(o)+'%'; }
+      acol=arrow==='↑'?'var(--amber)':arrow==='↓'?'var(--green)':'var(--muted)'; atitle=' · Vorwoche '+pct(o)+'%'; }
     return (
       <div style={{flex:1,textAlign:'center',padding:'8px 6px',borderRadius:10,background:hi?'var(--amber-bg)':'var(--surface-2)',border:'1px solid '+(hi?'var(--amber)':'var(--border)')}} title={feat.tag+' '+pct(main)+'%'+atitle}>
         <div style={{fontSize:10.5,color:'var(--muted)',fontWeight:600}}>{icon} {label}</div>
@@ -7313,6 +7324,9 @@ function Widget_KrankUrlaubQuote({employees, projects, mobile}){
   }
 
   return <div>
+    <div style={{display:'flex',justifyContent:'flex-end',marginBottom:10}}>
+      <label style={{display:'inline-flex',alignItems:'center',gap:6,fontSize:11,color:'var(--muted)',fontWeight:700}}>KW <select value={sel} onChange={e=>setSel(e.target.value)} style={{padding:'3px 7px',border:'1px solid var(--border)',borderRadius:7,fontSize:11.5,fontWeight:700,background:'var(--card)',color:'var(--text)'}}>{availWeeks.map(w=><option key={wkey(w)} value={wkey(w)}>{wLabel(w)}</option>)}</select></label>
+    </div>
     <div style={{display:'grid',gridTemplateColumns:mobile?'1fr':'repeat(3,1fr)',gap:12}}>
       {rows.map((r,i)=>{ const rel=relTag(r.feat.w); return (
         <div key={i} style={{border:'1px solid var(--border)',borderRadius:12,padding:'11px 13px',background:'var(--card)',minWidth:0}}>
@@ -7329,7 +7343,7 @@ function Widget_KrankUrlaubQuote({employees, projects, mobile}){
         </div>
       ); })}
     </div>
-    <div style={{fontSize:10,color:'var(--muted)',marginTop:10,lineHeight:1.5}}>Ausfallzeit / Arbeitszeit; je Tag geplante Stunden, sonst Kapazität. Tag zeigt die Grundlage (Plan/gemischt/Kapazität). Wert der Vorwoche; ↑↓ = Trend der laufenden Woche (bis {curLabel}). Höchste Werte hervorgehoben.</div>
+    <div style={{fontSize:10,color:'var(--muted)',marginTop:10,lineHeight:1.5}}>Ausfallzeit / Arbeitszeit; je Tag geplante Stunden, sonst Kapazität. Chip zeigt die Grundlage (Plan/gemischt/Kapazität). Wert der gewählten Woche; ↑↓ = Veränderung zur Vorwoche. Woche folgt dem Monat oben, hier fein wählbar. Höchste Werte hervorgehoben.</div>
   </div>;
 }
 // Widget_Personalkosten entfernt (2026-07-27, Personalkosten komplett raus lt. Cockpit-Überarbeitung).
@@ -9423,20 +9437,19 @@ function cockpitMonthMetrics(employees, cvsDb, selYear, selM0){
   const MON=['Jan','Feb','Mär','Apr','Mai','Jun','Jul','Aug','Sep','Okt','Nov','Dez'];
   // Monatsarrays (Krank/Urlaub/Kündigung) folgen dem gewählten Monat; die 30-Tage-CV-Kurve bleibt rollierend (now).
   const now=new Date(); const year=(selYear!=null)?selYear:now.getFullYear(); const todayM=(selM0!=null)?selM0:now.getMonth();
-  const isWD=d=>{ const w=d.getDay(); return w>=1&&w<=5; };
   const covers=(a,d)=>{ if(!a||!a.from) return false; const f=new Date(a.from+'T00:00:00'), t=new Date((a.to||a.from)+'T00:00:00'); return d>=f&&d<=t; };
   const sameDay=(x,d)=>x.getFullYear()===d.getFullYear()&&x.getMonth()===d.getMonth()&&x.getDate()===d.getDate();
   const cvDates=[].concat((cvsDb||[]).map(c=>c.cv_date),(employees||[]).filter(e=>e&&e.source==='cv').map(e=>e.cv_received_at)).map(x=>x?new Date(x):null).filter(d=>d&&!isNaN(d));
   const lastDom=new Date(year,todayM+1,0).getDate(); const monDays=[]; for(let dd=1;dd<=lastDom;dd++) monDays.push(new Date(year,todayM,dd));
   const monLabels=monDays.map(d=>d.getDate()+'. '+MON[d.getMonth()]);
-  const dSick=monDays.map(d=>isWD(d)?(employees||[]).filter(e=>(e.absences||[]).some(a=>a&&a.type==='sick'&&covers(a,d))).length:0);
-  const dVac=monDays.map(d=>isWD(d)?(employees||[]).filter(e=>(e.absences||[]).some(a=>a&&a.type==='vacation'&&covers(a,d))).length:0);
+  const dSick=monDays.map(d=>(employees||[]).filter(e=>empWorksDay(e,d)&&(e.absences||[]).some(a=>a&&a.type==='sick'&&covers(a,d))).length);
+  const dVac=monDays.map(d=>(employees||[]).filter(e=>empWorksDay(e,d)&&(e.absences||[]).some(a=>a&&a.type==='vacation'&&covers(a,d))).length);
   const dKuend=monDays.map(d=>(employees||[]).filter(e=>{ const td=e&&e.termination_date; return td&&sameDay(new Date(td),d); }).length);
   const days30=[]; { const b=new Date(); b.setHours(0,0,0,0); for(let i=29;i>=0;i--){ const d=new Date(b); d.setDate(b.getDate()-i); days30.push(d); } }
   const labels30=days30.map(d=>d.getDate()+'. '+MON[d.getMonth()]);
   const dCv=days30.map(d=>cvDates.filter(x=>sameDay(x,d)).length);
-  const absMon=a=>{ if(!a||!a.from) return 0; const from=new Date(a.from+'T00:00:00'), to=new Date((a.to||a.from)+'T00:00:00'); const ms=new Date(year,todayM,1), me=new Date(year,todayM+1,0); let s=from<ms?ms:from, e=to>me?me:to; if(s>e) return 0; let n=0,g=0,d=new Date(s.getFullYear(),s.getMonth(),s.getDate()); const end=new Date(e.getFullYear(),e.getMonth(),e.getDate()); while(d<=end&&g<400){ const dw=d.getDay(); if(dw>=1&&dw<=5)n++; d.setDate(d.getDate()+1); g++; } return n; };
-  let krankM=0,urlaubM=0; (employees||[]).forEach(e=>{ if(!e||String(e.status||'').startsWith('terminated')||e.status==='inactive') return; (e.absences||[]).forEach(a=>{ if(a&&a.type==='sick')krankM+=absMon(a); else if(a&&a.type==='vacation'&&a.approved!==false)urlaubM+=absMon(a); }); });
+  const absMon=(a,e)=>{ if(!a||!a.from) return 0; const from=new Date(a.from+'T00:00:00'), to=new Date((a.to||a.from)+'T00:00:00'); const ms=new Date(year,todayM,1), me=new Date(year,todayM+1,0); let s=from<ms?ms:from, ee=to>me?me:to; if(s>ee) return 0; let n=0,g=0,d=new Date(s.getFullYear(),s.getMonth(),s.getDate()); const end=new Date(ee.getFullYear(),ee.getMonth(),ee.getDate()); while(d<=end&&g<400){ if(empWorksDay(e,d))n++; d.setDate(d.getDate()+1); g++; } return n; };
+  let krankM=0,urlaubM=0; (employees||[]).forEach(e=>{ if(!e||String(e.status||'').startsWith('terminated')||e.status==='inactive') return; (e.absences||[]).forEach(a=>{ if(a&&a.type==='sick')krankM+=absMon(a,e); else if(a&&a.type==='vacation'&&a.approved!==false)urlaubM+=absMon(a,e); }); });
   const kuendM=(employees||[]).filter(e=>{ const td=e&&e.termination_date; if(!td) return false; const d=new Date(td); return d.getFullYear()===year&&d.getMonth()===todayM; }).length;
   return {monLabels,dSick,dVac,dKuend,labels30,dCv,krankM,urlaubM,kuendM};
 }
@@ -9592,7 +9605,7 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
           mobile Cockpit kein Widget-Grid nutzt; das Widget kapselt Lade-/Leerzustand selbst. */}
       <div className="ckm-card" style={{borderLeft:'4px solid #dc2626'}}>
         <div className="ckm-h" style={{color:'#dc2626'}}>🤒 Krank- und Urlaubsquote</div>
-        <div style={{padding:'2px 14px 8px'}}><Widget_KrankUrlaubQuote employees={employees} projects={projects} mobile={true}/></div>
+        <div style={{padding:'2px 14px 8px'}}><Widget_KrankUrlaubQuote employees={employees} projects={projects} mobile={true} selY={_selY} selM0={_selM0}/></div>
       </div>
 
       {/* Tagesberichte (Fabletics u.a.) — bei den projektbezogenen Blöcken, unter der Quote.
@@ -10066,7 +10079,7 @@ function CockpitLegacy({employees, projects, plans, forecast, onAbsence, team, o
         {todayAbsent.map(e=>(<div key={e.id} style={{fontSize:12,display:'flex',gap:8,padding:'3px 0'}}><span style={{color:'#ef4444'}}>●</span><span>{e.first_name} {e.last_name}</span><span style={{marginLeft:'auto',color:'var(--muted)',fontSize:11}}>Krank</span></div>))}
         {todayVac.map(e=>(<div key={e.id} style={{fontSize:12,display:'flex',gap:8,padding:'3px 0'}}><span style={{color:'#d97706'}}>●</span><span>{e.first_name} {e.last_name}</span><span style={{marginLeft:'auto',color:'var(--muted)',fontSize:11}}>Urlaub</span></div>))}
       </div> : null}
-      <div style={{padding:14}}><Widget_KrankUrlaubQuote employees={employees} projects={projects}/></div>
+      <div style={{padding:14}}><Widget_KrankUrlaubQuote employees={employees} projects={projects} selY={_selY} selM0={_selM0}/></div>
     </div>);
     const _cMonths=parseInt(localStorage.getItem('jsr_contract_reminder_months')||'1'); const _tdy=new Date(); const _cut=new Date(_tdy); _cut.setMonth(_cut.getMonth()+_cMonths);
     const _expiring=employees.filter(e=>{const ce=e.contract?.end||e.contract_end; if(!ce||e.status==='terminated'||e.status==='inactive') return false; const end=new Date(ce); return end>=_tdy&&end<=_cut;}).sort((a,b)=>new Date(a.contract?.end||a.contract_end)-new Date(b.contract?.end||b.contract_end));
@@ -12498,19 +12511,22 @@ function absCoversDay(a, ds){
 // EINE Zählung: delegiert an den geteilten Kern (shared/jsr-calc.js), identische Werktag-Logik.
 function absDaysInYear(a, year){ return JSRCalc.absDaysInYear(a, year); }
 // Werktage einer Abwesenheit im Kalendermonat ('YYYY-MM') — fuer Lohnabrechnung.
-function absDaysInMonth(a, ym){
+function absDaysInMonth(a, ym, emp){
   const from = a && a.from;
   if(from==null||from===''||!ym) return 0;
+  // Zählt einen Tag, wenn die Person an ihm arbeitet: mit emp Mo–Fr + gearbeitete Sa/So (Schichtbetrieb),
+  // ohne emp der alte Mo–Fr-Rückfall.
+  const works = emp ? (d=>empWorksDay(emp,d)) : (d=>{ const dw=d.getDay(); return dw>0&&dw<6; });
   const f0=String(from).slice(0,10);
   const toRaw=a.to;
   const t0=(toRaw==null||toRaw==='')?f0:String(toRaw).slice(0,10);
   const [yy,mm]=ym.split('-').map(Number); const last=new Date(yy,mm,0).getDate();
   const mStart=ym+'-01', mEnd=ym+'-'+String(last).padStart(2,'0');
-  if(f0===t0){ const d=new Date(f0+'T12:00:00'); const dw=d.getDay(); return (f0.slice(0,7)===ym && dw>0 && dw<6)?(Number(a.days)||1):0; }
+  if(f0===t0){ const d=new Date(f0+'T12:00:00'); return (f0.slice(0,7)===ym && works(d))?(Number(a.days)||1):0; }
   const start=f0<mStart?mStart:f0, end=t0>mEnd?mEnd:t0;
   if(start>end) return 0;
   let c=0, d=new Date(start+'T12:00:00'); const e=new Date(end+'T12:00:00');
-  while(d<=e){ const dw=d.getDay(); if(dw>0&&dw<6)c++; d.setDate(d.getDate()+1); }
+  while(d<=e){ if(works(d))c++; d.setDate(d.getDate()+1); }
   return c;
 }
 function shiftAbsent(emp, ds){
@@ -12559,6 +12575,9 @@ function shiftHolidayOn(emp, ds){
 function canWorkSat(emp){ return !(emp && (emp.work_saturday===false || emp.work_saturday==='no')); }
 function canWorkSun(emp){ return !(emp && (emp.work_sunday===false   || emp.work_sunday==='no')); }
 function canWorkHoliday(emp){ return !(emp && (emp.work_holidays===false || emp.work_holidays==='no')); }
+// Arbeitet die Person an diesem Kalendertag? Mo–Fr immer; Sa/So nur bei work_saturday/work_sunday. Schichtbetrieb:
+// Krank/Urlaub an einem gearbeiteten Wochenende ZÄHLT als Tag — statt pauschal Mo–Fr anzunehmen.
+function empWorksDay(emp, d){ const w=d.getDay(); if(w===6) return canWorkSat(emp); if(w===0) return canWorkSun(emp); return true; }
 // Soll-Werktage eines Monats fuer einen MA: gearbeitete Wochentage (Mo-Fr, plus Sa/So falls
 // er dort arbeitet), minus Feiertage (falls er nicht an Feiertagen arbeitet), minus ALLE
 // genehmigten Abwesenheitstage (absCoversDay, deckt Einzeltag- UND Zeitraum-Format ab).
@@ -12821,7 +12840,7 @@ function fxRateReminder(){
 // absDaysInMonth deckt Einzeltag- UND Zeitraum-Format ab.
 function empUnpaidWorkdays(emp, ym){
   return ((emp&&emp.absences)||[]).filter(a=>a && a.type==='unpaid' && a.approved)
-    .reduce((s,a)=>s+absDaysInMonth(a, ym), 0);
+    .reduce((s,a)=>s+absDaysInMonth(a, ym, emp), 0);
 }
 // Ist ein manueller Abzugs-Wert gesetzt? Leer/undefined = nein -> Automatik greift.
 function payrollAbsenceIsAuto(rec){ const raw=rec&&rec.deduction_absence_days; return raw==null||raw===''; }
@@ -37807,6 +37826,7 @@ function CalendarView({team, projects, employees, showToast, isMobileW, jumpTo, 
   const [monthJump,setMonthJump]=useState(false); // mobiles Monat-Sprung-Overlay
   const [busy,setBusy]=useState(false);
   const touchRef=React.useRef(null);              // Wisch zwischen Tagen (mobil)
+  const [filterEmp,setFilterEmp]=useState('');    // Personen-Filter: '' = alle, sonst nur Termine mit dieser Person als Teilnehmer
   const roleKeys=(team&&team.role_keys)||[];
   const isAdmin=roleKeys.includes('management')||roleKeys.includes('hr');
   const uid=team&&team.user_id, myName=(team&&(team.full_name||team.name))||'jemand';
@@ -37857,12 +37877,15 @@ function CalendarView({team, projects, employees, showToast, isMobileW, jumpTo, 
   const gridStart=React.useMemo(()=>{ const f=new Date(cursor.getFullYear(),cursor.getMonth(),1); const dow=(f.getDay()+6)%7; return new Date(f.getFullYear(),f.getMonth(),1-dow); },[cursor]);
   const winFrom = gridStart;
   const winTo   = new Date(gridStart.getFullYear(),gridStart.getMonth(),gridStart.getDate()+41);
+  // Personen für den Filter: alle, die irgendwo Teilnehmer sind (Namen, sortiert).
+  const calPeople=React.useMemo(()=>{ const ids=new Set(); (events||[]).forEach(ev=>(ev.participants||[]).forEach(id=>ids.add(id)));
+    return [...ids].map(id=>({id,name:empName(id)})).filter(p=>p.name&&p.name!=='?').sort((a,b)=>a.name.localeCompare(b.name,'de')); },[events,employees]);
   const occByDate=React.useMemo(()=>{
     const map={};
-    (events||[]).forEach(ev=>{ calOccurrences(ev,winFrom,winTo).forEach(ds=>{ const ov=overrides[ev.id+'|'+ds]; if(ov&&ov.hidden) return; (map[ds]=map[ds]||[]).push({ev,date:ds,ov}); }); });
+    (events||[]).filter(ev=>!filterEmp || (ev.participants||[]).includes(filterEmp)).forEach(ev=>{ calOccurrences(ev,winFrom,winTo).forEach(ds=>{ const ov=overrides[ev.id+'|'+ds]; if(ov&&ov.hidden) return; (map[ds]=map[ds]||[]).push({ev,date:ds,ov}); }); });
     Object.values(map).forEach(a=>a.sort((x,y)=>String(x.ev.start_time||'99').localeCompare(String(y.ev.start_time||'99'))));
     return map;
-  },[events,overrides,winFrom,winTo]);
+  },[events,overrides,winFrom,winTo,filterEmp]);
 
   async function toggleDone(ev,date,cur){
     if(busy) return; setBusy(true);
@@ -37905,7 +37928,8 @@ function CalendarView({team, projects, employees, showToast, isMobileW, jumpTo, 
           <div style={{fontSize:20,fontWeight:800}}>Terminkalender</div>
           <div style={{fontSize:12,color:'var(--muted)',marginTop:2}}>Pflichttermine und Termine je Rolle. Abhaken hier zählt auch in den Tagesaufgaben.</div>
         </div>
-        <div style={{display:'flex',alignItems:'center',gap:8}}>
+        <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+          {calPeople.length>0 && <label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,fontWeight:700,color:'var(--muted)'}}>Wer <select value={filterEmp} onChange={e=>setFilterEmp(e.target.value)} style={{padding:'6px 9px',border:'1px solid var(--border)',borderRadius:8,fontSize:13,fontWeight:700,background:'#fff',color:'var(--text)'}}><option value="">Alle</option>{calPeople.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></label>}
           {isMobileW
             ? <button className="btn btn-sm" onClick={()=>setMonthJump(true)}>📅 Monat</button>
             : <div style={{display:'flex',border:'1px solid var(--border)',borderRadius:10,overflow:'hidden'}}>
