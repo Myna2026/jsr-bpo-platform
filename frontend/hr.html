@@ -19229,7 +19229,7 @@ function ContractSection({cv, onContractSaved, onPromote}){
 
 // Hörprobe eines CVs — abwärtskompatibel: neu = audios[0].url (Array, wie MA-Profil), alt = audio_url (String in extra).
 function cvAudioUrl(cv){ return (cv && cv.audios && cv.audios[0] && cv.audios[0].url) || (cv && cv.audio_url) || ''; }
-function CVModal({cv, projects, team, onSave, onClose}){
+function CVModal({cv, projects, team, onSave, onClose, initialTab}){
   // Role helpers
   // C4b: role_keys statt des alten Rollen-Felds. Admin-Sicht = is_admin (management|hr).
   const roleKeys = (team&&team.role_keys)||[];
@@ -19257,7 +19257,7 @@ function CVModal({cv, projects, team, onSave, onClose}){
     ai_reasoning_audio:'',ai_reasoning_writing:'',
     contract:null,
   });
-  const [tab, setTab] = useState('basis');
+  const [tab, setTab] = useState(initialTab||'basis');
   // Termin-Tab: aktuellste Einladung dieses Bewerbers laden (läuft/angenommen/keine) + Neu-Erstellen-Modal.
   const [invRow, setInvRow] = useState(undefined);   // undefined=lädt, null=keine, {}=Zeile
   const [schedOpen, setSchedOpen] = useState(false);
@@ -21543,10 +21543,29 @@ function RecruitingFunnel({cvList, employees, isMobileW}){
     </div>
   );
 }
-</script><script type="text/babel">function RecruitingKanban({employees, setEmployees, cvList, setCvList, projects, onPromoteToEmployee, showToast}){
+</script><script type="text/babel">function RecruitingKanban({employees, setEmployees, cvList, setCvList, projects, onPromoteToEmployee, showToast, onNavigate}){
   const [dragging, setDragging] = useState(null);
   const [dragType, setDragType] = useState(null); // 'cv' | 'emp'
   const [selectedItem, setSelectedItem] = useState(null);
+  const [selTab, setSelTab] = useState(null);   // Ziel-Tab beim Öffnen (z.B. 'vertrag' vom Sperr-Hinweis)
+  // Zwei Strecken: Bewerber (bis Vertrag) frei ziehbar; Mitarbeiter-Phasen NUR über die passende Handlung, nie per
+  // Ziehen/„→". Wer es versucht, bekommt einen Dialog mit Weg dorthin.
+  const EMP_PHASES = new Set(['contract','training_planned','training','active']);
+  async function blockedCross(item, target){
+    if(target==='contract'){
+      if(await uiConfirm({title:'Erst den Arbeitsvertrag anlegen', text:'Aus einem Bewerber wird ein Mitarbeiter, indem ein Arbeitsvertrag hinterlegt wird — nicht per Ziehen. Öffne den Bewerber im Tab „Vertrag" und lege ihn an.', confirmLabel:'Vertrag anlegen', cancelLabel:'Abbrechen'}))
+        { setSelTab('vertrag'); setSelectedItem(item); }
+    } else if(target==='training_planned'){
+      if(await uiConfirm({title:'Über die Schulungsplanung', text:'„Schulung geplant" wird gesetzt, indem du den Mitarbeiter einer konkreten Schulung zuordnest — nicht per Ziehen.', confirmLabel:'Zur Schulungsplanung', cancelLabel:'Abbrechen'}))
+        { onNavigate&&onNavigate({kind:'view',view:'training_plans'}); }
+    } else if(target==='training'){
+      if(await uiConfirm({title:'Über den Schulungsstart', text:'„Schulung" wird durch den Schulungsstart in der Schulungsplanung erreicht — nicht per Ziehen.', confirmLabel:'Zur Schulungsplanung', cancelLabel:'Abbrechen'}))
+        { onNavigate&&onNavigate({kind:'view',view:'training_plans'}); }
+    } else if(target==='active'){
+      if(await uiConfirm({title:'Über „Produktiv setzen"', text:'„Aktiv" wird gesetzt, indem du die Schulung in der Schulungsplanung produktiv setzt — nicht per Ziehen.', confirmLabel:'Zur Schulungsplanung', cancelLabel:'Abbrechen'}))
+        { onNavigate&&onNavigate({kind:'view',view:'training_plans'}); }
+    }
+  }
   const [collapsed, setCollapsed] = useState(()=>{ try{const s=JSON.parse(localStorage.getItem('jsr_kanban_collapsed')||'null'); if(s&&typeof s==='object'&&!Array.isArray(s)) return s;}catch(e){} return {ruhend:true, beendet:true}; });
   useEffect(()=>{ try{localStorage.setItem('jsr_kanban_collapsed',JSON.stringify(collapsed));}catch(e){} },[collapsed]);
 
@@ -21612,9 +21631,10 @@ function RecruitingFunnel({cvList, employees, isMobileW}){
   async function onDrop(newStatus){
     if(!dragging) return;
     const item=allItems.find(x=>x.id===dragging && x._type===dragType);
+    setDragging(null); setDragType(null);
+    if(!item) return;
+    if(EMP_PHASES.has(newStatus) && item.status!==newStatus){ await blockedCross(item, newStatus); return; }
     await moveTo(item, newStatus);
-    setDragging(null);
-    setDragType(null);
   }
 
   async function confirmCV(itemId, type){
@@ -21634,7 +21654,7 @@ function RecruitingFunnel({cvList, employees, isMobileW}){
   // Eine Kanban-Karte (in jeder Feinstufen-Spalte wiederverwendet).
   function renderCard(item){
     const name=(item.first_name||'?')+' '+(item.last_name||'');
-    const isCV=item._type==='cv';
+    const isEmp=EMP_PHASES.has(item.status);   // ab Vertrag = Mitarbeiter (anderer Zustand, sichtbar abgesetzt)
     const sf=SF_BY_KEY[item.status];
     const nx=nextStatus(item.status);
     const since=item.status_changed_at||item.cv_date;
@@ -21644,16 +21664,17 @@ function RecruitingFunnel({cvList, employees, isMobileW}){
       <div key={item.id} draggable
         onDragStart={e=>{e.stopPropagation();setDragging(item.id);setDragType(item._type);}}
         onClick={()=>setSelectedItem(item)}
-        style={{padding:'6px 8px',background:'var(--card)',
-          border:'1px solid '+(isCV?'rgba(15,86,97,.3)':'rgba(5,150,105,.3)'),
+        style={{padding:'6px 8px',background:isEmp?'var(--green-bg)':'var(--card)',
+          border:'1px solid '+(isEmp?'rgba(5,150,105,.35)':'rgba(15,86,97,.22)'),
+          borderLeft:'4px solid '+(isEmp?'var(--green)':'rgba(15,86,97,.22)'),
           borderRadius:'var(--r)',cursor:'grab',fontSize:11,boxShadow:'0 1px 3px rgba(0,0,0,.06)'}}>
         <div style={{display:'flex',alignItems:'center',gap:4,marginBottom:3}}>
-          <span style={{fontSize:9,padding:'1px 5px',borderRadius:8,fontWeight:700,
-            background:isCV?'var(--blue-bg)':'var(--green-bg)',color:isCV?'var(--blue)':'var(--green)'}}>{isCV?'CV':'MA'}</span>
+          <span style={{fontSize:8.5,padding:'1px 6px',borderRadius:8,fontWeight:800,
+            background:isEmp?'var(--green)':'var(--blue-bg)',color:isEmp?'#fff':'var(--blue)'}}>{isEmp?'Mitarbeiter':'Bewerber'}</span>
           <span style={{fontWeight:600,flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{name}</span>
           {d!==null&&<span style={{fontSize:9,color:ageC,fontWeight:d>7?700:400,whiteSpace:'nowrap'}}>{d===0?'Heute':d===1?'Gestern':d+'d'}{d>7?' ⚠':''}</span>}
-          {nx&&<button title={'→ '+(SF_BY_KEY[nx]?SF_BY_KEY[nx].label:nx)}
-            onClick={e=>{e.stopPropagation();moveTo(item,nx);}}
+          {nx&&<button title={(EMP_PHASES.has(nx)?'Nur über die passende Handlung: ':'→ ')+(SF_BY_KEY[nx]?SF_BY_KEY[nx].label:nx)}
+            onClick={e=>{e.stopPropagation(); if(EMP_PHASES.has(nx)&&item.status!==nx){ blockedCross(item,nx); } else { moveTo(item,nx); }}}
             style={{flexShrink:0,width:20,height:20,borderRadius:6,border:'1px solid '+(sf?sf.color:'#94a3b8')+'55',
               background:(sf?sf.color:'#94a3b8')+'18',color:sf?sf.color:'#475569',fontWeight:800,fontSize:12,cursor:'pointer',lineHeight:1,padding:0}}>→</button>}
         </div>
@@ -21680,6 +21701,7 @@ function RecruitingFunnel({cvList, employees, isMobileW}){
           ?<CVModal
               cv={selectedItem}
               projects={projects||[]}
+              initialTab={selTab}
               onSave={async updatedCv=>{
                 try{
                   if(updatedCv.status==='active'){
@@ -21688,9 +21710,9 @@ function RecruitingFunnel({cvList, employees, isMobileW}){
                     await saveCvToDB(updatedCv);
                   }
                 }catch(e){ showToast&&showToast('⚠ '+(e.message||'DB'),'error'); }
-                setSelectedItem(null);
+                setSelectedItem(null); setSelTab(null);
               }}
-              onClose={()=>setSelectedItem(null)}
+              onClose={()=>{setSelectedItem(null); setSelTab(null);}}
             />
           :<EmployeeModal
               emp={selectedItem}
@@ -40364,7 +40386,7 @@ function App(){
           {view==='fcist'&&<ForecastVsIstView projects={projects}/>}
           {view==='callqa'&&<CallQaView projects={projects} employees={employees} showToast={showToast}/>}
           {view==='skillmatrix'&&<SkillMatrix employees={employees} projects={projects}/>}
-          {view==='kanban'&&<RecruitingKanban employees={employees} setEmployees={setEmployees} cvList={cvList} setCvList={setCvList} projects={projects} onPromoteToEmployee={promoteToEmployee} showToast={showToast}/>}
+          {view==='kanban'&&<RecruitingKanban employees={employees} setEmployees={setEmployees} cvList={cvList} setCvList={setCvList} projects={projects} onPromoteToEmployee={promoteToEmployee} showToast={showToast} onNavigate={dqNavigate}/>}
           {view==='onboarding'&&<OnboardingView employees={employees} setEmployees={setEmployees} showToast={showToast}/>}
           {view==='cvs'&&<CVsView cvList={cvList} setCvList={setCvList} projects={projects} onPromoteToEmployee={promoteToEmployee} testQuestions={testQuestions} showToast={showToast} navFilter={navFilter} onClearNavFilter={()=>setNavFilter(null)} isMobileW={isMobileW}/>}
           {view==='funnel'&&<RecruitingFunnel cvList={cvList} employees={employees} isMobileW={isMobileW}/>}
