@@ -3673,7 +3673,7 @@ function CareBadges({emp, fpMap, contractDocs}){
   </span>);
 }
 
-function EmployeeModal({emp, projects, employees, onSave, onClose, initialTab, onTerminate}){
+function EmployeeModal({emp, projects, employees, onSave, onClose, initialTab, onTerminate, plans}){
   // 27d-2: Salary-History-Panel liest direkt aus payslips-Table (Q3: kein Spinner)
   // fmtMonth lokal, da die Definition in PayrollView (7165) nicht im Scope von EmployeeModal liegt
   const fmtMonth=(m)=>{const [y,mo]=String(m||'').split('-');return new Date(y,mo-1,1).toLocaleDateString('de-DE',{month:'long',year:'numeric'});};
@@ -3797,6 +3797,10 @@ function EmployeeModal({emp, projects, employees, onSave, onClose, initialTab, o
           </span>
           <button className="btn" onClick={onClose}>×</button>
         </div>
+        {(()=>{ const tp=emp&&emp.training_id&&(plans||[]).find(p=>p&&p.id===emp.training_id); if(!tp) return null;
+          const st=emp.status==='training'?'läuft':emp.status==='training_planned'?'geplant':emp.status==='active'?'abgeschlossen':'';
+          return <div style={{padding:'8px 16px',background:'var(--blue-bg)',borderBottom:'1px solid var(--border)',fontSize:12.5,fontWeight:700,color:'#0F5661'}}>📚 Schulung: {tp.name||'—'}{st?(' · '+st):''}</div>;
+        })()}
 
         {/* TABS — horizontal scrollbar bei vielen Tabs, damit nichts abgeschnitten wird (auch am Telefon) */}
         <div style={{display:'flex',flexWrap:'nowrap',overflowX:'auto',overflowY:'hidden',borderBottom:'1px solid var(--border)',padding:'0 16px',flexShrink:0,WebkitOverflowScrolling:'touch',scrollbarWidth:'thin'}}>
@@ -5814,7 +5818,11 @@ function TrainingPlanModal({plan, projects, employees, onSave, onClose}){
   const [form, setForm]=useState(plan||{project_id:'',name:'',start_date:'',end_date:'',active_date:'',planned_count:8,mode:'Hybrid',skill_focus:'',confirmed_ids:[],notes:''});
   const set=(k,v)=>setForm(f=>({...f,[k]:v}));
   const toggleConf=id=>set('confirmed_ids',form.confirmed_ids.includes(id)?form.confirmed_ids.filter(x=>x!==id):[...form.confirmed_ids,id]);
-  const eligible=employees.filter(e=>['selected','in_system','presented','cv_received'].includes(e.status));
+  // Nur passende Kandidaten: mit VERTRAG (harte Vorbedingung „ohne Vertrag keine Schulung") UND gleiches Projekt wie
+  // die Schulung (wer für Giganetz eingestellt ist, gehört nicht in eine HolidayCheck-Schulung). Bereits dieser
+  // Schulung Zugeordnete bleiben wählbar (zum Abwählen).
+  const eligible=employees.filter(e=> e && form.project_id && e.project_id===form.project_id &&
+    (e.status==='contract' || (e.status==='training_planned' && e.training_id===form.id)) );
   const open=form.planned_count-(form.confirmed_ids?.length||0);
 
   return(
@@ -5878,7 +5886,7 @@ function TrainingPlanModal({plan, projects, employees, onSave, onClose}){
                   {form.confirmed_ids.includes(e.id)?'✓ ':''}{e.first_name} {e.last_name}
                 </button>
               ))}
-              {eligible.length===0&&<span style={{fontSize:12,color:'var(--muted)'}}>Keine geeigneten Kandidaten verfügbar</span>}
+              {eligible.length===0&&<span style={{fontSize:12,color:'var(--muted)'}}>{!form.project_id?'Erst ein Projekt wählen.':'Keine Mitarbeiter mit Vertrag für dieses Projekt. Nur wer im Status „Vertrag" ist und diesem Projekt zugeordnet, kann eingeplant werden.'}</span>}
             </div>
           </div>
           <div className="form-group"><label className="form-label">Notizen (intern)</label><textarea className="form-input" rows={2} value={form.notes||''} onChange={e=>set('notes',e.target.value)} style={{resize:'vertical'}}/></div>
@@ -5892,14 +5900,40 @@ function TrainingPlanModal({plan, projects, employees, onSave, onClose}){
   );
 }
 
-function TrainingPlans({plans, setPlans, projects, employees}){
+function TrainingPlans({plans, setPlans, projects, employees, setEmployees, showToast}){
   const [modal, setModal]=useState(null);
-  function savePlan(form){
+  const applyEmp=async(changed)=>{ for(const ce of changed){ try{ await saveEmployeeToDB(ce); }catch(err){} }
+    if(changed.length&&setEmployees) setEmployees(es=>es.map(e=>{ const c=changed.find(x=>x.id===e.id); return c||e; })); };
+  async function savePlan(form){
     const rec = form.id ? form : {...form, id:(window.crypto&&crypto.randomUUID)?crypto.randomUUID():'tp'+Date.now()};
-    if(form.id) setPlans(ps=>ps.map(p=>p.id===form.id?rec:p));
-    else setPlans(ps=>[...ps,rec]);
-    saveTrainingPlanToDB(rec);
+    // Zuordnung ↔ Mitarbeiterstatus koppeln: neu zugeordnet → training_planned + training_id; abgewählt → zurück auf contract.
+    const oldPlan=plans.find(p=>p.id===rec.id); const oldIds=(oldPlan&&oldPlan.confirmed_ids)||[]; const newIds=rec.confirmed_ids||[];
+    const added=newIds.filter(id=>!oldIds.includes(id)); const removed=oldIds.filter(id=>!newIds.includes(id));
+    const changed=[]; (employees||[]).forEach(e=>{ if(!e) return;
+      if(added.includes(e.id) && (e.status==='contract'||e.status==='training_planned')) changed.push({...e, status:'training_planned', training_id:rec.id});
+      else if(removed.includes(e.id) && e.training_id===rec.id) changed.push({...e, training_id:'', status:(e.status==='training_planned'?'contract':e.status)});
+    });
+    if(form.id) setPlans(ps=>ps.map(p=>p.id===form.id?rec:p)); else setPlans(ps=>[...ps,rec]);
+    await saveTrainingPlanToDB(rec);
+    await applyEmp(changed);
+    if(changed.length&&showToast) showToast(added.length?(added.length+' Mitarbeiter zugeordnet (Status „Schulung geplant")'):(removed.length+' aus der Schulung genommen'),'success');
     setModal(null);
+  }
+  async function startTraining(plan){
+    const parts=(employees||[]).filter(e=>e&&e.training_id===plan.id&&e.status==='training_planned');
+    if(!parts.length){ showToast&&showToast('Keine zugeordneten Mitarbeiter im Status „Schulung geplant".','error'); return; }
+    if(!(await uiConfirm({title:'Schulung starten', text:'Setzt die zugeordneten Mitarbeiter auf „Schulung" (ab jetzt in Bezahlung).', items:parts.map(e=>e.first_name+' '+e.last_name), confirmLabel:'Starten'}))) return;
+    await applyEmp(parts.map(e=>({...e,status:'training'})));
+    const rec={...plan, status:'running', start_date:plan.start_date||isoLocal(new Date())}; setPlans(ps=>ps.map(p=>p.id===plan.id?rec:p)); saveTrainingPlanToDB(rec);
+    showToast&&showToast(parts.length+' Mitarbeiter auf „Schulung" gesetzt','success');
+  }
+  async function setProductive(plan){
+    const parts=(employees||[]).filter(e=>e&&e.training_id===plan.id&&(e.status==='training'||e.status==='training_planned'));
+    if(!parts.length){ showToast&&showToast('Keine zugeordneten Mitarbeiter in dieser Schulung.','error'); return; }
+    if(!(await uiConfirm({title:'Gruppe produktiv setzen', text:'Setzt die Mitarbeiter auf „Aktiv" (produktiv auf dem Projekt).', items:parts.map(e=>e.first_name+' '+e.last_name), confirmLabel:'Produktiv setzen'}))) return;
+    await applyEmp(parts.map(e=>({...e,status:'active'})));
+    const rec={...plan, active_date:plan.active_date||isoLocal(new Date()), status:'done'}; setPlans(ps=>ps.map(p=>p.id===plan.id?rec:p)); saveTrainingPlanToDB(rec);
+    showToast&&showToast(parts.length+' Mitarbeiter produktiv gesetzt','success');
   }
   async function deletePlan(plan){
     const proj=projects.find(p=>p.id===plan.project_id);
@@ -5986,6 +6020,14 @@ function TrainingPlans({plans, setPlans, projects, employees}){
                     ))}
                   </div>
                 )}
+                {(()=>{ const assigned=(employees||[]).filter(e=>e&&e.training_id===plan.id);
+                  const nPlanned=assigned.filter(e=>e.status==='training_planned').length, nTraining=assigned.filter(e=>e.status==='training').length;
+                  if(!nPlanned&&!nTraining) return null;
+                  return <div style={{display:'flex',gap:8,flexWrap:'wrap',marginTop:12,paddingTop:12,borderTop:'1px solid var(--border)'}}>
+                    {nPlanned>0&&<button className="btn btn-sm" style={{background:'var(--blue,#2563eb)',color:'#fff',border:'none'}} onClick={()=>startTraining(plan)}>▶ Schulung starten ({nPlanned})</button>}
+                    <button className="btn btn-sm" style={{background:'var(--green,#16a34a)',color:'#fff',border:'none'}} onClick={()=>setProductive(plan)}>✓ Produktiv setzen{nTraining>0?(' ('+nTraining+')'):''}</button>
+                  </div>;
+                })()}
               </div>
             </div>
           </div>
@@ -40239,7 +40281,7 @@ function App(){
       <div className="mobile-fab-area">
         {view==='employees'&&<button className="fab" onClick={()=>setModal('add')}>＋</button>}
       </div>
-      {modal&&modal!=='add'&&<EmployeeModal emp={modal} initialTab={modalTab} projects={projects} employees={employees} onSave={saveEmployee} onClose={()=>setModal(null)} onTerminate={e=>{setModal(null);setTerminateModal(e);}}/>}
+      {modal&&modal!=='add'&&<EmployeeModal emp={modal} initialTab={modalTab} projects={projects} employees={employees} plans={plans} onSave={saveEmployee} onClose={()=>setModal(null)} onTerminate={e=>{setModal(null);setTerminateModal(e);}}/>}
           {modal==='add'&&<EmployeeModal emp={null} projects={projects} employees={employees} onSave={saveEmployee} onClose={()=>setModal(null)} onTerminate={null}/>}
 
           {view==='start'&&<WelcomePage firstName={firstName}/>}
@@ -40339,7 +40381,7 @@ function App(){
             </div>
           )}
           {view==='test_editor'&&<TestEditor testQuestions={testQuestions} setTestQuestions={setTestQuestions}/>}
-          {view==='training_plans'&&<TrainingPlans plans={plans} setPlans={setPlans} projects={projects} employees={employees}/>}
+          {view==='training_plans'&&<TrainingPlans plans={plans} setPlans={setPlans} projects={projects} employees={employees} setEmployees={setEmployees} showToast={showToast}/>}
           {view==='timeline'&&<Timeline employees={employees} projects={projects} plans={plans} forecast={forecast}/>}
           {view==='knowledge'&&<KnowledgeBase projects={projects} employees={employees} kbData={kbData} setKbData={setKbData}/>}
           {view==='elearning'&&<ELearning projects={projects} employees={employees} elData={elData} setElData={setElData} kbData={kbData}/>}
