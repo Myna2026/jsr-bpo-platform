@@ -1324,7 +1324,7 @@ const MENU_BADGE_MAIN_ITEMS = [
   {key:'timetracking',label:'Zeiterfassung'},{key:'locations',label:'Standorte'},{key:'spaces',label:'Spaces & Seats'},
   {key:'payroll',label:'Löhne'},{key:'orgchart',label:'Organigramm'},{key:'absences',label:'Abwesenheiten'},{key:'calendar',label:'Kalender'},
   {key:'urlaubantraege',label:'Urlaubsanträge'},{key:'feedback',label:'Feedbackgespräche'},{key:'kanban',label:'Recruiting'},{key:'funnel',label:'Bewerber-Trichter'},{key:'onboarding',label:'Onboarding'},
-  {key:'cvs',label:'CVs & Bewerber'},{key:'dubletten',label:'Dubletten'},{key:'showcase',label:'Showcases'},{key:'training_plans',label:'Schulungsplanung'},
+  {key:'cvs',label:'CVs & Bewerber'},{key:'bewerberlinks',label:'Bewerber-Links'},{key:'dubletten',label:'Dubletten'},{key:'showcase',label:'Showcases'},{key:'training_plans',label:'Schulungsplanung'},
   {key:'timeline',label:'Timeline'},{key:'projects',label:'Projekte'},{key:'forecast',label:'Forecast'},{key:'fcist',label:'Forecast vs. Ist'},
   {key:'profitability',label:'Wirtschaftlichkeit'},{key:'praesentation',label:'Präsentationen'},{key:'uploads',label:'Uploads'},{key:'dataimport',label:'Datenimport'},{key:'uploadplan',label:'Upload-Plan'},{key:'recmkt',label:'Recruiting Marketing'},{key:'nlquery',label:'Datenabfrage'},
   {key:'useractivity',label:'Nutzung & Aktivität'},{key:'taskadmin',label:'Aufgaben-Verwaltung'},
@@ -37672,6 +37672,198 @@ function MetaImportPanel({setCvList}){
   </div>;
 }
 
+// Bewerber-Links: gemeinsame Übersicht beider Token-Wege (Terminvereinbarung interview_invites +
+// Anreicherung cv_enrich_invites). Je Bewerber eine Zeile mit zwei Spuren, was daraus wurde, sortiert
+// nach Alter (am längsten offen zuerst), farblich eskalierend (frisch <3 Tg. → gelb ab 3 → rot ab 10 /
+// abgelaufen). Von hier nachfassen: Link erneut kopieren oder bei Ablauf einen neuen mit denselben
+// Parametern erzeugen (Teilnehmer/Formen bzw. Fassung des alten Links).
+const AL_TFORM={phone:'Telefon',teams:'Teams',office:'Persönlich im Büro'};
+function ApplicantLinksView({employees, showToast}){
+  const [iv,setIv]=useState(null);      // interview_invites (roh, neueste zuerst)
+  const [ev,setEv]=useState(null);      // cv_enrich_invites (roh, neueste zuerst)
+  const [forms,setForms]=useState({});  // form_id -> Fassungsname
+  const [cvMap,setCvMap]=useState({});  // cv_id -> {first_name,last_name,status,phone}
+  const [filter,setFilter]=useState('open');   // open | overdue | all | done
+  const [copied,setCopied]=useState('');
+  const [busyKey,setBusyKey]=useState('');
+  const [err,setErr]=useState('');
+  const [loading,setLoading]=useState(true);
+
+  const empById={}; (employees||[]).forEach(e=>{ if(e) empById[e.id]=e; });
+  const empName=id=>{ const e=empById[id]; return e?(((e.first_name||'')+' '+(e.last_name||'')).trim()||'?'):'?'; };
+
+  async function load(){ setLoading(true);
+    try{
+      const [ivr,evr,fmr]=await Promise.all([
+        sb.from('interview_invites').select('*').order('created_at',{ascending:false}),
+        sb.from('cv_enrich_invites').select('*').order('created_at',{ascending:false}),
+        sb.from('cv_enrich_forms').select('id,name')
+      ]);
+      const ivRows=ivr.data||[], evRows=evr.data||[];
+      setIv(ivRows); setEv(evRows);
+      const fm={}; (fmr.data||[]).forEach(f=>fm[f.id]=f.name); setForms(fm);
+      const ids=[...new Set([...ivRows.map(r=>r.cv_id),...evRows.map(r=>r.cv_id)])].filter(Boolean);
+      if(ids.length){ const {data}=await sb.from('cvs').select('id,first_name,last_name,status,phone').in('id',ids);
+        const m={}; (data||[]).forEach(c=>m[c.id]=c); setCvMap(m); } else setCvMap({});
+    }catch(e){ setErr('Laden fehlgeschlagen: '+(e.message||'')); }
+    setLoading(false);
+  }
+  useEffect(()=>{ load(); },[]);
+
+  const now=Date.now(), DAY=86400000;
+  const ageDays=ts=>Math.max(0,Math.floor((now-new Date(ts).getTime())/DAY));
+  const fmtD=ts=>ts?new Date(ts).toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit',year:'numeric'}):'';
+  const fmtDT=ts=>ts?new Date(ts).toLocaleString('de-DE',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'}):'';
+
+  // Neueste Einladung je Bewerber und Spur (Rohzeilen sind bereits absteigend sortiert).
+  const byCv={};
+  (iv||[]).forEach(r=>{ (byCv[r.cv_id]=byCv[r.cv_id]||{}); if(!byCv[r.cv_id].tRow) byCv[r.cv_id].tRow=r; });
+  (ev||[]).forEach(r=>{ (byCv[r.cv_id]=byCv[r.cv_id]||{}); if(!byCv[r.cv_id].eRow) byCv[r.cv_id].eRow=r; });
+
+  function terminState(r){ if(!r) return null;
+    const expired=new Date(r.expires_at).getTime()<now;
+    if(r.status==='booked') return {kind:'booked', at:r.booked_slot, form:r.booked_form, sentAt:r.created_at};
+    if(r.status==='cancelled') return {kind:'cancelled', sentAt:r.created_at};
+    if(r.status==='expired'||expired) return {kind:'expired', sentAt:r.created_at, age:ageDays(r.created_at)};
+    return {kind:'open', sentAt:r.created_at, age:ageDays(r.created_at), expiresAt:r.expires_at, token:r.token, parts:r.participant_ids||[]};
+  }
+  function enrichState(r){ if(!r) return null;
+    const expired=new Date(r.expires_at).getTime()<now;
+    if(r.used_at) return {kind:'done', at:r.used_at, sentAt:r.created_at, form:forms[r.form_id]};
+    if(expired) return {kind:'expired', sentAt:r.created_at, age:ageDays(r.created_at), form:forms[r.form_id]};
+    return {kind:'open', sentAt:r.created_at, age:ageDays(r.created_at), expiresAt:r.expires_at, form:forms[r.form_id], token:r.token};
+  }
+
+  const rows=Object.keys(byCv).map(cvId=>{
+    const cv=cvMap[cvId]||{};
+    const t=terminState(byCv[cvId].tRow), e=enrichState(byCv[cvId].eRow);
+    let u=-1; [t,e].forEach(s=>{ if(s&&(s.kind==='open'||s.kind==='expired')) u=Math.max(u,s.age); });
+    const overdue=[t,e].some(s=>s&&(s.kind==='expired'||(s.kind==='open'&&s.age>=10)));
+    const open=[t,e].some(s=>s&&s.kind==='open');
+    return {cvId, name:(((cv.first_name||'')+' '+(cv.last_name||'')).trim())||'(ohne Namen)', status:cv.status, phone:cv.phone,
+            t, e, tRow:byCv[cvId].tRow, eRow:byCv[cvId].eRow, u, overdue, open};
+  });
+  rows.sort((a,b)=> b.u-a.u || String(a.name).localeCompare(String(b.name),'de'));
+
+  const cOpen=rows.filter(r=>r.open||r.overdue).length;
+  const cOver=rows.filter(r=>r.overdue).length;
+  const filtered=rows.filter(r=> filter==='all'?true : filter==='open'?(r.open||r.overdue) : filter==='overdue'?r.overdue : (!r.open&&!r.overdue));
+
+  function ageColor(age){
+    if(age>=10) return {fg:'#b91c1c',bg:'#fef2f2',bd:'#fecaca'};
+    if(age>=3)  return {fg:'#b45309',bg:'#fffbeb',bd:'#fde68a'};
+    return {fg:'#15803d',bg:'#f0fdf4',bd:'#bbf7d0'};
+  }
+  const Pill=({c,children})=><span style={{display:'inline-block',padding:'2px 9px',borderRadius:20,fontSize:11,fontWeight:800,color:c.fg,background:c.bg,border:'1px solid '+c.bd,whiteSpace:'nowrap'}}>{children}</span>;
+  const GREY={fg:'#6b7280',bg:'#f3f4f6',bd:'#e5e7eb'}, GREEN={fg:'#15803d',bg:'#f0fdf4',bd:'#bbf7d0'}, RED={fg:'#b91c1c',bg:'#fef2f2',bd:'#fecaca'};
+  const sub={fontSize:11.5,color:'var(--muted)',marginTop:3,lineHeight:1.35};
+  const sent={fontSize:10.5,color:'var(--dim)',marginTop:2};
+
+  function copyLink(url,key){ try{navigator.clipboard.writeText(url);}catch(e){} setCopied(key); setTimeout(()=>setCopied(k=>k===key?'':k),1800); }
+  async function newTermin(row){ const r=row.tRow; if(!r||busyKey) return; setBusyKey('t'+row.cvId); setErr('');
+    try{ const {data,error}=await sb.rpc('create_interview_invite',{p_cv_id:row.cvId,p_participant_ids:r.participant_ids,p_forms:r.forms});
+      if(error||!data||!data.token){ setErr('Neuer Termin-Link fehlgeschlagen'+((error&&error.message)?': '+error.message:'.')); }
+      else { copyLink('https://client.tive360.de/termin.html?t='+data.token,'t'+row.cvId); if(showToast) showToast('Neuer Termin-Link kopiert'); await load(); }
+    }catch(e){ setErr('Fehler: '+(e.message||'')); }
+    setBusyKey('');
+  }
+  async function newEnrich(row){ const r=row.eRow; if(!r||busyKey) return; setBusyKey('e'+row.cvId); setErr('');
+    try{ const {data,error}=await sb.rpc('create_cv_enrich_invite',{p_cv_id:row.cvId,p_form_id:r.form_id||null,p_reusable:false});
+      if(error||!data){ setErr('Neuer Anreicherungs-Link fehlgeschlagen'+((error&&error.message)?': '+error.message:'.')); }
+      else { copyLink('https://client.tive360.de/bewerber.html?t='+data,'e'+row.cvId); if(showToast) showToast('Neuer Anreicherungs-Link kopiert'); await load(); }
+    }catch(e){ setErr('Fehler: '+(e.message||'')); }
+    setBusyKey('');
+  }
+
+  function terminCell(row){ const s=row.t; if(!s) return <span style={{color:'var(--dim)',fontSize:12}}>— kein Termin-Link</span>;
+    const ck='t'+row.cvId;
+    if(s.kind==='booked') return <div>
+      <Pill c={GREEN}>✓ Termin vereinbart</Pill>
+      <div style={sub}>{fmtDT(s.at)} Uhr · {AL_TFORM[s.form]||s.form}</div>
+      <div style={sent}>Einladung verschickt {fmtD(s.sentAt)}</div>
+    </div>;
+    if(s.kind==='cancelled') return <div><Pill c={GREY}>Abgesagt</Pill><div style={sent}>Einladung verschickt {fmtD(s.sentAt)}</div></div>;
+    if(s.kind==='expired') return <div>
+      <Pill c={RED}>⌛ Abgelaufen ohne Antwort</Pill>
+      <div style={sub}>verschickt {fmtD(s.sentAt)} · seit {s.age} Tg. keine Reaktion</div>
+      <button className="btn btn-sm" style={{marginTop:6}} disabled={busyKey===ck} onClick={()=>newTermin(row)}>{busyKey===ck?'…':(copied===ck?'✓ Neuer Link kopiert':'🔗 Neuen Termin-Link')}</button>
+    </div>;
+    const col=ageColor(s.age);
+    return <div>
+      <Pill c={col}>Einladung verschickt · offen</Pill>
+      <div style={sub}>seit {s.age} Tg. offen · verschickt {fmtD(s.sentAt)} · läuft ab {fmtD(s.expiresAt)}{s.parts.length?' · mit '+s.parts.map(empName).join(', '):''}</div>
+      <button className="btn btn-sm" style={{marginTop:6}} onClick={()=>copyLink('https://client.tive360.de/termin.html?t='+s.token,ck)}>{copied===ck?'✓ Kopiert':'Link kopieren'}</button>
+    </div>;
+  }
+  function enrichCell(row){ const s=row.e; if(!s) return <span style={{color:'var(--dim)',fontSize:12}}>— kein Anreicherungs-Link</span>;
+    const ck='e'+row.cvId, fassung=s.form?' · Fassung „'+s.form+'"':'';
+    if(s.kind==='done') return <div>
+      <Pill c={GREEN}>✓ Ausgefüllt</Pill>
+      <div style={sub}>am {fmtD(s.at)}{fassung}</div>
+      <div style={sent}>Link verschickt {fmtD(s.sentAt)}</div>
+    </div>;
+    if(s.kind==='expired') return <div>
+      <Pill c={RED}>⌛ Abgelaufen</Pill>
+      <div style={sub}>verschickt {fmtD(s.sentAt)}{fassung} · seit {s.age} Tg. nicht ausgefüllt</div>
+      <button className="btn btn-sm" style={{marginTop:6}} disabled={busyKey===ck} onClick={()=>newEnrich(row)}>{busyKey===ck?'…':(copied===ck?'✓ Neuer Link kopiert':'🔗 Neuen Anreicherungs-Link')}</button>
+    </div>;
+    const col=ageColor(s.age);
+    return <div>
+      <Pill c={col}>Link verschickt · offen</Pill>
+      <div style={sub}>seit {s.age} Tg. offen · verschickt {fmtD(s.sentAt)}{fassung} · läuft ab {fmtD(s.expiresAt)}</div>
+      <button className="btn btn-sm" style={{marginTop:6}} onClick={()=>copyLink('https://client.tive360.de/bewerber.html?t='+s.token,ck)}>{copied===ck?'✓ Kopiert':'Link kopieren'}</button>
+    </div>;
+  }
+
+  const chip=(k,label,n)=><button onClick={()=>setFilter(k)} className="btn btn-sm"
+    style={{fontWeight:700,background:filter===k?'var(--blue-bg)':'transparent',color:filter===k?'#0F5661':'var(--text)',border:'1.5px solid '+(filter===k?'#0F5661':'var(--border)')}}>{label}{n!=null?' ('+n+')':''}</button>;
+
+  return <div>
+    <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:12,flexWrap:'wrap',marginBottom:6}}>
+      <div>
+        <div style={{fontSize:20,fontWeight:700,marginBottom:2}}>🔗 Bewerber-Links</div>
+        <div style={{fontSize:13,color:'var(--muted)'}}>Terminvereinbarung und Anreicherung je Bewerber. Was am längsten offen ist, steht oben.</div>
+      </div>
+      <button className="btn btn-sm" onClick={load} disabled={loading}>{loading?'…':'↻ Aktualisieren'}</button>
+    </div>
+    <div style={{display:'flex',gap:16,flexWrap:'wrap',alignItems:'center',fontSize:11.5,color:'var(--muted)',marginBottom:12}}>
+      <span><b style={{color:'#15803d'}}>●</b> frisch (unter 3 Tg.)</span>
+      <span><b style={{color:'#b45309'}}>●</b> zieht sich (ab 3 Tg.)</span>
+      <span><b style={{color:'#b91c1c'}}>●</b> zu lange / abgelaufen (ab 10 Tg.)</span>
+    </div>
+    <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:14}}>
+      {chip('open','Offen',cOpen)}
+      {chip('overdue','Überfällig',cOver)}
+      {chip('all','Alle',rows.length)}
+      {chip('done','Erledigt',rows.length-cOpen)}
+    </div>
+    {err&&<div style={{background:'#fef2f2',border:'1px solid #fecaca',color:'#b91c1c',borderRadius:8,padding:'8px 10px',fontSize:12.5,marginBottom:12}}>{err}</div>}
+    <div className="card" style={{padding:0,overflowX:'auto'}}>
+      {loading&&iv===null ? <div style={{padding:24,color:'var(--muted)',fontSize:13}}>lädt…</div>
+       : filtered.length===0 ? <div style={{padding:24,color:'var(--muted)',fontSize:13,textAlign:'center'}}>{rows.length===0?'Noch keine Links verschickt.':'Nichts in diesem Filter.'}</div>
+       : <table style={{width:'100%',borderCollapse:'collapse',minWidth:720}}>
+        <thead><tr style={{textAlign:'left',fontSize:11,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',borderBottom:'1px solid var(--border)'}}>
+          <th style={{padding:'10px 14px',width:'26%'}}>Bewerber</th>
+          <th style={{padding:'10px 14px'}}>📅 Termin</th>
+          <th style={{padding:'10px 14px'}}>📝 Anreicherung</th>
+        </tr></thead>
+        <tbody>
+          {filtered.map(row=>{ const stf=STATUS_FLOW.find(x=>x.key===row.status);
+            return <tr key={row.cvId} style={{borderBottom:'1px solid var(--border)',verticalAlign:'top'}}>
+            <td style={{padding:'12px 14px'}}>
+              <div style={{fontWeight:700,fontSize:13.5}}>{row.name}</div>
+              {row.phone&&<div style={{fontSize:11,color:'var(--muted)',marginTop:1}}>{row.phone}</div>}
+              {stf&&<div style={{marginTop:5}}><span style={{padding:'2px 7px',borderRadius:20,fontSize:10,fontWeight:700,background:stf.color+'18',color:stf.color,border:'1px solid '+stf.color+'33',whiteSpace:'nowrap'}}>{stf.icon} {stf.label}</span></div>}
+            </td>
+            <td style={{padding:'12px 14px'}}>{terminCell(row)}</td>
+            <td style={{padding:'12px 14px'}}>{enrichCell(row)}</td>
+          </tr>; })}
+        </tbody>
+      </table>}
+    </div>
+  </div>;
+}
+
 // Schnitt 4: Dubletten-Center (HR/Management). Zwei Bereiche:
 // 1) Telefon-Kollisionen Meta ↔ Bestand (zurückgehaltene Leads) — HR: Meta übernehmen (ersetzt) oder verwerfen.
 // 2) Name+Datum-Gruppen im Bestand (mehrere CVs gleicher Person) — HR löscht die überflüssige. Kein Auto-Löschen.
@@ -40079,6 +40271,7 @@ function App(){
       {key:'funnel',label:'Bewerber-Trichter',icon:'📊'},
       {key:'cvs',label:'CVs & Bewerber',icon:'📋'},
       {key:'onboarding',label:'Onboarding',icon:'✅'},
+      ...(_isMgmtHr ? [{key:'bewerberlinks',label:'Bewerber-Links',icon:'🔗'}] : []),   // HR + Management
       ...(_isMgmtHr ? [{key:'dubletten',label:'Dubletten',icon:'📑'}] : []),   // HR + Management
       ...(_isMgmt ? [{key:'recmkt',label:'Recruiting Marketing',icon:'📣'}] : []),   // Management-only
     ]},
@@ -40175,6 +40368,7 @@ function App(){
       'cvs':'<path fill-rule="evenodd" d="M5.625 1.5c-1.036 0-1.875.84-1.875 1.875v17.25c0 1.035.84 1.875 1.875 1.875h12.75c1.035 0 1.875-.84 1.875-1.875V12.75A3.75 3.75 0 0 0 16.5 9h-1.875a1.875 1.875 0 0 1-1.875-1.875V5.25A3.75 3.75 0 0 0 9 1.5H5.625ZM7.5 15a.75.75 0 0 1 .75-.75h7.5a.75.75 0 0 1 0 1.5h-7.5A.75.75 0 0 1 7.5 15Zm.75 2.25a.75.75 0 0 0 0 1.5H12a.75.75 0 0 0 0-1.5H8.25Z" clip-rule="evenodd"/> <path d="M12.971 1.816A5.23 5.23 0 0 1 14.25 5.25v1.875c0 .207.168.375.375.375H16.5a5.23 5.23 0 0 1 3.434 1.279 9.768 9.768 0 0 0-6.963-6.963Z"/>',
       'showcase':'<path fill-rule="evenodd" d="M10.788 3.21c.448-1.077 1.976-1.077 2.424 0l2.082 5.006 5.404.434c1.164.093 1.636 1.545.749 2.305l-4.117 3.527 1.257 5.273c.271 1.136-.964 2.033-1.96 1.425L12 18.354 7.373 21.18c-.996.608-2.231-.29-1.96-1.425l1.257-5.273-4.117-3.527c-.887-.76-.415-2.212.749-2.305l5.404-.434 2.082-5.005Z" clip-rule="evenodd"/>',
       'dubletten':'<path fill-rule="evenodd" d="M15.75 1.5a6.75 6.75 0 0 0-6.651 7.906c.067.39-.032.717-.221.906l-6.5 6.499a3 3 0 0 0-.878 2.121v2.818c0 .414.336.75.75.75H6a.75.75 0 0 0 .75-.75v-1.5h1.5A.75.75 0 0 0 9 20.25v-1.5h1.5a.75.75 0 0 0 .53-.22l2.658-2.658c.19-.189.517-.288.906-.22A6.75 6.75 0 1 0 15.75 1.5Zm0 3a.75.75 0 0 0 0 1.5A2.25 2.25 0 0 1 18 8.25a.75.75 0 0 0 1.5 0 3.75 3.75 0 0 0-3.75-3.75Z" clip-rule="evenodd"/>',
+      'bewerberlinks':'<path fill-rule="evenodd" d="M19.902 4.098a3.75 3.75 0 0 0-5.304 0l-4.5 4.5a3.75 3.75 0 0 0 1.035 6.037.75.75 0 0 1-.646 1.353 5.25 5.25 0 0 1-1.449-8.45l4.5-4.5a5.25 5.25 0 1 1 7.424 7.424l-1.757 1.757a.75.75 0 1 1-1.06-1.06l1.757-1.757a3.75 3.75 0 0 0 0-5.304Zm-7.389 4.267a.75.75 0 0 1 1 .353 5.25 5.25 0 0 1-1.449 8.45l-4.5 4.5a5.25 5.25 0 1 1-7.424-7.424l1.757-1.757a.75.75 0 1 1 1.06 1.06l-1.757 1.757a3.75 3.75 0 1 0 5.304 5.304l4.5-4.5a3.75 3.75 0 0 0-1.035-6.037.75.75 0 0 1-.353-1Z" clip-rule="evenodd"/>',
       'training_plans':'<path d="M11.25 4.533A9.707 9.707 0 0 0 6 3a9.735 9.735 0 0 0-3.25.555.75.75 0 0 0-.5.707v14.25a.75.75 0 0 0 1 .707A8.237 8.237 0 0 1 6 18.75c1.995 0 3.823.707 5.25 1.886V4.533ZM12.75 20.636A8.214 8.214 0 0 1 18 18.75c.966 0 1.89.166 2.75.47a.75.75 0 0 0 1-.708V4.262a.75.75 0 0 0-.5-.707A9.735 9.735 0 0 0 18 3a9.707 9.707 0 0 0-5.25 1.533v16.103Z"/>',
       'timeline':'<path fill-rule="evenodd" d="M4.755 10.059a7.5 7.5 0 0 1 12.548-3.364l1.903 1.903h-3.183a.75.75 0 1 0 0 1.5h4.992a.75.75 0 0 0 .75-.75V4.356a.75.75 0 0 0-1.5 0v3.18l-1.9-1.9A9 9 0 0 0 3.306 9.67a.75.75 0 1 0 1.45.388Zm15.408 3.352a.75.75 0 0 0-.919.53 7.5 7.5 0 0 1-12.548 3.364l-1.902-1.903h3.183a.75.75 0 0 0 0-1.5H2.984a.75.75 0 0 0-.75.75v4.992a.75.75 0 0 0 1.5 0v-3.18l1.9 1.9a9 9 0 0 0 15.059-4.035.75.75 0 0 0-.53-.918Z" clip-rule="evenodd"/>',
       'knowledge':'<path d="M12 .75a8.25 8.25 0 0 0-4.135 15.39c.686.398 1.115 1.008 1.134 1.623a.75.75 0 0 0 .577.706c.352.083.71.148 1.074.195.323.041.6-.218.6-.544v-4.661a6.714 6.714 0 0 1-.937-.171.75.75 0 1 1 .374-1.453 5.261 5.261 0 0 0 2.626 0 .75.75 0 1 1 .374 1.452 6.712 6.712 0 0 1-.937.172v4.66c0 .327.277.586.6.545.364-.047.722-.112 1.074-.195a.75.75 0 0 0 .577-.706c.02-.615.448-1.225 1.134-1.623A8.25 8.25 0 0 0 12 .75Z"/> <path fill-rule="evenodd" d="M9.013 19.9a.75.75 0 0 1 .877-.597 11.319 11.319 0 0 0 4.22 0 .75.75 0 1 1 .28 1.473 12.819 12.819 0 0 1-4.78 0 .75.75 0 0 1-.597-.876ZM9.754 22.344a.75.75 0 0 1 .824-.668 13.682 13.682 0 0 0 2.844 0 .75.75 0 1 1 .156 1.492 15.156 15.156 0 0 1-3.156 0 .75.75 0 0 1-.668-.824Z" clip-rule="evenodd"/>',
@@ -40430,6 +40624,7 @@ function App(){
           {view==='hraccess'&&(<div><HrAccessView/></div>)}
           {view==='appusers'&&(<div><AppUsersView employees={employees} clients={clients} showToast={showToast}/></div>)}
           {view==='cvsync'&&(<div><CvSyncView setCvList={setCvList} projects={projects}/><MetaImportPanel setCvList={setCvList}/></div>)}
+          {view==='bewerberlinks'&&<ApplicantLinksView employees={employees} showToast={showToast}/>}
           {view==='dubletten'&&<DuplicatesView team={team} setCvList={setCvList}/>}
           {view==='feedback'&&<FeedbackView employees={employees} projects={projects} team={team} showToast={showToast} nav={feedbackNav} onNavConsumed={()=>setFeedbackNav(null)}/>}
           {view==='spaces'&&(
