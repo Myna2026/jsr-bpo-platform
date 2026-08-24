@@ -152,27 +152,32 @@ async function submitForm(){
     writing_sample:gv('writing_sample') };
   let audio=null;
   if(audioBlob){ const data=await blobToDataUrl(audioBlob); if(data) audio={data, mime:audioMime||'audio/webm'}; }
-  try{
-    const {data,error}=await sb.functions.invoke('cv-enrich',{body:{action:'submit',token,fields,audio}});
-    if(error||(data&&data.error)){ const msg=(data&&data.error)||'Konnte nicht gespeichert werden.';
-      document.getElementById('formErr').innerHTML='<div class="err">'+esc(msg)+'</div>'; window.scrollTo(0,0);
-      btn.disabled=false; btn.textContent='Profil absenden'; return; }
-    stateBox('✅','Vielen Dank!','Dein Profil ist bei uns eingegangen. Wir melden uns bei dir.');
-  }catch(e){
-    document.getElementById('formErr').innerHTML='<div class="err">Netzwerkfehler. Bitte prüfe deine Verbindung und versuch es erneut.</div>';
-    window.scrollTo(0,0); btn.disabled=false; btn.textContent='Profil absenden';
-  }
+  let res; try{ res=await sb.functions.invoke('cv-enrich',{body:{action:'submit',token,fields,audio}}); }
+  catch(e){ res={error:e}; }
+  const data=res.data, reset=(m)=>{ document.getElementById('formErr').innerHTML='<div class="err">'+esc(m)+'</div>'; window.scrollTo(0,0); btn.disabled=false; btn.textContent='Profil absenden'; };
+  if(res.error || !data){ return reset('Netzwerkfehler. Bitte prüfe deine Verbindung und versuch es erneut.'); }
+  if(data.ok){ return stateBox('✅','Vielen Dank!','Dein Profil ist bei uns eingegangen. Wir melden uns bei dir.'); }
+  if(data.code==='used'){ return showFail('used'); }
+  reset((data&&data.error)||'Konnte nicht gespeichert werden.');
 }
 
+// Unterscheidbare Meldungen je nach Grund (statt pauschal „ungültig").
+function showFail(code,msg){
+  if(code==='expired') return stateBox('⌛','Link abgelaufen','Dieser Link ist nicht mehr gültig. Melde dich bei uns, dann schicken wir dir einen neuen.');
+  if(code==='used')    return stateBox('✅','Schon erledigt','Du hast dein Profil bereits ergänzt. Vielen Dank! Melde dich bei uns, falls du etwas ändern möchtest.');
+  if(code==='not_found'||code==='no_token'||code==='no_profile') return stateBox('🔗','Link ungültig','Bitte öffne den Link genau so, wie du ihn von uns bekommen hast. Am besten direkt aus der Nachricht antippen.');
+  return stateBox('⚠️','Etwas ist schiefgelaufen', msg||'Bitte versuch es später noch einmal.');
+}
 (async function init(){
-  if(!token){ stateBox('🔗','Link unvollständig','Bitte öffne den Link genau so, wie du ihn von uns bekommen hast.'); return; }
-  try{
-    const {data,error}=await sb.functions.invoke('cv-enrich',{body:{action:'load',token}});
-    if(error||(data&&data.error)){ const msg=(data&&data.error)||'Link ungültig.';
-      stateBox('⚠️','Link nicht gültig',msg); return; }
-    if(data.used){ stateBox('✅','Schon erledigt','Du hast dein Profil bereits ergänzt. Vielen Dank! Melde dich bei uns, falls du etwas ändern möchtest.'); return; }
-    renderForm(data.first_name, data.cv);
-  }catch(e){ stateBox('⚠️','Etwas ist schiefgelaufen','Bitte versuch es später erneut oder melde dich bei uns.'); }
+  if(!token){ return showFail('no_token'); }
+  let res; try{ res=await sb.functions.invoke('cv-enrich',{body:{action:'load',token}}); }
+  catch(e){ res={error:e}; }
+  if(res.error){ return stateBox('⚠️','Konnte nicht laden','Der Server ist gerade nicht erreichbar. Bitte versuch es in ein paar Minuten noch einmal.'); }
+  const data=res.data;
+  if(!data){ return stateBox('⚠️','Konnte nicht laden','Bitte versuch es später noch einmal.'); }
+  if(data.ok===false){ return showFail(data.code, data.error); }
+  if(data.used){ return showFail('used'); }
+  renderForm(data.first_name, data.cv);
 })();
 </script>
 </body>

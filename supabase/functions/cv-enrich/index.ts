@@ -7,8 +7,11 @@ const SUPA_URL = Deno.env.get('SUPABASE_URL')!;
 const SERVICE  = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 const sb = createClient(SUPA_URL, SERVICE);
 
-const cors = { 'Access-Control-Allow-Origin':'*', 'Access-Control-Allow-Headers':'content-type,apikey,authorization', 'Access-Control-Allow-Methods':'POST,OPTIONS' };
+const cors = { 'Access-Control-Allow-Origin':'*', 'Access-Control-Allow-Headers':'authorization, x-client-info, apikey, content-type', 'Access-Control-Allow-Methods':'POST,OPTIONS' };
+// Erwartete Zustände (nicht gefunden/abgelaufen/genutzt) kommen als HTTP 200 mit {ok:false, code} zurück, damit
+// supabase-js sie in `data` liefert (bei 4xx ist data leer -> die Seite könnte sie sonst nicht unterscheiden).
 const json = (o:any, s=200)=>new Response(JSON.stringify(o), {status:s, headers:{...cors,'Content-Type':'application/json'}});
+const fail = (code:string, msg:string)=>json({ok:false, code, error:msg});
 
 // Direkt in cvs-Spalten schreibbare Anreicherungsfelder.
 const FIELDS = ['email','phone','city','birthday','education','education_level','experience_years','work_history',
@@ -18,17 +21,18 @@ Deno.serve(async (req)=>{
   if(req.method==='OPTIONS') return new Response('ok',{headers:cors});
   let body:any={}; try{ body=await req.json(); }catch(_e){}
   const action=body.action, token=String(body.token||'');
-  if(!token) return json({error:'Kein Token'},400);
+  if(!token) return fail('no_token','Kein Token im Link.');
 
-  const {data:inv}=await sb.from('cv_enrich_invites').select('*').eq('token',token).maybeSingle();
-  if(!inv) return json({error:'Link ungültig'},404);
-  if(inv.expires_at && new Date(inv.expires_at) < new Date()) return json({error:'Link abgelaufen'},410);
+  const {data:inv, error:invErr}=await sb.from('cv_enrich_invites').select('*').eq('token',token).maybeSingle();
+  if(invErr) return fail('load_error','Konnte den Link nicht prüfen.');
+  if(!inv) return fail('not_found','Diesen Link kennen wir nicht.');
+  if(inv.expires_at && new Date(inv.expires_at) < new Date()) return fail('expired','Der Link ist abgelaufen.');
   const {data:cv}=await sb.from('cvs').select('*').eq('id',inv.cv_id).maybeSingle();
-  if(!cv) return json({error:'Profil nicht gefunden'},404);
+  if(!cv) return fail('no_profile','Profil nicht gefunden.');
 
   if(action==='load'){
     const ex=cv.extra||{};
-    return json({ first_name:cv.first_name, used:!!inv.used_at, cv:{
+    return json({ ok:true, first_name:cv.first_name, used:!!inv.used_at, cv:{
       email:cv.email, phone:cv.phone, city:cv.city, birthday:cv.birthday,
       education:cv.education, education_level:cv.education_level,
       experience_years:cv.experience_years, work_history:cv.work_history,
@@ -40,7 +44,7 @@ Deno.serve(async (req)=>{
   }
 
   if(action==='submit'){
-    if(inv.used_at) return json({error:'Dieser Link wurde bereits genutzt. Bitte melde dich bei uns, falls du etwas ändern möchtest.'},409);
+    if(inv.used_at) return fail('used','Dieser Link wurde bereits genutzt. Bitte melde dich bei uns, falls du etwas ändern möchtest.');
     const f=body.fields||{};
     const upd:any={ updated_at:new Date().toISOString() };
     for(const k of FIELDS){ if(f[k]!==undefined){ let v=f[k];
@@ -76,10 +80,10 @@ Deno.serve(async (req)=>{
     }
 
     const {error}=await sb.from('cvs').update(upd).eq('id',inv.cv_id);
-    if(error) return json({error:'Speichern fehlgeschlagen'},500);
+    if(error) return fail('save_error','Speichern fehlgeschlagen.');
     await sb.from('cv_enrich_invites').update({used_at:new Date().toISOString()}).eq('token',token);
     return json({ok:true});
   }
 
-  return json({error:'Unbekannte Aktion'},400);
+  return fail('bad_action','Unbekannte Aktion.');
 });
