@@ -109,6 +109,9 @@ rsync -az --progress "$LOCAL_DIR/showcase.html" "$SERVER:$REMOTE_BASE/client/sho
 echo "→ Terminvereinbarung (öffentlich)..."
 rsync -az --progress "$LOCAL_DIR/termin.html" "$SERVER:$REMOTE_BASE/client/termin.html"
 
+echo "→ Bewerber-Anreicherung (öffentlich, Token)..."
+rsync -az --progress "$LOCAL_DIR/bewerber.html" "$SERVER:$REMOTE_BASE/client/bewerber.html"
+
 echo "→ Root (Landing + Login)..."
 ssh "$SERVER" "mkdir -p $REMOTE_BASE/root"
 rsync -az --progress "$LOCAL_DIR/root-index.html" "$SERVER:$REMOTE_BASE/root/index.html"
