@@ -37678,47 +37678,88 @@ function MetaImportPanel({setCvList}){
 // abgelaufen). Von hier nachfassen: Link erneut kopieren oder bei Ablauf einen neuen mit denselben
 // Parametern erzeugen (Teilnehmer/Formen bzw. Fassung des alten Links).
 const AL_TFORM={phone:'Telefon',teams:'Teams',office:'Persönlich im Büro'};
-function ApplicantLinksView({employees, showToast}){
+const AL_SENDABLE=['cv_inbound','cv_accepted','cv_confirmed'];   // Phasen, in denen ein Anschreiben Sinn ergibt
+function ApplicantLinksView({employees, showToast, team}){
   const [iv,setIv]=useState(null);      // interview_invites (roh, neueste zuerst)
   const [ev,setEv]=useState(null);      // cv_enrich_invites (roh, neueste zuerst)
+  const [msgs,setMsgs]=useState([]);    // applicant_messages (roh, neueste zuerst)
   const [forms,setForms]=useState({});  // form_id -> Fassungsname
-  const [cvMap,setCvMap]=useState({});  // cv_id -> {first_name,last_name,status,phone}
-  const [filter,setFilter]=useState('open');   // open | overdue | all | done
+  const [formList,setFormList]=useState([]); // [{id,name}] aktive Fassungen (für Config)
+  const [senders,setSenders]=useState([]);   // mail_senders
+  const [cfg,setCfg]=useState(null);         // jsr_enrich_mail_v1
+  const [cvMap,setCvMap]=useState({});  // cv_id -> {first_name,last_name,status,phone,email}
+  const [filter,setFilter]=useState('open');   // open | overdue | mail | all | done
   const [copied,setCopied]=useState('');
   const [busyKey,setBusyKey]=useState('');
   const [err,setErr]=useState('');
   const [loading,setLoading]=useState(true);
+  const [showCfg,setShowCfg]=useState(false);
+
+  const isMgmt=((team&&team.role_keys)||[]).some(r=>r==='management');
 
   const empById={}; (employees||[]).forEach(e=>{ if(e) empById[e.id]=e; });
   const empName=id=>{ const e=empById[id]; return e?(((e.first_name||'')+' '+(e.last_name||'')).trim()||'?'):'?'; };
 
   async function load(){ setLoading(true);
     try{
-      const [ivr,evr,fmr]=await Promise.all([
+      const [ivr,evr,mgr,fmr,snr,cfgv]=await Promise.all([
         sb.from('interview_invites').select('*').order('created_at',{ascending:false}),
         sb.from('cv_enrich_invites').select('*').order('created_at',{ascending:false}),
-        sb.from('cv_enrich_forms').select('id,name')
+        sb.from('applicant_messages').select('*').order('created_at',{ascending:false}),
+        sb.from('cv_enrich_forms').select('id,name,active,seq').order('seq'),
+        sb.from('mail_senders').select('*').order('seq'),
+        loadConfigFromDB('jsr_enrich_mail_v1')
       ]);
-      const ivRows=ivr.data||[], evRows=evr.data||[];
-      setIv(ivRows); setEv(evRows);
+      const ivRows=ivr.data||[], evRows=evr.data||[], mgRows=mgr.data||[];
+      setIv(ivRows); setEv(evRows); setMsgs(mgRows);
       const fm={}; (fmr.data||[]).forEach(f=>fm[f.id]=f.name); setForms(fm);
-      const ids=[...new Set([...ivRows.map(r=>r.cv_id),...evRows.map(r=>r.cv_id)])].filter(Boolean);
-      if(ids.length){ const {data}=await sb.from('cvs').select('id,first_name,last_name,status,phone').in('id',ids);
-        const m={}; (data||[]).forEach(c=>m[c.id]=c); setCvMap(m); } else setCvMap({});
+      setFormList((fmr.data||[]).filter(f=>f.active!==false));
+      setSenders(snr.data||[]);
+      const config=cfgv||{auto_enabled:false,trigger_status:'cv_accepted',sender_key:'25hrs',channel:'email',form_id:null};
+      setCfg(config);
+      // Bewerber mit Invite/Message + sendbare Bewerber (Trigger-Status mit Mailadresse) für die "wo nicht"-Sicht.
+      const trig=config.trigger_status||'cv_accepted';
+      const sendable=await sb.from('cvs').select('id,first_name,last_name,status,phone,email').eq('status',trig).not('email','is',null).limit(400);
+      const ids=[...new Set([...ivRows.map(r=>r.cv_id),...evRows.map(r=>r.cv_id),...mgRows.map(r=>r.cv_id)])].filter(Boolean);
+      let m={}; (sendable.data||[]).forEach(c=>{ m[c.id]=c; });
+      const missing=ids.filter(id=>!m[id]);
+      if(missing.length){ const {data}=await sb.from('cvs').select('id,first_name,last_name,status,phone,email').in('id',missing);
+        (data||[]).forEach(c=>{ m[c.id]=c; }); }
+      setCvMap(m);
     }catch(e){ setErr('Laden fehlgeschlagen: '+(e.message||'')); }
     setLoading(false);
   }
   useEffect(()=>{ load(); },[]);
+
+  const cfgSet=(patch)=>{ const next={...(cfg||{}),...patch}; setCfg(next); saveConfigToDB('jsr_enrich_mail_v1', next); };
+  async function saveSender(key, patch){
+    setSenders(ss=>ss.map(s=>s.key===key?{...s,...patch}:s));
+    const {error}=await sb.from('mail_senders').update({...patch, updated_at:new Date().toISOString()}).eq('key',key);
+    if(error){ setErr('Absender speichern fehlgeschlagen: '+error.message); load(); }
+  }
+  const activeSender=(senders||[]).find(s=>s.key===((cfg&&cfg.sender_key)||'25hrs'));
+  const senderReady=!!(activeSender&&activeSender.active&&activeSender.from_email);
 
   const now=Date.now(), DAY=86400000;
   const ageDays=ts=>Math.max(0,Math.floor((now-new Date(ts).getTime())/DAY));
   const fmtD=ts=>ts?new Date(ts).toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit',year:'numeric'}):'';
   const fmtDT=ts=>ts?new Date(ts).toLocaleString('de-DE',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'}):'';
 
-  // Neueste Einladung je Bewerber und Spur (Rohzeilen sind bereits absteigend sortiert).
+  // Neueste Einladung/Nachricht je Bewerber und Spur (Rohzeilen sind bereits absteigend sortiert).
   const byCv={};
   (iv||[]).forEach(r=>{ (byCv[r.cv_id]=byCv[r.cv_id]||{}); if(!byCv[r.cv_id].tRow) byCv[r.cv_id].tRow=r; });
   (ev||[]).forEach(r=>{ (byCv[r.cv_id]=byCv[r.cv_id]||{}); if(!byCv[r.cv_id].eRow) byCv[r.cv_id].eRow=r; });
+  (msgs||[]).forEach(m=>{ if(m.channel==='email'&&m.purpose==='enrich_invite'){ (byCv[m.cv_id]=byCv[m.cv_id]||{}); if(!byCv[m.cv_id].mRow) byCv[m.cv_id].mRow=m; } });
+  // Sendbare Bewerber (Trigger-Status mit Mailadresse) auch ohne Invite zeigen -> "wo ging KEINE Mail raus".
+  const trigStatus=(cfg&&cfg.trigger_status)||'cv_accepted';
+  Object.keys(cvMap).forEach(id=>{ const c=cvMap[id]; if(c&&c.status===trigStatus&&c.email) byCv[id]=byCv[id]||{}; });
+
+  function mailState(cvId){ const m=byCv[cvId]&&byCv[cvId].mRow; const cv=cvMap[cvId]||{};
+    const hasEmail=!!(cv.email&&String(cv.email).includes('@'));
+    if(m&&m.status==='sent') return {kind:m.origin==='auto'?'auto':'manual', at:m.sent_at||m.created_at, hasEmail};
+    if(m&&m.status==='failed') return {kind:'failed', at:m.created_at, error:m.error, hasEmail};
+    return {kind:'none', hasEmail};
+  }
 
   function terminState(r){ if(!r) return null;
     const expired=new Date(r.expires_at).getTime()<now;
@@ -37736,18 +37777,26 @@ function ApplicantLinksView({employees, showToast}){
 
   const rows=Object.keys(byCv).map(cvId=>{
     const cv=cvMap[cvId]||{};
-    const t=terminState(byCv[cvId].tRow), e=enrichState(byCv[cvId].eRow);
+    const t=terminState(byCv[cvId].tRow), e=enrichState(byCv[cvId].eRow), mail=mailState(cvId);
     let u=-1; [t,e].forEach(s=>{ if(s&&(s.kind==='open'||s.kind==='expired')) u=Math.max(u,s.age); });
     const overdue=[t,e].some(s=>s&&(s.kind==='expired'||(s.kind==='open'&&s.age>=10)));
     const open=[t,e].some(s=>s&&s.kind==='open');
-    return {cvId, name:(((cv.first_name||'')+' '+(cv.last_name||'')).trim())||'(ohne Namen)', status:cv.status, phone:cv.phone,
-            t, e, tRow:byCv[cvId].tRow, eRow:byCv[cvId].eRow, u, overdue, open};
+    // Versand offen: Trigger-Status, Mailadresse da, aber noch keine Mail erfolgreich raus.
+    const mailPending=(cv.status===trigStatus)&&mail.hasEmail&&mail.kind!=='auto'&&mail.kind!=='manual';
+    return {cvId, name:(((cv.first_name||'')+' '+(cv.last_name||'')).trim())||'(ohne Namen)', status:cv.status, phone:cv.phone, email:cv.email,
+            t, e, mail, mailPending, tRow:byCv[cvId].tRow, eRow:byCv[cvId].eRow, u, overdue, open};
   });
   rows.sort((a,b)=> b.u-a.u || String(a.name).localeCompare(String(b.name),'de'));
 
   const cOpen=rows.filter(r=>r.open||r.overdue).length;
   const cOver=rows.filter(r=>r.overdue).length;
-  const filtered=rows.filter(r=> filter==='all'?true : filter==='open'?(r.open||r.overdue) : filter==='overdue'?r.overdue : (!r.open&&!r.overdue));
+  const cMail=rows.filter(r=>r.mailPending).length;
+  const cDone=rows.filter(r=>!r.open&&!r.overdue&&!r.mailPending).length;
+  const filtered=rows.filter(r=> filter==='all'?true
+    : filter==='open'?(r.open||r.overdue)
+    : filter==='overdue'?r.overdue
+    : filter==='mail'?r.mailPending
+    : (!r.open&&!r.overdue));
 
   function ageColor(age){
     if(age>=10) return {fg:'#b91c1c',bg:'#fef2f2',bd:'#fecaca'};
@@ -37815,8 +37864,34 @@ function ApplicantLinksView({employees, showToast}){
     </div>;
   }
 
+  async function sendMail(row){ if(busyKey) return;
+    if(!senderReady){ setErr('Absender noch nicht scharf geschaltet. In der Konfiguration eine aktive 25HRS-Adresse hinterlegen.'); setShowCfg(true); return; }
+    setBusyKey('m'+row.cvId); setErr('');
+    try{ let tok=null; try{ const s=await sb.auth.getSession(); tok=s&&s.data&&s.data.session&&s.data.session.access_token; }catch(e){}
+      const r=await fetch(SB_URL+'/functions/v1/applicant-mailer',{method:'POST',headers:{'Authorization':'Bearer '+tok,'apikey':SB_KEY,'content-type':'application/json'},body:JSON.stringify({mode:'send',cv_id:row.cvId})});
+      const j=await r.json().catch(()=>({}));
+      if(j&&j.ok){ if(showToast) showToast('Mail an '+row.name+' verschickt'); await load(); }
+      else setErr('Versand fehlgeschlagen: '+((j&&j.error)||('HTTP '+r.status)));
+    }catch(e){ setErr('Fehler: '+(e.message||'')); }
+    setBusyKey('');
+  }
+  const BLUE={fg:'#1d4ed8',bg:'#eff6ff',bd:'#bfdbfe'}, AMBER={fg:'#b45309',bg:'#fffbeb',bd:'#fde68a'};
+  function mailCell(row){ const s=row.mail, ck='m'+row.cvId;
+    const canSend=s.hasEmail&&senderReady&&AL_SENDABLE.includes(row.status);
+    const sendBtn=(label)=><button className="btn btn-sm" style={{marginTop:6}} disabled={busyKey===ck||!canSend}
+      title={!s.hasEmail?'Keine Mailadresse':(!senderReady?'Absender noch nicht scharf geschaltet':'')} onClick={()=>sendMail(row)}>{busyKey===ck?'…':label}</button>;
+    if(s.kind==='auto') return <div><Pill c={GREEN}>✉ Automatisch versendet</Pill><div style={sub}>am {fmtD(s.at)}</div>{canSend&&sendBtn('Erneut senden')}</div>;
+    if(s.kind==='manual') return <div><Pill c={BLUE}>✉ Von Hand versendet</Pill><div style={sub}>am {fmtD(s.at)}</div>{canSend&&sendBtn('Erneut senden')}</div>;
+    if(s.kind==='failed') return <div><Pill c={RED}>✉ Versand fehlgeschlagen</Pill>{s.error&&<div style={sub}>{s.error}</div>}{sendBtn('Nochmal senden')}</div>;
+    if(!s.hasEmail) return <div><Pill c={GREY}>keine Mailadresse</Pill></div>;
+    if(!AL_SENDABLE.includes(row.status)) return <span style={{color:'var(--dim)',fontSize:12}}>—</span>;
+    return <div><Pill c={AMBER}>noch nicht versendet</Pill>{sendBtn('✉ Mail senden')}</div>;
+  }
+
   const chip=(k,label,n)=><button onClick={()=>setFilter(k)} className="btn btn-sm"
     style={{fontWeight:700,background:filter===k?'var(--blue-bg)':'transparent',color:filter===k?'#0F5661':'var(--text)',border:'1.5px solid '+(filter===k?'#0F5661':'var(--border)')}}>{label}{n!=null?' ('+n+')':''}</button>;
+
+  const AL_TRIGGERS=[['cv_inbound','sofort bei Eingang'],['cv_accepted','nach erster Sichtung (empfohlen)'],['cv_confirmed','nach Bestätigung']];
 
   return <div>
     <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:12,flexWrap:'wrap',marginBottom:6}}>
@@ -37824,8 +37899,75 @@ function ApplicantLinksView({employees, showToast}){
         <div style={{fontSize:20,fontWeight:700,marginBottom:2}}>🔗 Bewerber-Links</div>
         <div style={{fontSize:13,color:'var(--muted)'}}>Terminvereinbarung und Anreicherung je Bewerber. Was am längsten offen ist, steht oben.</div>
       </div>
-      <button className="btn btn-sm" onClick={load} disabled={loading}>{loading?'…':'↻ Aktualisieren'}</button>
+      <div style={{display:'flex',gap:8}}>
+        <button className="btn btn-sm" onClick={()=>setShowCfg(v=>!v)}>⚙ Mailversand</button>
+        <button className="btn btn-sm" onClick={load} disabled={loading}>{loading?'…':'↻ Aktualisieren'}</button>
+      </div>
     </div>
+
+    {/* Status-Banner Mailversand */}
+    <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',padding:'9px 13px',borderRadius:10,marginBottom:12,fontSize:12.5,
+        background: senderReady?(cfg&&cfg.auto_enabled?'#f0fdf4':'#fffbeb'):'#f3f4f6',
+        border:'1px solid '+(senderReady?(cfg&&cfg.auto_enabled?'#bbf7d0':'#fde68a'):'#e5e7eb')}}>
+      <span style={{fontWeight:800,color: senderReady?(cfg&&cfg.auto_enabled?'#15803d':'#b45309'):'#6b7280'}}>
+        {!senderReady?'● Versand inaktiv':(cfg&&cfg.auto_enabled?'● Automatik AN':'● Automatik AUS')}
+      </span>
+      <span style={{color:'var(--muted)'}}>
+        {!senderReady? 'Absender '+((activeSender&&activeSender.label)||'25HRS')+' ist noch nicht scharf geschaltet (Adresse fehlt oder inaktiv). Manueller Versand ebenfalls gesperrt, bis die Adresse steht.'
+          : (cfg&&cfg.auto_enabled? 'Neue Bewerber im Status „'+((AL_TRIGGERS.find(t=>t[0]===(cfg.trigger_status))||[])[1]||cfg.trigger_status)+'" bekommen automatisch den Anreicherungs-Link. Manueller Versand jederzeit zusätzlich möglich.'
+             : 'Automatik ist aus, es läuft nichts von selbst. Manueller Versand ist möglich.')}
+      </span>
+    </div>
+
+    {showCfg&&<div className="card" style={{padding:16,marginBottom:14}}>
+      <div style={{fontWeight:800,fontSize:14,marginBottom:2}}>⚙ Automatischer Mailversand</div>
+      <div style={{fontSize:12,color:'var(--muted)',marginBottom:14}}>Jeder neue Bewerber mit Mailadresse bekommt automatisch den Link zur Datenerhebung. Absender ist eine eigene Marken-Adresse (nicht das interne System). Der Schalter ist jederzeit umlegbar.</div>
+      {!isMgmt ? <div style={{fontSize:12.5,color:'var(--muted)'}}>Einstellungen ändert das Management.</div> : <div style={{display:'flex',flexDirection:'column',gap:16}}>
+        {/* Automatik-Schalter */}
+        <div style={{display:'flex',alignItems:'center',gap:12,flexWrap:'wrap'}}>
+          <button onClick={()=>cfgSet({auto_enabled:!(cfg&&cfg.auto_enabled)})}
+            style={{border:'none',borderRadius:22,width:52,height:28,cursor:'pointer',position:'relative',background:(cfg&&cfg.auto_enabled)?'#059669':'#cbd5e1',transition:'background .15s'}}>
+            <span style={{position:'absolute',top:3,left:(cfg&&cfg.auto_enabled)?27:3,width:22,height:22,borderRadius:'50%',background:'#fff',transition:'left .15s',boxShadow:'0 1px 3px rgba(0,0,0,.3)'}}/>
+          </button>
+          <div><div style={{fontWeight:700,fontSize:13.5}}>Automatischer Versand {(cfg&&cfg.auto_enabled)?'AN':'AUS'}</div>
+            <div style={{fontSize:11.5,color:'var(--muted)'}}>Aus = nichts läuft von selbst, manueller Versand bleibt möglich. Jederzeit umschaltbar.</div></div>
+        </div>
+        {/* Absender */}
+        {activeSender&&<div style={{borderTop:'1px solid var(--border)',paddingTop:14}}>
+          <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',marginBottom:8}}>Absender ({activeSender.label})</div>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))',gap:10}}>
+            <label style={{fontSize:12,fontWeight:600}}>Absender-Adresse
+              <input value={activeSender.from_email||''} onChange={e=>saveSender(activeSender.key,{from_email:e.target.value})} placeholder="z. B. bewerbung@25hrs.de"
+                style={{width:'100%',marginTop:4,padding:'7px 9px',border:'1px solid var(--border)',borderRadius:8,fontSize:13}}/></label>
+            <label style={{fontSize:12,fontWeight:600}}>Anzeigename
+              <input value={activeSender.from_name||''} onChange={e=>saveSender(activeSender.key,{from_name:e.target.value})} placeholder="z. B. 25HRS Recruiting"
+                style={{width:'100%',marginTop:4,padding:'7px 9px',border:'1px solid var(--border)',borderRadius:8,fontSize:13}}/></label>
+            <label style={{fontSize:12,fontWeight:600}}>Antwort-Adresse (optional)
+              <input value={activeSender.reply_to||''} onChange={e=>saveSender(activeSender.key,{reply_to:e.target.value})}
+                style={{width:'100%',marginTop:4,padding:'7px 9px',border:'1px solid var(--border)',borderRadius:8,fontSize:13}}/></label>
+          </div>
+          <label style={{display:'flex',alignItems:'center',gap:9,fontSize:13,marginTop:12,cursor:'pointer'}}>
+            <input type="checkbox" checked={!!activeSender.active} onChange={e=>saveSender(activeSender.key,{active:e.target.checked})} style={{width:16,height:16}}/>
+            <span style={{fontWeight:700}}>Absender scharf schalten</span>
+            <span style={{fontSize:11.5,color:'var(--muted)'}}>(erst wenn die Adresse steht und die Domain beim Versanddienst verifiziert ist)</span>
+          </label>
+        </div>}
+        {/* Fassung + Trigger */}
+        <div style={{borderTop:'1px solid var(--border)',paddingTop:14,display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))',gap:12}}>
+          <label style={{fontSize:12,fontWeight:600}}>Fassung (Inhalt der Datenerhebung)
+            <select value={(cfg&&cfg.form_id)||''} onChange={e=>cfgSet({form_id:e.target.value})}
+              style={{width:'100%',marginTop:4,padding:'7px 9px',border:'1px solid var(--border)',borderRadius:8,fontSize:13,background:'var(--card)',color:'var(--text)'}}>
+              {formList.map(f=><option key={f.id} value={f.id}>{f.name}</option>)}
+            </select></label>
+          <label style={{fontSize:12,fontWeight:600}}>Automatik startet
+            <select value={(cfg&&cfg.trigger_status)||'cv_accepted'} onChange={e=>cfgSet({trigger_status:e.target.value})}
+              style={{width:'100%',marginTop:4,padding:'7px 9px',border:'1px solid var(--border)',borderRadius:8,fontSize:13,background:'var(--card)',color:'var(--text)'}}>
+              {AL_TRIGGERS.map(([k,l])=><option key={k} value={k}>{l}</option>)}
+            </select></label>
+        </div>
+      </div>}
+    </div>}
+
     <div style={{display:'flex',gap:16,flexWrap:'wrap',alignItems:'center',fontSize:11.5,color:'var(--muted)',marginBottom:12}}>
       <span><b style={{color:'#15803d'}}>●</b> frisch (unter 3 Tg.)</span>
       <span><b style={{color:'#b45309'}}>●</b> zieht sich (ab 3 Tg.)</span>
@@ -37834,16 +37976,18 @@ function ApplicantLinksView({employees, showToast}){
     <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:14}}>
       {chip('open','Offen',cOpen)}
       {chip('overdue','Überfällig',cOver)}
+      {chip('mail','Versand offen',cMail)}
       {chip('all','Alle',rows.length)}
-      {chip('done','Erledigt',rows.length-cOpen)}
+      {chip('done','Erledigt',cDone)}
     </div>
     {err&&<div style={{background:'#fef2f2',border:'1px solid #fecaca',color:'#b91c1c',borderRadius:8,padding:'8px 10px',fontSize:12.5,marginBottom:12}}>{err}</div>}
     <div className="card" style={{padding:0,overflowX:'auto'}}>
       {loading&&iv===null ? <div style={{padding:24,color:'var(--muted)',fontSize:13}}>lädt…</div>
        : filtered.length===0 ? <div style={{padding:24,color:'var(--muted)',fontSize:13,textAlign:'center'}}>{rows.length===0?'Noch keine Links verschickt.':'Nichts in diesem Filter.'}</div>
-       : <table style={{width:'100%',borderCollapse:'collapse',minWidth:720}}>
+       : <table style={{width:'100%',borderCollapse:'collapse',minWidth:900}}>
         <thead><tr style={{textAlign:'left',fontSize:11,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',borderBottom:'1px solid var(--border)'}}>
-          <th style={{padding:'10px 14px',width:'26%'}}>Bewerber</th>
+          <th style={{padding:'10px 14px',width:'22%'}}>Bewerber</th>
+          <th style={{padding:'10px 14px'}}>✉ Versand</th>
           <th style={{padding:'10px 14px'}}>📅 Termin</th>
           <th style={{padding:'10px 14px'}}>📝 Anreicherung</th>
         </tr></thead>
@@ -37852,9 +37996,11 @@ function ApplicantLinksView({employees, showToast}){
             return <tr key={row.cvId} style={{borderBottom:'1px solid var(--border)',verticalAlign:'top'}}>
             <td style={{padding:'12px 14px'}}>
               <div style={{fontWeight:700,fontSize:13.5}}>{row.name}</div>
+              {row.email&&<div style={{fontSize:11,color:'var(--muted)',marginTop:1}}>{row.email}</div>}
               {row.phone&&<div style={{fontSize:11,color:'var(--muted)',marginTop:1}}>{row.phone}</div>}
               {stf&&<div style={{marginTop:5}}><span style={{padding:'2px 7px',borderRadius:20,fontSize:10,fontWeight:700,background:stf.color+'18',color:stf.color,border:'1px solid '+stf.color+'33',whiteSpace:'nowrap'}}>{stf.icon} {stf.label}</span></div>}
             </td>
+            <td style={{padding:'12px 14px'}}>{mailCell(row)}</td>
             <td style={{padding:'12px 14px'}}>{terminCell(row)}</td>
             <td style={{padding:'12px 14px'}}>{enrichCell(row)}</td>
           </tr>; })}
@@ -40624,7 +40770,7 @@ function App(){
           {view==='hraccess'&&(<div><HrAccessView/></div>)}
           {view==='appusers'&&(<div><AppUsersView employees={employees} clients={clients} showToast={showToast}/></div>)}
           {view==='cvsync'&&(<div><CvSyncView setCvList={setCvList} projects={projects}/><MetaImportPanel setCvList={setCvList}/></div>)}
-          {view==='bewerberlinks'&&<ApplicantLinksView employees={employees} showToast={showToast}/>}
+          {view==='bewerberlinks'&&<ApplicantLinksView employees={employees} showToast={showToast} team={team}/>}
           {view==='dubletten'&&<DuplicatesView team={team} setCvList={setCvList}/>}
           {view==='feedback'&&<FeedbackView employees={employees} projects={projects} team={team} showToast={showToast} nav={feedbackNav} onNavConsumed={()=>setFeedbackNav(null)}/>}
           {view==='spaces'&&(
