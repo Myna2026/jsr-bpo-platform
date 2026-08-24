@@ -20354,6 +20354,7 @@ function CVsView({cvList, setCvList, projects, onPromoteToEmployee, team, showTo
   const [quickView, setQuickView] = useState(null); // token
   const [resultsModal, setResultsModal] = useState(null);
   const [filter, setFilter] = useState(isMobileW?'cv_inbound':'all');   // mobil auf den Posteingang starten
+  const [sort, setSort] = useState('rank');   // Standard: nach Rang (Sortierhilfe); umschaltbar auf Datum/Name
 
   async function saveCv(form){
     if(form.id){
@@ -20396,6 +20397,13 @@ function CVsView({cvList, setCvList, projects, onPromoteToEmployee, team, showTo
   const _navCvPred = (_navCv && COCKPIT_FILTERS[_navCv.type]) || null;
   useEffect(()=>{ if(_navCv) setFilter('all'); },[navFilter]);
   const filtered = (filter==='all' ? cvList : cvList.filter(c=>normStatus(c.status)===filter)).filter(c=>!_navCvPred||_navCvPred(c));
+  // Rang = Sortierhilfe (Sprache dominant, Refinement innerhalb der Stufe). Umschaltbar; niemand wird gefiltert.
+  const sorted = React.useMemo(()=>{ const arr=[...filtered];
+    if(sort==='rank'){ const rk=new Map(); arr.forEach(c=>rk.set(c.id, applicantRank(c).score));
+      arr.sort((a,b)=>(rk.get(b.id)-rk.get(a.id))||String(a.last_name||'').localeCompare(String(b.last_name||''),'de')); }
+    else if(sort==='date'){ arr.sort((a,b)=>String(b.cv_date||'').localeCompare(String(a.cv_date||''))); }
+    else { arr.sort((a,b)=>String(a.last_name||'').localeCompare(String(b.last_name||''),'de')||String(a.first_name||'').localeCompare(String(b.first_name||''),'de')); }
+    return arr; },[filtered, sort]);
 
   // If test token in URL
   if(testView){
@@ -20419,6 +20427,12 @@ function CVsView({cvList, setCvList, projects, onPromoteToEmployee, team, showTo
       {/* Toolbar */}
       <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8,flexWrap:'wrap'}}>
         <button className="btn btn-primary btn-sm" onClick={()=>setModal('add')}>+ Neuer Bewerber</button>
+        <label style={{fontSize:12,color:'var(--muted)',fontWeight:700,display:'inline-flex',alignItems:'center',gap:6}}>Sortierung
+          <select value={sort} onChange={e=>setSort(e.target.value)} style={{padding:'4px 8px',border:'1px solid var(--border)',borderRadius:7,fontSize:12,fontWeight:700,background:'var(--card)',color:'var(--text)'}}>
+            <option value="rank">Rang (Qualität)</option>
+            <option value="date">Neueste zuerst</option>
+            <option value="name">Name</option>
+          </select></label>
         <div style={{flex:1}}/>
         <span style={{fontSize:12,color:'var(--muted)'}}>{filtered.length} von {cvList.length} Bewerbern</span>
       </div>
@@ -20489,7 +20503,7 @@ function CVsView({cvList, setCvList, projects, onPromoteToEmployee, team, showTo
         {isMobileW ? (
           <div>
             {filtered.length===0&&<div style={{textAlign:'center',padding:24,color:'var(--muted)',fontSize:13}}>Keine Bewerber in diesem Filter.</div>}
-            {filtered.map(cv=>{
+            {sorted.map(cv=>{
               const st=STATUS_FLOW.find(x=>x.key===normStatus(cv.status));
               const PIPE=['cv_inbound','cv_accepted','cv_confirmed','invited','interview','selection1','selection2','contract','training_planned','training','active'];
               const REQ={'cv_accepted':['first_name','last_name','email','phone'],'cv_confirmed':['first_name','last_name','email','phone','language_level','audio_url'],'invited':['first_name','last_name','email','phone','language_level'],'selection1':['first_name','last_name','email','phone','language_level','target_project'],'selection2':['first_name','last_name','email','phone','language_level','target_project','primary_skill']};
@@ -20508,6 +20522,11 @@ function CVsView({cvList, setCvList, projects, onPromoteToEmployee, team, showTo
                     {cv.phone&&<a href={'tel:'+String(cv.phone).replace(/[^\d+]/g,'')} onClick={e=>e.stopPropagation()} style={{fontSize:14,fontWeight:700,color:'#0F5661',textDecoration:'none'}}>📞 {cv.phone}</a>}
                     <span style={{fontSize:12,color:'var(--muted)'}}>Deutsch: <b style={{color:'var(--blue)'}}>{cv.language_level||'—'}</b>{cv.writing_level?' · Schrift '+cv.writing_level:''}</span>
                   </div>
+                  {(()=>{ const q=applicantRank(cv); if(!q.chips.length) return null;
+                    return <div style={{display:'flex',gap:5,flexWrap:'wrap',marginTop:8,alignItems:'center'}}>
+                      {q.tier&&<span title={q.tier==='A'?'Top-Kandidat':'Guter Kandidat'} style={{fontSize:12}}>{q.tier==='A'?'⭐':'✨'}</span>}
+                      {q.chips.map((c,i)=><span key={i} style={{fontSize:10.5,fontWeight:700,padding:'1px 8px',borderRadius:10,background:q.tier==='A'?'#fef3c7':'var(--surface-2)',color:q.tier==='A'?'#92400e':'var(--muted)'}}>{c}</span>)}
+                    </div>; })()}
                   {next&&cur>=0&&<div style={{marginTop:10}} onClick={e=>e.stopPropagation()}>
                     {readyMissing.length===0
                       ? <button className="btn btn-sm" style={{background:'#059669',color:'#fff',fontWeight:700,width:'100%'}} onClick={()=>saveCv({...cv,status:next})}>→ {nextS?nextS.label:'nächste Phase'}</button>
@@ -20530,7 +20549,7 @@ function CVsView({cvList, setCvList, projects, onPromoteToEmployee, team, showTo
           </tr></thead>
           <tbody>
             {filtered.length===0&&<tr><td colSpan={7} style={{textAlign:'center',padding:24,color:'var(--muted)'}}>Keine Bewerber</td></tr>}
-            {filtered.map(cv=>{
+            {sorted.map(cv=>{
               const proj = projects.find(p=>p.id===cv.target_project);
               const st = STATUS_FLOW.find(s=>s.key===normStatus(cv.status));
               const correctV = cv.test_completed ? LANGUAGE_TEST_QUESTIONS.filter(q=>q.type==='verstehen'&&(cv.test_answers||{})[q.id]===q.correct).length : null;
@@ -21543,7 +21562,39 @@ function RecruitingFunnel({cvList, employees, isMobileW}){
     </div>
   );
 }
-</script><script type="text/babel">function RecruitingKanban({employees, setEmployees, cvList, setCvList, projects, onPromoteToEmployee, showToast, onNavigate}){
+</script><script type="text/babel">// ── Bewerber-Rang: Sortierhilfe, KEINE Vorauswahl (niemand verschwindet) ─────────────────────────────────
+// Sprachniveau ist die HARTE Größe (dominant). Erfahrung/Arbeitszeit/Telefon/Freitext verfeinern nur INNERHALB der
+// Stufe — das Refinement ist so gedeckelt, dass es die Sprachstufe nie überspringt (ein C1 mit schlechtem Text bleibt
+// vor einem B1 mit gutem). Werte sind uneinheitlich → normalisiert.
+function cvLang(item){ const raw=((item&&item.language_level)||(item&&item.extra&&item.extra.german)||'').toUpperCase();
+  if(/C1|C2|MUTTERSPRACH/.test(raw)) return 'C1'; if(/B2/.test(raw)) return 'B2'; if(/B1/.test(raw)) return 'B1'; return ''; }
+function cvExp(item){ const v=item&&item.extra&&item.extra.cc_experience; if(v==null) return null; const s=String(v).toLowerCase().trim();
+  if(!s) return null; if(/^(nein|no|kein|nicht)/.test(s)) return false;
+  if(/ja|yes|jo|jahr|erfahr|agent|service|call|verkauf|\d/.test(s)) return true; return null; }
+function cvFull(item){ const s=String(item&&item.extra&&item.extra.work_time||'').toLowerCase();
+  if(/vollzeit|volzeit|full/.test(s)) return 'vollzeit'; if(/teilzeit|part/.test(s)) return 'teilzeit'; return ''; }
+function cvPhoneOk(item){ return String(item&&item.phone||'').replace(/\D/g,'').length>=6; }
+const CV_ALB=/\b(gjermanisht|shqip|pun[eë]|mund|faleminderit|p[eë]rshendetje|vieleit|nuk|jam|dua|kam|edhe|mir[eë])\b/i;
+function cvTextScore(item){ const ex=(item&&item.extra)||{};
+  const avail=String(ex.available||ex.availability||'').trim(), exp=String(ex.cc_experience||item.work_history||'').trim();
+  const nonsense=t=>{ if(!t) return false; const b=t.replace(/\s/g,''); return b.replace(/[^a-zA-ZäöüÄÖÜ]/g,'').length<3 || /^([a-z])\1{1,}$/i.test(b) || /^\W*\d+\W*$/.test(t) || /in welchen was/i.test(t); };
+  let s=0, early=false;
+  if(avail){ if(CV_ALB.test(avail)) s-=40; else if(nonsense(avail)) s-=30;
+    else { if(/sofort|jederzeit|immediately|diese woche|n[aä]chste woche|1 woche|2 wochen|zwei wochen/i.test(avail)){ s+=60; early=true; }
+      else if(/\d{1,2}[.\/-]\d{1,2}/.test(avail)) s+=20;
+      if(avail.split(/\s+/).length>=4 && /[a-zäöü]/i.test(avail)) s+=10; } }
+  if(exp && !/^(ja|nein)\.?$/i.test(exp)){ if(CV_ALB.test(exp)) s-=20; else if(nonsense(exp)) s-=20;
+    else if(/\d+\s*(jahr|monat)|jahr|erfahr|agent|service|verkauf|bpo|call|mahnwesen|collection/i.test(exp)) s+=30; }
+  return {s:Math.max(-80,Math.min(120,s)), early}; }
+function applicantRank(item){ const lang=cvLang(item), exp=cvExp(item), full=cvFull(item), phone=cvPhoneOk(item);
+  const langScore=lang==='C1'?3:lang==='B2'?2:lang==='B1'?1:0; const tx=cvTextScore(item);
+  const refine=(exp?200:0)+(full==='vollzeit'?80:full==='teilzeit'?30:0)+(phone?40:0)+tx.s;   // < 1000, überspringt Stufe nie
+  const score=langScore*1000+refine;
+  let tier=null; if(lang==='C1'&&exp) tier='A'; else if(lang==='C1'||(lang==='B2'&&exp)) tier='B';
+  const chips=[]; if(lang) chips.push(lang); if(exp) chips.push('Erfahrung'); if(full==='vollzeit') chips.push('Vollzeit'); if(tx.early) chips.push('sofort verfügbar');
+  return {score, tier, chips, lang, exp}; }
+const CV_EINGANG=new Set(['cv_inbound','cv_accepted','cv_confirmed']);
+function RecruitingKanban({employees, setEmployees, cvList, setCvList, projects, onPromoteToEmployee, showToast, onNavigate}){
   const [dragging, setDragging] = useState(null);
   const [dragType, setDragType] = useState(null); // 'cv' | 'emp'
   const [selectedItem, setSelectedItem] = useState(null);
@@ -21655,6 +21706,10 @@ function RecruitingFunnel({cvList, employees, isMobileW}){
   function renderCard(item){
     const name=(item.first_name||'?')+' '+(item.last_name||'');
     const isEmp=EMP_PHASES.has(item.status);   // ab Vertrag = Mitarbeiter (anderer Zustand, sichtbar abgesetzt)
+    const q = (!isEmp && CV_EINGANG.has(item.status)) ? applicantRank(item) : null;   // Priorisierung NUR in der Eingangsphase
+    const hi = q && q.tier;                    // 'A' (C1+Erfahrung) | 'B' | null
+    const accent = isEmp?'var(--green)':hi==='A'?'#f59e0b':hi==='B'?'#fbbf24':'rgba(15,86,97,.22)';
+    const cardBg = isEmp?'var(--green-bg)':hi==='A'?'#fffbeb':'var(--card)';
     const sf=SF_BY_KEY[item.status];
     const nx=nextStatus(item.status);
     const since=item.status_changed_at||item.cv_date;
@@ -21664,11 +21719,12 @@ function RecruitingFunnel({cvList, employees, isMobileW}){
       <div key={item.id} draggable
         onDragStart={e=>{e.stopPropagation();setDragging(item.id);setDragType(item._type);}}
         onClick={()=>setSelectedItem(item)}
-        style={{padding:'6px 8px',background:isEmp?'var(--green-bg)':'var(--card)',
-          border:'1px solid '+(isEmp?'rgba(5,150,105,.35)':'rgba(15,86,97,.22)'),
-          borderLeft:'4px solid '+(isEmp?'var(--green)':'rgba(15,86,97,.22)'),
-          borderRadius:'var(--r)',cursor:'grab',fontSize:11,boxShadow:'0 1px 3px rgba(0,0,0,.06)'}}>
+        style={{padding:'6px 8px',background:cardBg,
+          border:'1px solid '+(isEmp?'rgba(5,150,105,.35)':hi?accent:'rgba(15,86,97,.22)'),
+          borderLeft:'4px solid '+accent,
+          borderRadius:'var(--r)',cursor:'grab',fontSize:11,boxShadow:hi==='A'?'0 1px 6px rgba(245,158,11,.28)':'0 1px 3px rgba(0,0,0,.06)'}}>
         <div style={{display:'flex',alignItems:'center',gap:4,marginBottom:3}}>
+          {hi&&<span title={hi==='A'?'Top-Kandidat':'Guter Kandidat'} style={{fontSize:11}}>{hi==='A'?'⭐':'✨'}</span>}
           <span style={{fontSize:8.5,padding:'1px 6px',borderRadius:8,fontWeight:800,
             background:isEmp?'var(--green)':'var(--blue-bg)',color:isEmp?'#fff':'var(--blue)'}}>{isEmp?'Mitarbeiter':'Bewerber'}</span>
           <span style={{fontWeight:600,flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{name}</span>
@@ -21684,6 +21740,9 @@ function RecruitingFunnel({cvList, employees, isMobileW}){
           {item.location&&<span>{item.location==='Tirana'?'🇦🇱':'🇽🇰'}</span>}
           {item.primary_skill&&<span style={{background:'var(--surface-2)',borderRadius:6,padding:'0 4px'}}>{item.primary_skill}</span>}
         </div>
+        {hi&&q.chips.length>0&&<div style={{display:'flex',gap:3,flexWrap:'wrap',marginTop:3}}>
+          {q.chips.map((c,i)=><span key={i} style={{fontSize:8.5,fontWeight:700,padding:'0 5px',borderRadius:8,background:'#fef3c7',color:'#92400e'}}>{c}</span>)}
+        </div>}
         {item.status==='cv_accepted'&&(
           <button onClick={e=>{e.stopPropagation();confirmCV(item.id,item._type);}}
             style={{marginTop:5,width:'100%',padding:'3px',border:'none',borderRadius:4,background:'var(--green)',color:'white',fontSize:10,fontWeight:700,cursor:'pointer'}}>
