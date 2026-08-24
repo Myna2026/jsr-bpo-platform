@@ -30,9 +30,14 @@ Deno.serve(async (req)=>{
   const {data:cv}=await sb.from('cvs').select('*').eq('id',inv.cv_id).maybeSingle();
   if(!cv) return fail('no_profile','Profil nicht gefunden.');
 
+  // Aktive Abschnitte aus der gewählten Fassung; ohne Fassung (Alt-Links) alles an.
+  const ALL={contact:true,birthday:true,language:true,audio:true,education:true,experience:true,availability:true,writing_sample:true};
+  let sections:any = ALL;
+  if(inv.form_id){ const {data:frm}=await sb.from('cv_enrich_forms').select('sections').eq('id',inv.form_id).maybeSingle(); sections = (frm&&frm.sections) || {}; }
+
   if(action==='load'){
     const ex=cv.extra||{};
-    return json({ ok:true, first_name:cv.first_name, used:!!inv.used_at, cv:{
+    return json({ ok:true, first_name:cv.first_name, used:!!inv.used_at, reusable:!!inv.reusable, sections, cv:{
       email:cv.email, phone:cv.phone, city:cv.city, birthday:cv.birthday,
       education:cv.education, education_level:cv.education_level,
       experience_years:cv.experience_years, work_history:cv.work_history,
@@ -44,7 +49,7 @@ Deno.serve(async (req)=>{
   }
 
   if(action==='submit'){
-    if(inv.used_at) return fail('used','Dieser Link wurde bereits genutzt. Bitte melde dich bei uns, falls du etwas ändern möchtest.');
+    if(inv.used_at && !inv.reusable) return fail('used','Dieser Link wurde bereits genutzt. Bitte melde dich bei uns, falls du etwas ändern möchtest.');
     const f=body.fields||{};
     const upd:any={ updated_at:new Date().toISOString() };
     for(const k of FIELDS){ if(f[k]!==undefined){ let v=f[k];
@@ -81,7 +86,7 @@ Deno.serve(async (req)=>{
 
     const {error}=await sb.from('cvs').update(upd).eq('id',inv.cv_id);
     if(error) return fail('save_error','Speichern fehlgeschlagen.');
-    await sb.from('cv_enrich_invites').update({used_at:new Date().toISOString()}).eq('token',token);
+    if(!inv.reusable) await sb.from('cv_enrich_invites').update({used_at:new Date().toISOString()}).eq('token',token);
     return json({ok:true});
   }
 

@@ -20104,15 +20104,8 @@ Levels: A2, B1, B2, C1, C2. Für Kundenservice ist B2 das Minimum.`;
               {/* Profil-Anreicherung: Token-Link, der Bewerber ergänzt fehlende Daten an seinem bestehenden Profil */}
               <div style={{marginTop:22,paddingTop:16,borderTop:'1px solid var(--border)'}}>
                 <div style={{fontSize:13,fontWeight:700,marginBottom:4}}>📝 Profil vom Bewerber ergänzen lassen</div>
-                <div style={{fontSize:12.5,color:'var(--muted)',marginBottom:10,lineHeight:1.55}}>Erzeugt einen persönlichen Link. Der Bewerber sieht seinen Namen und ergänzt selbst Sprachniveau, Ausbildung, Erfahrung, Verfügbarkeit, Schriftprobe und eine Sprachaufnahme. Alles landet an <b>diesem</b> Profil, kein neuer Eintrag.</div>
-                <button className="btn" onClick={async(e)=>{ const b=e.currentTarget; const _t=b.textContent; b.disabled=true; b.textContent='…';
-                  try{ const {data,error}=await sb.rpc('create_cv_enrich_invite',{p_cv_id:form.id});
-                    if(error||!data){ b.textContent='Fehler'; setTimeout(()=>{b.textContent=_t;b.disabled=false;},1600); return; }
-                    const url='https://client.tive360.de/bewerber.html?t='+data;
-                    try{ await navigator.clipboard.writeText(url); }catch(_e){}
-                    b.textContent='✓ Link kopiert'; setTimeout(()=>{b.textContent=_t;b.disabled=false;},2000);
-                  }catch(_e){ b.textContent='Fehler'; setTimeout(()=>{b.textContent=_t;b.disabled=false;},1600); }
-                }}>🔗 Anreicherungs-Link kopieren</button>
+                <div style={{fontSize:12.5,color:'var(--muted)',marginBottom:10,lineHeight:1.55}}>Erzeugt einen persönlichen Link. Der Bewerber sieht seinen Namen und ergänzt die Felder der gewählten Fassung. Alles landet an <b>diesem</b> Profil, kein neuer Eintrag.</div>
+                <CvEnrichLinkButton cvId={form.id}/>
               </div>
             </div>;
           })()}
@@ -26612,6 +26605,66 @@ function CountryPayrollEditor(){
     </div>
   );
 }
+// Bewerber-Anreicherung: Link-Erzeugung mit Fassungswahl (am CV). Lädt die aktiven Fassungen, HR wählt eine,
+// erzeugt den Token-Link (einmalig) und kopiert ihn.
+function CvEnrichLinkButton({cvId}){
+  const [forms,setForms]=useState(null);
+  const [fid,setFid]=useState('');
+  const [copied,setCopied]=useState(false);
+  const [busy,setBusy]=useState(false);
+  useEffect(()=>{ let a=true; sb.from('cv_enrich_forms').select('id,name,seq').eq('active',true).order('seq')
+    .then(({data})=>{ if(a){ setForms(data||[]); if(data&&data.length) setFid(data[0].id); } }); return ()=>{a=false;}; },[]);
+  async function gen(){ if(busy||!cvId) return; setBusy(true);
+    try{ const {data,error}=await sb.rpc('create_cv_enrich_invite',{p_cv_id:cvId, p_form_id:fid||null, p_reusable:false});
+      if(error||!data){ setBusy(false); window.alert('Fehler: '+((error&&error.message)||'DB')); return; }
+      const url='https://client.tive360.de/bewerber.html?t='+data;
+      try{ await navigator.clipboard.writeText(url); }catch(e){}
+      setCopied(true); setTimeout(()=>setCopied(false),2200);
+    }catch(e){ window.alert('Fehler beim Erzeugen.'); }
+    setBusy(false);
+  }
+  if(forms===null) return <div style={{fontSize:12,color:'var(--muted)'}}>lädt…</div>;
+  return <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
+    {forms.length>1 && <label style={{fontSize:12,color:'var(--muted)',fontWeight:700,display:'inline-flex',alignItems:'center',gap:6}}>Fassung
+      <select value={fid} onChange={e=>setFid(e.target.value)} style={{padding:'8px 10px',border:'1px solid var(--border)',borderRadius:8,fontSize:13,background:'var(--card)',color:'var(--text)'}}>{forms.map(f=><option key={f.id} value={f.id}>{f.name}</option>)}</select></label>}
+    <button className="btn" disabled={busy} onClick={gen}>{copied?'✓ Link kopiert':(busy?'…':'🔗 Anreicherungs-Link kopieren')}</button>
+    {forms.length===0 && <span style={{fontSize:12,color:'var(--muted)'}}>Keine Fassung angelegt (System → Bewerber-Anreicherung).</span>}
+  </div>;
+}
+// Fassungen-Editor (System/Konfiguration): benannte Strecken anlegen und je Fassung Abschnitte an-/abschalten.
+function CvEnrichFormsEditor(){
+  const SECKEYS=[['contact','Kontakt (E-Mail, Telefon, Ort)'],['birthday','Geburtsdatum'],['language','Sprachniveau (Selbsteinschätzung)'],['audio','Sprachaufnahme'],['education','Ausbildung'],['experience','Erfahrung'],['availability','Verfügbarkeit'],['writing_sample','Schriftprobe']];
+  const [forms,setForms]=useState(null);
+  const load=()=>sb.from('cv_enrich_forms').select('*').order('seq').then(({data})=>setForms(data||[]));
+  useEffect(()=>{ load(); },[]);
+  async function saveForm(f, patch){ await sb.from('cv_enrich_forms').update({...patch, updated_at:new Date().toISOString()}).eq('id',f.id); load(); }
+  async function toggleSec(f, k){ const secs={...(f.sections||{})}; secs[k]=!secs[k]; saveForm(f,{sections:secs}); }
+  async function addForm(){ const secs={}; SECKEYS.forEach(([k])=>secs[k]=true); await sb.from('cv_enrich_forms').insert({name:'Neue Fassung', sections:secs, seq:(forms||[]).length}); load(); }
+  async function delForm(f){ if(!window.confirm('Fassung „'+f.name+'" löschen?')) return; await sb.from('cv_enrich_forms').delete().eq('id',f.id); load(); }
+  if(forms===null) return <div className="sp-empty">Lädt…</div>;
+  return <div style={{maxWidth:720}}>
+    <div style={{fontSize:13,color:'var(--muted)',marginBottom:14,lineHeight:1.55}}>Fassungen (Strecken) für die Bewerber-Anreicherung. Beim Erzeugen eines Links am Bewerber wählst du die Fassung. Abschnitte, die hier aus sind, erscheinen dem Bewerber nicht.</div>
+    <div style={{display:'flex',flexDirection:'column',gap:12}}>
+      {forms.map(f=>{ const s=f.sections||{}; return (
+        <div key={f.id} style={{border:'1px solid var(--border)',borderRadius:12,background:'var(--card)',padding:'12px 14px'}}>
+          <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10,flexWrap:'wrap'}}>
+            <input defaultValue={f.name} onBlur={e=>{ if(e.target.value.trim()&&e.target.value!==f.name) saveForm(f,{name:e.target.value.trim()}); }}
+              style={{flex:1,minWidth:160,padding:'7px 10px',border:'1px solid var(--border)',borderRadius:8,fontSize:14,fontWeight:700,background:'var(--surface-2)'}}/>
+            <label style={{fontSize:12,fontWeight:700,color:'var(--muted)',display:'inline-flex',alignItems:'center',gap:5}}><input type="checkbox" checked={f.active!==false} onChange={e=>saveForm(f,{active:e.target.checked})}/> aktiv</label>
+            <button className="btn btn-sm" style={{color:'var(--red)'}} onClick={()=>delForm(f)}>Löschen</button>
+          </div>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))',gap:6}}>
+            {SECKEYS.map(([k,lbl])=>(
+              <label key={k} style={{display:'flex',alignItems:'center',gap:8,fontSize:13,padding:'6px 8px',borderRadius:8,background:s[k]?'var(--blue-bg)':'var(--surface-2)',cursor:'pointer'}}>
+                <input type="checkbox" checked={!!s[k]} onChange={()=>toggleSec(f,k)}/>{lbl}</label>
+            ))}
+          </div>
+        </div>
+      ); })}
+    </div>
+    <button className="btn btn-sm btn-primary" style={{marginTop:14}} onClick={addForm}>+ Fassung anlegen</button>
+  </div>;
+}
 function SystemSettingsTab({projects, setProjects, employees, clients}){
   // Deeplink aus dem Cockpit (z.B. „Wechselkurs eintragen" → Section fx_rates). Einmalig beim Mount.
   const [activeSection, setActiveSection] = useState(()=>{ try{ const j=window.__sysJump; if(j){ window.__sysJump=null; return j; } }catch(e){} return 'skills'; });
@@ -26845,6 +26898,8 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
     {key:'migration25a', label:'⚡ Migration 25a → Supabase'},
     {key:'spinwheel',    label:'🎡 Glücksrad Gewinne'},
     {key:'menu_badges',  label:'🏷 Menü-Badges'},
+    {key:'_recruiting', label:'── Recruiting ──',     divider:true},
+    {key:'enrich_forms', label:'📝 Bewerber-Anreicherung'},
     {key:'_ki',         label:'── KI ──',            divider:true},
     {key:'aisettings',   label:'✨ KI-Einstellungen'},
     {key:'aiendpoint',   label:'🔌 KI-Anbindung'},
@@ -28860,6 +28915,9 @@ function SystemSettingsTab({projects, setProjects, employees, clients}){
 
         {/* ── MENÜ-BADGES ── */}
         {activeSection==='menu_badges'&&(<MenuBadgesAdmin sections={SECTIONS}/>)}
+
+        {/* ── Bewerber-Anreicherung: Fassungen/Strecken ── */}
+        {activeSection==='enrich_forms'&&(<CvEnrichFormsEditor/>)}
 
         {/* ── KI (eingefaltet, damit Konfig konsistent mit den KPIs ist) ── */}
         {activeSection==='aisettings'&&(<AISettingsView/>)}
