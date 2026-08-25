@@ -1318,7 +1318,7 @@ const MENU_BADGES_DEFAULT = { assignments:{
 }, custom:[] };
 // Hauptmenü-Items für den Badge-Admin (Keys müssen zu navSections passen).
 const MENU_BADGE_MAIN_ITEMS = [
-  {key:'start',label:'Start'},{key:'daily_tasks',label:'Tagesaufgaben'},{key:'datacheck',label:'Daten-Checks'},
+  {key:'start',label:'Start'},{key:'daily_tasks',label:'Tagesaufgaben'},{key:'meetingnotes',label:'Besprechungen'},{key:'datacheck',label:'Daten-Checks'},
   {key:'wissen_system',label:'Wissen System'},{key:'cockpit',label:'Cockpit'},{key:'productivity',label:'Produktivität'},
   {key:'performance',label:'Performance'},{key:'auswertung',label:'Auswertung'},{key:'callqa',label:'Call-Qualität'},{key:'shiftplan',label:'Schichtplanung'},{key:'checkin',label:'Check-in'},{key:'workforce',label:'Workforce (Beta)'},{key:'employees',label:'Mitarbeiter'},
   {key:'timetracking',label:'Zeiterfassung'},{key:'locations',label:'Standorte'},{key:'spaces',label:'Spaces & Seats'},
@@ -37673,6 +37673,172 @@ function MetaImportPanel({setCvList}){
   </div>;
 }
 
+// ══ Besprechungsnotizen je Projekt (Overhead-Meetings) — Schnitt 2: Schreibansicht ══════════════
+// Loest das Word-Dokument ab. Eine Besprechung = laufender Body + strukturierte Punkte mit
+// WICHTIGKEITS-Ampel (gruen in Ordnung / gelb wichtiger / rot wichtig) UND getrenntem Erledigt-Haken.
+// Schreiben nur Management + Projektleiter des Projekts (RLS mn_can_write); Auto-Save, kein Formular-Gefuehl.
+const MN_IMP={green:{fg:'#15803d',bg:'#f0fdf4',bd:'#bbf7d0',dot:'#22c55e',label:'In Ordnung'},
+              amber:{fg:'#b45309',bg:'#fffbeb',bd:'#fde68a',dot:'#f59e0b',label:'Wichtiger'},
+              red:{fg:'#b91c1c',bg:'#fef2f2',bd:'#fecaca',dot:'#ef4444',label:'Wichtig'}};
+const MN_IMP_ORDER=['green','amber','red'];
+function mnWeek(dateStr){ const d=new Date((dateStr||isoLocal(new Date()))+'T12:00:00'); const t=new Date(d); t.setDate(t.getDate()+3-((d.getDay()+6)%7)); const w1=new Date(t.getFullYear(),0,4); const kw=1+Math.round(((t-w1)/86400000-3+((w1.getDay()+6)%7))/7); return {year:t.getFullYear(), kw}; }
+function mnFmtDate(ds){ if(!ds) return ''; const d=new Date(ds+'T12:00:00'); return d.toLocaleDateString('de-DE',{weekday:'short',day:'2-digit',month:'2-digit',year:'numeric'}); }
+function MeetingNotesView({team, projects, employees, showToast, isMobileW}){
+  const roles=(team&&team.role_keys)||[];
+  const isMgmt=roles.includes('management'), isLead=roles.includes('projektleiter');
+  const myEmp=(team&&team.employee_id)?(employees||[]).find(e=>e&&e.id===team.employee_id):null;
+  const myProj=myEmp&&myEmp.project_id;
+  const myName=(myEmp?((myEmp.first_name||'')+' '+(myEmp.last_name||'')).trim():'')||(team&&team.full_name)||'';
+  const activeProjects=(projects||[]).filter(p=>p&&p.status!=='inactive');
+  const [selProjId,setSelProjId]=useState(()=> (isLead&&!isMgmt&&myProj)?myProj:((activeProjects[0]&&activeProjects[0].id)||''));
+  const selProj=activeProjects.find(p=>p.id===selProjId)||null;
+  const canWrite=isMgmt||(isLead&&myProj===selProjId);
+  const [meetings,setMeetings]=useState(null);
+  const [selId,setSelId]=useState(null);
+  const [items,setItems]=useState([]);
+  const [newItem,setNewItem]=useState('');
+  const [err,setErr]=useState('');
+  const saveTimers=React.useRef({});
+  const sel=(meetings||[]).find(m=>m.id===selId)||null;
+
+  async function loadMeetings(pid, keepSel){
+    setErr('');
+    const {data,error}=await sb.from('meeting_notes').select('*').eq('project_id',pid).order('meeting_date',{ascending:false}).order('created_at',{ascending:false});
+    if(error){ setErr('Laden fehlgeschlagen: '+error.message); setMeetings([]); return; }
+    const rows=data||[]; setMeetings(rows);
+    setSelId(prev=> (keepSel&&rows.some(m=>m.id===prev))?prev : (rows[0]?rows[0].id:null));
+  }
+  useEffect(()=>{ if(selProjId) loadMeetings(selProjId); },[selProjId]);
+  useEffect(()=>{ let a=true; (async()=>{
+    if(!selId){ setItems([]); return; }
+    const {data}=await sb.from('meeting_note_items').select('*').eq('note_id',selId).order('seq',{ascending:true}).order('created_at',{ascending:true});
+    if(a) setItems(data||[]);
+  })(); return ()=>{a=false;}; },[selId]);
+
+  async function createMeeting(){
+    const row={project_id:selProjId, skill:null, meeting_date:isoLocal(new Date()), title:'', body:'', created_by_name:myName};
+    const {data,error}=await sb.from('meeting_notes').insert(row).select().single();
+    if(error||!data){ setErr('Anlegen fehlgeschlagen'+(error?': '+error.message:'.')); return; }
+    setMeetings(ms=>[data,...(ms||[])]); setSelId(data.id); setItems([]);
+  }
+  function patchMeeting(id, patch, debounce){
+    setMeetings(ms=>(ms||[]).map(m=>m.id===id?{...m,...patch}:m));
+    const run=async()=>{ const {error}=await sb.from('meeting_notes').update({...patch, updated_at:new Date().toISOString(), updated_by_name:myName}).eq('id',id); if(error) setErr('Speichern fehlgeschlagen: '+error.message); };
+    if(debounce){ clearTimeout(saveTimers.current[id]); saveTimers.current[id]=setTimeout(run,700); } else run();
+  }
+  async function delMeeting(id){
+    if(!(await uiConfirm({title:'Besprechung löschen?', text:'Notizen und Punkte dieser Besprechung werden entfernt.', confirmLabel:'Löschen', danger:true}))) return;
+    await sb.from('meeting_notes').delete().eq('id',id);
+    setMeetings(ms=>(ms||[]).filter(m=>m.id!==id)); if(selId===id) setSelId(null);
+  }
+  async function addItem(){
+    const text=newItem.trim(); if(!text||!sel) return;
+    const wk=mnWeek(sel.meeting_date);
+    const row={note_id:sel.id, project_id:selProjId, skill:sel.skill||null, text, importance:'green', done:false, created_year:wk.year, created_kw:wk.kw, seq:items.length, created_by_name:myName};
+    const {data,error}=await sb.from('meeting_note_items').insert(row).select().single();
+    if(error||!data){ showToast&&showToast('Punkt speichern fehlgeschlagen','error'); return; }
+    setItems(x=>[...x,data]); setNewItem('');
+  }
+  async function patchItem(id, patch){
+    setItems(xs=>xs.map(i=>i.id===id?{...i,...patch}:i));
+    const {error}=await sb.from('meeting_note_items').update({...patch, updated_at:new Date().toISOString()}).eq('id',id);
+    if(error) showToast&&showToast('Punkt speichern fehlgeschlagen','error');
+  }
+  function patchItemText(id, text){
+    setItems(xs=>xs.map(i=>i.id===id?{...i,text}:i));
+    clearTimeout(saveTimers.current['it'+id]); saveTimers.current['it'+id]=setTimeout(()=>{ sb.from('meeting_note_items').update({text, updated_at:new Date().toISOString()}).eq('id',id); },700);
+  }
+  function toggleDone(it){ const wk=mnWeek(sel.meeting_date); const nd=!it.done;
+    patchItem(it.id, nd?{done:true,done_at:new Date().toISOString(),done_year:wk.year,done_kw:wk.kw}:{done:false,done_at:null,done_year:null,done_kw:null}); }
+  async function delItem(id){ if(!(await uiConfirm({title:'Punkt löschen?', confirmLabel:'Löschen', danger:true}))) return; setItems(xs=>xs.filter(i=>i.id!==id)); await sb.from('meeting_note_items').delete().eq('id',id); }
+
+  const skillOpts=[{v:'',label:'Ganzes Projekt'}].concat(((selProj&&selProj.skills)||[]).map(s=>({v:s.key,label:s.label})));
+  const skillLabel=k=>{ if(!k) return null; const s=((selProj&&selProj.skills)||[]).find(x=>x.key===k); return s?s.label:k; };
+  const openCount=items.filter(i=>!i.done).length;
+  const inp={padding:'7px 10px',border:'1px solid var(--border)',borderRadius:8,fontSize:13,background:'var(--card)',color:'var(--text)'};
+
+  return <div>
+    <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:12,flexWrap:'wrap',marginBottom:12}}>
+      <div>
+        <div style={{fontSize:20,fontWeight:700,marginBottom:2}}>📝 Besprechungen</div>
+        <div style={{fontSize:13,color:'var(--muted)'}}>Notizen der Overhead-Runde je Projekt. Punkte mit Ampel für Wichtigkeit, Haken für erledigt.</div>
+      </div>
+    </div>
+    {/* Projekt-Wahl */}
+    <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:14}}>
+      {activeProjects.map(p=>{ const on=p.id===selProjId; return <button key={p.id} onClick={()=>setSelProjId(p.id)} className="btn btn-sm"
+        style={{fontWeight:700,background:on?'var(--blue-bg)':'transparent',color:on?'#0F5661':'var(--text)',border:'1.5px solid '+(on?'#0F5661':'var(--border)')}}>{p.name}</button>; })}
+    </div>
+    {err&&<div style={{background:'#fef2f2',border:'1px solid #fecaca',color:'#b91c1c',borderRadius:8,padding:'8px 10px',fontSize:12.5,marginBottom:12}}>{err}</div>}
+
+    <div style={{display:'flex',gap:16,alignItems:'flex-start',flexDirection:isMobileW?'column':'row'}}>
+      {/* Liste der Besprechungen */}
+      <div style={{width:isMobileW?'100%':290,flexShrink:0}}>
+        {canWrite&&<button className="btn btn-primary btn-sm" style={{width:'100%',marginBottom:10}} onClick={createMeeting}>＋ Neue Besprechung</button>}
+        <div style={{display:'flex',flexDirection:'column',gap:8,maxHeight:isMobileW?'none':560,overflowY:'auto'}}>
+          {meetings===null&&<div style={{color:'var(--muted)',fontSize:13,padding:8}}>lädt…</div>}
+          {meetings&&meetings.length===0&&<div style={{color:'var(--muted)',fontSize:13,padding:12,textAlign:'center',border:'1px dashed var(--border)',borderRadius:10}}>Noch keine Besprechungen{canWrite?'. Leg oben eine an.':'.'}</div>}
+          {(meetings||[]).map(m=>{ const on=m.id===selId; return <button key={m.id} onClick={()=>setSelId(m.id)}
+            style={{textAlign:'left',border:'1.5px solid '+(on?'#0F5661':'var(--border)'),background:on?'var(--blue-bg)':'var(--card)',borderRadius:10,padding:'10px 12px',cursor:'pointer'}}>
+            <div style={{fontSize:13,fontWeight:700,color:'var(--text)'}}>{m.title||'Ohne Titel'}</div>
+            <div style={{fontSize:11.5,color:'var(--muted)',marginTop:2}}>{mnFmtDate(m.meeting_date)}{m.skill?' · '+(skillLabel(m.skill)||m.skill):''}</div>
+          </button>; })}
+        </div>
+      </div>
+
+      {/* Editor / Ansicht */}
+      <div style={{flex:1,minWidth:0,width:'100%'}}>
+        {!sel ? <div className="card" style={{padding:24,color:'var(--muted)',fontSize:13,textAlign:'center'}}>Wähle links eine Besprechung{canWrite?' oder leg eine neue an':''}.</div>
+        : <div className="card" style={{padding:16}}>
+          {/* Kopf: Datum, Skill, Titel */}
+          <div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'center',marginBottom:12}}>
+            <input type="date" value={sel.meeting_date||''} disabled={!canWrite} onChange={e=>patchMeeting(sel.id,{meeting_date:e.target.value})} style={inp}/>
+            <select value={sel.skill||''} disabled={!canWrite} onChange={e=>patchMeeting(sel.id,{skill:e.target.value||null})} style={inp}>
+              {skillOpts.map(o=><option key={o.v} value={o.v}>{o.label}</option>)}
+            </select>
+            <div style={{flex:1}}/>
+            {canWrite&&<button className="btn btn-sm" onClick={()=>delMeeting(sel.id)} style={{color:'#b91c1c'}}>Löschen</button>}
+          </div>
+          <input value={sel.title||''} disabled={!canWrite} placeholder="Titel der Besprechung (z. B. Wochenrunde KW 35)" onChange={e=>patchMeeting(sel.id,{title:e.target.value},true)}
+            style={{width:'100%',boxSizing:'border-box',padding:'9px 11px',border:'1px solid var(--border)',borderRadius:8,fontSize:15,fontWeight:700,marginBottom:12}}/>
+          {/* Body */}
+          <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',marginBottom:6}}>Notizen</div>
+          <textarea value={sel.body||''} disabled={!canWrite} placeholder={canWrite?'Was wurde besprochen…':'Keine Notizen'} onChange={e=>patchMeeting(sel.id,{body:e.target.value},true)}
+            style={{width:'100%',boxSizing:'border-box',minHeight:150,padding:'10px 12px',border:'1px solid var(--border)',borderRadius:8,fontSize:13.5,lineHeight:1.5,fontFamily:'inherit',resize:'vertical',marginBottom:16}}/>
+          {/* Punkte */}
+          <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8}}>
+            <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em'}}>Punkte{openCount>0?' · '+openCount+' offen':''}</div>
+          </div>
+          <div style={{display:'flex',flexDirection:'column',gap:8}}>
+            {items.length===0&&<div style={{fontSize:12.5,color:'var(--muted)'}}>Noch keine Punkte.</div>}
+            {items.map(it=>{ const im=MN_IMP[it.importance]||MN_IMP.green; return <div key={it.id}
+              style={{display:'flex',gap:10,alignItems:'flex-start',padding:'9px 11px',borderRadius:10,border:'1px solid '+im.bd,background:im.bg,opacity:it.done?0.6:1}}>
+              <input type="checkbox" checked={!!it.done} disabled={!canWrite} onChange={()=>toggleDone(it)} title="Erledigt" style={{width:16,height:16,marginTop:3,cursor:canWrite?'pointer':'default'}}/>
+              <div style={{flex:1,minWidth:0}}>
+                {canWrite
+                  ? <textarea value={it.text} onChange={e=>patchItemText(it.id,e.target.value)} rows={1}
+                      style={{width:'100%',boxSizing:'border-box',border:'none',background:'transparent',fontSize:13.5,color:'var(--text)',resize:'vertical',fontFamily:'inherit',textDecoration:it.done?'line-through':'none'}}/>
+                  : <div style={{fontSize:13.5,textDecoration:it.done?'line-through':'none'}}>{it.text}</div>}
+              </div>
+              {/* Ampel: Wichtigkeit */}
+              <div style={{display:'flex',gap:4,flexShrink:0}}>
+                {MN_IMP_ORDER.map(k=>{ const active=it.importance===k; return <button key={k} disabled={!canWrite} title={MN_IMP[k].label} onClick={()=>patchItem(it.id,{importance:k})}
+                  style={{width:18,height:18,borderRadius:'50%',cursor:canWrite?'pointer':'default',border:active?'2px solid '+MN_IMP[k].fg:'1px solid var(--border)',background:active?MN_IMP[k].dot:'transparent',padding:0}}/>; })}
+              </div>
+              {canWrite&&<button onClick={()=>delItem(it.id)} title="Punkt löschen" style={{border:'none',background:'transparent',color:'var(--muted)',cursor:'pointer',fontSize:15,lineHeight:1,flexShrink:0}}>×</button>}
+            </div>; })}
+          </div>
+          {canWrite&&<div style={{display:'flex',gap:8,marginTop:10}}>
+            <input value={newItem} placeholder="Neuer Punkt…" onChange={e=>setNewItem(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter'){ e.preventDefault(); addItem(); } }}
+              style={{flex:1,boxSizing:'border-box',padding:'8px 11px',border:'1px solid var(--border)',borderRadius:8,fontSize:13}}/>
+            <button className="btn btn-sm" disabled={!newItem.trim()} onClick={addItem}>Hinzufügen</button>
+          </div>}
+        </div>}
+      </div>
+    </div>
+  </div>;
+}
+
 // Bewerber-Links: gemeinsame Übersicht beider Token-Wege (Terminvereinbarung interview_invites +
 // Anreicherung cv_enrich_invites). Je Bewerber eine Zeile mit zwei Spuren, was daraus wurde, sortiert
 // nach Alter (am längsten offen zuerst), farblich eskalierend (frisch <3 Tg. → gelb ab 3 → rot ab 10 /
@@ -40387,11 +40553,13 @@ function App(){
   const _isMgmt = team&&(team.role_keys||[]).some(r=>r==='management');
   const _isMgmtHr = team&&(team.role_keys||[]).some(r=>r==='management'||r==='hr');
   const _isMgmtLead = team&&((team.role_keys||[]).some(r=>r==='management')||isLeadOnlyRoles(team.role_keys));
+  const _isOverhead = team&&(team.role_keys||[]).some(r=>['management','projektleiter','teamlead','qm','trainer'].includes(r));   // Besprechungen: Management+Overhead
   const navSections = [
     {sec:'Übersicht', items:[
       ...(!hasDailyTasks(team) ? [{key:'start',label:'Start',icon:'👋'}] : []),   // Startseite entfällt, wenn der Zugang Tagesaufgaben hat (überflüssig)
       {key:'daily_tasks',label:'Tagesaufgaben',icon:'✅'},
       {key:'calendar',label:'Kalender',icon:'📆'},
+      ...(_isOverhead ? [{key:'meetingnotes',label:'Besprechungen',icon:'📝'}] : []),   // Management+Overhead
       {key:'cockpit',label:'Cockpit',icon:'⊞'},
     ]},
     {sec:'Werkzeuge', items:[   // täglich gebrauchte Werkzeuge
@@ -40498,6 +40666,7 @@ function App(){
       'shiftplan':'<path fill-rule="evenodd" d="M6.75 2.25A.75.75 0 0 1 7.5 3v1.5h9V3a.75.75 0 0 1 1.5 0v1.5h.75a3 3 0 0 1 3 3v11.25a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3V7.5a3 3 0 0 1 3-3H6V3a.75.75 0 0 1 .75-.75Zm13.5 9a1.5 1.5 0 0 0-1.5-1.5H5.25a1.5 1.5 0 0 0-1.5 1.5v7.5a1.5 1.5 0 0 0 1.5 1.5h13.5a1.5 1.5 0 0 0 1.5-1.5v-7.5Z" clip-rule="evenodd"/><path d="M8 14.25a.75.75 0 0 1 .75-.75h6.5a.75.75 0 0 1 0 1.5h-6.5a.75.75 0 0 1-.75-.75Z"/>',
       'checkin':'<path fill-rule="evenodd" d="M2.25 12c0-5.385 4.365-9.75 9.75-9.75s9.75 4.365 9.75 9.75-4.365 9.75-9.75 9.75S2.25 17.385 2.25 12Zm13.36-1.814a.75.75 0 1 0-1.22-.872l-3.236 4.53L9.53 12.22a.75.75 0 0 0-1.06 1.06l2.25 2.25a.75.75 0 0 0 1.14-.094l3.75-5.25Z" clip-rule="evenodd"/>',
       'calendar':'<path fill-rule="evenodd" d="M6.75 2.25A.75.75 0 0 1 7.5 3v1.5h9V3a.75.75 0 0 1 1.5 0v1.5h.75a3 3 0 0 1 3 3v11.25a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3V7.5a3 3 0 0 1 3-3H6V3a.75.75 0 0 1 .75-.75Zm13.5 9a1.5 1.5 0 0 0-1.5-1.5H5.25a1.5 1.5 0 0 0-1.5 1.5v7.5a1.5 1.5 0 0 0 1.5 1.5h13.5a1.5 1.5 0 0 0 1.5-1.5v-7.5Z" clip-rule="evenodd"/>',
+      'meetingnotes':'<path fill-rule="evenodd" d="M4.848 2.771A49.144 49.144 0 0 1 12 2.25c2.43 0 4.817.178 7.152.52 1.978.292 3.348 2.024 3.348 3.97v6.02c0 1.946-1.37 3.678-3.348 3.97a48.901 48.901 0 0 1-3.476.383.39.39 0 0 0-.297.17l-2.755 4.133a.75.75 0 0 1-1.248 0l-2.755-4.133a.39.39 0 0 0-.297-.17 48.9 48.9 0 0 1-3.476-.384c-1.978-.29-3.348-2.024-3.348-3.97V6.741c0-1.946 1.37-3.68 3.348-3.97Z" clip-rule="evenodd"/>',
       'workforce':'<path d="M12.75 12.75a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM7.5 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM8.25 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM9.75 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM10.5 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM12 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM12.75 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM14.25 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM15 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM16.5 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM15 12.75a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM16.5 13.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Z"/> <path fill-rule="evenodd" d="M6.75 2.25A.75.75 0 0 1 7.5 3v1.5h9V3A.75.75 0 0 1 18 3v1.5h.75a3 3 0 0 1 3 3v11.25a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3V7.5a3 3 0 0 1 3-3H6V3a.75.75 0 0 1 .75-.75Zm13.5 9a1.5 1.5 0 0 0-1.5-1.5H5.25a1.5 1.5 0 0 0-1.5 1.5v7.5a1.5 1.5 0 0 0 1.5 1.5h13.5a1.5 1.5 0 0 0 1.5-1.5v-7.5Z" clip-rule="evenodd"/>',
       'employees':'<path d="M4.5 6.375a4.125 4.125 0 1 1 8.25 0 4.125 4.125 0 0 1-8.25 0ZM14.25 8.625a3.375 3.375 0 1 1 6.75 0 3.375 3.375 0 0 1-6.75 0ZM1.5 19.125a7.125 7.125 0 0 1 14.25 0v.003l-.001.119a.75.75 0 0 1-.363.63 13.067 13.067 0 0 1-6.761 1.873c-2.472 0-4.786-.684-6.76-1.873a.75.75 0 0 1-.364-.63l-.001-.122ZM17.25 19.128l-.001.144a2.25 2.25 0 0 1-.233.96 10.088 10.088 0 0 0 5.06-1.01.75.75 0 0 0 .42-.643 4.875 4.875 0 0 0-6.957-4.611 8.586 8.586 0 0 1 1.71 5.157v.003Z"/>',
       'feedback':'<path fill-rule="evenodd" d="M4.848 2.771A49.144 49.144 0 0 1 12 2.25c2.43 0 4.817.178 7.152.52 1.978.292 3.348 2.024 3.348 3.97v6.02c0 1.946-1.37 3.678-3.348 3.97a48.9 48.9 0 0 1-3.476.383.39.39 0 0 0-.297.17l-2.755 4.133a.75.75 0 0 1-1.248 0l-2.755-4.133a.39.39 0 0 0-.297-.17 48.9 48.9 0 0 1-3.476-.384c-1.978-.29-3.348-2.024-3.348-3.97V6.741c0-1.946 1.37-3.68 3.348-3.97Z" clip-rule="evenodd"/>',
@@ -40725,6 +40894,7 @@ function App(){
           {view==='start'&&<WelcomePage firstName={firstName}/>}
           {view==='daily_tasks'&&<DailyTasksView employees={employees} projects={projects} plans={plans} team={team} onNavigate={dqNavigate} isMobileW={isMobileW} catalog={taskCatalog}/>}
           {view==='calendar'&&<CalendarView team={team} projects={projects} employees={employees} showToast={showToast} isMobileW={isMobileW} jumpTo={calNav} onJumpConsumed={()=>setCalNav(null)}/>}
+          {view==='meetingnotes'&&<MeetingNotesView team={team} projects={projects} employees={employees} showToast={showToast} isMobileW={isMobileW}/>}
           {view==='cockpit'&&<Cockpit employees={employees} projects={projects} team={team} plans={plans} forecast={forecast} onAbsence={e=>setAbsenceModal(e)} onNavigate={dqNavigate} isMobileW={isMobileW} setEmployees={setEmployees} showToast={showToast}/>}
           {view==='datacheck'&&<DataQualityPanel employees={employees} projects={projects} plans={plans} onNavigate={dqNavigate}/>}
           {view==='wissen_system'&&<SystemManualView hasAccess={hasAccess} team={team} onNavigate={dqNavigate}/>}
