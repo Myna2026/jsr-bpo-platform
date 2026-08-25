@@ -37584,6 +37584,8 @@ function metaLeadToPayload(lead){
   const cleaned=metaCleanPhone(rawPhone); const pc=cleaned?phoneClassify(cleaned):{cat:'missing'};
   const phone=(pc.cat==='ok'||pc.cat==='e164')?pc.target:null;
   const nm=metaSplitName(metaField(lead,'vor-_und_nachname','full_name'));
+  const emailRaw=metaField(lead,'email','e_mail','__email__','e-mail-adresse','e_mail_adresse');
+  const email=(()=>{ const s=(emailRaw==null?'':String(emailRaw)).trim(); return (s&&s.indexOf('@')>0&&s.length<=254)?s:null; })();
   const german=metaField(lead,'__sprichst_du_deutsch__','german'); const lvl=metaLevel(german);
   const created=metaField(lead,'created_time'); const cvDate=(created?String(created).slice(0,10):isoLocal(new Date()));
   const availRaw=metaField(lead,'__wann_kannst_du_anfangen__','available'); const av=metaAvailable(availRaw, cvDate);
@@ -37604,7 +37606,7 @@ function metaLeadToPayload(lead){
   if(trim(formId))    extra.form_id=trim(formId);
   if(leadId)          extra.lead_id=leadId;
   if(!phone && trim(rawPhone)) extra.phone_raw=trim(rawPhone);
-  const payload={ first_name:trim(nm.first_name), last_name:trim(nm.last_name), email:null,
+  const payload={ first_name:trim(nm.first_name), last_name:trim(nm.last_name), email:email,
     phone:phone||null, city:null, project_id:null, target_role:'Agent', status:'cv_inbound',
     cv_date:cvDate, source:'meta', language_level:(lvl||null), available_from:av||null,
     work_history:null, notes:null, audios:[], videos:[], test_scores:{}, test_answers:{}, extra };
@@ -37697,6 +37699,10 @@ function MeetingNotesView({team, projects, employees, showToast, isMobileW}){
   const [selId,setSelId]=useState(null);
   const [items,setItems]=useState([]);
   const [newItem,setNewItem]=useState('');
+  const [comments,setComments]=useState([]);
+  const [newComment,setNewComment]=useState('');
+  const [commentAnchor,setCommentAnchor]=useState(null);   // item_id, an das der neue Kommentar hängt
+  const [authUid,setAuthUid]=useState(null);
   const [err,setErr]=useState('');
   const saveTimers=React.useRef({});
   const sel=(meetings||[]).find(m=>m.id===selId)||null;
@@ -37714,6 +37720,30 @@ function MeetingNotesView({team, projects, employees, showToast, isMobileW}){
     const {data}=await sb.from('meeting_note_items').select('*').eq('note_id',selId).order('seq',{ascending:true}).order('created_at',{ascending:true});
     if(a) setItems(data||[]);
   })(); return ()=>{a=false;}; },[selId]);
+  // Wer bin ich (auth.uid) — fuer created_by beim Kommentieren (RLS verlangt created_by = auth.uid()).
+  useEffect(()=>{ let a=true; sb.auth.getUser().then(({data})=>{ if(a&&data&&data.user) setAuthUid(data.user.id); }); return ()=>{a=false;}; },[]);
+  // Kommentare der gewaehlten Besprechung + Realtime (Overhead schreibt, Schreiber sieht/erledigt).
+  useEffect(()=>{ setCommentAnchor(null);
+    if(!selId){ setComments([]); return; }
+    let a=true;
+    const load=async()=>{ const {data}=await sb.from('meeting_note_comments').select('*').eq('note_id',selId).order('created_at',{ascending:true}); if(a) setComments(data||[]); };
+    load();
+    const ch=sb.channel('mn-comments-'+selId).on('postgres_changes',{event:'*',schema:'public',table:'meeting_note_comments',filter:'note_id=eq.'+selId},load).subscribe();
+    return ()=>{ a=false; try{ sb.removeChannel(ch); }catch(e){} };
+  },[selId]);
+  async function addComment(){ const body=newComment.trim(); if(!body||!sel) return;
+    if(!authUid){ showToast&&showToast('Nicht angemeldet erkannt, bitte neu laden','error'); return; }
+    const row={note_id:sel.id, item_id:commentAnchor||null, project_id:selProjId, body, author_name:myName, created_by:authUid};
+    const {error}=await sb.from('meeting_note_comments').insert(row);
+    if(error){ showToast&&showToast('Kommentar nicht möglich: '+error.message,'error'); return; }
+    setNewComment(''); setCommentAnchor(null);
+    const {data}=await sb.from('meeting_note_comments').select('*').eq('note_id',sel.id).order('created_at',{ascending:true}); setComments(data||[]);
+  }
+  async function markCommentRead(c){ if(!canWrite) return; const now=new Date().toISOString();
+    setComments(cs=>cs.map(x=>x.id===c.id?{...x,read_at:now,read_by:myName}:x));
+    await sb.from('meeting_note_comments').update({read_at:now, read_by:myName}).eq('id',c.id); }
+  async function delComment(c){ if(!canWrite) return; if(!(await uiConfirm({title:'Kommentar löschen?', confirmLabel:'Löschen', danger:true}))) return;
+    setComments(cs=>cs.filter(x=>x.id!==c.id)); await sb.from('meeting_note_comments').delete().eq('id',c.id); }
 
   async function createMeeting(){
     const row={project_id:selProjId, skill:null, meeting_date:isoLocal(new Date()), title:'', body:'', created_by_name:myName};
@@ -37825,6 +37855,8 @@ function MeetingNotesView({team, projects, employees, showToast, isMobileW}){
                 {MN_IMP_ORDER.map(k=>{ const active=it.importance===k; return <button key={k} disabled={!canWrite} title={MN_IMP[k].label} onClick={()=>patchItem(it.id,{importance:k})}
                   style={{width:18,height:18,borderRadius:'50%',cursor:canWrite?'pointer':'default',border:active?'2px solid '+MN_IMP[k].fg:'1px solid var(--border)',background:active?MN_IMP[k].dot:'transparent',padding:0}}/>; })}
               </div>
+              {(()=>{ const n=comments.filter(c=>c.item_id===it.id).length; return <button onClick={()=>setCommentAnchor(it.id)} title="Zu diesem Punkt kommentieren"
+                style={{border:'none',background:'transparent',cursor:'pointer',fontSize:12.5,color:n>0?'#0F5661':'var(--muted)',fontWeight:n>0?700:400,flexShrink:0,whiteSpace:'nowrap'}}>💬{n>0?' '+n:''}</button>; })()}
               {canWrite&&<button onClick={()=>delItem(it.id)} title="Punkt löschen" style={{border:'none',background:'transparent',color:'var(--muted)',cursor:'pointer',fontSize:15,lineHeight:1,flexShrink:0}}>×</button>}
             </div>; })}
           </div>
@@ -37833,6 +37865,35 @@ function MeetingNotesView({team, projects, employees, showToast, isMobileW}){
               style={{flex:1,boxSizing:'border-box',padding:'8px 11px',border:'1px solid var(--border)',borderRadius:8,fontSize:13}}/>
             <button className="btn btn-sm" disabled={!newItem.trim()} onClick={addItem}>Hinzufügen</button>
           </div>}
+
+          {/* Kommentare vom Team (Overhead schreibt, Schreiber sieht/erledigt) */}
+          {(()=>{ const unread=comments.filter(c=>!c.read_at).length; const linkBtn={border:'none',background:'transparent',cursor:'pointer',fontSize:11.5,fontWeight:700,padding:0,textDecoration:'underline'};
+            return <div style={{borderTop:'1px solid var(--border)',marginTop:18,paddingTop:14}}>
+            <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',marginBottom:8}}>💬 Kommentare vom Team{unread>0&&canWrite?' · '+unread+' neu':''}</div>
+            <div style={{display:'flex',flexDirection:'column',gap:8}}>
+              {comments.length===0&&<div style={{fontSize:12.5,color:'var(--muted)'}}>Noch keine Kommentare.</div>}
+              {comments.map(c=>{ const anchored=c.item_id&&items.find(i=>i.id===c.item_id); const isUnread=!c.read_at;
+                return <div key={c.id} style={{padding:'9px 11px',borderRadius:10,border:'1px solid var(--border)',background:(isUnread&&canWrite)?'#fffdf5':'var(--card)'}}>
+                  <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:3,flexWrap:'wrap'}}>
+                    <span style={{fontSize:12.5,fontWeight:700}}>{c.author_name||'—'}</span>
+                    <span style={{fontSize:11,color:'var(--dim)'}}>{new Date(c.created_at).toLocaleString('de-DE',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</span>
+                    {anchored&&<span style={{fontSize:10,fontWeight:700,padding:'1px 7px',borderRadius:20,background:'var(--surface-2)',color:'var(--muted)'}}>zu: {String(anchored.text).slice(0,40)}</span>}
+                    {c.read_at&&<span style={{fontSize:10,color:'var(--green)',fontWeight:700}}>✓ gelesen{c.read_by?' ('+c.read_by+')':''}</span>}
+                  </div>
+                  <div style={{fontSize:13,whiteSpace:'pre-wrap'}}>{c.body}</div>
+                  {canWrite&&<div style={{display:'flex',gap:12,marginTop:5}}>
+                    {isUnread&&<button onClick={()=>markCommentRead(c)} style={{...linkBtn,color:'var(--muted)'}}>als gelesen markieren</button>}
+                    <button onClick={()=>delComment(c)} style={{...linkBtn,color:'#b91c1c'}}>löschen</button>
+                  </div>}
+                </div>; })}
+            </div>
+            {commentAnchor&&(()=>{ const it=items.find(i=>i.id===commentAnchor); return it?<div style={{display:'inline-flex',alignItems:'center',gap:6,fontSize:11,marginTop:10,padding:'2px 8px',borderRadius:20,background:'var(--surface-2)',color:'var(--muted)'}}>zu Punkt: {String(it.text).slice(0,40)}<button onClick={()=>setCommentAnchor(null)} style={{border:'none',background:'transparent',cursor:'pointer',color:'var(--muted)',fontSize:13}}>×</button></div>:null; })()}
+            <div style={{display:'flex',gap:8,marginTop:10}}>
+              <input value={newComment} placeholder="Kommentar schreiben…" onChange={e=>setNewComment(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter'){ e.preventDefault(); addComment(); } }}
+                style={{flex:1,boxSizing:'border-box',padding:'8px 11px',border:'1px solid var(--border)',borderRadius:8,fontSize:13}}/>
+              <button className="btn btn-sm" disabled={!newComment.trim()} onClick={addComment}>Senden</button>
+            </div>
+          </div>; })()}
         </div>}
       </div>
     </div>
