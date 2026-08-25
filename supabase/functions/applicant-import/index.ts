@@ -71,6 +71,8 @@ function metaLeadToPayload(lead: any) {
   const cleaned = metaCleanPhone(rawPhone); const pc = cleaned ? phoneClassify(cleaned) : { cat: "missing" };
   const phone = (pc.cat === "ok" || pc.cat === "e164") ? pc.target : null;
   const nm = metaSplitName(metaField(lead, "vor-_und_nachname", "full_name"));
+  const emailRaw = metaField(lead, "email", "e_mail", "__email__", "e-mail-adresse", "e_mail_adresse");
+  const email = (() => { const s = String(emailRaw == null ? "" : emailRaw).trim(); return (s && s.indexOf("@") > 0 && s.length <= 254) ? s : null; })();
   const german = metaField(lead, "__sprichst_du_deutsch__", "german"); const lvl = metaLevel(german);
   const created = metaField(lead, "created_time"); const cvDate = created ? String(created).slice(0, 10) : isoUTC(new Date());
   const availRaw = metaField(lead, "__wann_kannst_du_anfangen__", "available"); const av = metaAvailable(availRaw, cvDate);
@@ -92,7 +94,7 @@ function metaLeadToPayload(lead: any) {
   if (leadId) extra.lead_id = leadId;
   if (!phone && trim(rawPhone)) extra.phone_raw = trim(rawPhone);
   const payload = {
-    first_name: trim(nm.first_name), last_name: trim(nm.last_name), email: null,
+    first_name: trim(nm.first_name), last_name: trim(nm.last_name), email: email,
     phone: phone || null, city: null, project_id: null, target_role: "Agent", status: "cv_inbound",
     cv_date: cvDate, source: "meta", language_level: (lvl || null), available_from: av || null,
     work_history: null, notes: null, audios: [], videos: [], test_scores: {}, test_answers: {}, extra,
