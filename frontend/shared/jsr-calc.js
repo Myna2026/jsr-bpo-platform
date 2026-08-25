@@ -80,8 +80,12 @@
    * + Anträge, andere Tagezählung). Reine Funktionen, keine DB. */
 
   /* Werktage (Mo–Fr) einer Abwesenheit im Fenster [lo,hi] (inkl., 'YYYY-MM-DD').
-   * Einzeltag (from===to) nutzt a.days (halbe Tage); Zeitraum zählt je Werktag 1. */
-  function vacDaysInRange(a, lo, hi) {
+   * Einzeltag (from===to) nutzt a.days (halbe Tage); Zeitraum zählt je Werktag 1.
+   * holSet (optional): Set aus 'YYYY-MM-DD'-Feiertagen des Standorts. Ein Feiertag, der
+   * auf Mo–Fr fällt, ist KEIN Urlaubstag und wird nicht mitgezählt (sonst zieht ein Urlaub
+   * über einen Feiertag fälschlich einen Urlaubstag zu viel ab). Ohne holSet = altes Verhalten. */
+  function isHol(holSet, ds) { return !!(holSet && typeof holSet.has === 'function' && holSet.has(ds)); }
+  function vacDaysInRange(a, lo, hi, holSet) {
     if (!a) return 0;
     var from = a.from; if (from == null || from === '') return 0;
     var f0 = String(from).slice(0, 10);
@@ -90,26 +94,34 @@
     if (f0 === t0) {
       if (f0 < lo || f0 > hi) return 0;
       var d1 = new Date(f0 + 'T12:00:00'), w1 = d1.getDay();
+      if (isHol(holSet, f0)) return 0;                       // Feiertag ist kein Urlaubstag
       return (w1 > 0 && w1 < 6) ? num(a.days, 1) : 0;
     }
     var start = f0 < lo ? lo : f0, end = t0 > hi ? hi : t0;
     if (start > end) return 0;
     var c = 0, d = new Date(start + 'T12:00:00'), e = new Date(end + 'T12:00:00');
-    while (d <= e) { var w = d.getDay(); if (w > 0 && w < 6) c++; d.setDate(d.getDate() + 1); }
+    while (d <= e) {
+      var w = d.getDay();
+      if (w > 0 && w < 6) {
+        var ds = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+        if (!isHol(holSet, ds)) c++;
+      }
+      d.setDate(d.getDate() + 1);
+    }
     return c;
   }
   /* Werktage einer Abwesenheit im Kalenderjahr — deckt Einzeltag UND Zeitraum ab.
-   * (hr.absDaysInYear delegiert hierher, damit es EINE Zählung gibt.) */
-  function absDaysInYear(a, year) {
+   * (hr.absDaysInYear delegiert hierher, damit es EINE Zählung gibt.) holSet optional. */
+  function absDaysInYear(a, year, holSet) {
     var y = String(year);
-    return vacDaysInRange(a, y + '-01-01', y + '-12-31');
+    return vacDaysInRange(a, y + '-01-01', y + '-12-31', holSet);
   }
-  /* Verbrauch = genehmigter Urlaub (type 'vacation') im Jahr, werktaggenau.
+  /* Verbrauch = genehmigter Urlaub (type 'vacation') im Jahr, werktaggenau, feiertagsbereinigt.
    * Zählt genommen UND genehmigt geplant (Datum entscheidet die Jahreszuordnung,
-   * nicht der Eintragungszeitpunkt). absences = employee.absences[]. */
-  function vacationConsumed(absences, year) {
+   * nicht der Eintragungszeitpunkt). absences = employee.absences[]. holSet optional. */
+  function vacationConsumed(absences, year, holSet) {
     var y = String(year), sum = 0;
-    (absences || []).forEach(function (a) { if (a && a.type === 'vacation') sum += vacDaysInRange(a, y + '-01-01', y + '-12-31'); });
+    (absences || []).forEach(function (a) { if (a && a.type === 'vacation') sum += vacDaysInRange(a, y + '-01-01', y + '-12-31', holSet); });
     return Math.round(sum * 2) / 2;
   }
   /* Verfallsdatum des Resturlaubs (Topf A): MA-Override (volles Datum) sonst
@@ -127,9 +139,10 @@
     opts = opts || {};
     var year = opts.year, quota = num(opts.quota, 0), carryIn = num(opts.carryIn, 0);
     var expiry = opts.expiry, today = opts.today, abs = opts.absences || [];
+    var holSet = opts.holidays || null;   // Set aus 'YYYY-MM-DD' (Standort-Feiertage); optional
     var yStart = String(year) + '-01-01', yEnd = String(year) + '-12-31';
     var r = function (x) { return Math.round(x * 2) / 2; };
-    var sumRange = function (lo, hi) { var s = 0; abs.forEach(function (a) { if (a && a.type === 'vacation') s += vacDaysInRange(a, lo, hi); }); return s; };
+    var sumRange = function (lo, hi) { var s = 0; abs.forEach(function (a) { if (a && a.type === 'vacation') s += vacDaysInRange(a, lo, hi, holSet); }); return s; };
     var consumed = r(sumRange(yStart, yEnd));
     var byExpiry = r(sumRange(yStart, expiry));           // Urlaub mit Datum ≤ Verfall (zieht Topf A)
     var afterExpiry = r(consumed - byExpiry);
@@ -161,9 +174,19 @@
     } catch (e) {}
     return [];
   }
+  /* STANDORTBEZOGENES Feiertags-Set als 'YYYY-MM-DD'. Wählt die Gruppe, deren Schlüssel im
+   * Standortnamen vorkommt (z. B. 'Tirana'), sonst die erste Gruppe. Gleiche Logik wie hr.html
+   * holidayDatesForLocation, damit beide Portale identisch rechnen. */
+  function holidaySet(cfg, location) {
+    if (!cfg || typeof cfg !== 'object') return new Set();
+    var keys = Object.keys(cfg); if (!keys.length) return new Set();
+    var l = String(location || '').toLowerCase();
+    var key = keys.find(function (k) { return l.indexOf(String(k).toLowerCase()) >= 0; }) || keys[0];
+    return new Set((cfg[key] || []).map(function (h) { return h && h.date; }).filter(Boolean));
+  }
 
   global.JSRCalc = {
-    vacationQuota: vacationQuota, holidayDates: holidayDates,
+    vacationQuota: vacationQuota, holidayDates: holidayDates, holidaySet: holidaySet,
     vacDaysInRange: vacDaysInRange, absDaysInYear: absDaysInYear,
     vacationConsumed: vacationConsumed, carryExpiryDate: carryExpiryDate, vacationAccount: vacationAccount
   };
