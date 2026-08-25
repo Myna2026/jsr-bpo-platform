@@ -37685,6 +37685,21 @@ const MN_IMP={green:{fg:'#15803d',bg:'#f0fdf4',bd:'#bbf7d0',dot:'#22c55e',label:
 const MN_IMP_ORDER=['green','amber','red'];
 function mnWeek(dateStr){ const d=new Date((dateStr||isoLocal(new Date()))+'T12:00:00'); const t=new Date(d); t.setDate(t.getDate()+3-((d.getDay()+6)%7)); const w1=new Date(t.getFullYear(),0,4); const kw=1+Math.round(((t-w1)/86400000-3+((w1.getDay()+6)%7))/7); return {year:t.getFullYear(), kw}; }
 function mnFmtDate(ds){ if(!ds) return ''; const d=new Date(ds+'T12:00:00'); return d.toLocaleDateString('de-DE',{weekday:'short',day:'2-digit',month:'2-digit',year:'numeric'}); }
+function mnImpRank(k){ return ({red:3,amber:2,green:1})[k]||0; }
+function mnDigestList(label, arr){ if(!Array.isArray(arr)||!arr.length) return null;
+  return <div style={{marginBottom:8}}>
+    <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',marginBottom:3}}>{label}</div>
+    <ul style={{margin:0,paddingLeft:18,fontSize:12.5,lineHeight:1.5}}>{arr.map((x,i)=><li key={i}>{x}</li>)}</ul>
+  </div>;
+}
+function mnArchiveItems(arr){ if(!arr||!arr.length) return null;
+  return <div style={{display:'flex',flexDirection:'column',gap:5}}>
+    {arr.map(it=>{ const im=MN_IMP[it.importance]||MN_IMP.green; return <div key={it.id} style={{display:'flex',alignItems:'center',gap:7,fontSize:12.5,opacity:it.done?0.55:1}}>
+      <span style={{width:9,height:9,borderRadius:'50%',background:im.dot,flexShrink:0}}/>
+      <span style={{textDecoration:it.done?'line-through':'none'}}>{it.text}</span>
+    </div>; })}
+  </div>;
+}
 function MeetingNotesView({team, projects, employees, showToast, isMobileW}){
   const roles=(team&&team.role_keys)||[];
   const isMgmt=roles.includes('management'), isLead=roles.includes('projektleiter');
@@ -37704,6 +37719,14 @@ function MeetingNotesView({team, projects, employees, showToast, isMobileW}){
   const [commentAnchor,setCommentAnchor]=useState(null);   // item_id, an das der neue Kommentar hängt
   const [authUid,setAuthUid]=useState(null);
   const [err,setErr]=useState('');
+  const [mode,setMode]=useState('edit');          // edit | summary | archive
+  const [allItems,setAllItems]=useState([]);       // alle Punkte des Projekts (Archiv/Zusammenfassung)
+  const [aiBusy,setAiBusy]=useState('');           // '' | polish | analyze | digest
+  const [analysis,setAnalysis]=useState(null);     // Einzel-Analyse (Bearbeiten)
+  const [digest,setDigest]=useState(null);         // Zeitraum-Zusammenfassung
+  const [rangeKind,setRangeKind]=useState('week'); // week | month | free
+  const [rangeFrom,setRangeFrom]=useState(''); const [rangeTo,setRangeTo]=useState('');
+  const [archOpen,setArchOpen]=useState({});       // KW-Schluessel -> aufgeklappt
   const saveTimers=React.useRef({});
   const sel=(meetings||[]).find(m=>m.id===selId)||null;
 
@@ -37715,7 +37738,7 @@ function MeetingNotesView({team, projects, employees, showToast, isMobileW}){
     setSelId(prev=> (keepSel&&rows.some(m=>m.id===prev))?prev : (rows[0]?rows[0].id:null));
   }
   useEffect(()=>{ if(selProjId) loadMeetings(selProjId); },[selProjId]);
-  useEffect(()=>{ let a=true; (async()=>{
+  useEffect(()=>{ let a=true; setAnalysis(null); (async()=>{
     if(!selId){ setItems([]); return; }
     const {data}=await sb.from('meeting_note_items').select('*').eq('note_id',selId).order('seq',{ascending:true}).order('created_at',{ascending:true});
     if(a) setItems(data||[]);
@@ -37744,6 +37767,34 @@ function MeetingNotesView({team, projects, employees, showToast, isMobileW}){
     await sb.from('meeting_note_comments').update({read_at:now, read_by:myName}).eq('id',c.id); }
   async function delComment(c){ if(!canWrite) return; if(!(await uiConfirm({title:'Kommentar löschen?', confirmLabel:'Löschen', danger:true}))) return;
     setComments(cs=>cs.filter(x=>x.id!==c.id)); await sb.from('meeting_note_comments').delete().eq('id',c.id); }
+
+  // Alle Punkte des Projekts (fuer Archiv + Zeitraum-Zusammenfassung) — bei Projektwechsel und beim Wechsel
+  // in Zusammenfassung/Archiv frisch laden.
+  useEffect(()=>{ let a=true; (async()=>{ if(!selProjId){ setAllItems([]); return; }
+    const {data}=await sb.from('meeting_note_items').select('*').eq('project_id',selProjId);
+    if(a) setAllItems(data||[]); })(); return ()=>{a=false;}; },[selProjId, mode]);
+
+  async function mnAI(payload){ let tok=null; try{ const s=await sb.auth.getSession(); tok=s&&s.data&&s.data.session&&s.data.session.access_token; }catch(e){}
+    const r=await fetch(SB_URL+'/functions/v1/meeting-notes-ai',{method:'POST',headers:{'Authorization':'Bearer '+tok,'apikey':SB_KEY,'content-type':'application/json'},body:JSON.stringify(payload)});
+    const j=await r.json().catch(()=>({})); if(!r.ok||j.error) throw new Error(j.error||('HTTP '+r.status)); return j; }
+  async function polishBody(){ if(!sel||!(sel.body||'').trim()||aiBusy) return; setAiBusy('polish');
+    try{ const j=await mnAI({mode:'polish', text:sel.body}); if(j.text){ patchMeeting(sel.id,{body:j.text}); showToast&&showToast('Text gesäubert'); } }
+    catch(e){ showToast&&showToast('KI: '+(e.message||''),'error'); } setAiBusy(''); }
+  async function analyzeMeeting(){ if(!sel||aiBusy) return; setAiBusy('analyze'); setAnalysis(null);
+    try{ const j=await mnAI({mode:'digest', meetings:[{date:sel.meeting_date,title:sel.title,skill:sel.skill?skillLabel(sel.skill):null,body:sel.body,items:items.map(i=>({text:i.text,importance:i.importance,done:i.done}))}]}); setAnalysis(j); }
+    catch(e){ showToast&&showToast('KI: '+(e.message||''),'error'); } setAiBusy(''); }
+  function mnRangeBounds(){ const today=new Date();
+    if(rangeKind==='week'){ const mon=new Date(today); mon.setDate(today.getDate()-((today.getDay()+6)%7)); const sun=new Date(mon); sun.setDate(mon.getDate()+6); return {from:isoLocal(mon), to:isoLocal(sun)}; }
+    if(rangeKind==='month'){ return {from:isoLocal(new Date(today.getFullYear(),today.getMonth(),1)), to:isoLocal(new Date(today.getFullYear(),today.getMonth()+1,0))}; }
+    return {from:rangeFrom, to:rangeTo}; }
+  function mnRangeMeetings(){ const b=mnRangeBounds(); if(!b.from||!b.to) return []; return (meetings||[]).filter(m=>m.meeting_date>=b.from&&m.meeting_date<=b.to); }
+  async function runDigest(){ if(aiBusy) return; const ms=mnRangeMeetings(); setDigest(null);
+    if(!ms.length){ setDigest({empty:true}); return; }
+    setAiBusy('digest');
+    try{ const byNote={}; (allItems||[]).forEach(i=>{ (byNote[i.note_id]=byNote[i.note_id]||[]).push(i); });
+      const payload=ms.map(m=>({date:m.meeting_date,title:m.title,skill:m.skill?skillLabel(m.skill):null,body:m.body,items:(byNote[m.id]||[]).map(i=>({text:i.text,importance:i.importance,done:i.done}))}));
+      const j=await mnAI({mode:'digest', meetings:payload}); setDigest(j); }
+    catch(e){ showToast&&showToast('KI: '+(e.message||''),'error'); setDigest(null); } setAiBusy(''); }
 
   async function createMeeting(){
     const row={project_id:selProjId, skill:null, meeting_date:isoLocal(new Date()), title:'', body:'', created_by_name:myName};
@@ -37799,9 +37850,14 @@ function MeetingNotesView({team, projects, employees, showToast, isMobileW}){
       {activeProjects.map(p=>{ const on=p.id===selProjId; return <button key={p.id} onClick={()=>setSelProjId(p.id)} className="btn btn-sm"
         style={{fontWeight:700,background:on?'var(--blue-bg)':'transparent',color:on?'#0F5661':'var(--text)',border:'1.5px solid '+(on?'#0F5661':'var(--border)')}}>{p.name}</button>; })}
     </div>
+    {/* Modus */}
+    <div style={{display:'flex',gap:6,marginBottom:14,borderBottom:'1px solid var(--border)'}}>
+      {[['edit','Bearbeiten'],['summary','Zusammenfassung'],['archive','Archiv']].map(([k,l])=>{ const on=mode===k; return <button key={k} onClick={()=>setMode(k)}
+        style={{border:'none',borderBottom:'2px solid '+(on?'#0F5661':'transparent'),background:'transparent',color:on?'#0F5661':'var(--muted)',fontWeight:700,fontSize:13.5,padding:'8px 12px',cursor:'pointer',marginBottom:-1}}>{l}</button>; })}
+    </div>
     {err&&<div style={{background:'#fef2f2',border:'1px solid #fecaca',color:'#b91c1c',borderRadius:8,padding:'8px 10px',fontSize:12.5,marginBottom:12}}>{err}</div>}
 
-    <div style={{display:'flex',gap:16,alignItems:'flex-start',flexDirection:isMobileW?'column':'row'}}>
+    {mode==='edit'&&<div style={{display:'flex',gap:16,alignItems:'flex-start',flexDirection:isMobileW?'column':'row'}}>
       {/* Liste der Besprechungen */}
       <div style={{width:isMobileW?'100%':290,flexShrink:0}}>
         {canWrite&&<button className="btn btn-primary btn-sm" style={{width:'100%',marginBottom:10}} onClick={createMeeting}>＋ Neue Besprechung</button>}
@@ -37832,12 +37888,16 @@ function MeetingNotesView({team, projects, employees, showToast, isMobileW}){
           <input value={sel.title||''} disabled={!canWrite} placeholder="Titel der Besprechung (z. B. Wochenrunde KW 35)" onChange={e=>patchMeeting(sel.id,{title:e.target.value},true)}
             style={{width:'100%',boxSizing:'border-box',padding:'9px 11px',border:'1px solid var(--border)',borderRadius:8,fontSize:15,fontWeight:700,marginBottom:12}}/>
           {/* Body */}
-          <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',marginBottom:6}}>Notizen</div>
+          <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:6}}>
+            <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em'}}>Notizen</div>
+            {canWrite&&(sel.body||'').trim()&&<button className="btn btn-sm" disabled={!!aiBusy} onClick={polishBody}>{aiBusy==='polish'?'…':'✨ Text säubern'}</button>}
+          </div>
           <textarea value={sel.body||''} disabled={!canWrite} placeholder={canWrite?'Was wurde besprochen…':'Keine Notizen'} onChange={e=>patchMeeting(sel.id,{body:e.target.value},true)}
             style={{width:'100%',boxSizing:'border-box',minHeight:150,padding:'10px 12px',border:'1px solid var(--border)',borderRadius:8,fontSize:13.5,lineHeight:1.5,fontFamily:'inherit',resize:'vertical',marginBottom:16}}/>
           {/* Punkte */}
           <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8}}>
             <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em'}}>Punkte{openCount>0?' · '+openCount+' offen':''}</div>
+            {((sel.body||'').trim()||items.length>0)&&<button className="btn btn-sm" disabled={!!aiBusy} onClick={analyzeMeeting}>{aiBusy==='analyze'?'…':'🔍 Analyse'}</button>}
           </div>
           <div style={{display:'flex',flexDirection:'column',gap:8}}>
             {items.length===0&&<div style={{fontSize:12.5,color:'var(--muted)'}}>Noch keine Punkte.</div>}
@@ -37864,6 +37924,17 @@ function MeetingNotesView({team, projects, employees, showToast, isMobileW}){
             <input value={newItem} placeholder="Neuer Punkt…" onChange={e=>setNewItem(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter'){ e.preventDefault(); addItem(); } }}
               style={{flex:1,boxSizing:'border-box',padding:'8px 11px',border:'1px solid var(--border)',borderRadius:8,fontSize:13}}/>
             <button className="btn btn-sm" disabled={!newItem.trim()} onClick={addItem}>Hinzufügen</button>
+          </div>}
+
+          {/* KI-Analyse dieser Besprechung (Schnitt 4) */}
+          {analysis&&<div style={{marginTop:14,padding:'12px 14px',borderRadius:10,border:'1px solid #c7d2fe',background:'#eef2ff'}}>
+            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:6}}>
+              <div style={{fontSize:11,fontWeight:800,color:'#4338ca',textTransform:'uppercase',letterSpacing:'.05em'}}>🔍 KI-Analyse</div>
+              <button onClick={()=>setAnalysis(null)} style={{border:'none',background:'transparent',color:'#4338ca',cursor:'pointer',fontSize:11.5,fontWeight:700,textDecoration:'underline',padding:0}}>schließen</button>
+            </div>
+            {analysis.summary&&<div style={{fontSize:13,lineHeight:1.5,marginBottom:8}}>{analysis.summary}</div>}
+            {mnDigestList('Besprochen', analysis.besprochen)}
+            {mnDigestList('Offen', analysis.offen)}
           </div>}
 
           {/* Kommentare vom Team (Overhead schreibt, Schreiber sieht/erledigt) */}
@@ -37896,7 +37967,80 @@ function MeetingNotesView({team, projects, employees, showToast, isMobileW}){
           </div>; })()}
         </div>}
       </div>
-    </div>
+    </div>}
+
+    {/* Zusammenfassung ueber einen Zeitraum (Schnitt 5) */}
+    {mode==='summary'&&<div className="card" style={{padding:16}}>
+      <div style={{fontSize:15,fontWeight:800,marginBottom:4}}>Zusammenfassung · {selProj?selProj.name:''}</div>
+      <div style={{fontSize:12.5,color:'var(--muted)',marginBottom:12}}>Was in einem Zeitraum besprochen wurde, was offen ist und was sich wiederholt.</div>
+      <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center',marginBottom:12}}>
+        {[['week','Diese Woche'],['month','Dieser Monat'],['free','Frei']].map(([k,l])=>{ const on=rangeKind===k; return <button key={k} onClick={()=>{setRangeKind(k);setDigest(null);}} className="btn btn-sm"
+          style={{fontWeight:700,background:on?'var(--blue-bg)':'transparent',color:on?'#0F5661':'var(--text)',border:'1.5px solid '+(on?'#0F5661':'var(--border)')}}>{l}</button>; })}
+        {rangeKind==='free'&&<React.Fragment>
+          <input type="date" value={rangeFrom} onChange={e=>{setRangeFrom(e.target.value);setDigest(null);}} style={inp}/>
+          <span style={{color:'var(--muted)',fontSize:12}}>bis</span>
+          <input type="date" value={rangeTo} onChange={e=>{setRangeTo(e.target.value);setDigest(null);}} style={inp}/>
+        </React.Fragment>}
+      </div>
+      {(()=>{ const ms=mnRangeMeetings(); const b=mnRangeBounds();
+        const byNote={}; (allItems||[]).forEach(i=>{ (byNote[i.note_id]=byNote[i.note_id]||[]).push(i); });
+        const openItems=ms.flatMap(m=>(byNote[m.id]||[])).filter(i=>!i.done).sort((x,y)=>mnImpRank(y.importance)-mnImpRank(x.importance));
+        return <div>
+          <div style={{fontSize:12.5,color:'var(--muted)',marginBottom:10}}>{(b.from&&b.to)?(mnFmtDate(b.from)+' bis '+mnFmtDate(b.to)+' · '):''}{ms.length} Besprechung(en), {openItems.length} offene Punkte</div>
+          <button className="btn btn-primary btn-sm" disabled={!!aiBusy||!ms.length} onClick={runDigest} style={{marginBottom:14}}>{aiBusy==='digest'?'…KI fasst zusammen':'✨ KI-Zusammenfassung'}</button>
+          {digest&&digest.empty&&<div style={{fontSize:13,color:'var(--muted)'}}>Keine Besprechungen im Zeitraum.</div>}
+          {digest&&!digest.empty&&<div style={{padding:'12px 14px',borderRadius:10,border:'1px solid #c7d2fe',background:'#eef2ff',marginBottom:16}}>
+            {digest.summary&&<div style={{fontSize:13.5,lineHeight:1.55,marginBottom:10}}>{digest.summary}</div>}
+            {mnDigestList('Besprochen', digest.besprochen)}
+            {mnDigestList('Offen', digest.offen)}
+            {mnDigestList('Wiederholt sich', digest.wiederholt)}
+          </div>}
+          {openItems.length>0&&<div>
+            <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',marginBottom:6}}>Offene Punkte im Zeitraum</div>
+            <div style={{display:'flex',flexDirection:'column',gap:6}}>
+              {openItems.map(it=>{ const im=MN_IMP[it.importance]||MN_IMP.green; return <div key={it.id} style={{display:'flex',alignItems:'center',gap:8,padding:'7px 10px',borderRadius:8,border:'1px solid '+im.bd,background:im.bg}}>
+                <span style={{width:10,height:10,borderRadius:'50%',background:im.dot,flexShrink:0}}/>
+                <span style={{fontSize:13}}>{it.text}</span>
+              </div>; })}
+            </div>
+          </div>}
+        </div>; })()}
+    </div>}
+
+    {/* Archiv: nach Wochen gruppiert, „letztes Mal" prominent (Schnitt 6) */}
+    {mode==='archive'&&(()=>{
+      const byNote={}; (allItems||[]).forEach(i=>{ (byNote[i.note_id]=byNote[i.note_id]||[]).push(i); });
+      const ms=(meetings||[]); const last=ms[0]||null;
+      const groups={}; ms.forEach(m=>{ const w=mnWeek(m.meeting_date); const key=w.year+'-'+String(w.kw).padStart(2,'0'); (groups[key]=groups[key]||{kw:w.kw,year:w.year,list:[]}).list.push(m); });
+      const keys=Object.keys(groups).sort().reverse();
+      return <div>
+        {ms.length===0&&<div className="card" style={{padding:24,color:'var(--muted)',fontSize:13,textAlign:'center'}}>Noch keine Besprechungen.</div>}
+        {last&&<div className="card" style={{padding:16,marginBottom:16,borderLeft:'4px solid #0F5661'}}>
+          <div style={{fontSize:11,fontWeight:800,color:'#0F5661',textTransform:'uppercase',letterSpacing:'.05em',marginBottom:4}}>Letztes Mal besprochen</div>
+          <div style={{fontSize:15,fontWeight:700}}>{last.title||'Ohne Titel'}</div>
+          <div style={{fontSize:12,color:'var(--muted)',marginTop:2,marginBottom:8}}>{mnFmtDate(last.meeting_date)}{last.skill?' · '+(skillLabel(last.skill)||last.skill):''}</div>
+          {last.body&&<div style={{fontSize:13,lineHeight:1.5,whiteSpace:'pre-wrap',marginBottom:8}}>{String(last.body).slice(0,400)}{String(last.body).length>400?'…':''}</div>}
+          {mnArchiveItems(byNote[last.id]||[])}
+          <button className="btn btn-sm" style={{marginTop:10}} onClick={()=>{setSelId(last.id);setMode('edit');}}>Öffnen</button>
+        </div>}
+        {keys.map(key=>{ const g=groups[key]; const open=archOpen[key]!==false;
+          return <div key={key} style={{marginBottom:10}}>
+            <button onClick={()=>setArchOpen(o=>({...o,[key]:!open}))} style={{width:'100%',textAlign:'left',border:'none',background:'transparent',cursor:'pointer',padding:'6px 2px',fontSize:13,fontWeight:800,color:'var(--text)',display:'flex',alignItems:'center',gap:8}}>
+              <span style={{fontSize:11,color:'var(--muted)'}}>{open?'▾':'▸'}</span> KW {g.kw} / {g.year} <span style={{fontSize:11,fontWeight:600,color:'var(--muted)'}}>· {g.list.length} Besprechung(en)</span>
+            </button>
+            {open&&<div style={{display:'flex',flexDirection:'column',gap:8,marginTop:4}}>
+              {g.list.map(m=>{ const its=byNote[m.id]||[]; const openN=its.filter(i=>!i.done).length;
+                return <div key={m.id} className="card" style={{padding:'12px 14px',cursor:'pointer'}} onClick={()=>{setSelId(m.id);setMode('edit');}}>
+                  <div style={{display:'flex',justifyContent:'space-between',gap:8,flexWrap:'wrap'}}>
+                    <div style={{fontSize:13.5,fontWeight:700}}>{m.title||'Ohne Titel'}</div>
+                    <div style={{fontSize:11.5,color:'var(--muted)'}}>{mnFmtDate(m.meeting_date)}{m.skill?' · '+(skillLabel(m.skill)||m.skill):''}</div>
+                  </div>
+                  {m.body&&<div style={{fontSize:12.5,color:'var(--muted)',marginTop:4,lineHeight:1.4}}>{String(m.body).slice(0,140)}{String(m.body).length>140?'…':''}</div>}
+                  {its.length>0&&<div style={{fontSize:11.5,color:'var(--muted)',marginTop:6}}>{its.length} Punkte{openN>0?' · '+openN+' offen':' · alle erledigt'}</div>}
+                </div>; })}
+            </div>}
+          </div>; })}
+      </div>; })()}
   </div>;
 }
 
