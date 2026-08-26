@@ -107,5 +107,17 @@ Deno.serve(async (req)=>{
     for(const l of lines){ await sb.from("agent_digests").upsert({ day:date, agent_key:l.key, name:l.name, summary:l.summary, metrics:l.metrics },{onConflict:"day,agent_key"}); }
   }catch(_e){ /* Agenten-Zeilen optional */ }
 
+  // ── Lena: aktuelle Datenpflege-Auffälligkeiten (Snapshot, sie MELDET) ──
+  try{
+    const { data:lf } = await sb.rpc("lena_scan");
+    const n = (lf||[]).length;
+    if(n>0){
+      const byCat:Record<string,number> = {}; (lf||[]).forEach((f:any)=>{ byCat[f.category]=(byCat[f.category]||0)+1; });
+      const NAMES:Record<string,string> = { vertrag_ohne_daten:"Verträge ohne Daten", ausweis_fehlt:"Ausweis fehlt", bank_fehlt:"Bankdaten fehlen", urlaubsantrag_liegt:"liegende Urlaubsanträge", abwesenheit_unplausibel:"unplausible Abwesenheiten", portalzugang_fehlt:"fehlende Portalzugänge" };
+      const top = Object.entries(byCat).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([k,v])=>v+"× "+(NAMES[k]||k)).join(", ");
+      await sb.from("agent_digests").upsert({ day:date, agent_key:"lena", name:"Lena", summary:`Lena meldet ${n} Auffälligkeit${n===1?"":"en"} in der Mitarbeiter-Datenpflege (${top}).`, metrics:byCat }, {onConflict:"day,agent_key"});
+    }
+  }catch(_e){ /* Lena-Zeile optional */ }
+
   return json({ ok:true, date, users:active.length, done, failed });
 });
