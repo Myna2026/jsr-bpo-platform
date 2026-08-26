@@ -36764,6 +36764,7 @@ function AgentDetail({agent, team, onNavigate, onClose}){
   const ag=agent; const acc=ag.accent||'#0F5661'; const da=ag.decision_authority||{};
   const flow=AGENT_FLOW[ag.key]||[]; const tree=AGENT_DATATREE[ag.key]||[];
   const [counts,setCounts]=useState({}); const [activity,setActivity]=useState(undefined);
+  const [obs,setObs]=useState(null); const [chk,setChk]=useState(undefined);   // Beobachtungen + „zuletzt geprüft"
   const isMgmt=((team&&team.role_keys)||[]).some(r=>r==='management'); const g=ag.guardrails||{};
   const [persona,setPersona]=useState(ag.persona||''); const [edit,setEdit]=useState(false); const [saving,setSaving]=useState(false); const [saveErr,setSaveErr]=useState('');
   async function savePersona(){ setSaving(true); setSaveErr(''); try{ const {error}=await sb.from('ai_agents').update({persona}).eq('key',ag.key); if(error) setSaveErr(error.message||'Speichern fehlgeschlagen'); else { ag.persona=persona; setEdit(false); } }catch(e){ setSaveErr((e&&e.message)||'Fehler'); } setSaving(false); }
@@ -36773,7 +36774,10 @@ function AgentDetail({agent, team, onNavigate, onClose}){
   useEffect(()=>{ let a=true;
     (async()=>{ const out={}; await Promise.all(tree.map(async(n,i)=>{ try{ const r=await n.q(); out[i]=(r&&typeof r.count==='number')?r.count:null; }catch(e){ out[i]=null; } })); if(a) setCounts(out); })();
     (async()=>{ try{ const {data}=await sb.from('agent_digests').select('summary,day').eq('agent_key',ag.key).order('day',{ascending:false}).limit(1); if(a) setActivity((data&&data[0]&&data[0].summary)||null); }catch(e){ if(a) setActivity(null); } })();
+    (async()=>{ try{ const {data}=await sb.from('agent_observations').select('*').eq('agent_key',ag.key).is('resolved_at',null).order('day',{ascending:false}).limit(6); if(a) setObs(data||[]); }catch(e){ if(a) setObs([]); } })();
+    (async()=>{ try{ const {data}=await sb.from('agent_checks').select('*').eq('agent_key',ag.key).maybeSingle(); if(a) setChk(data||null); }catch(e){ if(a) setChk(null); } })();
     return ()=>{a=false;}; },[ag.key]);
+  const agoTxt=ts=>{ if(!ts) return ''; const m=Math.floor((Date.now()-new Date(ts).getTime())/60000); if(m<60) return 'vor '+Math.max(1,m)+' Min'; const h=Math.floor(m/60); if(h<24) return 'vor '+h+' Std'; return 'vor '+Math.floor(h/24)+' Tagen'; };
   const fmtN=n=> n===undefined?'…' : n===null?'—' : n.toLocaleString('de-DE');
   return <div className="agc-open" onClick={onClose}>
     <div className="agc-detail" onClick={e=>e.stopPropagation()}>
@@ -36803,6 +36807,19 @@ function AgentDetail({agent, team, onNavigate, onClose}){
       </div>
       {/* Körper */}
       <div style={{padding:'20px 26px 26px'}}>
+        {(((team&&team.role_keys)||[]).some(r=>r==='management'||r==='hr')) && <div style={{marginBottom:22}}>
+          <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10,flexWrap:'wrap'}}>
+            <div style={{...secLbl,margin:0}}>Was mir aufgefallen ist</div>
+            {chk!==undefined&&<span style={{marginLeft:'auto',fontSize:11.5,color:'var(--muted)'}}>{chk&&chk.last_checked_at?('zuletzt geprüft '+agoTxt(chk.last_checked_at)):'noch nicht geprüft'}</span>}
+          </div>
+          {obs===null?<div style={{fontSize:12.5,color:'var(--muted)'}}>Lädt…</div>
+           : obs.length===0
+             ? <div style={{padding:'11px 14px',borderRadius:12,background:'#f0fdf4',border:'1px solid #bbf7d0',fontSize:13,color:'#166534',display:'flex',gap:9,alignItems:'center'}}><span>✓</span><span>Geprüft, nichts Auffälliges{chk&&chk.last_checked_at?' ('+agoTxt(chk.last_checked_at)+')':''}.</span></div>
+             : <div style={{display:'flex',flexDirection:'column',gap:8}}>{obs.map(o=>{ const sv=o.severity==='high'?{c:'#b91c1c',b:'#fef2f2',bd:'#fecaca',l:'wichtig'}:o.severity==='warn'?{c:'#b45309',b:'#fffbeb',bd:'#fde68a',l:'Hinweis'}:{c:acc,b:acc+'0d',bd:acc+'2e',l:'Notiz'};
+                return <div key={o.id} style={{padding:'11px 14px',borderRadius:12,background:sv.b,border:'1px solid '+sv.bd,fontSize:13,lineHeight:1.5,display:'flex',gap:9,alignItems:'baseline'}}>
+                  <span style={{fontSize:9.5,fontWeight:800,textTransform:'uppercase',letterSpacing:'.05em',color:sv.c,flexShrink:0}}>{sv.l}</span><span>{o.title}</span>
+                </div>; })}</div>}
+        </div>}
         <div className="agc-detail-cols">
           {/* Was ich sehe */}
           <div>

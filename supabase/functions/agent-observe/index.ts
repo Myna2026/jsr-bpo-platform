@@ -1,0 +1,148 @@
+// AI-Kollegen, Schnitt 4: ungefragtes Bemerken. Einmal am Tag (Cron) prüft JEDER Kollege sein Gebiet und
+// meldet NUR echte Abweichungen (Vortag/Vorwoche oder gespeicherter Vortags-Stand). Jede Prüfung schreibt
+// agent_checks (zuletzt geprüft) — Schweigen bedeutet dann „geprüft, alles in Ordnung", nicht „war nicht da".
+// Sätze in der Kollegen-Stimme (persona aus Register, Hausregeln wie in usage-digest). Global gerechnet;
+// der nutzerbezogene Filter kommt in Schnitt 5. Deploy: supabase functions deploy agent-observe --no-verify-jwt --use-api
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+
+const cors = { "Access-Control-Allow-Origin":"*", "Access-Control-Allow-Headers":"authorization, x-client-info, apikey, content-type", "Access-Control-Allow-Methods":"POST, OPTIONS" };
+const json = (b:unknown,s=200)=>new Response(JSON.stringify(b),{status:s,headers:{...cors,"Content-Type":"application/json"}});
+
+const MODEL = "claude-sonnet-5";
+const ANTHROPIC_KEY = Deno.env.get("ANTHROPIC_API_KEY") || "";
+const SB_URL = Deno.env.get("SUPABASE_URL")!;
+const SERVICE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+const sb = createClient(SB_URL, SERVICE);
+
+// ── Kollegen-Stimme (identisch zu usage-digest; später ins _shared) ──
+const PERSONAE: Record<string,string> = {};
+async function personaOf(key:string): Promise<string> {
+  if(PERSONAE[key]!==undefined) return PERSONAE[key];
+  const { data } = await sb.from("ai_agents").select("persona").eq("key",key).maybeSingle();
+  PERSONAE[key] = (data&&data.persona) || ""; return PERSONAE[key];
+}
+const TOOL = { name:"satz", description:"Ein Satz.", input_schema:{ type:"object", properties:{ summary:{type:"string"} }, required:["summary"] } };
+const HOUSE = "Hausregeln: Deutsch als Zweitsprache — kurze Sätze, kein Konjunktiv, keine Redewendungen. "+
+  "Keine Emotionen, kein Lob, kein Tadel. Erfinde nichts: nutze NUR die gegebenen Zahlen. "+
+  "Nenne den Vergleich zur Vorperiode, wenn er gegeben ist. Mach die Sicherheit hörbar, wenn gegeben "+
+  "(exakt / Obergrenze / Vermutung). Wenn etwas fehlt, sag klar was fehlt und dass die Zahl dann leer ist, nicht falsch. "+
+  "Wenn ein Thema zu einem anderen Kollegen gehört, verweise kurz auf ihn. Höchstens zwei kurze Sätze. Keine Zusagen. "+
+  "Schreib in der dritten Person mit dem Namen.";
+async function colleagueLine(name:string, persona:string, brief:any): Promise<string> {
+  const facts = (brief.facts||[]).map((f:any)=> `${f.label}: ${f.current}${(f.prior!==undefined&&f.prior!==null)?` (Vorperiode ${f.prior})`:""}`).join("; ");
+  const parts = [`Kollege: ${name}`, `Fakten: ${facts}`];
+  if(brief.confidence) parts.push(`Sicherheit: ${brief.confidence}`);
+  if(brief.missing) parts.push(`Fehlt: ${brief.missing}`);
+  const system = (persona? persona+"\n\n":"") + HOUSE;
+  const r = await fetch("https://api.anthropic.com/v1/messages",{ method:"POST",
+    headers:{ "x-api-key":ANTHROPIC_KEY, "anthropic-version":"2023-06-01", "content-type":"application/json" },
+    body: JSON.stringify({ model:MODEL, max_tokens:200, system, tools:[TOOL], tool_choice:{type:"tool",name:"satz"}, messages:[{role:"user",content:parts.join("\n")}] }) });
+  const d = await r.json();
+  if(!r.ok) throw new Error((d?.error?.message)||("HTTP "+r.status));
+  const tu = (d.content||[]).find((c:any)=>c.type==="tool_use");
+  return (tu && tu.input && tu.input.summary) || "";
+}
+
+// ── Datums-/Wochen-Helfer ──
+function berlinToday(): string { const now=new Date(); const b=new Date(now.toLocaleString("en-US",{timeZone:"Europe/Berlin"})); return b.toISOString().slice(0,10); }
+function addDays(d:string,n:number){ const x=new Date(d+"T00:00:00Z"); x.setUTCDate(x.getUTCDate()+n); return x.toISOString().slice(0,10); }
+function isoWeek(dstr:string): {year:number, week:number} {
+  const d=new Date(dstr+"T00:00:00Z"); const day=(d.getUTCDay()+6)%7; d.setUTCDate(d.getUTCDate()-day+3);
+  const firstTh=new Date(Date.UTC(d.getUTCFullYear(),0,4));
+  const week=1+Math.round(((d.getTime()-firstTh.getTime())/86400000 - 3 + ((firstTh.getUTCDay()+6)%7))/7);
+  return { year:d.getUTCFullYear(), week };
+}
+async function cnt(tbl:string,col:string,from:string,to:string,f?:(x:any)=>any): Promise<number> {
+  let q:any = sb.from(tbl).select("id",{count:"exact",head:true}); if(f) q=f(q); q=q.gte(col,from).lt(col,to);
+  const r = await q; return r.count||0;
+}
+
+Deno.serve(async (req)=>{
+  if(req.method==="OPTIONS") return new Response("ok",{headers:cors});
+  if(!ANTHROPIC_KEY) return json({error:"ANTHROPIC_API_KEY fehlt"},503);
+  let body:any={}; try{ body=await req.json(); }catch(_e){}
+  const date = (typeof body.date==="string" && /^\d{4}-\d{2}-\d{2}$/.test(body.date)) ? body.date : berlinToday();
+  const p = addDays(date,-1), n1 = addDays(date,1), d7 = addDays(date,-7), d28 = addDays(date,-28);
+
+  // je Agent: { findings:[{okey,severity,facts,confidence,missing?,metrics?}], snapshot? }
+  const checks: Record<string, {findings:any[], snapshot?:any}> = { clara:{findings:[]}, max:{findings:[]}, anna:{findings:[]}, paul:{findings:[]}, maya:{findings:[]}, lena:{findings:[]} };
+
+  // Clara: Posteingangs-Volumen heute vs. 7-Tage-Schnitt
+  try{
+    const today = await cnt("cvs","created_at",date,n1);
+    const last7 = await cnt("cvs","created_at",d7,date); const avg = last7/7;
+    if(today>=3 && avg>=3 && Math.abs((today-avg)/avg)>=0.4)
+      checks.clara.findings.push({okey:"clara_inbox_volume", severity:"info", confidence:"exakt",
+        facts:[{label:"Bewerbungen heute im Posteingang", current:today, prior:Math.round(avg)}], metrics:{today,avg7:Math.round(avg)}});
+  }catch(_e){}
+
+  // Max: leer abgehakte Aufgaben heute vs. Vortag
+  try{
+    const emToday = await cnt("daily_tasks_done","done_at",date,n1,(x)=>x.eq("session_writes",0));
+    const emPrev  = await cnt("daily_tasks_done","done_at",p,date,(x)=>x.eq("session_writes",0));
+    if(emToday>=3 && emToday>emPrev)
+      checks.max.findings.push({okey:"max_empty_checks", severity:"warn", confidence:"exakt",
+        facts:[{label:"Aufgaben leer abgehakt (ohne Datenänderung)", current:emToday, prior:emPrev}], metrics:{emToday,emPrev}});
+  }catch(_e){}
+
+  // Anna: neue offene Wissenslücken heute
+  try{
+    const gapsToday = await cnt("assistant_gaps","created_at",date,n1,(x)=>x.eq("resolved",false));
+    if(gapsToday>=2)
+      checks.anna.findings.push({okey:"anna_gaps", severity:"info", confidence:"exakt",
+        facts:[{label:"neue Fragen ohne Antwort im Wissen", current:gapsToday}], metrics:{gapsToday}});
+  }catch(_e){}
+
+  // Paul: gelieferte Stunden diese Woche vs. Vorwoche
+  try{
+    const w=isoWeek(date), wp=isoWeek(d7);
+    const sumH=async (yr:number,kw:number)=>{ const {data}=await sb.from("weekly_hours").select("hours").eq("year",yr).eq("kw",kw); return (data||[]).reduce((a:number,r:any)=>a+(Number(r.hours)||0),0); };
+    const hThis=await sumH(w.year,w.week), hPrev=await sumH(wp.year,wp.week);
+    if(hThis>0 && hPrev>0 && Math.abs((hThis-hPrev)/hPrev)>=0.15)
+      checks.paul.findings.push({okey:"paul_hours_week", severity: hThis<hPrev?"warn":"info", confidence:"exakt",
+        facts:[{label:"gelieferte Stunden diese Woche (KW "+w.week+")", current:Math.round(hThis), prior:Math.round(hPrev)}], metrics:{hThis:Math.round(hThis),hPrev:Math.round(hPrev)}});
+  }catch(_e){}
+
+  // Maya: Zugänge mit plötzlichem Abbruch (vorher regelmäßig, letzte 7 Tage nichts)
+  try{
+    const { data:al } = await sb.from("activity_log").select("user_id,created_at").gte("created_at",d28).lt("created_at",n1);
+    const prevDays:Record<string,Set<string>>={}, lastDays:Record<string,Set<string>>={};
+    (al||[]).forEach((r:any)=>{ const day=String(r.created_at).slice(0,10); const u=r.user_id; if(!u) return;
+      if(day>=d7){ (lastDays[u]=lastDays[u]||new Set()).add(day); } else { (prevDays[u]=prevDays[u]||new Set()).add(day); } });
+    let drop=0; Object.keys(prevDays).forEach(u=>{ if(prevDays[u].size>=8 && !(lastDays[u]&&lastDays[u].size)) drop++; });
+    if(drop>0)
+      checks.maya.findings.push({okey:"maya_drop", severity:"info", confidence:"exakt",
+        facts:[{label:"Zugänge seit einer Woche ohne Aktivität, vorher regelmäßig", current:drop}], metrics:{drop}});
+  }catch(_e){}
+
+  // Lena: Datenpflege-Lücken, die Geld blockieren (Bank/Ausweis), + Delta zum letzten Stand
+  try{
+    const { data:lf } = await sb.rpc("lena_scan");
+    const byCat:Record<string,number>={}; (lf||[]).forEach((f:any)=>{ byCat[f.category]=(byCat[f.category]||0)+1; });
+    const { data:chk } = await sb.from("agent_checks").select("metrics").eq("agent_key","lena").maybeSingle();
+    const prev = (chk&&chk.metrics)||{};
+    if((byCat.bank_fehlt||0)>0)
+      checks.lena.findings.push({okey:"lena_bank_fehlt", severity:"high", confidence:"exakt",
+        facts:[{label:"Mitarbeiter ohne Bankdaten, das blockiert die Lohnzahlung", current:byCat.bank_fehlt, prior:(prev.bank_fehlt!==undefined?prev.bank_fehlt:null)}], metrics:{bank_fehlt:byCat.bank_fehlt}});
+    if((byCat.ausweis_fehlt||0)>0)
+      checks.lena.findings.push({okey:"lena_ausweis_fehlt", severity:"warn", confidence:"exakt",
+        facts:[{label:"Mitarbeiter ohne Ausweis-Nummer", current:byCat.ausweis_fehlt, prior:(prev.ausweis_fehlt!==undefined?prev.ausweis_fehlt:null)}], metrics:{ausweis_fehlt:byCat.ausweis_fehlt}});
+    checks.lena.snapshot = byCat;
+  }catch(_e){}
+
+  // Schreiben: Befunde als Beobachtungen (Kollegen-Satz) + Heartbeat je Agent.
+  const NAMES:Record<string,string> = { clara:"Clara", max:"Max", anna:"Anna", paul:"Paul", maya:"Maya", lena:"Lena" };
+  let totalFound=0;
+  for(const key of Object.keys(checks)){
+    const c=checks[key]; const persona=await personaOf(key);
+    for(const f of c.findings){
+      let title=""; try{ title=await colleagueLine(NAMES[key], persona, {facts:f.facts, confidence:f.confidence, missing:f.missing}); }catch(_e){}
+      if(!title) title = f.facts.map((x:any)=>`${x.label}: ${x.current}`).join("; ");
+      await sb.from("agent_observations").upsert({ day:date, okey:f.okey, agent_key:key, severity:f.severity, title, metrics:f.metrics||null, confidence:f.confidence||null },{onConflict:"day,okey"});
+    }
+    totalFound += c.findings.length;
+    await sb.from("agent_checks").upsert({ agent_key:key, last_checked_at:new Date().toISOString(), last_day:date, found_count:c.findings.length, metrics:(c.snapshot!==undefined?c.snapshot:undefined), updated_at:new Date().toISOString() },{onConflict:"agent_key"});
+  }
+
+  return json({ ok:true, date, found:totalFound, per:Object.fromEntries(Object.entries(checks).map(([k,v])=>[k,v.findings.length])) });
+});
