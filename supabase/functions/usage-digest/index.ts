@@ -54,6 +54,40 @@ async function summarize(name:string, prof:string): Promise<string> {
   return (tu && tu.input && tu.input.summary) || "";
 }
 
+// ── Kollegen-Stimme (Schnitt 3): aus Rohzahl + Vorperiode + Konfidenz einen Satz IM CHARAKTER des Kollegen ──
+// Persona kommt aus dem Register (ai_agents.persona, im Admin änderbar). Die Hausregeln gelten für alle:
+// Deutsch als Zweitsprache, keine Emotionen, nichts erfinden, Sicherheit hörbar, Grenze benennen, weiterreichen.
+const PERSONAE: Record<string,string> = {};
+async function personaOf(key:string): Promise<string> {
+  if(PERSONAE[key]!==undefined) return PERSONAE[key];
+  const { data } = await sb.from("ai_agents").select("persona").eq("key",key).maybeSingle();
+  PERSONAE[key] = (data&&data.persona) || ""; return PERSONAE[key];
+}
+const HOUSE = "Hausregeln: Deutsch als Zweitsprache — kurze Sätze, kein Konjunktiv, keine Redewendungen. "+
+  "Keine Emotionen, kein Lob, kein Tadel. Erfinde nichts: nutze NUR die gegebenen Zahlen. "+
+  "Nenne den Vergleich zur Vorperiode, wenn er gegeben ist (z. B. 'letzte Woche 45'). "+
+  "Mach die Sicherheit hörbar, wenn gegeben (exakt / Obergrenze / Vermutung). "+
+  "Wenn etwas fehlt, sag klar was fehlt und dass die Zahl dann leer ist, nicht falsch. "+
+  "Wenn ein Thema zu einem anderen Kollegen gehört, verweise kurz auf ihn. "+
+  "Höchstens zwei kurze Sätze. Keine Zusagen. Schreib in der dritten Person mit dem Namen.";
+async function colleagueLine(name:string, persona:string, brief:any): Promise<string> {
+  const facts = (brief.facts||[]).map((f:any)=> `${f.label}: ${f.current}${(f.prior!==undefined&&f.prior!==null)?` (Vorperiode ${f.prior})`:""}`).join("; ");
+  const parts = [`Kollege: ${name}`, `Fakten: ${facts}`];
+  if(brief.confidence) parts.push(`Sicherheit: ${brief.confidence}`);
+  if(brief.missing) parts.push(`Fehlt: ${brief.missing}`);
+  if(brief.handoff) parts.push(`Gehört zu: ${brief.handoff}`);
+  const system = (persona? persona+"\n\n":"") + HOUSE;
+  const r = await fetch("https://api.anthropic.com/v1/messages",{ method:"POST",
+    headers:{ "x-api-key":ANTHROPIC_KEY, "anthropic-version":"2023-06-01", "content-type":"application/json" },
+    body: JSON.stringify({ model:MODEL, max_tokens:220, system, tools:[TOOL], tool_choice:{type:"tool",name:"satz"}, messages:[{role:"user",content:parts.join("\n")}] }) });
+  const d = await r.json();
+  if(!r.ok) throw new Error((d?.error?.message)||("HTTP "+r.status));
+  const tu = (d.content||[]).find((c:any)=>c.type==="tool_use");
+  return (tu && tu.input && tu.input.summary) || "";
+}
+function prevDay(d:string){ const x=new Date(d+"T00:00:00Z"); x.setUTCDate(x.getUTCDate()-1); return x.toISOString().slice(0,10); }
+function nextDay(d:string){ const x=new Date(d+"T00:00:00Z"); x.setUTCDate(x.getUTCDate()+1); return x.toISOString().slice(0,10); }
+
 Deno.serve(async (req)=>{
   if(req.method==="OPTIONS") return new Response("ok",{headers:cors});
   if(!ANTHROPIC_KEY) return json({error:"ANTHROPIC_API_KEY fehlt"},503);
@@ -76,51 +110,58 @@ Deno.serve(async (req)=>{
       if(ue) failed++; else done++;
     }catch(_e){ failed++; }
   }
-  // ── Agenten laufen mit: Clara (zählbare Aktionen). Weitere folgen, sobald ihre Aktionen protokolliert werden.
+  // ── Clara: Bewerbungen vorsortiert + Anreicherungs-Mails, mit Vortagsvergleich, in Claras Stimme. ──
   try{
-    const nd = new Date(date+"T00:00:00Z"); nd.setUTCDate(nd.getUTCDate()+1); const next = nd.toISOString().slice(0,10);
-    const cvC = await sb.from("cvs").select("id",{count:"exact",head:true}).eq("source","meta").gte("created_at",date).lt("created_at",next);
-    const mlC = await sb.from("applicant_messages").select("id",{count:"exact",head:true}).eq("origin","auto").eq("status","sent").gte("sent_at",date).lt("sent_at",next);
-    const sorted = cvC.count||0, mails = mlC.count||0;
+    const p = prevDay(date), n1 = nextDay(date);
+    const cnt = async (tbl:string,col:string,from:string,to:string,f:(x:any)=>any)=>{ const r=await f(sb.from(tbl).select("id",{count:"exact",head:true})).gte(col,from).lt(col,to); return r.count||0; };
+    const sorted  = await cnt("cvs","created_at",date,n1,(x)=>x.eq("source","meta"));
+    const mails   = await cnt("applicant_messages","sent_at",date,n1,(x)=>x.eq("origin","auto").eq("status","sent"));
+    const sortedP = await cnt("cvs","created_at",p,date,(x)=>x.eq("source","meta"));
+    const mailsP  = await cnt("applicant_messages","sent_at",p,date,(x)=>x.eq("origin","auto").eq("status","sent"));
     if(sorted>0 || mails>0){
-      const bits:string[]=[]; if(sorted>0) bits.push(`${sorted} Bewerbung${sorted===1?"":"en"} vorsortiert`); if(mails>0) bits.push(`${mails} Anreicherungs-Mail${mails===1?"":"s"} verschickt`);
-      await sb.from("agent_digests").upsert({ day:date, agent_key:"clara", name:"Clara", summary:"Clara hat "+bits.join(" und ")+".", metrics:{sorted,mails} }, {onConflict:"day,agent_key"});
+      const facts:any[]=[];
+      if(sorted>0) facts.push({label:"Bewerbungen vorsortiert", current:sorted, prior:sortedP});
+      if(mails>0)  facts.push({label:"Anreicherungs-Mails verschickt", current:mails, prior:mailsP});
+      let summary=""; try{ summary = await colleagueLine("Clara", await personaOf("clara"), {facts, confidence:"exakt"}); }catch(_e){}
+      if(!summary){ const b:string[]=[]; if(sorted>0)b.push(`${sorted} Bewerbungen vorsortiert`); if(mails>0)b.push(`${mails} Anreicherungs-Mails verschickt`); summary="Clara hat "+b.join(" und ")+"."; }
+      await sb.from("agent_digests").upsert({ day:date, agent_key:"clara", name:"Clara", summary, metrics:{sorted,mails,sorted_prev:sortedP,mails_prev:mailsP} }, {onConflict:"day,agent_key"});
     }
   }catch(_e){ /* Agenten-Zeile optional */ }
 
-  // ── Max/Paul/Anna aus agent_actions (zählbare Aktionen des Tages) ──
+  // ── Max/Paul/Anna aus agent_actions, mit Vortagsvergleich, je in ihrer Stimme. ──
   try{
-    const nd2 = new Date(date+"T00:00:00Z"); nd2.setUTCDate(nd2.getUTCDate()+1); const next2 = nd2.toISOString().slice(0,10);
-    const { data:acts } = await sb.from("agent_actions").select("agent_key,kind").gte("at",date).lt("at",next2);
-    const cnt:Record<string,Record<string,number>> = {};
-    (acts||[]).forEach((x:any)=>{ (cnt[x.agent_key]=cnt[x.agent_key]||{}); cnt[x.agent_key][x.kind]=(cnt[x.agent_key][x.kind]||0)+1; });
-    const g=(k:string)=>cnt[k]||{};
-    const lines:{key:string,name:string,summary:string,metrics:any}[]=[];
-    const mx=g("max"); const rem=(mx.reminder_slack||0)+(mx.reminder_cliq||0);
-    if(rem>0) lines.push({key:"max",name:"Max",summary:`Max hat ${rem} Erinnerung${rem===1?"":"en"} verschickt.`,metrics:mx});
-    const pl=g("paul"); const sums=(pl.summary||0)+(pl.analysis||0), pol=pl.polish||0; const pb:string[]=[];
-    if(sums>0) pb.push(`${sums} Zusammenfassung${sums===1?"":"en"} und Analyse${sums===1?"":"n"} erstellt`);
-    if(pol>0) pb.push(`${pol} Text${pol===1?"":"e"} gesäubert`);
-    if(pb.length) lines.push({key:"paul",name:"Paul",summary:"Paul hat "+pb.join(" und ")+".",metrics:pl});
-    const an=g("anna"); const q=(an.assistant||0)+(an.nlquery||0);
-    if(q>0) lines.push({key:"anna",name:"Anna",summary:`Anna hat ${q} Frage${q===1?"":"n"} beantwortet.`,metrics:an});
-    for(const l of lines){ await sb.from("agent_digests").upsert({ day:date, agent_key:l.key, name:l.name, summary:l.summary, metrics:l.metrics },{onConflict:"day,agent_key"}); }
+    const p = prevDay(date), n1 = nextDay(date);
+    const { data:acts } = await sb.from("agent_actions").select("agent_key,kind,at").gte("at",p).lt("at",n1);
+    const bucket=(from:string,to:string)=>{ const c:Record<string,Record<string,number>>={}; (acts||[]).forEach((x:any)=>{ const d=String(x.at).slice(0,10); if(d>=from && d<to){ (c[x.agent_key]=c[x.agent_key]||{}); c[x.agent_key][x.kind]=(c[x.agent_key][x.kind]||0)+1; } }); return c; };
+    const cur=bucket(date,n1), prv=bucket(p,date); const g=(c:any,k:string)=>c[k]||{};
+    const put=async (key:string,name:string,summary:string,metrics:any)=>{ await sb.from("agent_digests").upsert({day:date,agent_key:key,name,summary,metrics},{onConflict:"day,agent_key"}); };
+    // Max
+    const mx=g(cur,"max"), mxP=g(prv,"max"); const rem=(mx.reminder_slack||0)+(mx.reminder_cliq||0), remP=(mxP.reminder_slack||0)+(mxP.reminder_cliq||0);
+    if(rem>0){ let s=""; try{ s=await colleagueLine("Max", await personaOf("max"), {facts:[{label:"Erinnerungen verschickt", current:rem, prior:remP}], confidence:"exakt"}); }catch(_e){} if(!s) s=`Max hat ${rem} Erinnerungen verschickt.`; await put("max","Max",s,{...mx,rem_prev:remP}); }
+    // Paul
+    const pl=g(cur,"paul"), plP=g(prv,"paul"); const sums=(pl.summary||0)+(pl.analysis||0), sumsP=(plP.summary||0)+(plP.analysis||0), pol=pl.polish||0, polP=plP.polish||0;
+    if(sums>0||pol>0){ const facts:any[]=[]; if(sums>0)facts.push({label:"Zusammenfassungen und Analysen erstellt", current:sums, prior:sumsP}); if(pol>0)facts.push({label:"Texte gesäubert", current:pol, prior:polP}); let s=""; try{ s=await colleagueLine("Paul", await personaOf("paul"), {facts, confidence:"exakt"}); }catch(_e){} if(!s){ const b:string[]=[]; if(sums>0)b.push(`${sums} Zusammenfassungen und Analysen erstellt`); if(pol>0)b.push(`${pol} Texte gesäubert`); s="Paul hat "+b.join(" und ")+"."; } await put("paul","Paul",s,{...pl}); }
+    // Anna
+    const an=g(cur,"anna"), anP=g(prv,"anna"); const q=(an.assistant||0)+(an.nlquery||0), qP=(anP.assistant||0)+(anP.nlquery||0);
+    if(q>0){ let s=""; try{ s=await colleagueLine("Anna", await personaOf("anna"), {facts:[{label:"Fragen beantwortet", current:q, prior:qP}], confidence:"exakt"}); }catch(_e){} if(!s) s=`Anna hat ${q} Fragen beantwortet.`; await put("anna","Anna",s,{...an}); }
   }catch(_e){ /* Agenten-Zeilen optional */ }
 
-  // ── Lena: Datenpflege-Auffälligkeiten (Snapshot) + gemeldete Chat-Verstöße (an dem Tag). Sie MELDET. ──
+  // ── Lena: Datenpflege-Auffälligkeiten (Snapshot, kein Vorwert) + Chat-Verstöße (Tag vs. Vortag). Sie MELDET. ──
   try{
     const { data:lf } = await sb.rpc("lena_scan");
-    const n = (lf||[]).length;
-    const nd = new Date(date+"T00:00:00Z"); nd.setUTCDate(nd.getUTCDate()+1); const next = nd.toISOString().slice(0,10);
-    const { count:cf } = await sb.from("chat_flags").select("id",{count:"exact",head:true}).gte("created_at",date).lt("created_at",next);
-    const flags = cf||0;
-    if(n>0 || flags>0){
+    const n = (lf||[]).length; const p = prevDay(date), n1 = nextDay(date);
+    const cf  = (await sb.from("chat_flags").select("id",{count:"exact",head:true}).gte("created_at",date).lt("created_at",n1)).count||0;
+    const cfP = (await sb.from("chat_flags").select("id",{count:"exact",head:true}).gte("created_at",p).lt("created_at",date)).count||0;
+    if(n>0 || cf>0){
       const byCat:Record<string,number> = {}; (lf||[]).forEach((f:any)=>{ byCat[f.category]=(byCat[f.category]||0)+1; });
       const NAMES:Record<string,string> = { vertrag_ohne_daten:"Verträge ohne Daten", ausweis_fehlt:"Ausweis fehlt", bank_fehlt:"Bankdaten fehlen", urlaubsantrag_liegt:"liegende Urlaubsanträge", abwesenheit_unplausibel:"unplausible Abwesenheiten", portalzugang_fehlt:"fehlende Portalzugänge" };
-      const parts:string[]=[];
-      if(n>0){ const top = Object.entries(byCat).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([k,v])=>v+"× "+(NAMES[k]||k)).join(", "); parts.push(`${n} Auffälligkeit${n===1?"":"en"} in der Datenpflege (${top})`); }
-      if(flags>0){ parts.push(`${flags} Chat-Verstoß${flags===1?"":"e"}`); }
-      await sb.from("agent_digests").upsert({ day:date, agent_key:"lena", name:"Lena", summary:"Lena meldet "+parts.join(" und ")+".", metrics:{...byCat, chat_flags:flags} }, {onConflict:"day,agent_key"});
+      const top = Object.entries(byCat).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([k,v])=>`${v}× ${NAMES[k]||k}`).join(", ");
+      const facts:any[]=[];
+      if(n>0)  facts.push({label:`Auffälligkeiten in der Datenpflege (${top})`, current:n});
+      if(cf>0) facts.push({label:"Chat-Verstöße", current:cf, prior:cfP});
+      let s=""; try{ s=await colleagueLine("Lena", await personaOf("lena"), {facts, confidence:"exakt"}); }catch(_e){}
+      if(!s){ const parts:string[]=[]; if(n>0)parts.push(`${n} Auffälligkeiten in der Datenpflege (${top})`); if(cf>0)parts.push(`${cf} Chat-Verstöße`); s="Lena meldet "+parts.join(" und ")+"."; }
+      await sb.from("agent_digests").upsert({ day:date, agent_key:"lena", name:"Lena", summary:s, metrics:{...byCat, chat_flags:cf} }, {onConflict:"day,agent_key"});
     }
   }catch(_e){ /* Lena-Zeile optional */ }
 
