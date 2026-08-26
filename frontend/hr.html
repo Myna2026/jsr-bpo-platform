@@ -32287,7 +32287,7 @@ function AssistantBox({onNavigate}){
       {WSA_STARS.map((s,i)=><circle key={'s'+i} className="wsa-star" cx={s[0]} cy={s[1]} r={i%3===0?3.4:2.6} style={{animationDelay:s[2]+'s'}}/>)}
     </svg>
     <div className="wsa-hd">
-      <div className="wsa-orb"><AgentAvatar agentKey="anna" size={46} color="#a78bfa" live={true}/></div>
+      <div className="wsa-orb"><AgentGlyph agentKey="anna" size={46} color="#a78bfa" live={true}/></div>
       <div>
         <div className="wsa-ttl">{((AI_AGENTS.anna&&AI_AGENTS.anna.name)||'Anna')} · Wissen &amp; Auskunft</div>
         <div className="wsa-sb">Frag Anna wie eine Kollegin. Antworten kommen in Schritten, mit Sprung ins richtige Modul.</div>
@@ -36309,11 +36309,102 @@ function NlqDataTree({lit, active}){
 // Anmelde- und Aktivitaetsuebersicht (Management-only). Je Zugang eine Zeile: wer sich zuletzt angemeldet
 // hat (auth.users.last_sign_in_at) und - wichtiger - wer zuletzt etwas gepflegt hat (activity_log + Uploads).
 // Ampel auf die letzte Aktivitaet zeigt, wo die Datenpflege haengt. Daten aus RPC management_activity_overview.
-const ACT_KIND_LABELS = {employee:'Mitarbeiter', shift_assignment:'Schichtplan', project:'Projekt', payroll_input:'Lohn', cv:'Bewerber', applicant:'Bewerber', kpi:'Kennzahlen', absence:'Abwesenheit', upload:'Upload'};
+const ACT_KIND_LABELS = {employee:'Mitarbeiter', shift_assignment:'Schichtplan', project:'Projekt', payroll_input:'Lohn', cv:'Bewerber', applicant:'Bewerber', kpi:'Kennzahlen', absence:'Abwesenheit', upload:'Upload', daily_task:'Aufgabe', feedback:'Feedback', meeting_note:'Besprechung', presentation:'Präsentation'};
+// Detailansicht je Person (Klick aus „Nutzung & Aktivität"): Wochen-Verlauf, Sitzungen, besuchte Bereiche,
+// Änderungen, Tagesaufgaben (erledigt/verschoben/leer abgehakt), Mayas Sätze der letzten Tage, Auffälligkeiten.
+// Alles aus EINEM RPC usage_user_detail (serverseitig verdichtet, Management-only via RLS-Escape).
+function UsageDetailModal({userId, userName, onClose}){
+  const [d,setD]=useState(null); const [err,setErr]=useState('');
+  useEffect(()=>{ let a=true; (async()=>{ try{ const {data,error}=await sb.rpc('usage_user_detail',{p_user:userId,p_days:42});
+    if(!a) return; if(error){ setErr(error.message||'Laden fehlgeschlagen'); setD({}); } else setD(data||{}); }
+    catch(e){ if(a){ setErr((e&&e.message)||'Fehler'); setD({}); } } })(); return ()=>{a=false;}; },[userId]);
+  useEffect(()=>{ const h=e=>{ if(e.key==='Escape') onClose&&onClose(); }; window.addEventListener('keydown',h); return ()=>window.removeEventListener('keydown',h); },[]);
+  const areaLbl=k=>((MENU_BADGE_MAIN_ITEMS.find(m=>m&&m.key===k)||{}).label)||ACT_KIND_LABELS[k]||k;
+  const daily=(d&&d.daily)||[]; const sessions=(d&&d.sessions)||[]; const areas=(d&&d.areas)||[]; const changes=(d&&d.changes)||[];
+  const tasks=(d&&d.tasks)||{done:0,empty:0,snoozed:0}; const digests=(d&&d.digests)||[]; const anoms=(d&&d.anomalies)||[];
+  const maxAct=Math.max(1,...daily.map(x=>(x.writes||0)+(x.views||0)+(x.tasks_done||0)));
+  const cell=v=> v===0?'var(--surface-2)': v<3?'#bcdfe3': v<10?'#5fa9b1':'#0F5661';
+  const fmtDT=ts=>{ try{ return new Date(ts).toLocaleString('de-DE',{weekday:'short',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}); }catch(e){ return ''; } };
+  const fmtDay=ts=>{ try{ return new Date(String(ts).slice(0,10)+'T12:00:00').toLocaleDateString('de-DE',{weekday:'short',day:'2-digit',month:'2-digit'}); }catch(e){ return String(ts); } };
+  const secLbl={fontSize:11,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',marginBottom:8};
+  const chip=(txt,n,acc)=><span key={txt} style={{fontSize:12,fontWeight:600,padding:'4px 10px',borderRadius:8,background:(acc||'#0F5661')+'12',color:'var(--text)',border:'1px solid '+(acc||'#0F5661')+'2e',whiteSpace:'nowrap'}}>{txt}<b style={{marginLeft:6,fontFamily:'var(--mono)',color:acc||'#0F5661'}}>{n}</b></span>;
+  return <div onClick={onClose} style={{position:'fixed',inset:0,background:'rgba(15,23,42,.55)',zIndex:1200,display:'flex',justifyContent:'center',alignItems:'flex-start',padding:'34px 16px',overflow:'auto'}}>
+    <div onClick={e=>e.stopPropagation()} className="card" style={{maxWidth:780,width:'100%',padding:0,borderRadius:16,overflow:'hidden'}}>
+      <div style={{padding:'15px 20px',borderBottom:'1px solid var(--border)',display:'flex',alignItems:'flex-start',gap:12}}>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{fontSize:18,fontWeight:800}}>{userName||'—'}</div>
+          <div style={{fontSize:12,color:'var(--muted)',marginTop:2}}>Verlauf der letzten 6 Wochen{(d&&d.last_active&&new Date(d.last_active)>new Date('2000-01-01'))?' · zuletzt aktiv '+fmtDT(d.last_active):''}</div>
+        </div>
+        <button onClick={onClose} title="Schließen (Esc)" style={{border:'1px solid var(--border)',background:'var(--card)',color:'var(--muted)',borderRadius:8,width:32,height:32,fontSize:16,cursor:'pointer',flexShrink:0}}>✕</button>
+      </div>
+      {d===null?<div className="sp-empty" style={{padding:44}}>Lädt…</div>
+       : <div style={{padding:'16px 20px',display:'flex',flexDirection:'column',gap:20,maxHeight:'72vh',overflow:'auto'}}>
+          {err&&<div style={{padding:'9px 11px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:10,color:'#b91c1c',fontSize:12.5}}>{err}</div>}
+          {anoms.length>0&&<div style={{display:'flex',gap:8,flexWrap:'wrap'}}>{anoms.map((x,i)=><span key={i} style={{fontSize:12.5,fontWeight:700,padding:'5px 12px',borderRadius:20,background:'#fef2f2',color:'#b91c1c',border:'1px solid #fecaca'}}>⚠ {x}</span>)}</div>}
+
+          <div>
+            <div style={secLbl}>Verlauf (6 Wochen)</div>
+            <div style={{display:'flex',gap:2,alignItems:'flex-end',height:58,padding:'2px 0'}}>
+              {daily.map((x,i)=>{ const act=(x.writes||0)+(x.views||0)+(x.tasks_done||0); const h=act?Math.round(7+49*act/maxAct):4;
+                return <div key={i} title={fmtDay(x.day)+': '+(x.writes||0)+' Änderungen, '+(x.views||0)+' Aufrufe, '+(x.tasks_done||0)+' Aufgaben, '+(x.minutes||0)+' Min anwesend'}
+                  style={{flex:1,minWidth:3,height:h,borderRadius:2,background:act?cell(act):'var(--surface-2)'}}/>; })}
+            </div>
+            <div style={{display:'flex',justifyContent:'space-between',fontSize:10.5,color:'var(--dim)',marginTop:5}}>
+              <span>{daily.length?fmtDay(daily[0].day):''}</span><span>heute</span></div>
+          </div>
+
+          <div>
+            <div style={secLbl}>Sitzungen · wann angemeldet, wie lange</div>
+            {sessions.length===0?<div style={{fontSize:12.5,color:'var(--muted)'}}>Keine erfassten Sitzungen. Anwesenheits-Erfassung läuft erst seit Kurzem.</div>
+             : <div style={{display:'flex',flexDirection:'column',border:'1px solid var(--border)',borderRadius:10,overflow:'hidden'}}>
+                {sessions.slice(0,12).map((s,i)=><div key={i} style={{display:'flex',alignItems:'center',gap:12,padding:'7px 12px',borderTop:i?'1px solid var(--border)':'none',fontSize:12.5}}>
+                  <span style={{flex:1}}>{fmtDT(s.started_at)}</span>
+                  <span style={{fontFamily:'var(--mono)',color:'var(--muted)'}}>{s.minutes>0?s.minutes+' Min':'< 1 Min'}</span>
+                </div>)}
+                {sessions.length>12&&<div style={{padding:'6px 12px',borderTop:'1px solid var(--border)',fontSize:11.5,color:'var(--dim)'}}>und {sessions.length-12} weitere</div>}
+               </div>}
+          </div>
+
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:18}}>
+            <div>
+              <div style={secLbl}>Besuchte Bereiche</div>
+              {areas.length===0?<div style={{fontSize:12.5,color:'var(--muted)'}}>Noch keine Bereichs-Aufrufe erfasst.</div>
+               : <div style={{display:'flex',flexWrap:'wrap',gap:6}}>{areas.slice(0,14).map(a=>chip(areaLbl(a.area),a.count,'#0F5661'))}</div>}
+            </div>
+            <div>
+              <div style={secLbl}>Änderungen · wo</div>
+              {changes.length===0?<div style={{fontSize:12.5,color:'var(--muted)'}}>Keine Datenänderungen im Zeitraum.</div>
+               : <div style={{display:'flex',flexWrap:'wrap',gap:6}}>{changes.slice(0,14).map(c=>chip(ACT_KIND_LABELS[c.entity]||c.entity,c.count,'#b45309'))}</div>}
+            </div>
+          </div>
+
+          <div>
+            <div style={secLbl}>Tagesaufgaben</div>
+            <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
+              {[['erledigt',tasks.done,'#16a34a'],['verschoben',tasks.snoozed,'#d97706'],['leer abgehakt',tasks.empty,tasks.empty>0?'#dc2626':'#64748b']].map(t=>
+                <div key={t[0]} style={{flex:'1 1 120px',border:'1px solid '+t[2]+'33',background:t[2]+'0d',borderRadius:10,padding:'10px 12px'}}>
+                  <div style={{fontSize:22,fontWeight:800,color:t[2]}}>{t[1]}</div>
+                  <div style={{fontSize:12,color:'var(--muted)',marginTop:1}}>{t[0]}</div>
+                </div>)}
+            </div>
+            {tasks.empty>0&&<div style={{fontSize:11,color:'var(--dim)',marginTop:6}}>„Leer abgehakt" = Aufgabe erledigt gesetzt, ohne dass in der Sitzung eine Datenänderung erfasst wurde.</div>}
+          </div>
+
+          <div>
+            <div style={secLbl}>Mayas Sätze der letzten Tage</div>
+            {digests.length===0?<div style={{fontSize:12.5,color:'var(--muted)'}}>Noch keine Tages-Sätze für diese Person.</div>
+             : <div style={{display:'flex',flexDirection:'column',gap:7}}>{digests.map((g,i)=><div key={i} style={{fontSize:12.5,lineHeight:1.5,display:'flex',gap:10}}>
+                <span style={{flexShrink:0,width:78,color:'var(--muted)',fontWeight:600}}>{fmtDay(g.day)}</span><span>{g.summary}</span></div>)}</div>}
+          </div>
+        </div>}
+    </div>
+  </div>;
+}
 function LoginActivityView({team}){
   const isMgmt=((team&&team.role_keys)||[]).some(r=>r==='management');
   const [rows,setRows]=useState(null); const [err,setErr]=useState(''); const [sortK,setSortK]=useState('activity');
   const [metrics30,setMetrics30]=useState(null); const [digests,setDigests]=useState([]); const [digestDay,setDigestDay]=useState(''); const [agentDigests,setAgentDigests]=useState([]);
+  const [detailUser,setDetailUser]=useState(null);   // {id,name} → öffnet Detail-/Historie-Modal
   useEffect(()=>{ if(!isMgmt) return; let a=true; (async()=>{ try{
       const from30=isoLocal(new Date(Date.now()-29*864e5)), to=isoLocal(new Date());
       const [ov,m30,dg,ad]=await Promise.all([
@@ -36385,10 +36476,16 @@ function LoginActivityView({team}){
   }
   const DAY_KEYS=Array.from({length:30},(_,i)=>isoLocal(new Date(Date.now()-(29-i)*864e5)));
   const cellColor=v=> v===0?'var(--surface-2)': v<3?'#bcdfe3': v<10?'#5fa9b1':'#0F5661';
-  const mayaUsers=(()=>{ const bu={}; (metrics30||[]).forEach(r=>{ const id=r.user_id; bu[id]=bu[id]||{id,name:r.user_name||'—',days:{}}; bu[id].days[String(r.day).slice(0,10)]=(r.writes||0)+(r.tasks_done||0)+(r.sessions>0?1:0)+(r.logins>0?1:0); });
+  const mayaUsers=(()=>{ const bu={}; (metrics30||[]).forEach(r=>{ const id=r.user_id; const b=bu[id]=bu[id]||{id,name:r.user_name||'—',days:{},te:0,td:0};
+      b.days[String(r.day).slice(0,10)]=(r.writes||0)+(r.tasks_done||0)+(r.sessions>0?1:0)+(r.logins>0?1:0); b.te+=(r.tasks_empty||0); b.td+=(r.tasks_done||0); });
     return Object.values(bu).map(u=>{ const vals=DAY_KEYS.map(k=>u.days[k]||0); const activeDays=vals.filter(v=>v>0).length;
       const band=activeDays>=20?{label:'täglich aktiv',c:'#0F5661'}:activeDays>=6?{label:'unregelmäßig',c:'#b45309'}:activeDays>=1?{label:'selten',c:'#64748b'}:{label:'keine Aktivität',c:'#94a3b8'};
-      return {...u,vals,activeDays,band}; }).sort((a,b)=>b.activeDays-a.activeDays); })();
+      // Auffälligkeiten für den Blick von außen: leere Häkchen, plötzlicher Abbruch, längere Abwesenheit.
+      let lastIdx=-1; for(let i=vals.length-1;i>=0;i--){ if(vals[i]>0){ lastIdx=i; break; } }
+      const daysAgo=lastIdx<0?99:(vals.length-1-lastIdx); const last7=vals.slice(-7).filter(v=>v>0).length; const prev=vals.slice(0,-7).filter(v=>v>0).length;
+      const anoms=[]; if(u.te>=3 && u.te>=0.5*Math.max(u.td,1)) anoms.push('leere Häkchen');
+      if(prev>=8 && last7===0) anoms.push('Abbruch'); else if(lastIdx>=0 && daysAgo>=10) anoms.push('länger inaktiv');
+      return {...u,vals,activeDays,band,anoms}; }).sort((a,b)=>(b.anoms.length-a.anoms.length)||(b.activeDays-a.activeDays)); })();
   const digestLbl=digestDay?new Date(digestDay+'T12:00:00').toLocaleDateString('de-DE',{weekday:'short',day:'2-digit',month:'2-digit',year:'numeric'}):'';
   return <div style={{maxWidth:1100}}>
     <div style={{marginBottom:6,fontSize:20,fontWeight:700}}>Nutzung & Aktivität</div>
@@ -36407,21 +36504,24 @@ function LoginActivityView({team}){
       {agentDigests.length>0&&<div style={{marginTop:10}}>
         <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',marginBottom:5}}>Assistenten</div>
         <div style={{display:'flex',flexDirection:'column',gap:6}}>{agentDigests.map(ad=>{ const ag=AI_AGENTS[ad.agent_key]; const acc=(ag&&ag.accent)||'#6366f1'; return <div key={ad.agent_key} style={{fontSize:13,lineHeight:1.5,display:'flex',alignItems:'center',gap:8}}>
-          <span style={{width:18,height:18,flexShrink:0,display:'inline-flex'}}><AgentAvatar agentKey={ad.agent_key} size={18} color={acc} live={false}/></span>
+          <span style={{width:34,height:34,flexShrink:0,display:'inline-flex'}}><AgentAvatar agentKey={ad.agent_key} size={34} color={acc} live={true}/></span>
           <span>{ad.summary}</span></div>; })}</div>
       </div>}
       <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',margin:'16px 0 8px'}}>Aktivität der letzten 30 Tage</div>
       {metrics30===null?<div style={{fontSize:12.5,color:'var(--muted)'}}>Lädt…</div>
        : mayaUsers.length===0?<div style={{fontSize:12.5,color:'var(--muted)'}}>Noch keine Verlaufsdaten.</div>
        : <div style={{display:'flex',flexDirection:'column',gap:8}}>
-          {mayaUsers.map(u=><div key={u.id} style={{display:'flex',alignItems:'center',gap:12,flexWrap:'wrap'}}>
+          {mayaUsers.map(u=><div key={u.id} onClick={()=>setDetailUser({id:u.id,name:u.name})} title="Details und Historie anzeigen"
+            style={{display:'flex',alignItems:'center',gap:12,flexWrap:'wrap',cursor:'pointer',padding:'4px 8px',margin:'0 -8px',borderRadius:8}}
+            onMouseEnter={e=>e.currentTarget.style.background='var(--surface-2)'} onMouseLeave={e=>e.currentTarget.style.background='transparent'}>
             <div style={{width:150,flexShrink:0,fontSize:13,fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{u.name}</div>
             <div style={{display:'flex',gap:2}}>{u.vals.map((v,i)=><span key={i} title={DAY_KEYS[i]+': '+v} style={{width:9,height:16,borderRadius:2,background:cellColor(v)}}/>)}</div>
             <span style={{fontSize:11,fontWeight:700,padding:'2px 9px',borderRadius:20,color:u.band.c,background:u.band.c+'18',border:'1px solid '+u.band.c+'33',whiteSpace:'nowrap'}}>{u.band.label}</span>
             <span style={{fontSize:11,color:'var(--muted)'}}>{u.activeDays}/30 Tage</span>
+            {u.anoms.map(x=><span key={x} style={{fontSize:10.5,fontWeight:700,padding:'2px 8px',borderRadius:20,color:'#b91c1c',background:'#fef2f2',border:'1px solid #fecaca',whiteSpace:'nowrap'}}>⚠ {x}</span>)}
           </div>)}
         </div>}
-      <div style={{fontSize:10.5,color:'var(--dim)',marginTop:10,lineHeight:1.5}}>Einstufung nach aktiven Tagen der letzten 30: täglich aktiv (ab 20), unregelmäßig (6 bis 19), selten (1 bis 5). Sitzungsdauer und besuchte Bereiche füllen sich ab jetzt, da Anwesenheits- und Bereichs-Erfassung neu aktiv sind.</div>
+      <div style={{fontSize:10.5,color:'var(--dim)',marginTop:10,lineHeight:1.5}}>Klick auf eine Zeile öffnet Details und Historie. Einstufung nach aktiven Tagen der letzten 30: täglich aktiv (ab 20), unregelmäßig (6 bis 19), selten (1 bis 5). Sitzungsdauer und besuchte Bereiche füllen sich ab jetzt, da Anwesenheits- und Bereichs-Erfassung neu aktiv sind.</div>
     </div>
     <div style={{display:'flex',gap:10,flexWrap:'wrap',marginBottom:16}}>
       {[['Aktiv gepflegt',stats.green,'#16a34a','#f0fdf4','bis 3 Tage'],['Lahmt',stats.amber,'#d97706','#fffbeb','4 bis 10 Tage'],['Hängt',stats.red,'#dc2626','#fef2f2','über 10 Tage oder nie']].map((s,i)=>
@@ -36445,7 +36545,9 @@ function LoginActivityView({team}){
           {['Zugang','Rolle','Zuletzt gesehen','Letzte Aktivität','Zuletzt getan','30 T'].map((h,i)=><th key={i} style={{textAlign:i===5?'right':'left',padding:'8px 12px',fontWeight:700,borderBottom:'1px solid var(--border)',whiteSpace:'nowrap'}}>{h}</th>)}
         </tr></thead>
         <tbody>{list.map(r=>{ const c=ampel(dayDiff(r.last_activity_at)); const kind=ACT_KIND_LABELS[r.last_activity_kind]||r.last_activity_kind;
-          return <tr key={r.user_id} style={{borderTop:'1px solid var(--border)'}}>
+          return <tr key={r.user_id} onClick={()=>setDetailUser({id:r.user_id,name:r.full_name||'—'})} title="Details und Historie anzeigen"
+            style={{borderTop:'1px solid var(--border)',cursor:'pointer'}}
+            onMouseEnter={e=>e.currentTarget.style.background='var(--surface-2)'} onMouseLeave={e=>e.currentTarget.style.background='transparent'}>
             <td style={{padding:'9px 12px',whiteSpace:'nowrap'}}><span style={{display:'inline-block',width:9,height:9,borderRadius:'50%',background:c,marginRight:8,verticalAlign:'middle'}}></span><span style={{fontWeight:600}}>{r.full_name||'—'}</span></td>
             <td style={{padding:'9px 12px',color:'var(--muted)',whiteSpace:'nowrap'}}>{roleTxt(r.role_keys)}</td>
             <td style={{padding:'9px 12px',whiteSpace:'nowrap'}} title={r.last_sign_in?('Echte Anmeldung: '+fmtDate(r.last_sign_in)):''}>{ago(r.last_seen)}</td>
@@ -36455,7 +36557,8 @@ function LoginActivityView({team}){
           </tr>; })}</tbody>
       </table>
     </div>}
-    <div style={{fontSize:11,color:'var(--muted)',marginTop:8,lineHeight:1.5}}>„Zuletzt gesehen" = jüngstes Signal (Anmeldung, Eingabe oder Upload), also auch bei laufender Sitzung, deren reines Anmeldedatum sonst veraltet. „Letzte Aktivität" = letzte echte Eingabe (Mitarbeiter, Schichtplan, Kennzahlen, Bewerber, Abwesenheit, Lohn, Upload). „30 T" = Zahl der Eingaben der letzten 30 Tage.</div>
+    <div style={{fontSize:11,color:'var(--muted)',marginTop:8,lineHeight:1.5}}>Klick auf eine Person öffnet Details und Historie. „Zuletzt gesehen" = jüngstes Signal (Anmeldung, Eingabe oder Upload), also auch bei laufender Sitzung, deren reines Anmeldedatum sonst veraltet. „Letzte Aktivität" = letzte echte Eingabe (Mitarbeiter, Schichtplan, Kennzahlen, Bewerber, Abwesenheit, Lohn, Upload). „30 T" = Zahl der Eingaben der letzten 30 Tage.</div>
+    {detailUser&&<UsageDetailModal userId={detailUser.id} userName={detailUser.name} onClose={()=>setDetailUser(null)}/>}
   </div>;
 }
 // ── KI-Agenten-Cache (für die dezente Präsenz in den Modulen: „Von Clara", Anna als Gesicht …) ──
@@ -36463,10 +36566,11 @@ function LoginActivityView({team}){
 let AI_AGENTS = {};   // key -> {name, accent, avatar_url, tagline, domain}
 async function loadAgentsCache(){ try{ const {data}=await sb.from('ai_agents').select('key,name,accent,avatar_url,tagline,domain').eq('active',true);
   const m={}; (data||[]).forEach(a=>{ if(a&&a.key) m[a.key]=a; }); AI_AGENTS=m; }catch(e){} }
-// Abstrakter, animierter SVG-Avatar je Agent — einfärbbar (color/accent), `live` schaltet die Bewegung.
+// Abstraktes, animiertes SVG-Zeichen je Agent — einfärbbar (color/accent), `live` schaltet die Bewegung.
 // Je Agent eine eigene Form: Anna=Orbit/Wissen, Clara=Verzweigung/Sortierung, Max=Signalringe/Erinnerung,
-// Paul=Equalizer/Analyse, Maya=Radar/Überwachung. viewBox 0 0 48 48, Mitte (24,24). Reines SVG+CSS.
-function AgentAvatar({agentKey, size, color, live}){
+// Paul=Equalizer/Analyse, Maya=Radar/Überwachung, Lena=Puls. viewBox 0 0 48 48, Mitte (24,24). Reines SVG+CSS.
+// Wird als Foto-Abzeichen (AgentAvatar), als Fallback und als Konsolen-Orb verwendet.
+function AgentGlyph({agentKey, size, color, live}){
   const a=AI_AGENTS[agentKey]||{}; const c=color||a.accent||'#0F5661'; const s=size||44;
   const P={className:'ag-av'+(live?' ag-live':''), width:s, height:s, viewBox:'0 0 48 48', fill:'none', style:{color:c}};
   const anchor=<rect x="0" y="0" width="48" height="48" fill="none"/>;
@@ -36512,6 +36616,23 @@ function AgentAvatar({agentKey, size, color, live}){
     <circle className="ag-core" cx="24" cy="24" r="4" fill="currentColor"/>
   </svg>;
 }
+// Der Avatar je Agent: das Foto (avatar_url) im farbigen Rahmen, mit dem animierten Zeichen als kleinem
+// Abzeichen unten rechts (behält seine Bewegung). Fällt auf das reine Zeichen zurück, solange kein Foto
+// vorliegt oder es nicht lädt (onError). Das Abzeichen erscheint nur ab genug Größe (kleiner Chip = nur Foto).
+function AgentAvatar({agentKey, size, color, live}){
+  const a=AI_AGENTS[agentKey]||{}; const c=color||a.accent||'#0F5661'; const s=size||44;
+  const [imgErr,setImgErr]=useState(false);
+  const showImg=a.avatar_url&&!imgErr;
+  if(!showImg) return <span style={{display:'inline-flex',width:s,height:s,borderRadius:'50%',border:'2px solid '+c,boxSizing:'border-box',alignItems:'center',justifyContent:'center'}}>
+    <AgentGlyph agentKey={agentKey} size={Math.round(s*0.64)} color={c} live={live}/></span>;
+  const withBadge=s>=26; const bs=Math.max(13,Math.round(s*0.4));
+  return <span style={{position:'relative',display:'inline-block',width:s,height:s,lineHeight:0}}>
+    <img src={a.avatar_url} alt={a.name||''} onError={()=>setImgErr(true)}
+      style={{width:s,height:s,borderRadius:'50%',objectFit:'cover',display:'block',border:'2px solid '+c,boxSizing:'border-box'}}/>
+    {withBadge&&<span style={{position:'absolute',right:-1,bottom:-1,width:bs,height:bs,borderRadius:'50%',background:'var(--card)',border:'1.5px solid '+c,boxSizing:'border-box',display:'inline-flex',alignItems:'center',justifyContent:'center',boxShadow:'0 1px 3px rgba(0,0,0,.28)'}}>
+      <AgentGlyph agentKey={agentKey} size={Math.round(bs*0.72)} color={c} live={live}/></span>}
+  </span>;
+}
 function AgentChip({agentKey, prefix, size}){ const a=AI_AGENTS[agentKey]; if(!a) return null; const acc=a.accent||'#0F5661'; const s=size||15;
   return <span title={a.tagline||''} style={{display:'inline-flex',alignItems:'center',gap:5,fontSize:10,fontWeight:700,padding:'1px 8px 1px 3px',borderRadius:20,background:acc+'14',color:acc,border:'1px solid '+acc+'2e',whiteSpace:'nowrap'}}>
     <span style={{width:s,height:s,flexShrink:0,display:'inline-flex'}}><AgentAvatar agentKey={agentKey} size={s} color={acc} live={false}/></span>
@@ -36543,7 +36664,7 @@ function AgentsView({team, onNavigate}){
               <span style={{position:'absolute',top:6,right:6,width:10,height:10,borderTop:'2px solid '+acc+'66',borderRight:'2px solid '+acc+'66'}}/>
               <div style={{position:'relative',display:'flex',alignItems:'center',gap:14}}>
                 <div style={{width:62,height:62,flexShrink:0,borderRadius:15,background:'var(--card)',border:'1px solid '+acc+'3a',display:'flex',alignItems:'center',justifyContent:'center',boxShadow:'0 0 22px -6px '+acc+'88, inset 0 0 0 3px '+acc+'10'}}>
-                  {ag.avatar_url?<img src={ag.avatar_url} alt="" style={{width:46,height:46,borderRadius:'50%',objectFit:'cover'}}/>:<AgentAvatar agentKey={ag.key} size={42} color={acc} live={true}/>}
+                  <AgentAvatar agentKey={ag.key} size={50} color={acc} live={true}/>
                 </div>
                 <div style={{minWidth:0,flex:1}}>
                   <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
@@ -36653,7 +36774,7 @@ function NlQueryView({team}){
         {WSA_STARS.map((s,i)=><circle key={'s'+i} className="nlq-star" cx={s[0]} cy={s[1]} r={i%3===0?3.4:2.6} style={{animationDelay:s[2]+'s'}}/>)}
       </svg>
       <div className="nlq-hero-hd">
-        <div className="nlq-orb2"><AgentAvatar agentKey="anna" size={46} color="#4fd1c5" live={true}/></div>
+        <div className="nlq-orb2"><AgentGlyph agentKey="anna" size={46} color="#4fd1c5" live={true}/></div>
         <div style={{flex:1}}>
           <div className="nlq-htt">{((AI_AGENTS.anna&&AI_AGENTS.anna.name)||'Anna')} · Datenabfrage <span className="nlq-hbadge">SQL · nur lesend</span></div>
           <div className="nlq-hsb">Tippe unten eine Frage in Alltagssprache — z. B. „Wer war diesen Monat krank?". Die Antwort erscheint gleich hier oben. Es wird nur gelesen, nichts verändert.</div>
