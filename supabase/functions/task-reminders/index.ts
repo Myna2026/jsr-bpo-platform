@@ -172,12 +172,45 @@ Deno.serve(async (req)=>{
     const inst= roles.length ? effInstances(u.role_keys||[], (aRes.data||[]).filter((a:any)=>a.user_id===u.user_id)).filter(t=>!t.auto && winActive(t) && gatePass(t)) : [];
     const open=inst.filter(t=>!isDone(u.user_id,t));
     const dueU=await userDueUploads(u.user_id);
+    const openCount=open.length+dueU.length;
+
+    // ── Eskalation (Schnitt 7): 1×/Tag hochstufen solange offen; auflösen + loben, wenn erledigt. ──
+    let escLine='';
+    try{
+      const { data:escRow } = await sb.from('agent_escalations').select('*').eq('user_id',u.user_id).eq('subject','tasks').is('resolved_at',null).maybeSingle();
+      if(openCount>0){
+        let stage=1, opened=today, advance=true;
+        if(escRow){ opened=escRow.opened_on; if(escRow.last_tick===today){ stage=escRow.stage; advance=false; } else stage=Math.min(5,(escRow.stage||1)+1); }
+        if(escRow){ if(advance) await sb.from('agent_escalations').update({ stage, last_tick:today, open_count:openCount }).eq('id',escRow.id); }
+        else await sb.from('agent_escalations').insert({ user_id:u.user_id, subject:'tasks', stage, opened_on:today, last_tick:today, open_count:openCount });
+        const days=Math.max(1, Math.round(((+new Date(today))-(+new Date(opened)))/86400000)+1);
+        if(stage===2) escLine='Das war gestern auch schon offen.';
+        else if(stage===3) escLine='Das ist jetzt öfter offen. Brauchst du Hilfe, oder soll das jemand anders übernehmen?';
+        else if(stage===4) escLine='Wenn sich nichts tut, gebe ich das ans Management weiter. Willst du vorher etwas dazu sagen?';
+        else if(stage>=5){
+          escLine='Ich habe das ans Management gemeldet.';
+          const okeyE='max_escalation_'+u.user_id;
+          // Der Gemeldete sieht es (in-App).
+          await sb.from('agent_insights').upsert({ agent_key:'max', user_id:u.user_id, okey:okeyE, day:today, title:'Max hat einen offenen Rückstand ans Management gemeldet. '+openCount+' Punkte sind seit '+days+' Tagen offen.', severity:'high', context:['daily_tasks'] }, {onConflict:'user_id,day,okey', ignoreDuplicates:true});
+          // Management sieht die Meldung — als Beobachtung, nicht als Anklage.
+          const mgrs=(uRes.data||[]).filter((m:any)=>m.active!==false && (m.role_keys||[]).includes('management') && !m.mgmt_external).map((m:any)=>m.user_id).filter((id:string)=>id&&id!==u.user_id);
+          if(mgrs.length){ const rows=mgrs.map((mid:string)=>({ agent_key:'max', user_id:mid, okey:okeyE, day:today, title:'Max meldet: '+(u.full_name||'Ein Zugang')+' hat seit '+days+' Tagen offene Aufgaben, trotz mehrfacher Erinnerung. '+openCount+' Punkte offen.', severity:'warn', context:['useractivity'] }));
+            await sb.from('agent_insights').upsert(rows, {onConflict:'user_id,day,okey', ignoreDuplicates:true}); }
+          if(escRow && !escRow.escalated_at) await sb.from('agent_escalations').update({ escalated_at:new Date().toISOString() }).eq('id',escRow.id);
+        }
+      } else if(escRow){
+        await sb.from('agent_escalations').update({ resolved_at:new Date().toISOString() }).eq('id',escRow.id);
+        if((escRow.stage||1)>=3) await sb.from('agent_insights').upsert({ agent_key:'max', user_id:u.user_id, okey:'max_backlog_cleared', day:today, title:'Der Rückstand ist abgearbeitet.', severity:'info', context:['daily_tasks'] }, {onConflict:'user_id,day,okey', ignoreDuplicates:true});
+      }
+    }catch(_e){ /* Eskalation optional */ }
+
     if(!open.length && !dueU.length) continue;                   // nichts offen + keine Uploads -> keine Nachricht
     const channel = prefBy[u.user_id] || defChannel;
     if(channel==='none') { results.push({u:u.full_name,skip:'channel-none'}); continue; }
     const parts:string[]=[greet];
     if(open.length){ parts.push('*Offene Aufgaben ('+open.length+'):*'); open.forEach(t=>parts.push('• '+t.title+(t.project_id?(' · '+(projName[t.project_id]||t.project_id)):'')+(t.cadence==='weekly'?' (diese Woche)':''))); }
     if(dueU.length){ parts.push('*Uploads:*'); dueU.forEach((x:any)=>parts.push((x.overdue?'🚨 Überfällig: ':'• Fällig: ')+x.label+' · '+x.proj+(x.rel?(' ('+x.rel+')'):''))); }
+    if(escLine) parts.push('\n'+escLine);              // Eskalationston (Stufe 2-5)
     parts.push('\nErledigen im HR-Portal: '+PORTAL);
     parts.push('\n— Max, dein digitaler Assistent');   // Absender-Identität (intern)
     const text=parts.join('\n');
