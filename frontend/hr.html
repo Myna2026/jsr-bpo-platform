@@ -7883,9 +7883,10 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW, catal
     } else {
       const name=(team&&(team.full_name||team.name))||'jemand', at=new Date().toISOString();
       setDone(p=>({...p,[mk]:{done_by_name:name,done_at:at,done_by:uid}}));
-      const {error}=await sb.from('daily_tasks_done').upsert({task_key:t.key,date:d,assignee_user:uid,project_id:proj,done_by:uid,done_by_name:name,done_at:at},{onConflict:'task_key,date,assignee_user,project_id'});
+      const {error}=await sb.from('daily_tasks_done').upsert({task_key:t.key,date:d,assignee_user:uid,project_id:proj,done_by:uid,done_by_name:name,done_at:at,
+        session_id:CURRENT_SESSION_ID, session_writes:SESSION_WRITE_COUNT, last_write_at:LAST_WRITE_AT},{onConflict:'task_key,date,assignee_user,project_id'});   // harter Beleg: Schreibstand der Sitzung beim Abhaken
       if(error){ setDone(prev); window.alert('Konnte nicht speichern: '+(error.message||'DB')); }
-      else logActivity('task_done','daily_task', t.key, t.label||t.title||t.key);   // Abhaken auf die Aktivitäts-Zeitachse (für Häkchen↔Änderung, Schnitt 2)
+      else logActivity('task_done','daily_task', t.key, t.label||t.title||t.key);   // Abhaken auf die Aktivitäts-Zeitachse
     }
     setBusy('');
   }
@@ -30745,8 +30746,15 @@ function visibleExtraWarn(entity, field){
 // logActivity ist FIRE-AND-FORGET: kein await, Fehler werden geschluckt — das
 // Protokollieren darf den eigentlichen Vorgang NIE blockieren oder verlangsamen.
 let CURRENT_USER = null;
+// Harter Beleg (Häkchen ↔ Datenänderung): sitzungsweiter Schreib-Zähler, write-basiert (nicht zeitbasiert).
+// Beim Abhaken wird der Stand mitgestempelt (daily_tasks_done.session_writes/last_write_at/session_id).
+let CURRENT_SESSION_ID = null;
+let SESSION_WRITE_COUNT = 0;
+let LAST_WRITE_AT = null;
 function logActivity(action, entity, id, label, details){
   try{
+    // Nur ECHTE Datenschreibvorgänge zählen (nicht view/login/task_done/ping).
+    if(action==='create'||action==='update'||action==='delete'){ SESSION_WRITE_COUNT++; LAST_WRITE_AT=new Date().toISOString(); }
     const u = CURRENT_USER || {};
     if(!u.id) console.warn('[activity_log] keine Identität (CURRENT_USER leer), Eintrag wird von der RLS verworfen:', action, entity||'');
     sb.from('activity_log').insert({
@@ -39735,7 +39743,8 @@ function App(){
   // Heartbeat: echte Anwesenheit/Dauer, auch reine Lese-Sitzungen. Alle 3 Min, nur bei sichtbarem Tab.
   // Dauer = last_seen − started_at je Sitzung; „wie oft" = Zahl der Sitzungen.
   useEffect(()=>{ if(!loggedIn) return;
-    if(!sessionIdRef.current){ try{ sessionIdRef.current = crypto.randomUUID(); }catch(e){ sessionIdRef.current = 's'+Date.now(); } }
+    if(!sessionIdRef.current){ try{ sessionIdRef.current = crypto.randomUUID(); }catch(e){ sessionIdRef.current = 's'+Date.now(); }
+      CURRENT_SESSION_ID = sessionIdRef.current; SESSION_WRITE_COUNT = 0; LAST_WRITE_AT = null; }
     const ping=()=>{ if(typeof document!=='undefined' && document.visibilityState==='hidden') return;
       try{ sb.rpc('session_ping',{p_session_id:sessionIdRef.current, p_view:viewRef.current||null, p_agent:((navigator&&navigator.userAgent)||'').slice(0,180)}); }catch(e){} };
     ping();
