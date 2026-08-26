@@ -43,14 +43,24 @@ async function makeInvite(cvId: string, formId: string | null): Promise<string> 
   return token;
 }
 
-function mailBody(firstName: string, link: string): string {
+// Clara aus dem Register (Name + Aussen-Kennzeichnung). Einmal je Function-Instanz gecacht.
+let CLARA: any = null;
+async function clara() {
+  if (CLARA) return CLARA;
+  const { data } = await sb.from("ai_agents").select("name,disclosure").eq("key", "clara").maybeSingle();
+  CLARA = data || { name: "Clara", disclosure: "Clara ist eine digitale Assistentin bei 25HRS, keine Person." };
+  return CLARA;
+}
+function mailBody(firstName: string, link: string, sig: any): string {
   const hi = firstName ? "Hallo " + firstName + "," : "Hallo,";
+  const name = (sig && sig.name) || "Clara";
+  const disc = (sig && sig.disclosure) || "Clara ist eine digitale Assistentin bei 25HRS, keine Person.";
   return `<div style="font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#222;line-height:1.55;max-width:520px">
     <p>${hi}</p>
     <p>vielen Dank fuer deine Bewerbung. Damit wir schnell weitermachen koennen, ergaenze bitte kurz dein Profil ueber den folgenden Link. Das dauert nur wenige Minuten:</p>
     <p><a href="${link}" style="display:inline-block;padding:12px 22px;background:#0F5661;color:#fff;text-decoration:none;border-radius:8px;font-weight:700">Profil vervollstaendigen</a></p>
     <p style="font-size:13px;color:#666">Falls der Knopf nicht funktioniert, kopiere diesen Link in deinen Browser:<br>${link}</p>
-    <p>Viele Gruesse<br>Dein 25HRS Team</p>
+    <p>Viele Gruesse<br>${name}<br><span style="font-size:12px;color:#888">${disc}</span></p>
   </div>`;
 }
 
@@ -79,7 +89,8 @@ async function providerSend(sender: any, to: string, subject: string, html: stri
 async function sendOne(cv: any, cfg: any, sender: any, origin: string, createdBy: string | null) {
   const token = await makeInvite(cv.id, cfg.form_id || null);
   const link = PUBLIC_BASE + "/bewerber.html?t=" + token;
-  const res = await providerSend(sender, cv.email, "Deine Bewerbung: Profil vervollstaendigen", mailBody(cv.first_name || "", link));
+  const sig = await clara();
+  const res = await providerSend(sender, cv.email, "Deine Bewerbung: Profil vervollstaendigen", mailBody(cv.first_name || "", link, sig));
   await sb.from("applicant_messages").insert({
     cv_id: cv.id, channel: "email", purpose: "enrich_invite", origin,
     sender_key: sender.key, to_address: cv.email, invite_token: token, form_id: cfg.form_id || null,

@@ -179,6 +179,7 @@ Deno.serve(async (req)=>{
     if(open.length){ parts.push('*Offene Aufgaben ('+open.length+'):*'); open.forEach(t=>parts.push('• '+t.title+(t.project_id?(' · '+(projName[t.project_id]||t.project_id)):'')+(t.cadence==='weekly'?' (diese Woche)':''))); }
     if(dueU.length){ parts.push('*Uploads:*'); dueU.forEach((x:any)=>parts.push((x.overdue?'🚨 Überfällig: ':'• Fällig: ')+x.label+' · '+x.proj+(x.rel?(' ('+x.rel+')'):''))); }
     parts.push('\nErledigen im HR-Portal: '+PORTAL);
+    parts.push('\n— Max, dein digitaler Assistent');   // Absender-Identität (intern)
     const text=parts.join('\n');
     const outcome = dry ? 'dry' : (channel==='cliq' ? await cliqDM(emailBy[u.user_id], text) : await slackDM(emailBy[u.user_id], text));
     results.push({u:u.full_name, channel, open:open.length, uploads:dueU.length, outcome});

@@ -76,5 +76,17 @@ Deno.serve(async (req)=>{
       if(ue) failed++; else done++;
     }catch(_e){ failed++; }
   }
+  // ── Agenten laufen mit: Clara (zählbare Aktionen). Weitere folgen, sobald ihre Aktionen protokolliert werden.
+  try{
+    const nd = new Date(date+"T00:00:00Z"); nd.setUTCDate(nd.getUTCDate()+1); const next = nd.toISOString().slice(0,10);
+    const cvC = await sb.from("cvs").select("id",{count:"exact",head:true}).eq("source","meta").gte("created_at",date).lt("created_at",next);
+    const mlC = await sb.from("applicant_messages").select("id",{count:"exact",head:true}).eq("origin","auto").eq("status","sent").gte("sent_at",date).lt("sent_at",next);
+    const sorted = cvC.count||0, mails = mlC.count||0;
+    if(sorted>0 || mails>0){
+      const bits:string[]=[]; if(sorted>0) bits.push(`${sorted} Bewerbung${sorted===1?"":"en"} vorsortiert`); if(mails>0) bits.push(`${mails} Anreicherungs-Mail${mails===1?"":"s"} verschickt`);
+      await sb.from("agent_digests").upsert({ day:date, agent_key:"clara", name:"Clara", summary:"Clara hat "+bits.join(" und ")+".", metrics:{sorted,mails} }, {onConflict:"day,agent_key"});
+    }
+  }catch(_e){ /* Agenten-Zeile optional */ }
+
   return json({ ok:true, date, users:active.length, done, failed });
 });
