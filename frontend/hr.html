@@ -36204,7 +36204,19 @@ const ACT_KIND_LABELS = {employee:'Mitarbeiter', shift_assignment:'Schichtplan',
 function LoginActivityView({team}){
   const isMgmt=((team&&team.role_keys)||[]).some(r=>r==='management');
   const [rows,setRows]=useState(null); const [err,setErr]=useState(''); const [sortK,setSortK]=useState('activity');
-  useEffect(()=>{ if(!isMgmt) return; let a=true; (async()=>{ try{ const {data,error}=await sb.rpc('management_activity_overview'); if(!a) return; if(error) setErr(error.message||'Laden fehlgeschlagen'); setRows(error?[]:(data||[])); }catch(e){ if(a){ setErr((e&&e.message)||'Fehler'); setRows([]); } } })(); return ()=>{a=false;}; },[isMgmt]);
+  const [metrics30,setMetrics30]=useState(null); const [digests,setDigests]=useState([]); const [digestDay,setDigestDay]=useState('');
+  useEffect(()=>{ if(!isMgmt) return; let a=true; (async()=>{ try{
+      const from30=isoLocal(new Date(Date.now()-29*864e5)), to=isoLocal(new Date());
+      const [ov,m30,dg]=await Promise.all([
+        sb.rpc('management_activity_overview'),
+        sb.rpc('usage_day_metrics',{p_from:from30,p_to:to}),
+        sb.from('usage_digests').select('*').order('day',{ascending:false}).limit(60) ]);
+      if(!a) return;
+      if(ov.error) setErr(ov.error.message||'Laden fehlgeschlagen'); setRows(ov.error?[]:(ov.data||[]));
+      setMetrics30(m30.error?[]:(m30.data||[]));
+      const days=dg.data||[]; const latest=days.length?String(days[0].day).slice(0,10):''; setDigestDay(latest);
+      setDigests(days.filter(x=>String(x.day).slice(0,10)===latest));
+    }catch(e){ if(a){ setErr((e&&e.message)||'Fehler'); setRows([]); } } })(); return ()=>{a=false;}; },[isMgmt]);
   if(!isMgmt) return <div className="sp-empty">Nur für Management.</div>;
   const dayDiff=ts=>ts?Math.floor((Date.now()-new Date(ts).getTime())/86400000):null;
   const ampel=d=>d==null?'#dc2626':(d<=3?'#16a34a':(d<=10?'#d97706':'#dc2626'));
@@ -36260,9 +36272,40 @@ function LoginActivityView({team}){
       +'</div></body></html>';
     w.document.write(html); w.document.close();
   }
+  const DAY_KEYS=Array.from({length:30},(_,i)=>isoLocal(new Date(Date.now()-(29-i)*864e5)));
+  const cellColor=v=> v===0?'var(--surface-2)': v<3?'#bcdfe3': v<10?'#5fa9b1':'#0F5661';
+  const mayaUsers=(()=>{ const bu={}; (metrics30||[]).forEach(r=>{ const id=r.user_id; bu[id]=bu[id]||{id,name:r.user_name||'—',days:{}}; bu[id].days[String(r.day).slice(0,10)]=(r.writes||0)+(r.tasks_done||0)+(r.sessions>0?1:0)+(r.logins>0?1:0); });
+    return Object.values(bu).map(u=>{ const vals=DAY_KEYS.map(k=>u.days[k]||0); const activeDays=vals.filter(v=>v>0).length;
+      const band=activeDays>=20?{label:'täglich aktiv',c:'#0F5661'}:activeDays>=6?{label:'unregelmäßig',c:'#b45309'}:activeDays>=1?{label:'selten',c:'#64748b'}:{label:'keine Aktivität',c:'#94a3b8'};
+      return {...u,vals,activeDays,band}; }).sort((a,b)=>b.activeDays-a.activeDays); })();
+  const digestLbl=digestDay?new Date(digestDay+'T12:00:00').toLocaleDateString('de-DE',{weekday:'short',day:'2-digit',month:'2-digit',year:'numeric'}):'';
   return <div style={{maxWidth:1100}}>
     <div style={{marginBottom:6,fontSize:20,fontWeight:700}}>Nutzung & Aktivität</div>
     <div style={{fontSize:13,color:'var(--muted)',marginBottom:16}}>Wer nutzt das System, und vor allem: wer pflegt Daten. Die Farbe zeigt, wie lange die letzte Eingabe her ist.</div>
+
+    {/* Maya · Systemüberwachung — sachlich, ohne Wertung */}
+    <div className="card" style={{padding:16,marginBottom:18,borderLeft:'4px solid #0F5661'}}>
+      <div style={{display:'flex',alignItems:'baseline',gap:10,flexWrap:'wrap',marginBottom:2}}>
+        <span style={{fontSize:15,fontWeight:800}}>Maya · Systemüberwachung</span>
+        <span style={{fontSize:11.5,color:'var(--muted)'}}>zeigt, was ist, ohne Wertung</span>
+      </div>
+      <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',margin:'12px 0 6px'}}>Zusammenfassung{digestLbl?' · '+digestLbl:''}</div>
+      {(!digests||digests.length===0)
+        ? <div style={{fontSize:12.5,color:'var(--muted)'}}>Noch keine Tages-Zusammenfassung. Sie entsteht täglich automatisch für den Vortag.</div>
+        : <div style={{display:'flex',flexDirection:'column',gap:6}}>{digests.map(d=><div key={d.user_id} style={{fontSize:13,lineHeight:1.5}}>{(d.metrics&&d.metrics.tasks_empty>0)&&<span title="Aufgaben ohne begleitende Datenänderung" style={{marginRight:6}}>⚠️</span>}<b>{d.user_name}</b>: {d.summary}</div>)}</div>}
+      <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',margin:'16px 0 8px'}}>Aktivität der letzten 30 Tage</div>
+      {metrics30===null?<div style={{fontSize:12.5,color:'var(--muted)'}}>Lädt…</div>
+       : mayaUsers.length===0?<div style={{fontSize:12.5,color:'var(--muted)'}}>Noch keine Verlaufsdaten.</div>
+       : <div style={{display:'flex',flexDirection:'column',gap:8}}>
+          {mayaUsers.map(u=><div key={u.id} style={{display:'flex',alignItems:'center',gap:12,flexWrap:'wrap'}}>
+            <div style={{width:150,flexShrink:0,fontSize:13,fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{u.name}</div>
+            <div style={{display:'flex',gap:2}}>{u.vals.map((v,i)=><span key={i} title={DAY_KEYS[i]+': '+v} style={{width:9,height:16,borderRadius:2,background:cellColor(v)}}/>)}</div>
+            <span style={{fontSize:11,fontWeight:700,padding:'2px 9px',borderRadius:20,color:u.band.c,background:u.band.c+'18',border:'1px solid '+u.band.c+'33',whiteSpace:'nowrap'}}>{u.band.label}</span>
+            <span style={{fontSize:11,color:'var(--muted)'}}>{u.activeDays}/30 Tage</span>
+          </div>)}
+        </div>}
+      <div style={{fontSize:10.5,color:'var(--dim)',marginTop:10,lineHeight:1.5}}>Einstufung nach aktiven Tagen der letzten 30: täglich aktiv (ab 20), unregelmäßig (6 bis 19), selten (1 bis 5). Sitzungsdauer und besuchte Bereiche füllen sich ab jetzt, da Anwesenheits- und Bereichs-Erfassung neu aktiv sind.</div>
+    </div>
     <div style={{display:'flex',gap:10,flexWrap:'wrap',marginBottom:16}}>
       {[['Aktiv gepflegt',stats.green,'#16a34a','#f0fdf4','bis 3 Tage'],['Lahmt',stats.amber,'#d97706','#fffbeb','4 bis 10 Tage'],['Hängt',stats.red,'#dc2626','#fef2f2','über 10 Tage oder nie']].map((s,i)=>
         <div key={i} style={{flex:'1 1 180px',border:'1px solid '+s[2]+'33',background:s[3],borderRadius:12,padding:'12px 14px'}}>
