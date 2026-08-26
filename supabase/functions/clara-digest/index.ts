@@ -93,6 +93,7 @@ Deno.serve(async (req)=>{
   const st:any = stats||{}; const nt=st.new_today||0, np=st.new_prev||0, rep=st.repeaters||0, dub=st.dubletten_pending||0;
   const neu=Math.max(0, nt-rep); const lg=st.lang||{}; const hoch=lg.hoch||0, mit=lg.mittel||0, nied=lg.niedrig||0, unb=lg.unbekannt||0;
   const langTot=hoch+mit+nied+unb; const delta=nt-np;
+  const qt=st.quality||{}; const qTop=qt.top||0, qGut=qt.gut||0, qRest=qt.rest||0;
   const arrow = delta>0 ? "▲ "+delta+" mehr als gestern" : delta<0 ? "▼ "+(-delta)+" weniger als gestern" : "gleich wie gestern";
   const acc=(cl&&cl.accent)||"#7c3aed"; const photo="https://hr.tive360.de/"+((cl&&cl.avatar_url)||"assets/agents/clara.png");
   const portal="https://hr.tive360.de";
@@ -121,6 +122,12 @@ Deno.serve(async (req)=>{
     +(langTot>0 ? '<tr><td style="padding:14px 22px 2px;"><div style="font-size:12px;color:#6b7280;font-weight:bold;text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px;">Sprachniveau</div>'
       +'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="table-layout:fixed;width:100%;border-radius:8px;overflow:hidden;"><tr>'+barCells+'</tr></table>'
       +'<div style="margin-top:9px;font-size:12.5px;">'+legend+'</div></td></tr>' : '')
+    +'<tr><td style="padding:14px 22px 2px;"><div style="font-size:12px;color:#6b7280;font-weight:bold;text-transform:uppercase;letter-spacing:.04em;margin-bottom:9px;">Qualität der neuen</div>'
+      +'<table role="presentation" cellpadding="0" cellspacing="0"><tr>'
+      +'<td style="padding-right:8px;"><span style="display:inline-block;background:#d97706;color:#ffffff;font-weight:bold;font-size:14px;padding:7px 13px;border-radius:20px;">&#9733; TOP '+qTop+'</span></td>'
+      +'<td style="padding-right:8px;"><span style="display:inline-block;background:#fde68a;color:#8a5a00;font-weight:bold;font-size:14px;padding:7px 13px;border-radius:20px;">&#9733; GUT '+qGut+'</span></td>'
+      +'<td><span style="display:inline-block;background:#eef0f4;color:#6b7280;font-weight:bold;font-size:14px;padding:7px 13px;border-radius:20px;">Rest '+qRest+'</span></td>'
+      +'</tr></table></td></tr>'
     +'<tr><td style="padding:16px 22px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f6f4fb;border-left:4px solid '+acc+';border-radius:10px;"><tr>'
       +'<td width="58" valign="top" style="padding:14px 0 14px 14px;"><img src="'+photo+'" width="40" height="40" alt="Clara" style="border-radius:20px;display:block;"></td>'
       +'<td style="padding:14px;font-size:15px;line-height:1.55;color:#1f2937;">'+obsText.replace(/</g,"&lt;").replace(/\n/g,"<br>")+'</td></tr></table></td></tr>'
@@ -131,11 +138,13 @@ Deno.serve(async (req)=>{
   const textFb = "Recruiting heute Morgen · "+dateLbl+"\n\n"
     +"Bewerbungen heute: "+nt+" (gestern "+np+", "+arrow.replace(/▲ |▼ /,"")+")\n"
     +"Davon neu: "+neu+"\nDubletten offen: "+dub+"\n\n"
-    +"Sprachniveau: hoch "+hoch+", mittel "+mit+", niedrig "+nied+", unbekannt "+unb+"\n\n"
+    +"Sprachniveau: hoch "+hoch+", mittel "+mit+", niedrig "+nied+", unbekannt "+unb+"\n"
+    +"Qualität: TOP "+qTop+", GUT "+qGut+", Rest "+qRest+"\n\n"
     +obsText+"\n\nZum Recruiting: "+portal+"\n\n— Clara, digitale Kollegin im Recruiting";
   const slackText = "*Recruiting heute Morgen · "+dateLbl+"*\n"
     +"📥 Bewerbungen heute: *"+nt+"*  ("+arrow+")\n🆕 Davon neu: *"+neu+"*    👥 Dubletten offen: *"+dub+"*\n"
-    +"Sprache: hoch "+hoch+" · mittel "+mit+" · niedrig "+nied+" · unbekannt "+unb+"\n\n"+obsText+"\n_— Clara_";
+    +"Sprache: hoch "+hoch+" · mittel "+mit+" · niedrig "+nied+" · unbekannt "+unb+"\n"
+    +"Qualität: ⭐ TOP "+qTop+" · ★ GUT "+qGut+" · Rest "+qRest+"\n\n"+obsText+"\n_— Clara_";
 
   if(sp.get("dry")==="1") return json({ dry:true, day, obsText, textFb, html });
 
