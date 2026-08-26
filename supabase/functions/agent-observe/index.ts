@@ -130,19 +130,31 @@ Deno.serve(async (req)=>{
     checks.lena.snapshot = byCat;
   }catch(_e){}
 
-  // Schreiben: Befunde als Beobachtungen (Kollegen-Satz) + Heartbeat je Agent.
+  // Schreiben: Befunde als Beobachtungen (Kollegen-Satz) + Einblendungen je Zielnutzer + Heartbeat je Agent.
   const NAMES:Record<string,string> = { clara:"Clara", max:"Max", anna:"Anna", paul:"Paul", maya:"Maya", lena:"Lena" };
-  let totalFound=0;
+  // Wer bekommt welchen Kollegen zu sehen (Rollen); Kontext = wo die Einblendung passt (am richtigen Ort).
+  const ROLE_TARGETS:Record<string,string[]> = { clara:["management","hr"], max:["management","hr"], anna:["management","hr"], paul:["management"], maya:["management"], lena:["management","hr"] };
+  const AGENT_CONTEXT:Record<string,string[]> = { clara:["kanban","funnel","cvs","dubletten","bewerberlinks"], max:["daily_tasks","uploads"], anna:["nlquery","wissen_system","knowledge"], paul:["auswertung","praesentation","meetingnotes"], maya:["useractivity"], lena:["datacheck","absences","urlaubantraege","employees"] };
+  const { data:usersRaw } = await sb.from("app_users").select("user_id,role_keys,active");
+  const users = (usersRaw||[]).filter((u:any)=>u.active!==false && u.user_id);
+  const targetsFor=(k:string)=>{ const roles=ROLE_TARGETS[k]||["management"]; return users.filter((u:any)=>(u.role_keys||[]).some((r:string)=>roles.includes(r))).map((u:any)=>u.user_id); };
+  let totalFound=0, insCount=0;
   for(const key of Object.keys(checks)){
     const c=checks[key]; const persona=await personaOf(key);
     for(const f of c.findings){
       let title=""; try{ title=await colleagueLine(NAMES[key], persona, {facts:f.facts, confidence:f.confidence, missing:f.missing}); }catch(_e){}
       if(!title) title = f.facts.map((x:any)=>`${x.label}: ${x.current}`).join("; ");
-      await sb.from("agent_observations").upsert({ day:date, okey:f.okey, agent_key:key, severity:f.severity, title, metrics:f.metrics||null, confidence:f.confidence||null },{onConflict:"day,okey"});
+      const { data:obsRow } = await sb.from("agent_observations").upsert({ day:date, okey:f.okey, agent_key:key, severity:f.severity, title, metrics:f.metrics||null, confidence:f.confidence||null },{onConflict:"day,okey"}).select("id").maybeSingle();
+      const tgts=targetsFor(key); const ctx=AGENT_CONTEXT[key]||null;
+      if(tgts.length){
+        const rows = tgts.map((uid:string)=>({ agent_key:key, user_id:uid, observation_id:(obsRow&&obsRow.id)||null, okey:f.okey, day:date, title, severity:f.severity, context:ctx }));
+        const { error } = await sb.from("agent_insights").upsert(rows, {onConflict:"user_id,day,okey", ignoreDuplicates:true});
+        if(!error) insCount += rows.length;
+      }
     }
     totalFound += c.findings.length;
     await sb.from("agent_checks").upsert({ agent_key:key, last_checked_at:new Date().toISOString(), last_day:date, found_count:c.findings.length, metrics:(c.snapshot!==undefined?c.snapshot:undefined), updated_at:new Date().toISOString() },{onConflict:"agent_key"});
   }
 
-  return json({ ok:true, date, found:totalFound, per:Object.fromEntries(Object.entries(checks).map(([k,v])=>[k,v.findings.length])) });
+  return json({ ok:true, date, found:totalFound, insights:insCount, per:Object.fromEntries(Object.entries(checks).map(([k,v])=>[k,v.findings.length])) });
 });

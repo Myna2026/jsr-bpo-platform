@@ -789,6 +789,7 @@ textarea.form-input{resize:vertical;min-height:70px}
 .agc-photo{border-radius:18px;object-fit:cover;display:block;background:var(--surface-2);}
 .agc-float{animation:agFloat 5s ease-in-out infinite;}
 @keyframes agFloat{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}
+@keyframes agInsIn{from{transform:translateY(16px);opacity:0}to{transform:translateY(0);opacity:1}}
 .agc-open{position:fixed;inset:0;z-index:1300;background:rgba(6,14,22,.62);backdrop-filter:blur(3px);display:flex;justify-content:center;align-items:flex-start;padding:32px 16px;overflow:auto;}
 .agc-detail{max-width:920px;width:100%;border-radius:24px;overflow:hidden;background:var(--card);box-shadow:0 40px 90px rgba(2,10,16,.5);}
 .agc-detail-cols{display:grid;grid-template-columns:1.05fr .95fr;gap:18px;}
@@ -36751,6 +36752,50 @@ function AgentTag({agentKey}){
     <span style={{fontSize:10.5,fontWeight:700,color:acc}}>{a.name}</span>
   </span>;
 }
+// Einblendungen (Schnitt 5): eigene, ungesehene Einblendungen. Regeln: höchstens 2 pro Tag, Arbeitszeit-Fenster
+// (Mo-Fr 8-18), am richtigen Ort (context = View-Keys; wichtige zeigen überall). Eine nach der anderen, unten rechts
+// (mobil unten breit). „Ansehen" springt zum Bereich, „Weg" klickt weg. Zustand (gesehen/weg/gehandelt) via RPC.
+function AgentInsights({view, onNavigate, isMobileW}){
+  const [list,setList]=useState([]); const [cur,setCur]=useState(null); const shownRef=React.useRef(new Set());
+  const load=React.useCallback(async()=>{ try{ const {data}=await sb.from('agent_insights').select('*').is('dismissed_at',null).order('created_at',{ascending:false}); setList(data||[]); }catch(e){} },[]);
+  useEffect(()=>{ load(); const t=setInterval(load, 5*60000); return ()=>clearInterval(t); },[load]);
+  useEffect(()=>{ if(cur) return;
+    const now=new Date(), wd=now.getDay(), h=now.getHours();
+    if(!(wd>=1&&wd<=5 && h>=8 && h<18)) return;                    // Arbeitszeit-Fenster
+    const today=isoLocal(new Date());
+    const seenToday=list.filter(i=>i.seen_at && String(i.seen_at).slice(0,10)===today).length;
+    if(seenToday>=2) return;                                       // Budget: max 2 pro Tag
+    const elig=list.filter(i=>!i.seen_at && !shownRef.current.has(i.id) && (i.severity==='high' || !i.context || i.context.length===0 || i.context.includes(view)));
+    if(!elig.length) return;
+    const ord={high:0,warn:1,info:2}; elig.sort((a,b)=>(ord[a.severity]??3)-(ord[b.severity]??3));
+    const pick=elig[0]; shownRef.current.add(pick.id); setCur(pick);
+    sb.rpc('insight_mark',{p_id:pick.id,p_state:'seen'}).then(()=>setList(l=>l.map(x=>x.id===pick.id?{...x,seen_at:new Date().toISOString()}:x))).catch(()=>{});
+  },[list,view,cur]);
+  if(!cur) return null;
+  const a=AI_AGENTS[cur.agent_key]||{}; const acc=a.accent||'#0F5661';
+  const sv=cur.severity==='high'?'#b91c1c':cur.severity==='warn'?'#b45309':acc;
+  const close=(state)=>{ sb.rpc('insight_mark',{p_id:cur.id,p_state:state}).catch(()=>{}); if(state==='dismissed') setList(l=>l.map(x=>x.id===cur.id?{...x,dismissed_at:new Date().toISOString()}:x)); setCur(null); };
+  const jump=()=>{ const v=(cur.context&&cur.context[0]); close('acted'); if(v&&onNavigate) onNavigate({kind:'view',view:v}); };
+  return <div style={{position:'fixed',zIndex:1400,borderRadius:16,background:'var(--card)',border:'1px solid '+acc+'40',boxShadow:'0 20px 50px -12px rgba(2,10,16,.5)',overflow:'hidden',animation:'agInsIn .28s ease',
+      ...(isMobileW?{left:10,right:10,bottom:10}:{right:20,bottom:20,width:360})}}>
+    <div style={{height:3,background:sv}}/>
+    <div style={{padding:'14px 16px',display:'flex',gap:12,alignItems:'flex-start'}}>
+      <span style={{flexShrink:0}}><AgentAvatar agentKey={cur.agent_key} size={40} color={acc} live={true}/></span>
+      <div style={{minWidth:0,flex:1}}>
+        <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:3}}>
+          <span style={{fontWeight:800,fontSize:13.5}}>{a.name||cur.agent_key}</span>
+          <span style={{fontSize:9,fontWeight:800,textTransform:'uppercase',letterSpacing:'.05em',color:sv}}>{cur.severity==='high'?'wichtig':cur.severity==='warn'?'Hinweis':'Notiz'}</span>
+        </div>
+        <div style={{fontSize:13,lineHeight:1.5}}>{cur.title}</div>
+        <div style={{display:'flex',gap:8,marginTop:11}}>
+          {cur.context&&cur.context.length>0&&<button onClick={jump} style={{border:'none',background:acc,color:'#fff',borderRadius:9,padding:'7px 14px',fontSize:12.5,fontWeight:700,cursor:'pointer'}}>Ansehen</button>}
+          <button onClick={()=>close('dismissed')} style={{border:'1px solid var(--border)',background:'var(--card)',color:'var(--muted)',borderRadius:9,padding:'7px 14px',fontSize:12.5,fontWeight:600,cursor:'pointer'}}>Weg</button>
+        </div>
+      </div>
+      <button onClick={()=>close('dismissed')} title="Schließen" style={{border:'none',background:'transparent',color:'var(--muted)',fontSize:16,cursor:'pointer',flexShrink:0,lineHeight:1}}>✕</button>
+    </div>
+  </div>;
+}
 // Cockpit nach Gebiet: je Block der Zuständige. NUR wo ein Agent wirklich arbeitet (kein Gastgeber oben).
 const WIDGET_AGENT = {
   recruiting_pipeline:'clara', neue_cvs:'clara',
@@ -41239,6 +41284,7 @@ function App(){
         </div>
         <div className="content">
           <DialogHost/>
+          <AgentInsights view={view} onNavigate={dqNavigate} isMobileW={isMobileW}/>
           {absenceModal&&<AbsenceModal emp={absenceModal} onSave={saveAbsences} onClose={()=>setAbsenceModal(null)}/>}
           {terminateModal&&<TerminateModal emp={terminateModal} onConfirm={confirmTerminate} onClose={()=>setTerminateModal(null)}/>}
           {bonusModal&&<BonusModal emp={bonusModal} onSave={saveBonus} onClose={()=>setBonusModal(null)}/>}
