@@ -68,17 +68,19 @@ async function makeInvite(cvId: string, formId: string | null): Promise<string> 
   return token;
 }
 
-function mailBody(firstName: string, link: string, sender: any): string {
-  const hi = firstName ? "Hallo " + firstName + "," : "Hallo,";
-  const name = sender.name || "Clara";
-  const disc = sender.disclosure || "";
-  return `<div style="font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#222;line-height:1.55;max-width:520px">
-    <p>${hi}</p>
-    <p>vielen Dank fuer deine Bewerbung. Damit wir schnell weitermachen koennen, ergaenze bitte kurz dein Profil ueber den folgenden Link. Das dauert nur wenige Minuten:</p>
-    <p><a href="${link}" style="display:inline-block;padding:12px 22px;background:#0F5661;color:#fff;text-decoration:none;border-radius:8px;font-weight:700">Profil vervollstaendigen</a></p>
-    <p style="font-size:13px;color:#666">Falls der Knopf nicht funktioniert, kopiere diesen Link in deinen Browser:<br>${link}</p>
-    <p>Viele Gruesse<br>${name}${disc ? `<br><span style="font-size:12px;color:#888">${disc}</span>` : ""}</p>
-  </div>`;
+// Leitplanke: externe Mail läuft NUR über freigegebene, aktive Vorlagen (mail_templates) — kein Freitext.
+async function loadTemplate(key: string): Promise<any> {
+  const { data } = await sb.from("mail_templates").select("*").eq("key", key).eq("active", true).maybeSingle();
+  return data || null;
+}
+function renderTemplate(tpl: any, vars: Record<string, string>): { subject: string; html: string } {
+  const sub = (s: string) => String(s).replace(/\{\{(\w+)\}\}/g, (_m, k) => (vars[k] !== undefined ? vars[k] : ""));
+  return { subject: sub(tpl.subject), html: sub(tpl.body_html) };
+}
+// Technische Klasse einer Aktion aus dem Register-Gate. Fail-closed: bei Fehler 'unbekannt' -> gesperrt.
+async function guardClass(agent: string, action: string): Promise<string> {
+  try { const { data } = await sb.rpc("agent_guard", { p_agent: agent, p_action: action }); return typeof data === "string" ? data : "unbekannt"; }
+  catch (_e) { return "unbekannt"; }
 }
 
 // UTF-8 -> Base64 sauber über TextEncoder (kein veraltetes unescape). In 0x8000-Blöcken, damit der
@@ -156,9 +158,22 @@ async function smtpSend(sender: any, to: string, subject: string, html: string):
 
 // Einen Bewerber anschreiben: Einladung erzeugen, senden, protokollieren.
 async function sendOne(cv: any, cfg: any, sender: any, origin: string, createdBy: string | null) {
+  const logFail = async (err: string) => { await sb.from("applicant_messages").insert({
+    cv_id: cv.id, channel: "email", purpose: "enrich_invite", origin, sender_key: sender.key,
+    to_address: cv.email, form_id: cfg.form_id || null, status: "failed", error: err, created_by: createdBy });
+    return { ok: false, error: err }; };
+  // Leitplanke 1: externe Mail nur mit Freigabe-Klasse.
+  const g = await guardClass(sender.key, "mail_external");
+  if (g !== "freigabe" && g !== "autonom") return await logFail("Leitplanke: externe Mail nicht erlaubt (" + g + ")");
+  // Leitplanke 2: nur freigegebene, aktive Vorlage — kein Freitext.
+  const tpl = await loadTemplate("enrich_invite");
+  if (!tpl) return await logFail("Keine freigegebene Vorlage (enrich_invite) aktiv");
+
   const token = await makeInvite(cv.id, cfg.form_id || null);
   const link = PUBLIC_BASE + "/bewerber.html?t=" + token;
-  const res = await smtpSend(sender, cv.email, "Deine Bewerbung: Profil vervollstaendigen", mailBody(cv.first_name || "", link, sender));
+  const hi = cv.first_name ? "Hallo " + cv.first_name + "," : "Hallo,";
+  const { subject, html } = renderTemplate(tpl, { hi, link, name: sender.name || "Clara", disc: sender.disclosure || "" });
+  const res = await smtpSend(sender, cv.email, subject, html);
   await sb.from("applicant_messages").insert({
     cv_id: cv.id, channel: "email", purpose: "enrich_invite", origin,
     sender_key: sender.key, to_address: cv.email, invite_token: token, form_id: cfg.form_id || null,
@@ -173,6 +188,11 @@ Deno.serve(async (req) => {
   let body: any = {}; try { body = await req.json(); } catch (_e) { /* leerer Body ok (Cron) */ }
   const mode = body.mode || "scan";
   const cfg = await loadCfg();
+
+  // Leitplanke: an Externe kein frei formulierter Text. Anfragen mit eigenem Body/Betreff werden abgewiesen.
+  if ((mode === "scan" || mode === "send") && (body.html || body.body || body.text || body.subject || body.message)) {
+    return json({ ok: false, error: "Freitext an Externe ist nicht erlaubt. Es gehen nur freigegebene Vorlagen raus." }, 400);
+  }
 
   // ── Test-Versand (durch MAILER_TEST_KEY geschützt) ──────────────────────────
   if (mode === "test") {
