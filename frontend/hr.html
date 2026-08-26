@@ -7885,6 +7885,7 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW, catal
       setDone(p=>({...p,[mk]:{done_by_name:name,done_at:at,done_by:uid}}));
       const {error}=await sb.from('daily_tasks_done').upsert({task_key:t.key,date:d,assignee_user:uid,project_id:proj,done_by:uid,done_by_name:name,done_at:at},{onConflict:'task_key,date,assignee_user,project_id'});
       if(error){ setDone(prev); window.alert('Konnte nicht speichern: '+(error.message||'DB')); }
+      else logActivity('task_done','daily_task', t.key, t.label||t.title||t.key);   // Abhaken auf die Aktivitäts-Zeitachse (für Häkchen↔Änderung, Schnitt 2)
     }
     setBusy('');
   }
@@ -33042,6 +33043,7 @@ function FeedbackInterview({session, emp, questions, conductorName, onDone, onCl
     if(!error){ ({error}=await sb.from('feedback_sessions').update({status:'done',conducted_at:new Date().toISOString(),conducted_by:uid,conducted_by_name:conductorName||null,project_id:(emp&&emp.project_id)||null,location:(emp&&emp.location)||null}).eq('id',session.id)); }
     setBusy(false);
     if(error){ showToast&&showToast('⚠ Nicht gespeichert: '+(error.message||''),'error'); return; }
+    logActivity('update','feedback', session.id, ((emp&&(emp.first_name+' '+emp.last_name))||'Gespräch'));
     showToast&&showToast('✓ Gespräch abgeschlossen'); onDone&&onDone();
   }
   return (
@@ -37274,6 +37276,7 @@ function MeetingNotesView({team, projects, employees, showToast, isMobileW}){
     const row={project_id:selProjId, skill:null, meeting_date:isoLocal(new Date()), title:'', body:'', created_by_name:myName};
     const {data,error}=await sb.from('meeting_notes').insert(row).select().single();
     if(error||!data){ setErr('Anlegen fehlgeschlagen'+(error?': '+error.message:'.')); return; }
+    logActivity('create','meeting_note', data.id, (selProj&&selProj.name)||'Besprechung');
     setMeetings(ms=>[data,...(ms||[])]); setSelId(data.id); setItems([]);
   }
   function patchMeeting(id, patch, debounce){
@@ -39147,6 +39150,7 @@ function PresentationsView({projects, employees, team, showToast}){
       if(rowId){ const {error}=await sb.from('presentations').update({data:snap,title,published:true,public_token:tok,kind:'weekly',updated_at:new Date().toISOString()}).eq('id',rowId); if(error) throw error; }
       else { const {data,error}=await sb.from('presentations').insert({project_id:selProj.id,period_type:'kw',period_year:rev.yr,period_no:rev.kw,title,data:snap,published:true,public_token:tok,kind:'weekly',created_by:by}).select('id').single(); if(error) throw error; setRowId(data.id); }
       dirtyRef.current=false; setPublished(true); setToken(tok); showToast&&showToast('Veröffentlicht','success');
+      logActivity('update','presentation', rowId||selProj.id, title);
     }catch(e){ showToast&&showToast('Veröffentlichen fehlgeschlagen: '+(e.message||''),'error'); }
     setBusy(false);
   }
@@ -39722,6 +39726,32 @@ function App(){
     return ()=>{ try{ sub.subscription.unsubscribe(); }catch(e){} };
   }, []);
   const [view, setView] = useState('start');
+  // ── Nutzungs-Erfassung (Fundament für die tägliche Zusammenfassung / Maya) ──
+  const sessionIdRef = React.useRef(null);
+  const viewRef = React.useRef('start');
+  const lastViewLoggedRef = React.useRef(null);
+  const viewLogTimerRef = React.useRef(null);
+  useEffect(()=>{ viewRef.current = view; }, [view]);
+  // Heartbeat: echte Anwesenheit/Dauer, auch reine Lese-Sitzungen. Alle 3 Min, nur bei sichtbarem Tab.
+  // Dauer = last_seen − started_at je Sitzung; „wie oft" = Zahl der Sitzungen.
+  useEffect(()=>{ if(!loggedIn) return;
+    if(!sessionIdRef.current){ try{ sessionIdRef.current = crypto.randomUUID(); }catch(e){ sessionIdRef.current = 's'+Date.now(); } }
+    const ping=()=>{ if(typeof document!=='undefined' && document.visibilityState==='hidden') return;
+      try{ sb.rpc('session_ping',{p_session_id:sessionIdRef.current, p_view:viewRef.current||null, p_agent:((navigator&&navigator.userAgent)||'').slice(0,180)}); }catch(e){} };
+    ping();
+    const iv=setInterval(ping, 180000);
+    const onVis=()=>{ if(document.visibilityState==='visible') ping(); };
+    document.addEventListener('visibilitychange', onVis);
+    return ()=>{ clearInterval(iv); document.removeEventListener('visibilitychange', onVis); };
+  }, [loggedIn]);
+  // View-Logging (gedrosselt): erst nach 2s Verweilen loggen, keine Wiederholung desselben Bereichs —
+  // so kollabiert rasches Durchklicken und das Volumen bleibt klein. Zeigt „welche Bereiche".
+  useEffect(()=>{ if(!loggedIn) return;
+    clearTimeout(viewLogTimerRef.current);
+    viewLogTimerRef.current=setTimeout(()=>{ if(lastViewLoggedRef.current===view) return; lastViewLoggedRef.current=view;
+      const lbl=(MENU_BADGE_MAIN_ITEMS.find(m=>m&&m.key===view)||{}).label||view; logActivity('view', view, null, lbl); }, 2000);
+    return ()=>clearTimeout(viewLogTimerRef.current);
+  }, [view, loggedIn]);
   const [empSeed, setEmpSeed] = useState(''); // Datenqualität-Klick → Mitarbeiter-Suche vorbelegen
   const [navFilter, setNavFilter] = useState(null); // „Heute zu erledigen"-Sprung → Zielansicht vorfiltern {type,label,view}
   const [profitProj, setProfitProj] = useState(null); // Cockpit-Projektkarte → Wirtschaftlichkeit mit vorgewähltem Projekt
