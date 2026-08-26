@@ -8189,9 +8189,16 @@ function DataQualityPanel({employees, projects, plans, onNavigate, summary, onOp
   // Immer aufgeklappt — kein Toggle (Klick-Events erreichen dieses Panel im Cockpit nicht;
   // ein Bericht hinter einem Klick würde ohnehin übersehen). Befunde direkt sichtbar.
   const [asyncState,setAsyncState]=useState({loading:true,openSessions:[],locsNoCost:[]});
-  // Lenas Datenpflege-Wächter (nur Vollansicht; RLS gibt nur Management+HR Daten, sonst leer/Fehler → Sektion versteckt).
+  // Lenas Datenpflege-Wächter + Chat-Überwachung (nur Vollansicht; RLS gibt nur Management+HR Daten).
   const [lena,setLena]=useState(null);
-  useEffect(()=>{ if(summary) return; let a=true; sb.rpc('lena_scan').then(({data,error})=>{ if(a) setLena(error?[]:(data||[])); }); return ()=>{a=false;}; },[summary]);
+  const [chatFlags,setChatFlags]=useState(null); const [chatCfg,setChatCfg]=useState(null); const [chatCfgOpen,setChatCfgOpen]=useState(false);
+  useEffect(()=>{ if(summary) return; let a=true;
+    sb.rpc('lena_scan').then(({data,error})=>{ if(a) setLena(error?[]:(data||[])); });
+    sb.from('chat_flags').select('*').is('reviewed_at',null).order('created_at',{ascending:false}).limit(50).then(({data,error})=>{ if(a) setChatFlags(error?[]:(data||[])); });
+    (async()=>{ const c=await loadConfigFromDB('jsr_chat_monitoring_v1'); if(a) setChatCfg(c||{global:false,projects:[],employees:[]}); })();
+    return ()=>{a=false;}; },[summary]);
+  const saveChatCfg=(next)=>{ setChatCfg(next); saveConfigToDB('jsr_chat_monitoring_v1', next); };
+  const markFlagReviewed=async(f)=>{ setChatFlags(fs=>(fs||[]).filter(x=>x.id!==f.id)); await sb.from('chat_flags').update({reviewed_at:new Date().toISOString()}).eq('id',f.id); };
   useEffect(()=>{
     let alive=true;
     (async()=>{
@@ -8417,6 +8424,53 @@ function DataQualityPanel({employees, projects, plans, onNavigate, summary, onOp
                 {list.length>12&&<span style={{fontSize:11,color:'var(--muted)',padding:'2px 0'}}>… und {list.length-12} weitere</span>}
               </div>
             </div>; })}
+          </div>;
+        })()}
+        {!summary && chatFlags!==null && (()=>{
+          const cfg=chatCfg||{global:false,projects:[],employees:[]};
+          const projOn=pid=>Array.isArray(cfg.projects)&&cfg.projects.includes(pid);
+          const empOn=eid=>Array.isArray(cfg.employees)&&cfg.employees.includes(eid);
+          const toggleProj=pid=>{ const p=new Set(cfg.projects||[]); p.has(pid)?p.delete(pid):p.add(pid); saveChatCfg({...cfg,projects:[...p]}); };
+          const toggleEmp=eid=>{ const e=new Set(cfg.employees||[]); e.has(eid)?e.delete(eid):e.add(eid); saveChatCfg({...cfg,employees:[...e]}); };
+          const activeEmps=(employees||[]).filter(x=>x&&['active','training','contract','inactive'].includes(x.status)).sort((a,b)=>String(a.first_name||'').localeCompare(String(b.first_name||''),'de'));
+          const CAT={beleidigung:'Beleidigung',beschimpfung:'Beschimpfung',mobbing:'Mobbing',betrug:'Betrugsversuch'};
+          const anyOn=cfg.global||(cfg.projects||[]).length>0||(cfg.employees||[]).length>0;
+          return <div style={{borderTop:'1px solid var(--border)',marginTop:12,paddingTop:12}}>
+            <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8,flexWrap:'wrap'}}>
+              <span style={{width:22,height:22,display:'inline-flex'}}><AgentAvatar agentKey="lena" size={22} live={false}/></span>
+              <span style={{fontSize:13,fontWeight:800}}>Lena · Chat-Überwachung</span>
+              <span style={{fontSize:11,fontWeight:700,padding:'1px 8px',borderRadius:20,background:anyOn?'#fef2f2':'var(--surface-2)',color:anyOn?'#b91c1c':'var(--muted)'}}>{anyOn?'aktiv':'aus'}</span>
+              <button onClick={()=>setChatCfgOpen(v=>!v)} style={{marginLeft:'auto',fontSize:11.5,fontWeight:700,border:'1px solid var(--border)',background:'var(--card)',borderRadius:8,padding:'3px 10px',cursor:'pointer'}}>⚙ Einstellungen</button>
+            </div>
+            {chatFlags.length===0 ? <div style={{fontSize:12.5,color:'var(--muted)'}}>Keine gemeldeten Verstöße.</div>
+             : <div style={{display:'flex',flexDirection:'column',gap:8}}>
+                {chatFlags.map(f=><div key={f.id} style={{padding:'8px 10px',borderRadius:8,background:'#fef2f2',border:'1px solid #fecaca'}}>
+                  <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:3,flexWrap:'wrap'}}>
+                    <span style={{fontSize:10,fontWeight:800,color:'#b91c1c',textTransform:'uppercase',letterSpacing:'.04em'}}>{CAT[f.category]||f.category}</span>
+                    <span style={{fontSize:12.5,fontWeight:700}}>{f.from_name||'—'}</span>
+                    <span style={{fontSize:10.5,color:'var(--dim)'}}>{f.sent_at?new Date(f.sent_at).toLocaleString('de-DE',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):''}</span>
+                    <button onClick={()=>markFlagReviewed(f)} style={{marginLeft:'auto',fontSize:11,fontWeight:700,border:'none',background:'transparent',color:'var(--muted)',cursor:'pointer',textDecoration:'underline'}}>erledigt</button>
+                  </div>
+                  <div style={{fontSize:12.5,fontStyle:'italic',color:'#7f1d1d'}}>„{f.excerpt}"</div>
+                </div>)}
+              </div>}
+            {chatCfgOpen && <div style={{marginTop:12,padding:12,borderRadius:10,background:'var(--surface-2)',border:'1px solid var(--border)'}}>
+              <label style={{display:'flex',alignItems:'center',gap:9,fontSize:13,fontWeight:700,cursor:'pointer',marginBottom:10}}>
+                <input type="checkbox" checked={!!cfg.global} onChange={e=>saveChatCfg({...cfg,global:e.target.checked})} style={{width:16,height:16}}/>
+                Global überwachen (alle Chats)
+              </label>
+              {!cfg.global && <React.Fragment>
+                <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',margin:'8px 0 5px'}}>Je Projekt</div>
+                <div style={{display:'flex',gap:6,flexWrap:'wrap',marginBottom:10}}>{(projects||[]).map(p=><label key={p.id} style={{display:'inline-flex',alignItems:'center',gap:6,fontSize:12,padding:'3px 9px',borderRadius:8,border:'1px solid '+(projOn(p.id)?'#0F5661':'var(--border)'),background:projOn(p.id)?'var(--blue-bg)':'var(--card)',cursor:'pointer'}}>
+                  <input type="checkbox" checked={projOn(p.id)} onChange={()=>toggleProj(p.id)} style={{width:14,height:14}}/>{p.name}</label>)}</div>
+                <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',margin:'8px 0 5px'}}>Einzelne Mitarbeiter</div>
+                <div style={{display:'flex',flexDirection:'column',gap:3,maxHeight:220,overflowY:'auto',border:'1px solid var(--border)',borderRadius:8,padding:8,background:'var(--card)'}}>
+                  {activeEmps.map(x=><label key={x.id} style={{display:'flex',alignItems:'center',gap:8,fontSize:12.5,cursor:'pointer'}}>
+                    <input type="checkbox" checked={empOn(x.id)} onChange={()=>toggleEmp(x.id)} style={{width:14,height:14}}/>{x.first_name} {x.last_name} <span style={{color:'var(--muted)',fontSize:11}}>{x.position}</span></label>)}
+                </div>
+              </React.Fragment>}
+              <div style={{fontSize:10.5,color:'var(--dim)',marginTop:8}}>Wo die Überwachung aktiv ist, sehen die Mitarbeiter einen Hinweis im Chat. Wo sie aus ist, wird nichts geprüft. Lena meldet nur, sie sanktioniert nicht.</div>
+            </div>}
           </div>;
         })()}
       </div>
