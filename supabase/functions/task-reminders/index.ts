@@ -163,6 +163,10 @@ Deno.serve(async (req)=>{
   async function lastMapFor(pid:string){ if(lastMapCache[pid]) return lastMapCache[pid]; const {data}=await sb.from('data_imports').select('source_type,created_at').eq('project_id',pid).order('created_at',{ascending:false}).limit(300); const m:Record<string,Date>={}; (data||[]).forEach((r:any)=>{ if(!m[r.source_type]) m[r.source_type]=new Date(r.created_at); }); lastMapCache[pid]=m; return m; }
   async function userDueUploads(uid:string){ const list=cfgByUser[uid]||[]; const out:any[]=[]; for(const c of list){ const lm=await lastMapFor(c.project_id); const st=await computeUploadStatus(sb,c,c.project_id,todayDate,lm); if(st.bucket==='overdue'||st.bucket==='today'||st.bucket==='week'){ out.push({label:UPLOAD_LABEL[c.source_type]||c.source_type, proj:projName[c.project_id]||c.project_id, rel:st.rel, overdue:st.bucket==='overdue'}); } } out.sort((a:any,b:any)=>(a.overdue?0:1)-(b.overdue?0:1)); return out; }
 
+  // Nutzer-Einstellungen (Schnitt 12): Eskalation kann je Person abgeschaltet sein.
+  const { data:apRows } = await sb.from('agent_prefs').select('user_id,settings');
+  const prefsBy:Record<string,any>={}; (apRows||[]).forEach((r:any)=>{ prefsBy[r.user_id]=r.settings||{}; });
+
   const greet = berlinHour<10 ? 'Guten Morgen!' : berlinHour<13 ? 'Mittags-Erinnerung:' : 'Letzte Erinnerung für heute:';
   const results:any[]=[];
   for(const u of (uRes.data||[])){
@@ -175,8 +179,9 @@ Deno.serve(async (req)=>{
     const openCount=open.length+dueU.length;
 
     // ── Eskalation (Schnitt 7): 1×/Tag hochstufen solange offen; auflösen + loben, wenn erledigt. ──
+    // Schnitt 12: nur wenn die Person Eskalation zulässt.
     let escLine='';
-    try{
+    if((prefsBy[u.user_id]||{}).escalation!==false) try{
       const { data:escRow } = await sb.from('agent_escalations').select('*').eq('user_id',u.user_id).eq('subject','tasks').is('resolved_at',null).maybeSingle();
       if(openCount>0){
         let stage=1, opened=today, advance=true;

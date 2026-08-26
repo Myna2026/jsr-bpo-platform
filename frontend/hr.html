@@ -36752,30 +36752,39 @@ function AgentTag({agentKey}){
     <span style={{fontSize:10.5,fontWeight:700,color:acc}}>{a.name}</span>
   </span>;
 }
-// Einblendungen (Schnitt 5): eigene, ungesehene Einblendungen. Regeln: höchstens 2 pro Tag, Arbeitszeit-Fenster
-// (Mo-Fr 8-18), am richtigen Ort (context = View-Keys; wichtige zeigen überall). Eine nach der anderen, unten rechts
-// (mobil unten breit). „Ansehen" springt zum Bereich, „Weg" klickt weg. Zustand (gesehen/weg/gehandelt) via RPC.
+// Standard-Einstellungen je Nutzer (Schnitt 12); jede Person kann sie in „Meine AI-Kollegen" ändern.
+const AGENT_ORDER=['clara','max','anna','paul','maya','lena'];
+function defaultAgentPrefs(){ const ag={}; AGENT_ORDER.forEach(k=>ag[k]=true); return {agents:ag, max_per_day:2, escalation:true, work:{start:8,end:18}, tone:'normal'}; }
+async function loadMyAgentPrefs(){ try{ const s=await sb.auth.getUser(); const uid=s&&s.data&&s.data.user&&s.data.user.id;
+  const {data}=await sb.from('agent_prefs').select('settings').eq('user_id',uid).maybeSingle(); const d=defaultAgentPrefs(); const m=(data&&data.settings)||{};
+  return {...d,...m, agents:{...d.agents,...(m.agents||{})}, work:{...d.work,...(m.work||{})}}; }catch(e){ return defaultAgentPrefs(); } }
+// Einblendungen (Schnitt 5, gesteuert per Schnitt 12): eigene, ungesehene. Regeln aus den Nutzer-Einstellungen:
+// welche Kollegen, wie viele/Tag, Zeitfenster; am richtigen Ort (context), wichtige überall. Gedämpfte Typen 1×/Woche.
 function AgentInsights({view, onNavigate, isMobileW}){
-  const [list,setList]=useState([]); const [cur,setCur]=useState(null); const [muted,setMuted]=useState(null); const shownRef=React.useRef(new Set());
+  const [list,setList]=useState([]); const [cur,setCur]=useState(null); const [muted,setMuted]=useState(null); const [prefs,setPrefs]=useState(null); const shownRef=React.useRef(new Set());
   const load=React.useCallback(async()=>{ try{ const cut=isoLocal(new Date(Date.now()-21*864e5));
     const {data}=await sb.from('agent_insights').select('*').gte('created_at',cut).order('created_at',{ascending:false}); setList(data||[]); }catch(e){} },[]);
-  useEffect(()=>{ load(); (async()=>{ try{ const {data}=await sb.rpc('insight_muted_types'); setMuted(new Set(data||[])); }catch(e){ setMuted(new Set()); } })(); const t=setInterval(load, 5*60000); return ()=>clearInterval(t); },[load]);
+  useEffect(()=>{ load();
+    (async()=>{ try{ const {data}=await sb.rpc('insight_muted_types'); setMuted(new Set(data||[])); }catch(e){ setMuted(new Set()); } })();
+    (async()=>{ setPrefs(await loadMyAgentPrefs()); })();
+    const t=setInterval(load, 5*60000); return ()=>clearInterval(t); },[load]);
   const typeOf=okey=>String(okey||'').replace(/_[0-9a-f-]{8,}$/,'');
-  useEffect(()=>{ if(cur||muted===null) return;
-    const now=new Date(), wd=now.getDay(), h=now.getHours();
-    if(!(wd>=1&&wd<=5 && h>=8 && h<18)) return;                    // Arbeitszeit-Fenster
+  useEffect(()=>{ if(cur||muted===null||prefs===null) return;
+    const w=prefs.work||{start:8,end:18}; const now=new Date(), wd=now.getDay(), h=now.getHours();
+    if(!(wd>=1&&wd<=5 && h>=(w.start??8) && h<(w.end??18))) return;   // Zeitfenster aus den Einstellungen
     const today=isoLocal(new Date());
     const seenToday=list.filter(i=>i.seen_at && String(i.seen_at).slice(0,10)===today).length;   // zählt auch weggeklickte
-    if(seenToday>=2) return;                                       // Budget: max 2 pro Tag
+    if(seenToday>=(prefs.max_per_day??2)) return;                  // Budget aus den Einstellungen
     const seen7=new Set(list.filter(i=>i.seen_at && (Date.now()-new Date(i.seen_at).getTime())<7*864e5).map(i=>typeOf(i.okey)));
     const elig=list.filter(i=>!i.seen_at && !i.dismissed_at && !shownRef.current.has(i.id)
+      && (prefs.agents ? prefs.agents[i.agent_key]!==false : true)     // nur erlaubte Kollegen
       && (i.severity==='high' || !i.context || i.context.length===0 || i.context.includes(view))
       && !(muted.has(typeOf(i.okey)) && seen7.has(typeOf(i.okey))));   // gedämpfte Typen höchstens 1×/Woche
     if(!elig.length) return;
     const ord={high:0,warn:1,info:2}; elig.sort((a,b)=>(ord[a.severity]??3)-(ord[b.severity]??3));
     const pick=elig[0]; shownRef.current.add(pick.id); setCur(pick);
     sb.rpc('insight_mark',{p_id:pick.id,p_state:'seen'}).then(()=>setList(l=>l.map(x=>x.id===pick.id?{...x,seen_at:new Date().toISOString()}:x))).catch(()=>{});
-  },[list,view,cur,muted]);
+  },[list,view,cur,muted,prefs]);
   if(!cur) return null;
   const a=AI_AGENTS[cur.agent_key]||{}; const acc=a.accent||'#0F5661';
   const sv=cur.severity==='high'?'#b91c1c':cur.severity==='warn'?'#b45309':acc;
@@ -36994,14 +37003,69 @@ function ColleagueAsk({agents, onOpenAgent}){
     </div>
   </div>;
 }
+// Schnitt 12: „Meine AI-Kollegen" — jeder steuert selbst, wer/wie oft/wann/wie direkt. Zugänglich, nicht in der DB versteckt.
+function AgentPrefsModal({onClose}){
+  const [p,setP]=useState(null); const [saving,setSaving]=useState(false);
+  useEffect(()=>{ let a=true; (async()=>{ const pr=await loadMyAgentPrefs(); if(a) setP(pr); })(); return ()=>{a=false;}; },[]);
+  async function save(){ setSaving(true); try{ const s=await sb.auth.getUser(); const uid=s&&s.data&&s.data.user&&s.data.user.id;
+    await sb.from('agent_prefs').upsert({user_id:uid, settings:p, updated_at:new Date().toISOString()}); onClose&&onClose(); }catch(e){} setSaving(false); }
+  if(p===null) return null;
+  const set=(k,v)=>setP(x=>({...x,[k]:v}));
+  const secLbl={fontSize:11,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',margin:'0 0 8px'};
+  const numIn={width:66,border:'1px solid var(--border)',borderRadius:9,padding:'8px 10px',fontSize:14,background:'var(--card)',color:'var(--text)'};
+  return <div onClick={onClose} style={{position:'fixed',inset:0,zIndex:1300,background:'rgba(6,14,22,.6)',display:'flex',justifyContent:'center',alignItems:'flex-start',padding:'32px 16px',overflow:'auto'}}>
+    <div onClick={e=>e.stopPropagation()} className="card" style={{maxWidth:520,width:'100%',padding:0,borderRadius:18,overflow:'hidden'}}>
+      <div style={{padding:'15px 20px',borderBottom:'1px solid var(--border)',display:'flex',alignItems:'center'}}>
+        <div style={{fontSize:17,fontWeight:800,flex:1}}>Meine AI-Kollegen</div>
+        <button onClick={onClose} style={{border:'1px solid var(--border)',background:'var(--card)',color:'var(--muted)',borderRadius:8,width:30,height:30,fontSize:15,cursor:'pointer'}}>✕</button>
+      </div>
+      <div style={{padding:'18px 20px',display:'flex',flexDirection:'column',gap:22,maxHeight:'70vh',overflow:'auto'}}>
+        <div>
+          <div style={secLbl}>Wer darf sich bei mir melden</div>
+          <div style={{display:'flex',flexDirection:'column',gap:8}}>{AGENT_ORDER.map(k=>{ const a=AI_AGENTS[k]; if(!a) return null;
+            return <label key={k} style={{display:'flex',alignItems:'center',gap:10,cursor:'pointer'}}>
+              <span style={{width:26,height:26,flexShrink:0,display:'inline-flex'}}><AgentAvatar agentKey={k} size={26} live={false}/></span>
+              <span style={{flex:1,fontSize:13.5,fontWeight:600}}>{a.name}</span>
+              <input type="checkbox" checked={!!(p.agents&&p.agents[k])} onChange={e=>setP(x=>({...x,agents:{...x.agents,[k]:e.target.checked}}))} style={{width:20,height:20}}/>
+            </label>; })}</div>
+        </div>
+        <div>
+          <div style={secLbl}>Einblendungen pro Tag</div>
+          <input type="number" min="0" max="5" value={p.max_per_day} onChange={e=>set('max_per_day',Math.max(0,Math.min(5,parseInt(e.target.value)||0)))} style={numIn}/>
+        </div>
+        <div>
+          <div style={secLbl}>Zeitfenster (Mo–Fr)</div>
+          <div style={{display:'flex',alignItems:'center',gap:8,fontSize:13.5}}>von <input type="number" min="0" max="23" value={p.work.start} onChange={e=>setP(x=>({...x,work:{...x.work,start:Math.max(0,Math.min(23,parseInt(e.target.value)||0))}}))} style={numIn}/> bis <input type="number" min="1" max="24" value={p.work.end} onChange={e=>setP(x=>({...x,work:{...x.work,end:Math.max(1,Math.min(24,parseInt(e.target.value)||0))}}))} style={numIn}/> Uhr</div>
+        </div>
+        <label style={{display:'flex',alignItems:'center',gap:10,cursor:'pointer'}}>
+          <input type="checkbox" checked={p.escalation!==false} onChange={e=>set('escalation',e.target.checked)} style={{width:20,height:20}}/>
+          <span style={{fontSize:13.5,fontWeight:600}}>Eskalation zulassen (Erinnerungen dürfen hochstufen)</span>
+        </label>
+        <div>
+          <div style={secLbl}>Ton</div>
+          <select value={p.tone} onChange={e=>set('tone',e.target.value)} style={{border:'1px solid var(--border)',borderRadius:9,padding:'8px 10px',fontSize:14,background:'var(--card)',color:'var(--text)'}}>
+            <option value="normal">Normal</option><option value="direkt">Direkt</option><option value="knapp">Knapp</option>
+          </select>
+        </div>
+      </div>
+      <div style={{padding:'14px 20px',borderTop:'1px solid var(--border)',display:'flex',gap:8,justifyContent:'flex-end'}}>
+        <button onClick={onClose} style={{border:'1px solid var(--border)',background:'var(--card)',color:'var(--text)',borderRadius:9,padding:'9px 16px',fontSize:13,fontWeight:600,cursor:'pointer'}}>Abbrechen</button>
+        <button onClick={save} disabled={saving} style={{border:'none',background:'#0F5661',color:'#fff',borderRadius:9,padding:'9px 18px',fontSize:13,fontWeight:700,cursor:'pointer',opacity:saving?.6:1}}>{saving?'Speichert…':'Speichern'}</button>
+      </div>
+    </div>
+  </div>;
+}
 // „AI Kollegen": hochwertige, anklickbare Karten mit großem Gesicht; Klick öffnet die Detailansicht.
 function AgentsView({team, onNavigate}){
-  const [agents,setAgents]=useState(null); const [err,setErr]=useState(''); const [open,setOpen]=useState(null);
+  const [agents,setAgents]=useState(null); const [err,setErr]=useState(''); const [open,setOpen]=useState(null); const [prefsOpen,setPrefsOpen]=useState(false);
   useEffect(()=>{ let a=true; (async()=>{ try{ const {data,error}=await sb.from('ai_agents').select('*').eq('active',true).order('seq');
     if(!a) return; if(error) setErr(error.message||'Laden fehlgeschlagen'); setAgents(error?[]:(data||[])); }catch(e){ if(a){ setErr((e&&e.message)||'Fehler'); setAgents([]); } } })(); return ()=>{a=false;}; },[]);
   const lbl=k=>((MENU_BADGE_MAIN_ITEMS.find(m=>m&&m.key===k)||{}).label)||k;
   return <div style={{maxWidth:1120}}>
-    <div style={{fontSize:22,fontWeight:800,marginBottom:2,letterSpacing:'-.01em'}}>AI Kollegen</div>
+    <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:2}}>
+      <div style={{fontSize:22,fontWeight:800,letterSpacing:'-.01em',flex:1}}>AI Kollegen</div>
+      <button onClick={()=>setPrefsOpen(true)} style={{border:'1px solid var(--border)',background:'var(--card)',color:'var(--text)',borderRadius:9,padding:'7px 14px',fontSize:12.5,fontWeight:700,cursor:'pointer',flexShrink:0}}>⚙ Meine Einstellungen</button>
+    </div>
     <div style={{fontSize:13.5,color:'var(--muted)',marginBottom:20,lineHeight:1.5}}>Digitale Kolleginnen und Kollegen, die im Hintergrund mitarbeiten. Jeder mit klarem Auftrag und klarer Grenze. Klick auf eine Karte öffnet den Kollegen groß, mit Datenbaum, Ablauf und Grenzen.</div>
     <ColleagueAsk agents={agents||[]} onOpenAgent={setOpen}/>
     {err&&<div style={{marginBottom:12,padding:'9px 11px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:10,color:'#b91c1c',fontSize:12.5}}>{err}</div>}
@@ -37038,6 +37102,7 @@ function AgentsView({team, onNavigate}){
           </div>; })}
       </div>}
     {open&&<AgentDetail agent={open} team={team} onNavigate={onNavigate} onClose={()=>setOpen(null)}/>}
+    {prefsOpen&&<AgentPrefsModal onClose={()=>setPrefsOpen(false)}/>}
   </div>;
 }
 function NlQueryView({team}){
