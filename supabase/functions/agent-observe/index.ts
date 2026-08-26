@@ -33,6 +33,7 @@ async function colleagueLine(name:string, persona:string, brief:any): Promise<st
   const parts = [`Kollege: ${name}`, `Fakten: ${facts}`];
   if(brief.confidence) parts.push(`Sicherheit: ${brief.confidence}`);
   if(brief.missing) parts.push(`Fehlt: ${brief.missing}`);
+  if(brief.frame) parts.push(`Rahmen: ${brief.frame}`);
   const system = (persona? persona+"\n\n":"") + HOUSE;
   const r = await fetch("https://api.anthropic.com/v1/messages",{ method:"POST",
     headers:{ "x-api-key":ANTHROPIC_KEY, "anthropic-version":"2023-06-01", "content-type":"application/json" },
@@ -74,6 +75,26 @@ Deno.serve(async (req)=>{
     if(today>=3 && avg>=3 && Math.abs((today-avg)/avg)>=0.4)
       checks.clara.findings.push({okey:"clara_inbox_volume", severity:"info", confidence:"exakt",
         facts:[{label:"Bewerbungen heute im Posteingang", current:today, prior:Math.round(avg)}], metrics:{today,avg7:Math.round(avg)}});
+  }catch(_e){}
+
+  // Clara-Rückschau (Schnitt 9): trägt die Sortierung nach Sprachlevel? Ehrlich — nur bei genug Entschiedenen,
+  // Erfahrung fehlt fast überall (kann sie nicht einbeziehen). Fehler eingestehen macht glaubwürdiger.
+  try{
+    const { data:chkC } = await sb.from("agent_checks").select("metrics").eq("agent_key","clara").maybeSingle();
+    const prevC = (chkC&&chkC.metrics)||{};
+    const HIRED = ["contract","training_planned","training","active"];
+    const { data:dec } = await sb.from("cvs").select("status,language_level").not("language_level","is",null)
+      .in("status",[...HIRED,"rejected_by_us","rejected_by_employee","rejected_by_client","blacklist"]);
+    const top=(dec||[]).filter((c:any)=> ["C1","C2"].includes(c.language_level) || /mutter/i.test(c.language_level||""));
+    const topN=top.length, topHired=top.filter((c:any)=>HIRED.includes(c.status)).length;
+    if(topN>=10 && (topHired/topN)<=0.2 && (prevC.rank_topN!==topN || prevC.rank_topHired!==topHired)){
+      checks.clara.findings.push({ okey:"clara_rank_review", severity:"info", confidence:"vermutung",
+        facts:[{label:"nach Sprachlevel hoch eingestufte Bewerber (C1/C2/Muttersprache), entschieden", current:topN},{label:"davon eingestellt", current:topHired}],
+        missing:"Erfahrungsjahre fehlen bei fast allen, darum kann ich sie nicht einbeziehen",
+        frame:"Rückschau: gestehe selbstkritisch ein, dass dein Rang nach Sprachlevel schwach trennt. Sag 'möglicherweise', dass du das Sprachlevel zu stark gewichtest.",
+        metrics:{rank_topN:topN, rank_topHired:topHired} });
+    }
+    checks.clara.snapshot = { ...(prevC||{}), rank_topN:topN, rank_topHired:topHired };
   }catch(_e){}
 
   // Max: leer abgehakte Aufgaben heute vs. Vortag
