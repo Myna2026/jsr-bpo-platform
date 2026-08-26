@@ -18,6 +18,7 @@ const MODEL = "claude-sonnet-5";
 const ANTHROPIC_KEY = Deno.env.get("ANTHROPIC_API_KEY") || "";
 const SB_URL = Deno.env.get("SUPABASE_URL")!;
 const ANON = Deno.env.get("SUPABASE_ANON_KEY")!;
+const SERVICE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
 // Die 8 Bereiche des Datenbaums (Frontend nutzt dieselben Schluessel). Jede Tabelle gehoert zu einem Bereich.
 const AREA_KEYS = ["mitarbeiter", "kennzahlen", "bewerber", "abwesenheiten", "schichten", "callqualitaet", "importe", "marketing"];
@@ -291,7 +292,8 @@ Deno.serve(async (req) => {
         } else {
           const sql = String(parsed.sql || extractSqlLive(jsonAcc) || "").trim();
           if (!sql) send({ t: "error", error: "Ich konnte dazu keine Abfrage bauen. Formulier die Frage bitte etwas anders." });
-          else send({ t: "done", action: "sql", sql, explanation: parsed.explanation || "", warning: parsed.warning || null, chart: parsed.chart || null, areas: Array.isArray(parsed.areas) ? parsed.areas : [] });
+          else { send({ t: "done", action: "sql", sql, explanation: parsed.explanation || "", warning: parsed.warning || null, chart: parsed.chart || null, areas: Array.isArray(parsed.areas) ? parsed.areas : [] });
+            try { await createClient(SB_URL, SERVICE).from("agent_actions").insert({ agent_key: "anna", kind: "nlquery" }); } catch (_e) { /* Zähler optional */ } }
         }
       } catch (e) {
         send({ t: "error", error: "Die KI ist gerade nicht erreichbar: " + (e as Error).message });

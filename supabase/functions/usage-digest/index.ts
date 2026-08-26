@@ -88,5 +88,24 @@ Deno.serve(async (req)=>{
     }
   }catch(_e){ /* Agenten-Zeile optional */ }
 
+  // ── Max/Paul/Anna aus agent_actions (zählbare Aktionen des Tages) ──
+  try{
+    const nd2 = new Date(date+"T00:00:00Z"); nd2.setUTCDate(nd2.getUTCDate()+1); const next2 = nd2.toISOString().slice(0,10);
+    const { data:acts } = await sb.from("agent_actions").select("agent_key,kind").gte("at",date).lt("at",next2);
+    const cnt:Record<string,Record<string,number>> = {};
+    (acts||[]).forEach((x:any)=>{ (cnt[x.agent_key]=cnt[x.agent_key]||{}); cnt[x.agent_key][x.kind]=(cnt[x.agent_key][x.kind]||0)+1; });
+    const g=(k:string)=>cnt[k]||{};
+    const lines:{key:string,name:string,summary:string,metrics:any}[]=[];
+    const mx=g("max"); const rem=(mx.reminder_slack||0)+(mx.reminder_cliq||0);
+    if(rem>0) lines.push({key:"max",name:"Max",summary:`Max hat ${rem} Erinnerung${rem===1?"":"en"} verschickt.`,metrics:mx});
+    const pl=g("paul"); const sums=(pl.summary||0)+(pl.analysis||0), pol=pl.polish||0; const pb:string[]=[];
+    if(sums>0) pb.push(`${sums} Zusammenfassung${sums===1?"":"en"} und Analyse${sums===1?"":"n"} erstellt`);
+    if(pol>0) pb.push(`${pol} Text${pol===1?"":"e"} gesäubert`);
+    if(pb.length) lines.push({key:"paul",name:"Paul",summary:"Paul hat "+pb.join(" und ")+".",metrics:pl});
+    const an=g("anna"); const q=(an.assistant||0)+(an.nlquery||0);
+    if(q>0) lines.push({key:"anna",name:"Anna",summary:`Anna hat ${q} Frage${q===1?"":"n"} beantwortet.`,metrics:an});
+    for(const l of lines){ await sb.from("agent_digests").upsert({ day:date, agent_key:l.key, name:l.name, summary:l.summary, metrics:l.metrics },{onConflict:"day,agent_key"}); }
+  }catch(_e){ /* Agenten-Zeilen optional */ }
+
   return json({ ok:true, date, users:active.length, done, failed });
 });

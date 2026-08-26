@@ -182,6 +182,7 @@ Deno.serve(async (req)=>{
     parts.push('\n— Max, dein digitaler Assistent');   // Absender-Identität (intern)
     const text=parts.join('\n');
     const outcome = dry ? 'dry' : (channel==='cliq' ? await cliqDM(emailBy[u.user_id], text) : await slackDM(emailBy[u.user_id], text));
+    if(outcome==='sent'){ try{ await sb.from('agent_actions').insert({agent_key:'max', kind: channel==='cliq'?'reminder_cliq':'reminder_slack', meta:{user:u.full_name}}); }catch(_e){} }
     results.push({u:u.full_name, channel, open:open.length, uploads:dueU.length, outcome});
   }
   return json({berlinHour, sent:results.filter(r=>r.outcome==='sent').length, results});

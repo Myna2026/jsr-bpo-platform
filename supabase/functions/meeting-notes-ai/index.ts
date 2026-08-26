@@ -19,6 +19,7 @@ const MODEL = "claude-sonnet-5";
 const ANTHROPIC_KEY = Deno.env.get("ANTHROPIC_API_KEY") || "";
 const SB_URL = Deno.env.get("SUPABASE_URL")!;
 const ANON = Deno.env.get("SUPABASE_ANON_KEY")!;
+const SERVICE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
 const IMP_LABEL: Record<string, string> = { red: "wichtig", amber: "wichtiger", green: "in Ordnung" };
 
@@ -103,6 +104,11 @@ Deno.serve(async (req) => {
     if (!resp.ok) return json({ error: "KI-Fehler: " + (data?.error?.message || resp.status) }, 502);
     const tu = (data.content || []).find((c: any) => c.type === "tool_use");
     if (!tu) return json({ error: "Keine verwertbare Antwort." }, 502);
+    // Paul-Zähler (für Mayas Zusammenfassung): polish = gesäubert; digest = Analyse (1) bzw. Zusammenfassung (mehrere).
+    try {
+      const kind = mode === "polish" ? "polish" : ((Array.isArray(body.meetings) && body.meetings.length > 1) ? "summary" : "analysis");
+      await createClient(SB_URL, SERVICE).from("agent_actions").insert({ agent_key: "paul", kind });
+    } catch (_e) { /* Zähler optional */ }
     return json({ ok: true, ...(tu.input || {}) });
   } catch (e) {
     return json({ error: "Die KI ist gerade nicht erreichbar: " + (e as Error).message }, 502);

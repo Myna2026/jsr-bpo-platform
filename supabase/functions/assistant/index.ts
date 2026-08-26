@@ -187,5 +187,6 @@ Deno.serve(async (req) => {
   if (!known) {
     try { const q = String(messages[messages.length - 1]?.content || "").trim().slice(0, 500); if (q) await admin.from("assistant_gaps").insert({ question: q, asked_by: uid }); } catch (_e) { /* egal */ }
   }
+  try { await admin.from("agent_actions").insert({ agent_key: "anna", kind: "assistant" }); } catch (_e) { /* Zähler optional */ }
   return json({ known, steps: Array.isArray(out.steps) ? out.steps : [], jump, note: out.note || "" });
 });
