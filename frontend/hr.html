@@ -36756,21 +36756,26 @@ function AgentTag({agentKey}){
 // (Mo-Fr 8-18), am richtigen Ort (context = View-Keys; wichtige zeigen überall). Eine nach der anderen, unten rechts
 // (mobil unten breit). „Ansehen" springt zum Bereich, „Weg" klickt weg. Zustand (gesehen/weg/gehandelt) via RPC.
 function AgentInsights({view, onNavigate, isMobileW}){
-  const [list,setList]=useState([]); const [cur,setCur]=useState(null); const shownRef=React.useRef(new Set());
-  const load=React.useCallback(async()=>{ try{ const {data}=await sb.from('agent_insights').select('*').is('dismissed_at',null).order('created_at',{ascending:false}); setList(data||[]); }catch(e){} },[]);
-  useEffect(()=>{ load(); const t=setInterval(load, 5*60000); return ()=>clearInterval(t); },[load]);
-  useEffect(()=>{ if(cur) return;
+  const [list,setList]=useState([]); const [cur,setCur]=useState(null); const [muted,setMuted]=useState(null); const shownRef=React.useRef(new Set());
+  const load=React.useCallback(async()=>{ try{ const cut=isoLocal(new Date(Date.now()-21*864e5));
+    const {data}=await sb.from('agent_insights').select('*').gte('created_at',cut).order('created_at',{ascending:false}); setList(data||[]); }catch(e){} },[]);
+  useEffect(()=>{ load(); (async()=>{ try{ const {data}=await sb.rpc('insight_muted_types'); setMuted(new Set(data||[])); }catch(e){ setMuted(new Set()); } })(); const t=setInterval(load, 5*60000); return ()=>clearInterval(t); },[load]);
+  const typeOf=okey=>String(okey||'').replace(/_[0-9a-f-]{8,}$/,'');
+  useEffect(()=>{ if(cur||muted===null) return;
     const now=new Date(), wd=now.getDay(), h=now.getHours();
     if(!(wd>=1&&wd<=5 && h>=8 && h<18)) return;                    // Arbeitszeit-Fenster
     const today=isoLocal(new Date());
-    const seenToday=list.filter(i=>i.seen_at && String(i.seen_at).slice(0,10)===today).length;
+    const seenToday=list.filter(i=>i.seen_at && String(i.seen_at).slice(0,10)===today).length;   // zählt auch weggeklickte
     if(seenToday>=2) return;                                       // Budget: max 2 pro Tag
-    const elig=list.filter(i=>!i.seen_at && !shownRef.current.has(i.id) && (i.severity==='high' || !i.context || i.context.length===0 || i.context.includes(view)));
+    const seen7=new Set(list.filter(i=>i.seen_at && (Date.now()-new Date(i.seen_at).getTime())<7*864e5).map(i=>typeOf(i.okey)));
+    const elig=list.filter(i=>!i.seen_at && !i.dismissed_at && !shownRef.current.has(i.id)
+      && (i.severity==='high' || !i.context || i.context.length===0 || i.context.includes(view))
+      && !(muted.has(typeOf(i.okey)) && seen7.has(typeOf(i.okey))));   // gedämpfte Typen höchstens 1×/Woche
     if(!elig.length) return;
     const ord={high:0,warn:1,info:2}; elig.sort((a,b)=>(ord[a.severity]??3)-(ord[b.severity]??3));
     const pick=elig[0]; shownRef.current.add(pick.id); setCur(pick);
     sb.rpc('insight_mark',{p_id:pick.id,p_state:'seen'}).then(()=>setList(l=>l.map(x=>x.id===pick.id?{...x,seen_at:new Date().toISOString()}:x))).catch(()=>{});
-  },[list,view,cur]);
+  },[list,view,cur,muted]);
   if(!cur) return null;
   const a=AI_AGENTS[cur.agent_key]||{}; const acc=a.accent||'#0F5661';
   const sv=cur.severity==='high'?'#b91c1c':cur.severity==='warn'?'#b45309':acc;
@@ -36810,6 +36815,7 @@ function AgentDetail({agent, team, onNavigate, onClose}){
   const flow=AGENT_FLOW[ag.key]||[]; const tree=AGENT_DATATREE[ag.key]||[];
   const [counts,setCounts]=useState({}); const [activity,setActivity]=useState(undefined);
   const [obs,setObs]=useState(null); const [chk,setChk]=useState(undefined);   // Beobachtungen + „zuletzt geprüft"
+  const [learn,setLearn]=useState(null);   // Wirkung meiner Hinweise (Selbstmessung)
   const isMgmt=((team&&team.role_keys)||[]).some(r=>r==='management'); const g=ag.guardrails||{};
   const [persona,setPersona]=useState(ag.persona||''); const [edit,setEdit]=useState(false); const [saving,setSaving]=useState(false); const [saveErr,setSaveErr]=useState('');
   async function savePersona(){ setSaving(true); setSaveErr(''); try{ const {error}=await sb.from('ai_agents').update({persona}).eq('key',ag.key); if(error) setSaveErr(error.message||'Speichern fehlgeschlagen'); else { ag.persona=persona; setEdit(false); } }catch(e){ setSaveErr((e&&e.message)||'Fehler'); } setSaving(false); }
@@ -36821,6 +36827,9 @@ function AgentDetail({agent, team, onNavigate, onClose}){
     (async()=>{ try{ const {data}=await sb.from('agent_digests').select('summary,day').eq('agent_key',ag.key).order('day',{ascending:false}).limit(1); if(a) setActivity((data&&data[0]&&data[0].summary)||null); }catch(e){ if(a) setActivity(null); } })();
     (async()=>{ try{ const {data}=await sb.from('agent_observations').select('*').eq('agent_key',ag.key).is('resolved_at',null).order('day',{ascending:false}).limit(6); if(a) setObs(data||[]); }catch(e){ if(a) setObs([]); } })();
     (async()=>{ try{ const {data}=await sb.from('agent_checks').select('*').eq('agent_key',ag.key).maybeSingle(); if(a) setChk(data||null); }catch(e){ if(a) setChk(null); } })();
+    (async()=>{ try{ const {data}=await sb.rpc('insight_learning',{p_days:14}); if(!a) return; const rows=(data||[]).filter(r=>r.agent_key===ag.key);
+      const shown=rows.reduce((s,r)=>s+(r.shown||0),0), acted=rows.reduce((s,r)=>s+(r.acted||0),0), weg=rows.reduce((s,r)=>s+(r.dismissed||0)+(r.ignored||0),0);
+      setLearn({shown,acted,weg,anyMuted:rows.some(r=>r.muted)}); }catch(e){ if(a) setLearn(null); } })();
     return ()=>{a=false;}; },[ag.key]);
   const agoTxt=ts=>{ if(!ts) return ''; const m=Math.floor((Date.now()-new Date(ts).getTime())/60000); if(m<60) return 'vor '+Math.max(1,m)+' Min'; const h=Math.floor(m/60); if(h<24) return 'vor '+h+' Std'; return 'vor '+Math.floor(h/24)+' Tagen'; };
   const fmtN=n=> n===undefined?'…' : n===null?'—' : n.toLocaleString('de-DE');
@@ -36864,6 +36873,10 @@ function AgentDetail({agent, team, onNavigate, onClose}){
                 return <div key={o.id} style={{padding:'11px 14px',borderRadius:12,background:sv.b,border:'1px solid '+sv.bd,fontSize:13,lineHeight:1.5,display:'flex',gap:9,alignItems:'baseline'}}>
                   <span style={{fontSize:9.5,fontWeight:800,textTransform:'uppercase',letterSpacing:'.05em',color:sv.c,flexShrink:0}}>{sv.l}</span><span>{o.title}</span>
                 </div>; })}</div>}
+          {learn&&learn.shown>0&&<div style={{marginTop:12,paddingTop:12,borderTop:'1px solid var(--border)',fontSize:12,color:'var(--muted)',lineHeight:1.5}}>
+            <b style={{color:'var(--text)'}}>Wirkung meiner Hinweise (14 Tage):</b> von {learn.shown} {learn.shown===1?'Hinweis':'Hinweisen'} {learn.acted} gehandelt, {learn.weg} weggeklickt.
+            {learn.anyMuted&&<span> Eine Art zeige ich jetzt seltener, weil sie fast immer weggeklickt wird.</span>}
+          </div>}
         </div>}
         <div className="agc-detail-cols">
           {/* Was ich sehe */}
