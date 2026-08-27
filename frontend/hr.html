@@ -9908,7 +9908,7 @@ function CockpitSearchBar({team, onNavigate, mobile}){
     <div style={{display:'flex',alignItems:'center',gap:9,marginBottom:9}}>
       <span style={{display:'inline-flex',alignItems:'center',justifyContent:'center',width:26,height:26,borderRadius:8,background:'#0d9488',color:'#fff',fontSize:14,flexShrink:0}}>🔎</span>
       <span style={{fontSize:14,fontWeight:800,color:'var(--text)'}}>Frag deine Daten</span>
-      <span style={{marginLeft:'auto',fontSize:10,fontWeight:700,textTransform:'uppercase',letterSpacing:'.06em',color:'#0d9488'}}>Datenabfrage</span>
+      <span style={{marginLeft:'auto'}}><AgentTag agentKey="anna"/></span>
     </div>
     <div style={{display:'flex',alignItems:'center',gap:8,background:'var(--surface-2)',border:'1px solid var(--border)',borderRadius:10,padding:'7px 10px'}}>
       <input value={q} onChange={e=>setQ(e.target.value)} disabled={thinking}
@@ -34735,12 +34735,19 @@ function cqDate(v){ if(v==null||v==='') return null; if(v instanceof Date) retur
 }
 const DATE_HEAD_CAND=['interval start','interval start time','interval','zeitraum','datum','date','start','tag'];
 function fmtDur(sec){ if(sec==null) return '—'; sec=Math.round(sec); const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60; return (h?h+':'+String(m).padStart(2,'0'):String(m))+':'+String(s).padStart(2,'0'); }
-const CALLS_FIELDS=[
+// Call-CSV GESAMT (Filters leer): NUR Mengen. AHT/ACW kommen NICHT hierher — Outbound verfälscht sie.
+const CALLS_TOTAL_FIELDS=[
+  {key:'name',        label:'Agent-Name',      req:true,  kind:'name', cand:['agent name','agentname','agent','name','mitarbeiter']},
+  {key:'answered',    label:'Answered',        req:true,  kind:'int',  cand:['answered','angenommen','answered calls','calls answered']},
+  {key:'outbound',    label:'Outbound',        req:false, kind:'int',  cand:['outbound','outbound calls','ausgehend']},
+  {key:'transferred', label:'Transferred',     req:false, kind:'int',  cand:['transferred','weitergeleitet','transfers']},
+  {key:'no_answer',   label:'Alert-No Answer', req:false, kind:'int',  cand:['alert-no answer','alert no answer','no answer','not answered','verpasst','missed']},
+  {key:'held',        label:'Held',            req:false, kind:'int',  cand:['held','gehalten']},
+];
+// Call-CSV INBOUND (Filters: Direction Inbound): NUR Zeiten (AHT/ACW/Talk/Hold), ohne Outbound-Verfälschung.
+const CALLS_INBOUND_FIELDS=[
   {key:'name',          label:'Agent-Name',       req:true,  kind:'name', cand:['agent name','agentname','agent','name','mitarbeiter']},
-  {key:'answered',      label:'Answered',         req:true,  kind:'int',  cand:['answered','angenommen','answered calls','calls answered']},
-  {key:'outbound',      label:'Outbound',         req:false, kind:'int',  cand:['outbound','outbound calls','ausgehend']},
-  {key:'no_answer',     label:'Alert-No Answer',  req:false, kind:'int',  cand:['alert-no answer','alert no answer','no answer','not answered','verpasst','missed']},
-  {key:'avg_handle_sec',label:'Avg Handle',       req:false, kind:'dur',  cand:['avg handle','average handle','avg handle time','avg handling time','aht']},
+  {key:'avg_handle_sec',label:'Avg Handle (AHT)', req:true,  kind:'dur',  cand:['avg handle','average handle','avg handle time','avg handling time','aht']},
   {key:'avg_talk_sec',  label:'Avg Talk',         req:false, kind:'dur',  cand:['avg talk','average talk','avg talk time','talk time']},
   {key:'avg_hold_sec',  label:'Avg Hold',         req:false, kind:'dur',  cand:['avg hold','average hold','avg hold time','hold time']},
   {key:'avg_acw_sec',   label:'Avg ACW',          req:false, kind:'dur',  cand:['avg acw','average acw','acw','after call work','wrap up','wrapup']},
@@ -34765,11 +34772,22 @@ const BOOKING_A_FIELDS=[
   {key:'osl',         label:'OSL-Buchungen',       req:true, kind:'num',  cand:['sum_osl_bookings','osl_bookings','osl bookings','osl buchungen','osl']},
   {key:'sales_calls', label:'Sales Calls',         req:true, kind:'int',  cand:['salescalls_daily','sales_calls','salescalls','sales calls','calls']},
 ];
+// UTF-16 erkennen — MIT ODER OHNE BOM. Ohne BOM am Nullbyte-Muster: ASCII-Text in UTF-16LE hat das Nullbyte an
+// ungerader Position, in UTF-16BE an gerader. (Unser Auftraggeber exportiert UTF-16 BE ohne BOM.)
+function sniffUtf16(bytes){
+  if(!bytes || bytes.length<4) return null;
+  if(bytes[0]===0xFF && bytes[1]===0xFE) return 'utf-16le';
+  if(bytes[0]===0xFE && bytes[1]===0xFF) return 'utf-16be';
+  const N=Math.min(bytes.length,4000); let ev=0, od=0, z=0;
+  for(let i=0;i<N;i++){ if(bytes[i]===0){ z++; if(i%2===0) ev++; else od++; } }
+  if(z < N*0.20) return null;                 // zu wenige Nullbytes -> kein UTF-16
+  return od>ev ? 'utf-16le' : 'utf-16be';
+}
 // Team-Dateien B/C: UTF-16/UTF-8/xlsx robust einlesen -> {headers, rows}. Trenner Tab/;/, erkannt.
 function importDecode(bytes){
   if(bytes[0]===0x50&&bytes[1]===0x4B){ const wb=XLSX.read(bytes,{type:'array',cellDates:true,raw:false}); const nm=wb.SheetNames[0]; const aoa=XLSX.utils.sheet_to_json(wb.Sheets[nm],{header:1,defval:''}); return {headers:(aoa[0]||[]).map(x=>String(x==null?'':x)), rows:aoa.slice(1)}; }
-  let text;
-  if(bytes.length>=2 && ((bytes[0]===0xFF&&bytes[1]===0xFE)||(bytes[0]===0xFE&&bytes[1]===0xFF))){ const enc=(bytes[0]===0xFE)?'utf-16be':'utf-16le'; text=new TextDecoder(enc).decode(bytes); }
+  let text; const u16=sniffUtf16(bytes);
+  if(u16){ text=new TextDecoder(u16).decode(bytes); }
   else { text=new TextDecoder('utf-8').decode(bytes); }
   text=text.replace(/^﻿/,'').replace(/\r\n/g,'\n').replace(/\r/g,'\n');
   const lines=text.split('\n').filter(l=>l.length>0); if(!lines.length) return {headers:[],rows:[]};
@@ -34965,7 +34983,7 @@ function RohdatenImport({projId, projName, employees, onSaved}){
 // Generischer Wochen-Pivot-Import (Import B Call-CSV, Import C Gauges-Excel).
 // Eine Datei = eine Woche (KW manuell gewählt, keine Datumsspalte). Eine Zeile je Agent/Name.
 // Feld-getrieben (fields), Zieltabelle (table); Feld-keys = Spaltennamen der Tabelle.
-function PivotImport({projId, employees, source, fields, table, accept, hint, onSaved, kpiTargets, initKw, initYear}){
+function PivotImport({projId, employees, source, fields, table, accept, hint, onSaved, kpiTargets, initKw, initYear, filterExpect, mergeUpsert}){
   const nowW=getISOWeek(new Date());
   const [kw,setKw]=useState(initKw!=null?initKw:nowW.kw); const [year,setYear]=useState(initYear!=null?initYear:nowW.year);
   // Schnitt 4: kpi_config einmal laden, Ziel-KPI je (Name, Agenten-Skill) aufloesen (agent-level).
@@ -34985,11 +35003,26 @@ function PivotImport({projId, employees, source, fields, table, accept, hint, on
     const rd=new FileReader();
     rd.onload=async ev=>{ try{
       const bytes=new Uint8Array(ev.target.result);
-      const wb=XLSX.read(bytes,{type:'array',cellDates:true,raw:false});
+      // UTF-16 OHNE BOM erkennen (Auftraggeber-Export) und als Text an SheetJS geben; sonst normal (xlsx/UTF-8).
+      const isXlsx=(bytes[0]===0x50&&bytes[1]===0x4B);
+      const u16=isXlsx?null:sniffUtf16(bytes);
+      const wb = u16 ? XLSX.read(new TextDecoder(u16).decode(bytes),{type:'string',raw:false})
+                     : XLSX.read(bytes,{type:'array',cellDates:true,raw:false});
       const sh=wb.SheetNames.map(nm=>{ const aoa=XLSX.utils.sheet_to_json(wb.Sheets[nm],{header:1,defval:''});
         return {name:nm, headers:(aoa[0]||[]).map(x=>String(x==null?'':x)), rows:aoa.slice(1)}; });
-      setFile(f); setFileHash('sz'+bytes.length); setSheets(sh);
       let pick=0; let best=-1; sh.forEach((s,i)=>{ const m=cqAutoMap(s.headers,fields); const hit=fields.filter(fl=>m[fl.key]>=0).length; if(hit>best){best=hit;pick=i;} });
+      // Filters-Spalte prüfen: Gesamt-Datei hat sie leer, Inbound-Datei „Direction: Inbound". Erkennung am INHALT.
+      if(filterExpect){
+        const fh=sh[pick].headers.map(cqNormHead); let fcol=fh.indexOf('filters'); if(fcol<0) fcol=fh.findIndex(h=>h.indexOf('filter')>=0);
+        if(fcol>=0){
+          const anyInbound=(sh[pick].rows||[]).some(r=>/inbound/i.test(String(r[fcol]==null?'':r[fcol])));
+          const ok = filterExpect==='inbound' ? anyInbound : !anyInbound;
+          if(!ok){ setErr(filterExpect==='inbound'
+            ? 'Das ist die GESAMT-Datei (Filter leer). Hier gehört die Inbound-Datei hin (Direction: Inbound).'
+            : 'Das ist die INBOUND-Datei (Direction: Inbound). Hier gehört die Gesamt-Datei hin (Filter leer).'); return; }
+        }
+      }
+      setFile(f); setFileHash('sz'+bytes.length); setSheets(sh);
       setSheetIdx(pick);
       // KW aus der Datei ableiten (z. B. Spalte „Interval Start") und vorschlagen — statt heutiger Woche.
       const dh=sh[pick].headers.map(cqNormHead); let dcol=-1;
@@ -35040,9 +35073,12 @@ function PivotImport({projId, employees, source, fields, table, accept, hint, on
     const status=result.unmatched.length?'partial':'ok';
     const {data:imp,error:ie}=await sb.from('data_imports').insert({ project_id:projId, source_type:source, kw:Number(kw), year:Number(year), file_name:file.name, file_hash:fileHash, storage_path:storagePath, status, warnings:result.warnings, row_count:(sheet.rows||[]).length, matched_count:result.facts.length, unmatched_count:result.unmatched.length, uploaded_by:uid, uploaded_by_name:uname }).select('id').single();
     if(ie){ setBusy(false); setErr('Import nicht gespeichert: '+(ie.message||'')); return; }
-    await sb.from(table).delete().eq('project_id',projId).eq('kw',Number(kw)).eq('year',Number(year));
     const rows=result.facts.map(f=>({ import_id:imp.id, project_id:projId, employee_id:f.employee_id, kw:Number(kw), year:Number(year), ...f.vals, raw:f.raw }));
-    const {error:fe}=await sb.from(table).insert(rows);
+    // mergeUpsert: zwei Quellen (Gesamt+Inbound) mergen in EINE Zeile — nur die eigenen Spalten setzen, nicht löschen.
+    // Sonst delete+insert (eine Datei = vollständiger Satz).
+    let fe;
+    if(mergeUpsert){ const r=await sb.from(table).upsert(rows,{onConflict:'project_id,employee_id,kw,year'}); fe=r.error; }
+    else { await sb.from(table).delete().eq('project_id',projId).eq('kw',Number(kw)).eq('year',Number(year)); const r=await sb.from(table).insert(rows); fe=r.error; }
     if(fe){ setBusy(false); setErr('Fakten nicht gespeichert: '+(fe.message||'')); return; }
     // Schnitt 4: zusaetzlich konfigurierte KPIs je Agent -> kpi_entries (verifiziert). Ziel-KPI je Agenten-Skill.
     if(kpiTargets&&kpiTargets.length){
@@ -37964,7 +38000,8 @@ function NlQueryView({team}){
 // Import-Quellen — EINE WAHRHEIT (Datenimport + Upload-Plan). key = data_imports.source_type.
 const UPLOAD_SOURCES=[
   {key:'rohdaten',    label:'Rohdaten-Excel',        sub:'Stunden je Skill (agent_qm)',              period:'week', file:'performance_kpis_25HXK_<Zeitstempel>.xlsx'},
-  {key:'calls',       label:'Call-CSV',              sub:'Answered, AHT, ACW',                       period:'week', file:'<Datum>_Agent_Performance_Summary.csv'},
+  {key:'calls',        label:'Call-CSV gesamt',      sub:'Mengen: Answered, Outbound, Transferred (Filter leer)', period:'week', file:'<Datum>_Agent_Performance_Summary.csv'},
+  {key:'calls_inbound',label:'Call-CSV Inbound',     sub:'Zeiten: AHT, ACW (nur eingehend, Direction: Inbound)',  period:'week', file:'<Datum>_Agent_Performance_Summary.csv'},
   {key:'gauges',      label:'Gauges-Excel',          sub:'CSAT',                                     period:'week', file:'Gauges_<Datum>.xlsx'},
   {key:'booking_a',   label:'Booking-Excel (Agent)', sub:'Conversion, Buchungen, Sales Calls je Agent', period:'week', file:'Table_Booking_KPIs.xlsx'},
   {key:'booking_week',label:'Booking-Team Woche',    sub:'CR, Buchungen, Sales Calls je KW',         period:'week', file:'Table_Weeks_Booking_KPIs.csv'},
@@ -38176,7 +38213,8 @@ async function uploadPresent(fn){ try{ const {count}=await fn(); return (count||
 async function uploadTargetDone(key, projId, kw, year, month){
   switch(key){
     case 'rohdaten':     return uploadPresent(()=>sb.from('weekly_hours').select('*',{count:'exact',head:true}).eq('project_id',projId).eq('kw',kw).eq('year',year));
-    case 'calls':        return uploadPresent(()=>sb.from('weekly_calls').select('*',{count:'exact',head:true}).eq('project_id',projId).eq('kw',kw).eq('year',year));
+    case 'calls':        return uploadPresent(()=>sb.from('weekly_calls').select('*',{count:'exact',head:true}).eq('project_id',projId).eq('kw',kw).eq('year',year).not('answered','is',null));
+    case 'calls_inbound':return uploadPresent(()=>sb.from('weekly_calls').select('*',{count:'exact',head:true}).eq('project_id',projId).eq('kw',kw).eq('year',year).not('avg_handle_sec','is',null));
     case 'gauges':       return uploadPresent(()=>sb.from('weekly_gauges').select('*',{count:'exact',head:true}).eq('project_id',projId).eq('kw',kw).eq('year',year));
     case 'booking_a':    return uploadPresent(()=>sb.from('kpi_entries').select('*',{count:'exact',head:true}).eq('kw',kw).eq('year',year).eq('source','import').eq('kpi_id','kpi_hc_open_bookings'));
     case 'booking_week': return uploadPresent(()=>sb.from('kpi_project_entries').select('*',{count:'exact',head:true}).eq('project_id',projId).eq('kw',kw).eq('year',year).eq('source','import'));
@@ -38350,7 +38388,8 @@ function DataImportView({projects, employees}){
     const ex=async fn=>{ try{ const {count}=await fn(); return (count||0)>0; }catch(e){ return false; } };
     const s={};
     s.rohdaten    =await ex(()=>sb.from('weekly_hours').select('*',{count:'exact',head:true}).eq('project_id',projId).eq('kw',K).eq('year',Y));
-    s.calls       =await ex(()=>sb.from('weekly_calls').select('*',{count:'exact',head:true}).eq('project_id',projId).eq('kw',K).eq('year',Y));
+    s.calls        =await ex(()=>sb.from('weekly_calls').select('*',{count:'exact',head:true}).eq('project_id',projId).eq('kw',K).eq('year',Y).not('answered','is',null));
+    s.calls_inbound=await ex(()=>sb.from('weekly_calls').select('*',{count:'exact',head:true}).eq('project_id',projId).eq('kw',K).eq('year',Y).not('avg_handle_sec','is',null));
     s.gauges      =await ex(()=>sb.from('weekly_gauges').select('*',{count:'exact',head:true}).eq('project_id',projId).eq('kw',K).eq('year',Y));
     s.booking_a   =await ex(()=>sb.from('kpi_entries').select('*',{count:'exact',head:true}).eq('kw',K).eq('year',Y).eq('source','import').eq('kpi_id','kpi_hc_open_bookings'));
     s.booking_week=await ex(()=>sb.from('kpi_project_entries').select('*',{count:'exact',head:true}).eq('project_id',projId).eq('kw',K).eq('year',Y).eq('source','import'));
@@ -38390,7 +38429,8 @@ function DataImportView({projects, employees}){
           </div>
           {isOpen && selProj && <div style={{padding:'8px 14px 16px',borderTop:'1px dashed var(--border)',background:'var(--card)'}}>
             {s.key==='rohdaten' && <RohdatenImport projId={projId} projName={selProj.name} employees={employees} onSaved={onSaved}/>}
-            {s.key==='calls' && <PivotImport projId={projId} employees={employees} source="calls" fields={CALLS_FIELDS} table="weekly_calls" accept=".csv,.xlsx,.xls" hint="Call-CSV wählen" kpiTargets={CALLS_KPI_TARGETS} initKw={Number(kw)} initYear={Number(year)} onSaved={onSaved}/>}
+            {s.key==='calls' && <PivotImport projId={projId} employees={employees} source="calls" fields={CALLS_TOTAL_FIELDS} table="weekly_calls" accept=".csv,.xlsx,.xls" hint="Call-CSV GESAMT wählen (Filter leer)" filterExpect="empty" mergeUpsert initKw={Number(kw)} initYear={Number(year)} onSaved={onSaved}/>}
+            {s.key==='calls_inbound' && <PivotImport projId={projId} employees={employees} source="calls_inbound" fields={CALLS_INBOUND_FIELDS} table="weekly_calls" accept=".csv,.xlsx,.xls" hint="Call-CSV INBOUND wählen (Direction: Inbound)" filterExpect="inbound" mergeUpsert kpiTargets={CALLS_KPI_TARGETS} initKw={Number(kw)} initYear={Number(year)} onSaved={onSaved}/>}
             {s.key==='gauges' && <PivotImport projId={projId} employees={employees} source="gauges" fields={GAUGES_FIELDS} table="weekly_gauges" accept=".xlsx,.xls,.csv" hint="Gauges-Excel wählen" kpiTargets={GAUGES_KPI_TARGETS} initKw={Number(kw)} initYear={Number(year)} onSaved={onSaved}/>}
             {s.key==='booking_a' && <BookingImportAgent projId={projId} employees={employees} initKw={Number(kw)} initYear={Number(year)} onSaved={onSaved}/>}
             {s.key==='booking_week' && <BookingImportTeam projId={projId} expectMode="kw" onSaved={onSaved}/>}
