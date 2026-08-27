@@ -118,13 +118,19 @@ Deno.serve(async (req)=>{
     const mails   = await cnt("applicant_messages","sent_at",date,n1,(x)=>x.eq("origin","auto").eq("status","sent"));
     const sortedP = await cnt("cvs","created_at",p,date,(x)=>x.eq("source","meta"));
     const mailsP  = await cnt("applicant_messages","sent_at",p,date,(x)=>x.eq("origin","auto").eq("status","sent"));
-    if(sorted>0 || mails>0){
+    // Recruiting-Marketing überwachen (Qualität + Kampagnen-Vergleiche). Gehört Clara: sie kennt die Bewerber
+    // und beurteilt, ob eine Kampagne gute bringt. Der Ausbleib-Wächter (agent-observe) ist die Grundlage.
+    let mkFind:any[]=[]; try{ const {data}=await sb.rpc("clara_marketing_scan"); mkFind=(data||[]) as any[]; }catch(_e){}
+    const mkOrder:Record<string,number>={qualitaet:0,daten_fehlt:1,kampagne:2};
+    mkFind.sort((a,b)=>(mkOrder[a.category]??9)-(mkOrder[b.category]??9));
+    if(sorted>0 || mails>0 || mkFind.length){
       const facts:any[]=[];
       if(sorted>0) facts.push({label:"Bewerbungen vorsortiert", current:sorted, prior:sortedP});
       if(mails>0)  facts.push({label:"Anreicherungs-Mails verschickt", current:mails, prior:mailsP});
+      mkFind.slice(0,4).forEach((f:any)=>facts.push({label:f.detail}));
       let summary=""; try{ summary = await colleagueLine("Clara", await personaOf("clara"), {facts, confidence:"exakt"}); }catch(_e){}
-      if(!summary){ const b:string[]=[]; if(sorted>0)b.push(`${sorted} Bewerbungen vorsortiert`); if(mails>0)b.push(`${mails} Anreicherungs-Mails verschickt`); summary="Clara hat "+b.join(" und ")+"."; }
-      await sb.from("agent_digests").upsert({ day:date, agent_key:"clara", name:"Clara", summary, metrics:{sorted,mails,sorted_prev:sortedP,mails_prev:mailsP} }, {onConflict:"day,agent_key"});
+      if(!summary){ const b:string[]=[]; if(sorted>0)b.push(`${sorted} Bewerbungen vorsortiert`); if(mails>0)b.push(`${mails} Anreicherungs-Mails verschickt`); mkFind.slice(0,2).forEach((f:any)=>b.push(f.detail)); summary="Clara: "+b.join("; ")+"."; }
+      await sb.from("agent_digests").upsert({ day:date, agent_key:"clara", name:"Clara", summary, metrics:{sorted,mails,sorted_prev:sortedP,mails_prev:mailsP, marketing: mkFind.slice(0,30)} }, {onConflict:"day,agent_key"});
     }
   }catch(_e){ /* Agenten-Zeile optional */ }
 
@@ -135,19 +141,24 @@ Deno.serve(async (req)=>{
     const bucket=(from:string,to:string)=>{ const c:Record<string,Record<string,number>>={}; (acts||[]).forEach((x:any)=>{ const d=String(x.at).slice(0,10); if(d>=from && d<to){ (c[x.agent_key]=c[x.agent_key]||{}); c[x.agent_key][x.kind]=(c[x.agent_key][x.kind]||0)+1; } }); return c; };
     const cur=bucket(date,n1), prv=bucket(p,date); const g=(c:any,k:string)=>c[k]||{};
     const put=async (key:string,name:string,summary:string,metrics:any)=>{ await sb.from("agent_digests").upsert({day:date,agent_key:key,name,summary,metrics},{onConflict:"day,agent_key"}); };
-    // Max: Erinnerungen (bestehend) + AKTIVE Upload-Überwachung mit Kontext (nicht nur die Ampel).
+    // Max: Erinnerungen + AKTIVE Überwachung von Uploads, Check-in UND Schichtplan, mit Kontext und Folge.
     const mx=g(cur,"max"), mxP=g(prv,"max"); const rem=(mx.reminder_slack||0)+(mx.reminder_cliq||0), remP=(mxP.reminder_slack||0)+(mxP.reminder_cliq||0);
-    let upFindings:any[]=[]; try{ const {data:uf}=await sb.rpc("max_upload_scan"); upFindings=(uf||[]) as any[]; }catch(_e){}
-    const upOrder:Record<string,number>={ueberfaellig:0,unvollstaendig:1,wenig_zeilen:2,muster:3};
-    upFindings.sort((a,b)=>(upOrder[a.category]??9)-(upOrder[b.category]??9));
-    const upByCat:Record<string,number>={}; upFindings.forEach((f:any)=>{ upByCat[f.category]=(upByCat[f.category]||0)+1; });
-    if(rem>0 || upFindings.length){
+    let mFind:any[]=[];
+    try{ const {data}=await sb.rpc("max_upload_scan");                 (data||[]).forEach((f:any)=>mFind.push(f)); }catch(_e){}
+    try{ const {data}=await sb.rpc("max_checkin_scan",{p_date:date});  (data||[]).forEach((f:any)=>mFind.push(f)); }catch(_e){}
+    try{ const {data}=await sb.rpc("max_shift_scan",  {p_date:date});  (data||[]).forEach((f:any)=>mFind.push(f)); }catch(_e){}
+    // Priorität: eingeplant-trotz-Abwesenheit + nicht-eingecheckt zuerst, dann Überfälliges, dann der Rest.
+    const mOrder:Record<string,number>={eingeplant_abwesend:0,nicht_eingecheckt:1,ueberfaellig:2,unbesetzt:3,unvollstaendig:4,kein_plan:5,abweichung_forecast:6,kein_checkout:7,unbestaetigt:8,wenig_zeilen:9,muster:10};
+    mFind.sort((a,b)=>(mOrder[a.category]??99)-(mOrder[b.category]??99));
+    const mByCat:Record<string,number>={}; mFind.forEach((f:any)=>{ mByCat[f.category]=(mByCat[f.category]||0)+1; });
+    if(rem>0 || mFind.length){
       const facts:any[]=[];
+      // Die Überwachungs-Befunde ZUERST (das ist Max' Auftrag), Erinnerungen zuletzt — sonst lässt der Satz sie weg.
+      mFind.slice(0,3).forEach((f:any)=>facts.push({label:f.subject+" — "+f.detail}));
       if(rem>0) facts.push({label:"Erinnerungen verschickt", current:rem, prior:remP});
-      upFindings.slice(0,4).forEach((f:any)=>facts.push({label:f.subject+" — "+f.detail}));
       let s=""; try{ s=await colleagueLine("Max", await personaOf("max"), {facts, confidence:"exakt"}); }catch(_e){}
-      if(!s){ const parts:string[]=[]; if(rem>0)parts.push(`${rem} Erinnerungen verschickt`); upFindings.slice(0,3).forEach((f:any)=>parts.push(f.detail)); s="Max: "+parts.join("; ")+"."; }
-      await put("max","Max",s,{...mx,rem_prev:remP, uploads:upByCat, upload_findings: upFindings.slice(0,40)});
+      if(!s){ const parts:string[]=[]; mFind.slice(0,3).forEach((f:any)=>parts.push(f.detail)); if(rem>0)parts.push(`${rem} Erinnerungen verschickt`); s="Max: "+parts.join("; ")+"."; }
+      await put("max","Max",s,{...mx,rem_prev:remP, watch:mByCat, findings: mFind.slice(0,60)});
     }
     // Paul
     const pl=g(cur,"paul"), plP=g(prv,"paul"); const sums=(pl.summary||0)+(pl.analysis||0), sumsP=(plP.summary||0)+(plP.analysis||0), pol=pl.polish||0, polP=plP.polish||0;
