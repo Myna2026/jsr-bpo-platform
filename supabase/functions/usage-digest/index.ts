@@ -147,8 +147,9 @@ Deno.serve(async (req)=>{
     try{ const {data}=await sb.rpc("max_upload_scan");                 (data||[]).forEach((f:any)=>mFind.push(f)); }catch(_e){}
     try{ const {data}=await sb.rpc("max_checkin_scan",{p_date:date});  (data||[]).forEach((f:any)=>mFind.push(f)); }catch(_e){}
     try{ const {data}=await sb.rpc("max_shift_scan",  {p_date:date});  (data||[]).forEach((f:any)=>mFind.push(f)); }catch(_e){}
+    try{ const {data}=await sb.rpc("max_training_scan",{p_date:date});  (data||[]).forEach((f:any)=>mFind.push(f)); }catch(_e){}
     // Priorität: eingeplant-trotz-Abwesenheit + nicht-eingecheckt zuerst, dann Überfälliges, dann der Rest.
-    const mOrder:Record<string,number>={eingeplant_abwesend:0,nicht_eingecheckt:1,ueberfaellig:2,unbesetzt:3,unvollstaendig:4,kein_plan:5,abweichung_forecast:6,kein_checkout:7,unbestaetigt:8,wenig_zeilen:9,muster:10};
+    const mOrder:Record<string,number>={schulung_kritisch:0,schulung_abgesprungen:1,eingeplant_abwesend:2,schulung_knapp:3,nicht_eingecheckt:4,ueberfaellig:5,unbesetzt:6,unvollstaendig:7,kein_plan:8,abweichung_forecast:9,schulung_offen:10,kein_checkout:11,unbestaetigt:12,wenig_zeilen:13,muster:14};
     mFind.sort((a,b)=>(mOrder[a.category]??99)-(mOrder[b.category]??99));
     const mByCat:Record<string,number>={}; mFind.forEach((f:any)=>{ mByCat[f.category]=(mByCat[f.category]||0)+1; });
     if(rem>0 || mFind.length){

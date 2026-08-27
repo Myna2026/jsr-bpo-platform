@@ -37404,7 +37404,7 @@ function AgentChip({agentKey, prefix, size}){ const a=AI_AGENTS[agentKey]; if(!a
 // Arbeitsablauf je Kollege (Ablauf als Kette). Kurze, klare Schritte.
 const AGENT_FLOW = {
   clara: ['Neue Bewerbung kommt an','Prüfen und einstufen','Vorsortieren, an HR übergeben','Marketing-Qualität und Kampagnen prüfen','Änderungen mit Folge melden'],
-  max:   ['Aufgaben, Uploads, Check-in und Schichtplan prüfen','Ausbleibendes und Kollisionen erkennen','Mit Kontext und Folge melden','Über Slack zustellen','Bei Wiederholung eskalieren'],
+  max:   ['Aufgaben, Uploads, Check-in, Schichtplan und Schulungen prüfen','Ausbleibendes, Kollisionen und knappe Gruppen erkennen','Mit Kontext und Folge melden, je näher desto dringlicher','Über Slack zustellen','Bei Wiederholung eskalieren'],
   anna:  ['Frage entgegennehmen','Im Wissen und in Daten suchen','Antwort mit Quelle bilden','Bei Unklarheit nachfragen','Lücke vermerken wenn unbekannt'],
   paul:  ['Text oder Zahlen lesen','Muster und Ausreißer finden','Mit Vergleich einordnen','Kurz zusammenfassen','Ergebnis bereitstellen'],
   maya:  ['Aktivität und Rechte sammeln','Je Nutzer verdichten','Auffälliges markieren','Verwaiste und unpassende Rechte melden','Zeigen, nie bewerten'],
@@ -37426,6 +37426,7 @@ const AGENT_DATATREE = {
     {label:'Importe',                mode:'read',  q:()=>sb.from('data_imports').select('id',{count:'exact',head:true})},
     {label:'Schichtplan',            mode:'read',  q:()=>sb.from('shift_assignments').select('project_id',{count:'exact',head:true})},
     {label:'Check-ins',              mode:'read',  q:()=>sb.from('shift_checkins').select('work_date',{count:'exact',head:true})},
+    {label:'Schulungspläne',         mode:'read',  q:()=>sb.from('training_plans').select('id',{count:'exact',head:true})},
     {label:'Erinnerungen gesendet',  mode:'write', q:()=>sb.from('agent_actions').select('id',{count:'exact',head:true}).eq('agent_key','max')},
     {label:'Upload-Meldungen',       mode:'write', q:()=>sb.from('agent_digests').select('day',{count:'exact',head:true}).eq('agent_key','max')},
   ],
@@ -37456,7 +37457,7 @@ const AGENT_DATATREE = {
 const VIEW_AGENT = {
   nlquery:'anna', wissen_system:'anna', knowledge:'anna',
   kanban:'clara', funnel:'clara', cvs:'clara', dubletten:'clara', bewerberlinks:'clara', recmkt:'clara',
-  daily_tasks:'max', uploads:'max', uploadplan:'max', checkin:'max', shiftplan:'max',
+  daily_tasks:'max', uploads:'max', uploadplan:'max', checkin:'max', shiftplan:'max', training_plans:'max',
   auswertung:'paul', praesentation:'paul', meetingnotes:'paul',
   useractivity:'maya', aiaccess:'maya', whosees:'maya',
   datacheck:'lena', absences:'lena', urlaubantraege:'lena', employees:'lena',
@@ -38016,6 +38017,7 @@ const UPLOAD_SOURCES=[
   {key:'forecast_sales',  label:'Forecast Woche · Sales',   sub:'FC-Stunden je KW (Auftraggeber, Blatt 5)', period:'week', file:'FC_<Monat>_25Hrs__SALES.xlsx'},
   {key:'forecast_support',label:'Forecast Woche · Support', sub:'FC-Stunden je KW (Auftraggeber, Blatt 5)', period:'week', file:'FC_<Monat>_25Hrs__Support.xlsx'},
   {key:'longterm',        label:'Langzeit-Kapazität',       sub:'12-Monats-Modell (Blätter Sales + Support)', period:'week', file:'Long_Term_Capacity_25H_Sales_Support.xlsx'},
+  {key:'mailer',          label:'Mailer-Performance',       sub:'Mails/h je Support-Agent (alle Wochen der Datei)', period:'week', file:'Mailerperformance_25hrs.xlsx'},
 ];
 // Rhythmen (Rückgriff im Admin + späterer Statusrechner). daily/weekly_progressive ohne feste Wochentag-Fälligkeit.
 const UPLOAD_CADENCES=[
@@ -38372,6 +38374,209 @@ function UploadHubView({team, projects, onNavigate}){
   </div>;
 }
 
+// ══ Mailer-Performance-Import → Support-Kennzahl „Mails/h" ═══════════════════════════════════
+// Mehrblatt-xlsx: „Rohdaten Novo" (Mails) + „vw_agent_qm" (LogTime). Rechnet je Support-Agent je
+// ISO-Woche:  Mails/h = Σ Gesamt_bearbeitet (Bearbeiter=ME) / LogTime-Stunden.
+// NUR Support (Skill aus UNSEREM project_skill); Sales-Zeilen werden still übersprungen.
+//
+// ▼▼ STUNDEN-QUELLE — die EINZIGE Stelle. Bestätigt der Auftraggeber eine andere LogTime-Spalte,
+//    hier tauschen (Blatt-Muster / Spaltenname / Einheit). Sonst nichts anfassen. ▼▼
+const MAILER_HOURS_SOURCE={
+  sheetRx:/agent_qm/i,       // Blatt mit der LogTime
+  nameCol:'mitarbeiterid',   // Agent (Genesys-Vollname), Join-Schlüssel
+  dateCol:'datum',           // Datum -> ISO-Woche
+  valueCol:'mailer',         // LogTime ME
+  unit:'sec',                // 'sec' -> /3600 · 'min' -> /60 · 'hour' -> ×1
+  label:'Spalte „mailer" aus vw_agent_qm (Sekunden)'
+};
+function mailerHoursToH(v){ const n=Number(String(v==null?'':v).replace(',','.'))||0; const u=MAILER_HOURS_SOURCE.unit; return u==='sec'?n/3600:(u==='min'?n/60:n); }
+function mailerNum(v){ return Number(String(v==null?'':v).replace(',','.'))||0; }
+function mailerYw(v){ if(v==null||v==='') return null; const d = v instanceof Date ? v : new Date(String(v).slice(0,10)); if(isNaN(d.getTime())) return null; const w=getISOWeek(d); return w.year+'-'+String(w.kw).padStart(2,'0'); }
+
+function MailerImport({employees, onSaved}){
+  const [file,setFile]=useState(null); const [fileHash,setFileHash]=useState('');
+  const [step,setStep]=useState('upload'); const [result,setResult]=useState(null);
+  const [busy,setBusy]=useState(false); const [saved,setSaved]=useState(false); const [err,setErr]=useState('');
+  const [kpiId,setKpiId]=useState(undefined);  // undefined=lädt · null=fehlt · id
+  const [alias,setAlias]=useState({});          // normname -> emp_id | 'skip'
+
+  useEffect(()=>{ let alive=true; (async()=>{
+    try{ const {data}=await sb.from('kpi_config').select('id,name,skill');
+      const k=(data||[]).find(x=>/^\s*mails?\s*\/?\s*h\s*$/i.test(x.name||'') && String(x.skill||'').toLowerCase()==='support');
+      if(alive) setKpiId(k?k.id:null);
+    }catch(e){ if(alive) setKpiId(null); }
+    try{ const a=await loadConfigFromDB('jsr_mailer_alias_v1'); if(alive&&a&&typeof a==='object') setAlias(a); }catch(e){}
+  })(); return ()=>{alive=false;}; },[]);
+
+  function sheetAoa(wb,rx){ const nm=wb.SheetNames.find(n=>rx.test(n)); if(!nm) return null;
+    const aoa=XLSX.utils.sheet_to_json(wb.Sheets[nm],{header:1,defval:''});
+    const headers=(aoa[0]||[]).map(x=>String(x==null?'':x).trim());
+    return {name:nm, headers, idx:h=>headers.findIndex(x=>x.toLowerCase()===String(h).toLowerCase()), rows:aoa.slice(1)};
+  }
+
+  function onFile(f){ if(!f) return; setErr(''); setSaved(false); setResult(null);
+    const rd=new FileReader();
+    rd.onload=async ev=>{ try{
+      const bytes=new Uint8Array(ev.target.result);
+      const wb=XLSX.read(bytes,{type:'array',cellDates:true,raw:false});
+      const roh=sheetAoa(wb,/rohdaten/i); const qm=sheetAoa(wb,MAILER_HOURS_SOURCE.sheetRx);
+      if(!roh) throw new Error('Blatt „Rohdaten Novo" fehlt. Blätter: '+wb.SheetNames.join(', '));
+      if(!qm)  throw new Error('Blatt „vw_agent_qm" (Stunden) fehlt. Blätter: '+wb.SheetNames.join(', '));
+      const iN=roh.idx('Name Genesys'), iD=roh.idx('Datum'), iB=roh.idx('Bearbeiter'), iM=roh.idx('Gesamt_bearbeitet');
+      if(iN<0||iD<0||iB<0||iM<0) throw new Error('Rohdaten-Spalten unvollständig (erwartet: Name Genesys, Datum, Bearbeiter, Gesamt_bearbeitet).');
+      const qN=qm.idx(MAILER_HOURS_SOURCE.nameCol), qD=qm.idx(MAILER_HOURS_SOURCE.dateCol), qV=qm.idx(MAILER_HOURS_SOURCE.valueCol);
+      if(qN<0||qD<0||qV<0) throw new Error('Stunden-Spalten fehlen ('+MAILER_HOURS_SOURCE.nameCol+' / '+MAILER_HOURS_SOURCE.dateCol+' / '+MAILER_HOURS_SOURCE.valueCol+').');
+      setFile(f); setFileHash('sz'+bytes.length);
+      // Mails je (Name, ISO-Woche), nur Bearbeiter=ME
+      const mails={};
+      roh.rows.forEach(r=>{ if(String(r[iB]).trim()!=='ME') return; const nm=String(r[iN]||'').trim(); if(!nm) return;
+        const yw=mailerYw(r[iD]); if(!yw) return; const key=nm+'|'+yw; mails[key]=(mails[key]||0)+mailerNum(r[iM]); });
+      // Stunden je (Name, ISO-Woche)
+      const hours={};
+      qm.rows.forEach(r=>{ const nm=String(r[qN]||'').trim(); if(!nm) return; const yw=mailerYw(r[qD]); if(!yw) return;
+        const key=nm+'|'+yw; hours[key]=(hours[key]||0)+mailerHoursToH(r[qV]); });
+      window.__mailerAgg={mails,hours}; // Rohaggregat für Reprocess nach Alias-Zuordnung
+      compute(mails,hours);
+    }catch(e){ setErr('Datei nicht lesbar: '+(e.message||'')); } };
+    rd.readAsArrayBuffer(f);
+  }
+
+  function compute(mails,hours){
+    // Skill-Index aus UNSEREM System (alle Mitarbeiter, nicht projektgebunden — Kennzahl ist skill-weit).
+    const bySkill={}, empByName={};
+    (employees||[]).forEach(e=>{ if(!e) return; const n=cqNormName((e.first_name||'')+' '+(e.last_name||''));
+      if(!empByName[n] || String(e.project_skill||'').toLowerCase()==='support') empByName[n]=e; });
+    const names=[...new Set([...Object.keys(mails),...Object.keys(hours)].map(k=>k.split('|')[0]))];
+    const factsByEmp={}, skippedSales=new Set(), unmatched={};
+    names.forEach(nm=>{
+      const n=cqNormName(nm); const al=alias[n];
+      let emp = al==='skip' ? null : (al ? (employees||[]).find(e=>e&&e.id===al) : empByName[n]);
+      const skill = emp ? String(emp.project_skill||'').toLowerCase() : null;
+      if(al==='skip') return;
+      if(!emp){ (unmatched[nm]=unmatched[nm]||{name:nm,mails:0}); Object.keys(mails).forEach(k=>{ if(k.split('|')[0]===nm) unmatched[nm].mails+=mails[k]; }); return; }
+      if(skill!=='support'){ skippedSales.add(nm); return; }  // Sales/andere still übersprungen
+    });
+    // je Support-MA je Woche einen Fakt
+    const facts=[];
+    names.forEach(nm=>{ const n=cqNormName(nm); const al=alias[n]; if(al==='skip') return;
+      const emp = al ? (employees||[]).find(e=>e&&e.id===al) : empByName[n];
+      if(!emp || String(emp.project_skill||'').toLowerCase()!=='support') return;
+      const weeks=[...new Set([...Object.keys(mails),...Object.keys(hours)].filter(k=>k.split('|')[0]===nm).map(k=>k.split('|')[1]))];
+      weeks.forEach(yw=>{ const key=nm+'|'+yw; const m=mails[key]||0; const h=hours[key]||0;
+        if(m<=0 && h<=0) return;
+        const [y,w]=yw.split('-').map(Number);
+        facts.push({ emp_id:emp.id, name:((emp.first_name||'')+' '+(emp.last_name||'')).trim(), genesys:nm,
+          year:y, kw:w, mails:Math.round(m), hours:h, meh: h>0 ? m/h : null }); });
+    });
+    facts.sort((a,b)=>(a.year-b.year)||(a.kw-b.kw)||a.name.localeCompare(b.name,'de'));
+    setResult({ facts,
+      skippedSales:[...skippedSales].sort(),
+      unmatched:Object.values(unmatched).sort((a,b)=>b.mails-a.mails),
+      weeks:[...new Set(facts.map(f=>f.year+'-'+String(f.kw).padStart(2,'0')))].sort(),
+      agents:new Set(facts.map(f=>f.emp_id)).size,
+      noHours:facts.filter(f=>f.meh==null).map(f=>f.name+' (KW '+f.kw+')') });
+    setStep('preview');
+  }
+  function reCompute(){ if(window.__mailerAgg) compute(window.__mailerAgg.mails, window.__mailerAgg.hours); }
+  async function assignAlias(nm, val){ const n=cqNormName(nm); const next={...alias,[n]:val}; setAlias(next);
+    try{ await saveConfigToDB('jsr_mailer_alias_v1', next); }catch(e){} setTimeout(reCompute,0); }
+
+  async function save(){ if(!result||busy||!kpiId) return; setBusy(true); setErr('');
+    try{
+      let uid=null,uname=null; try{ const u=await sb.auth.getUser(); uid=u&&u.data&&u.data.user&&u.data.user.id||null; if(uid){ const nr=await sb.from('app_users').select('full_name').eq('user_id',uid).single(); uname=nr&&nr.data&&nr.data.full_name||null; } }catch(e){}
+      const rows=result.facts.filter(f=>f.meh!=null).map(f=>({ emp_id:f.emp_id, kpi_id:kpiId, value:kpiRound(f.meh), kw:f.kw, year:f.year, source:'import', entered_by:uname }));
+      if(!rows.length) throw new Error('Keine berechenbaren Werte (keine Stunden gefunden?).');
+      // Alte Import-Werte gezielt je Woche/Agent entfernen, dann bulk schreiben + verifizieren.
+      const weeks=[...new Set(rows.map(r=>r.year+'-'+r.kw))].map(s=>s.split('-').map(Number));
+      for(const [y,w] of weeks){ const empIds=rows.filter(r=>r.year===y&&r.kw===w).map(r=>r.emp_id);
+        const del=await sb.from('kpi_entries').delete().eq('kpi_id',kpiId).eq('kw',w).eq('year',y).in('emp_id',empIds);
+        if(del.error) throw new Error('Alte Werte (KW '+w+'/'+y+') nicht ersetzbar: '+(del.error.message||del.error)); }
+      const ins=await sb.from('kpi_entries').insert(rows).select('id');
+      if(ins.error) throw new Error('Werte nicht gespeichert: '+(ins.error.message||ins.error));
+      if((ins.data||[]).length!==rows.length) throw new Error('Nur '+(ins.data||[]).length+' von '+rows.length+' Werten geschrieben — bitte Rechte prüfen.');
+      // Protokoll je Woche (Rechenbasis mitschreiben, damit eine Korrektur sichtbar wird).
+      try{ const proj=(employees||[]).find(e=>result.facts[0]&&e.id===result.facts[0].emp_id); const pid=proj?proj.project_id:null;
+        const perWeek={}; result.facts.forEach(f=>{ const k=f.year+'-'+f.kw; (perWeek[k]=perWeek[k]||[]).push(f); });
+        for(const [y,w] of weeks){ const k=y+'-'+w; const fs=perWeek[k]||[];
+          const basis={ hours_source:MAILER_HOURS_SOURCE.label, mails_source:'Σ Gesamt_bearbeitet (Bearbeiter=ME), Blatt Rohdaten Novo',
+            agents:fs.map(f=>({name:f.name, mails:f.mails, hours:Math.round(f.hours*10)/10, meh:f.meh==null?null:Math.round(f.meh*100)/100})) };
+          await sb.from('data_imports').insert({ project_id:pid, source_type:'mailer', kw:w, year:y, file_name:file.name, file_hash:fileHash,
+            status:result.unmatched.length?'partial':'ok', warnings:{basis, skipped_sales:result.skippedSales, unmatched:result.unmatched.map(u=>u.name)},
+            row_count:fs.length, matched_count:fs.length, unmatched_count:result.unmatched.length, uploaded_by:uid, uploaded_by_name:uname }); }
+      }catch(e){}
+      setBusy(false); setSaved(true); setStep('upload'); setFile(null); setResult(null); onSaved&&onSaved();
+    }catch(e){ setBusy(false); setErr(String((e&&e.message)||e)); }
+  }
+
+  if(kpiId===null) return <div style={{padding:'10px 12px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:8,color:'#dc2626',fontSize:12,fontWeight:700}}>Support-KPI „Mails/h" nicht gefunden. Erst im KPI-Editor anlegen.</div>;
+  const supEmps=(employees||[]).filter(e=>e&&String(e.project_skill||'').toLowerCase()==='support').slice().sort((a,b)=>((a.first_name||'')+a.last_name).localeCompare((b.first_name||'')+b.last_name,'de'));
+  return <div>
+    {err && <div style={{padding:'8px 12px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:8,color:'#dc2626',fontSize:12,marginBottom:12}}>{err}</div>}
+    {saved && <div style={{padding:'8px 12px',background:'#ecfdf5',border:'1px solid #a7f3d0',borderRadius:8,color:'#059669',fontSize:12,marginBottom:12,fontWeight:700}}>✓ Mailer-Import gespeichert — Mails/h je Support-Agent und Woche.</div>}
+    <div style={{fontSize:11.5,color:'var(--muted)',marginBottom:10,lineHeight:1.5}}>
+      Die Datei enthält alle Wochen; jede ISO-Woche füllt ihre eigene Kennzahl (die Wochenwahl oben wird hier ignoriert).
+      Gerechnet wird <b>Mails/h = Mails ÷ LogTime-Stunden</b>. Stunden-Quelle: <b>{MAILER_HOURS_SOURCE.label}</b>. Nur Support, Sales wird übersprungen.
+    </div>
+
+    {step==='upload' && <label style={{display:'inline-flex',alignItems:'center',gap:8,padding:'10px 16px',border:'1px dashed var(--border)',borderRadius:10,cursor:'pointer',fontWeight:700}}>
+      ⬆ Mailer-Performance-Excel wählen
+      <input type="file" accept=".xlsx,.xls" style={{display:'none'}} onChange={e=>{ const f=e.target.files&&e.target.files[0]; e.target.value=''; onFile(f); }}/>
+    </label>}
+
+    {step==='preview' && result && <div>
+      <div style={{display:'flex',gap:20,flexWrap:'wrap',marginBottom:12}}>
+        <div><div style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>Support-Agenten</div><div style={{fontSize:22,fontWeight:800}}>{result.agents}</div></div>
+        <div><div style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>Wochen</div><div style={{fontSize:22,fontWeight:800}}>{result.weeks.length}</div></div>
+        <div><div style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>Werte</div><div style={{fontSize:22,fontWeight:800}}>{result.facts.filter(f=>f.meh!=null).length}</div></div>
+        {result.skippedSales.length>0 && <div><div style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>Sales übersprungen</div><div style={{fontSize:22,fontWeight:800,color:'var(--muted)'}}>{result.skippedSales.length}</div></div>}
+        <div><div style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>Nicht zugeordnet</div><div style={{fontSize:22,fontWeight:800,color:result.unmatched.length?'#dc2626':'#059669'}}>{result.unmatched.length}</div></div>
+      </div>
+
+      <div style={{fontSize:11,color:'var(--muted)',background:'var(--surface-2)',border:'1px solid var(--border)',borderRadius:8,padding:'8px 10px',marginBottom:12,lineHeight:1.5}}>
+        <b>Rechenbasis:</b> Mails = Σ Gesamt_bearbeitet (Bearbeiter ME) aus „Rohdaten Novo" · Stunden = {MAILER_HOURS_SOURCE.label}. Ändert sich die Stunden-Quelle, ändern sich genau die unten gezeigten Werte.
+      </div>
+
+      {result.unmatched.length>0 && <div style={{border:'1px solid #fecaca',background:'#fef2f2',borderRadius:10,padding:'10px 12px',marginBottom:12}}>
+        <div style={{fontSize:12,fontWeight:800,color:'#dc2626',marginBottom:6}}>Nicht zugeordnete Agenten — zuordnen oder dauerhaft überspringen:</div>
+        {result.unmatched.map((u,i)=><div key={i} style={{display:'flex',alignItems:'center',gap:8,padding:'3px 0',flexWrap:'wrap'}}>
+          <span style={{fontWeight:600,minWidth:150}}>{u.name} <span style={{color:'var(--muted)',fontWeight:400}}>({Math.round(u.mails)} Mails)</span></span>
+          <select className="form-select" style={{width:'auto',fontSize:12}} defaultValue="" onChange={e=>{ if(e.target.value) assignAlias(u.name, e.target.value); }}>
+            <option value="">→ Support-Mitarbeiter wählen…</option>
+            {supEmps.map(e=><option key={e.id} value={e.id}>{e.first_name} {e.last_name}</option>)}
+          </select>
+          <button className="btn btn-sm" disabled={busy} onClick={()=>assignAlias(u.name,'skip')} title="Diesen Agenten dauerhaft überspringen">Überspringen</button>
+        </div>)}
+      </div>}
+
+      {result.skippedSales.length>0 && <div style={{fontSize:11,color:'var(--muted)',marginBottom:10}}>Übersprungen (Sales, keine Mail-Kennzahl): {result.skippedSales.join(', ')}.</div>}
+      {result.noHours.length>0 && <div style={{fontSize:11,color:'#b45309',marginBottom:10}}>⚠ Ohne Stunden (kein Wert, nicht gespeichert): {result.noHours.slice(0,12).join(' · ')}{result.noHours.length>12?' …':''}</div>}
+
+      <div style={{maxHeight:340,overflow:'auto',border:'1px solid var(--border)',borderRadius:8,marginBottom:12}}>
+        <table style={{width:'100%',borderCollapse:'collapse',fontSize:12,whiteSpace:'nowrap'}}>
+          <thead><tr style={{position:'sticky',top:0,background:'var(--surface-2)'}}>
+            <th style={{textAlign:'left',padding:'6px 8px',fontSize:11,color:'var(--muted)'}}>KW</th>
+            <th style={{textAlign:'left',padding:'6px 8px',fontSize:11,color:'var(--muted)'}}>Mitarbeiter</th>
+            <th style={{textAlign:'right',padding:'6px 8px',fontSize:11,color:'var(--muted)'}}>Mails</th>
+            <th style={{textAlign:'right',padding:'6px 8px',fontSize:11,color:'var(--muted)'}}>Stunden</th>
+            <th style={{textAlign:'right',padding:'6px 8px',fontSize:11,color:'var(--muted)'}}>Mails/h</th>
+          </tr></thead>
+          <tbody>{result.facts.map((f,i)=><tr key={i} style={{borderTop:'1px solid var(--border)',opacity:f.meh==null?0.5:1}}>
+            <td style={{padding:'5px 8px'}}>{f.kw}/{f.year}</td>
+            <td style={{padding:'5px 8px'}}>{f.name}</td>
+            <td style={{padding:'5px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{f.mails.toLocaleString('de-DE')}</td>
+            <td style={{padding:'5px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{f.hours.toLocaleString('de-DE',{maximumFractionDigits:1})}</td>
+            <td style={{padding:'5px 8px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:700}}>{f.meh==null?'—':f.meh.toLocaleString('de-DE',{maximumFractionDigits:2})}</td>
+          </tr>)}</tbody>
+        </table>
+      </div>
+      <div style={{display:'flex',gap:8}}>
+        <button className="btn btn-sm" onClick={()=>{ setStep('upload'); setFile(null); setResult(null); }}>Abbrechen</button>
+        <button className="btn btn-sm btn-primary" disabled={busy||result.facts.filter(f=>f.meh!=null).length===0} onClick={save}>💾 Import speichern ({result.facts.filter(f=>f.meh!=null).length} Werte)</button>
+      </div>
+    </div>}
+  </div>;
+}
+
 function DataImportView({projects, employees}){
   const projList=(projects||[]).filter(p=>p&&p.id).slice().sort((a,b)=>String(a.name).localeCompare(String(b.name),'de'));
   const [projId,setProjId]=useState(()=>{ const hc=projList.find(p=>/holiday.?check/i.test(p.name||'')); return hc?hc.id:(projList[0]?projList[0].id:''); });
@@ -38404,6 +38609,7 @@ function DataImportView({projects, employees}){
     s.forecast_sales  =await ex(()=>sb.from('report_forecast').select('*',{count:'exact',head:true}).eq('project_id',projId).eq('skill','sales').eq('kw',K).eq('year',Y));
     s.forecast_support=await ex(()=>sb.from('report_forecast').select('*',{count:'exact',head:true}).eq('project_id',projId).eq('skill','support').eq('kw',K).eq('year',Y));
     s.longterm        =await ex(()=>sb.from('report_longterm').select('*',{count:'exact',head:true}).eq('project_id',projId));
+    s.mailer          =await ex(()=>sb.from('kpi_entries').select('*',{count:'exact',head:true}).eq('kpi_id','kpi_1784716406726').eq('kw',K).eq('year',Y).eq('source','import'));
     if(alive) setStatus(s);
   })(); return ()=>{alive=false;}; },[projId,kw,year,tick]);
   const onSaved=()=>setTick(t=>t+1);
@@ -38445,6 +38651,7 @@ function DataImportView({projects, employees}){
             {s.key==='forecast_sales' && <ForecastImport projId={projId} skill="sales" initYear={Number(year)} onSaved={onSaved}/>}
             {s.key==='forecast_support' && <ForecastImport projId={projId} skill="support" initYear={Number(year)} onSaved={onSaved}/>}
             {s.key==='longterm' && <LongtermImport projId={projId} initYear={Number(year)} onSaved={onSaved}/>}
+            {s.key==='mailer' && <MailerImport employees={employees} onSaved={onSaved}/>}
           </div>}
         </div>;
       })}
