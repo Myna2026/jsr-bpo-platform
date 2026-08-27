@@ -165,5 +165,20 @@ Deno.serve(async (req)=>{
     }
   }catch(_e){ /* Lena-Zeile optional */ }
 
+  // ── Maya: Zugriffsrechte-Auffälligkeiten (Snapshot, kein Vorwert). Sie MELDET nüchtern, ohne Wertung. ──
+  try{
+    const { data:af } = await sb.rpc("maya_access_scan");
+    const rows = (af||[]) as any[];
+    if(rows.length){
+      const byCat:Record<string,number> = {}; rows.forEach((f:any)=>{ byCat[f.category]=(byCat[f.category]||0)+1; });
+      const NAMES:Record<string,string> = { verwaist:"verwaiste Sperren/Freigaben", rolle:"Rechte ohne Rollen-Deckung", ungenutzt:"ungenutzte Zugänge mit weiten Rechten", widerspruch:"Widersprüche zwischen Menü und KI-Datenrechten" };
+      const facts = Object.entries(byCat).sort((a,b)=>b[1]-a[1]).map(([k,v])=>({label:NAMES[k]||k, current:v}));
+      let s=""; try{ s=await colleagueLine("Maya", await personaOf("maya"), {facts, confidence:"exakt"}); }catch(_e){}
+      if(!s){ const parts=Object.entries(byCat).map(([k,v])=>`${v} ${NAMES[k]||k}`); s="Maya meldet "+parts.join(", ")+"."; }
+      await sb.from("agent_digests").upsert({ day:date, agent_key:"maya", name:"Maya", summary:s,
+        metrics:{ ...byCat, findings: rows.slice(0,60) } }, {onConflict:"day,agent_key"});
+    }
+  }catch(_e){ /* Maya-Rechte-Zeile optional */ }
+
   return json({ ok:true, date, users:active.length, done, failed });
 });
