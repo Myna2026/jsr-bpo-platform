@@ -97,6 +97,27 @@ Deno.serve(async (req)=>{
     checks.clara.snapshot = { ...(prevC||{}), rank_topN:topN, rank_topHired:topHired };
   }catch(_e){}
 
+  // Clara: Kampagne läuft und kostet Geld, aber es kommen keine Bewerbungen? Muss auffallen. (dedupe über Signatur)
+  try{
+    const { data:chkC2 } = await sb.from("agent_checks").select("metrics").eq("agent_key","clara").maybeSingle();
+    const prevC2 = (chkC2&&chkC2.metrics)||{};
+    const from4 = addDays(date,-4);
+    const { data:mk } = await sb.from("windsor_marketing").select("date,spend").gte("date",from4).lt("date",date);
+    const spendByDay:Record<string,number>={}; (mk||[]).forEach((r:any)=>{ const d=String(r.date).slice(0,10); spendByDay[d]=(spendByDay[d]||0)+(Number(r.spend)||0); });
+    const { data:cvd } = await sb.from("cvs").select("created_at").gte("created_at",from4).lt("created_at",date);
+    const appsByDay:Record<string,number>={}; (cvd||[]).forEach((r:any)=>{ const d=String(r.created_at).slice(0,10); appsByDay[d]=(appsByDay[d]||0)+1; });
+    const silent = Object.keys(spendByDay).filter(d=> spendByDay[d]>=20 && (appsByDay[d]||0)===0).sort();
+    const wasted = Math.round(silent.reduce((s,d)=>s+spendByDay[d],0));
+    const sig = silent.join(",");
+    if(silent.length>=1 && sig !== (prevC2.silent_sig||"")){
+      checks.clara.findings.push({okey:"clara_campaign_silent", severity:"high", confidence:"exakt",
+        facts:[{label:"Tage mit Kampagnen-Ausgaben, aber ohne eine einzige Bewerbung", current:silent.length},{label:"in diesen Tagen ausgegeben (Euro)", current:wasted}],
+        frame:"Alarm: die Kampagne lief und kostete Geld, aber es kam nichts an. Sag klar, dass das auffällt und geprüft werden muss. Die Zahlen sind exakt, die Ursache eine Vermutung.",
+        metrics:{silent_days:silent, wasted}});
+    }
+    checks.clara.snapshot = { ...(checks.clara.snapshot||prevC2||{}), silent_sig: sig };
+  }catch(_e){}
+
   // Max: leer abgehakte Aufgaben heute vs. Vortag
   try{
     const emToday = await cnt("daily_tasks_done","done_at",date,n1,(x)=>x.eq("session_writes",0));
