@@ -36,7 +36,23 @@ function keysOf(block){
   return out;
 }
 
-const navBlock = sliceArray('navSections');
+// navSections wurde in die reine Top-Level-Funktion buildNavSections() ausgelagert (EINE Quelle fuer die
+// Live-Sidebar UND die „Wer sieht was"-Uebersicht). Der Katalog-Abgleich schneidet jetzt deren return-Array.
+function sliceBuildNav(){
+  const a = src.indexOf('function buildNavSections');
+  if (a < 0) return null;
+  const r = src.indexOf('return [', a);
+  if (r < 0) return null;
+  const i = r + 'return '.length;   // auf '[' zeigen
+  let depth = 0;
+  for (let k = i; k < src.length; k++){
+    const c = src[k];
+    if (c === '[') depth++;
+    else if (c === ']'){ depth--; if (depth === 0) return src.slice(i, k + 1); }
+  }
+  return null;
+}
+const navBlock = sliceBuildNav();
 const catBlock = sliceArray('MENU_BADGE_MAIN_ITEMS');
 if (!navBlock || !catBlock){
   console.error('menucheck: konnte navSections oder MENU_BADGE_MAIN_ITEMS nicht finden — Ankertext geaendert?');
