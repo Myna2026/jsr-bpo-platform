@@ -7737,8 +7737,16 @@ function menuAccessFor(user, key, opts){
   if(!ok) return false;
   if(key==='activity_log' && !rk.some(r=>r==='management'||r==='hr'||r==='finance')) return false;
   if(AI_COST_VIEWS.includes(key) && !rk.some(r=>r==='management'||r==='finance')) return false;
-  if(mobile && !(user&&user.mobile_full) && !MOBILE_NAV_KEYS.includes(key)) return false;
+  if(mobile && !mobileKeyAllowed(user, key)) return false;
   return true;
+}
+// Mobil-Sichtbarkeit eines view-keys je Nutzer: „Mobil vollständig" zeigt alles; sonst eine per-Nutzer
+// gepflegte Key-Liste (jsr_mobile_keys_v1); ohne Eintrag greift die klassische Kern-Liste MOBILE_NAV_KEYS.
+function mobileKeyAllowed(user, key){
+  if(user && user.mobile_full) return true;
+  const mk=user && user.mobile_keys;
+  if(Array.isArray(mk)) return mk.includes(key);
+  return MOBILE_NAV_KEYS.includes(key);
 }
 function menuIsLockable(key){ return HR_LOCKABLE_TABS.some(t=>t.key===key); }
 // Aufgaben-Rollen eines Zugangs (Manager EXTERN hat keine eigenen Aufgaben).
@@ -36133,6 +36141,11 @@ function aiNormalizePrefs(d){
   o.project_ids = (o.projects==='list') ? (Array.isArray(d.project_ids)?d.project_ids:[]) : [];
   return o;
 }
+// Echter Override nur, wenn die gespeicherte Einstellung vom Rollen-Standard ABWEICHT (ein Save identisch
+// zum Standard ist keiner). Verhindert irrefuehrendes „Angepasst".
+function aiHasRealOverride(stored, def){
+  return !!stored && JSON.stringify(aiNormalizePrefs(stored)) !== JSON.stringify(aiNormalizePrefs(def||{}));
+}
 function aiEffectText(s, projMap){
   const parts=[];
   if(s.projects==='all') parts.push('alle Projekte');
@@ -36170,15 +36183,20 @@ function AiAccessView({team, employees}){
   },[sel, rows]);
   const empOf=(r)=> r&&r.employee_id ? (employees||[]).find(e=>e.id===r.employee_id) : null;
   const ctxLine=(r)=>{ const e=empOf(r); if(!e) return (r.role_keys||[]).join(', ')||'—'; const pj=e.project_id?(projMap[e.project_id]||e.project_id):null; return [e.position, pj].filter(Boolean).join(' · ')||((r.role_keys||[]).join(', ')||'—'); };
-  const hasOverride = current && !!current.stored;
+  const hasOverride = current && aiHasRealOverride(current.stored, current.default_prefs);
   const dirty = current && draft && !current.is_full &&
     JSON.stringify(aiNormalizePrefs(draft)) !== JSON.stringify(aiNormalizePrefs(current.stored||current.default_prefs||{}));
   const save=async()=>{
     if(!current||!draft) return; setSaving(true); setMsg('');
-    const {error}=await sb.from('ai_access_prefs').upsert({user_id:current.user_id, settings:aiNormalizePrefs(draft), updated_at:new Date().toISOString()});
+    const norm=aiNormalizePrefs(draft);
+    const isDef = JSON.stringify(norm)===JSON.stringify(aiNormalizePrefs(current.default_prefs||{}));
+    // Standardwerte speichern = kein Override: bestehende Zeile entfernen, damit „Standard" ehrlich bleibt.
+    const {error}= isDef
+      ? await sb.from('ai_access_prefs').delete().eq('user_id',current.user_id)
+      : await sb.from('ai_access_prefs').upsert({user_id:current.user_id, settings:norm, updated_at:new Date().toISOString()});
     setSaving(false);
     if(error){ setMsg('Fehler: '+error.message); return; }
-    setMsg('Gespeichert.'); await load();
+    setMsg(isDef?'Entspricht dem Rollen-Standard, kein Override gespeichert.':'Gespeichert.'); await load();
   };
   const resetDefault=async()=>{
     if(!current) return; setSaving(true); setMsg('');
@@ -36223,7 +36241,7 @@ function AiAccessView({team, employees}){
           <div style={{display:'flex',flexDirection:'column',gap:6,maxHeight:'62vh',overflowY:'auto'}}>
             {filtered.map(r=>{
               const active=r.user_id===sel;
-              const chip = r.is_full ? {t:'Sieht alles',c:'var(--teal)'} : (r.stored ? {t:'Angepasst',c:'var(--amber)'} : {t:'Standard',c:'var(--muted)'});
+              const chip = r.is_full ? {t:'Sieht alles',c:'var(--teal)'} : (aiHasRealOverride(r.stored,r.default_prefs) ? {t:'Angepasst',c:'var(--amber)'} : {t:'Standard',c:'var(--muted)'});
               return (
                 <button key={r.user_id} onClick={()=>setSel(r.user_id)} style={{textAlign:'left',padding:'10px 12px',border:'1px solid '+(active?'var(--blue)':'var(--border)'),
                   borderRadius:'var(--r)',background:active?'var(--blue-bg)':'var(--card)',cursor:'pointer',display:'flex',flexDirection:'column',gap:2}}>
@@ -36315,10 +36333,11 @@ function AiAccessView({team, employees}){
 // Menue kommt aus derselben buildNavSections-Quelle wie die Live-Sidebar (kein Drift).
 const WS_STATE_COL={on:'var(--green)', locked:'var(--amber)', mobhidden:'var(--blue)', na:'var(--muted)'};
 const WS_STATE_TXT={on:'sichtbar', locked:'gesperrt', mobhidden:'mobil ausgeblendet', na:'nicht verfügbar (Rolle)'};
-function wsUserObj(u, locks, mobileFull){
+function wsUserObj(u, locks, mobileFull, mobileKeys){
   return { user_id:u.user_id, role_keys:u.role_keys||[], employee_id:u.employee_id||null,
     locked: (locks && locks[u.user_id]!==undefined) ? locks[u.user_id] : HR_DEFAULT_LOCKED_TABS.slice(),
-    mobile_full: !!(mobileFull && mobileFull[u.user_id]) };
+    mobile_full: !!(mobileFull && mobileFull[u.user_id]),
+    mobile_keys: (mobileKeys && Array.isArray(mobileKeys[u.user_id])) ? mobileKeys[u.user_id] : null };
 }
 function wsOfferedKeys(u){
   const flags=navFlagsForRoles(u.role_keys);
@@ -36343,26 +36362,28 @@ function AiWhoSeesView({team, employees, onOpenView}){
   const [users,setUsers]=React.useState(null);
   const [locks,setLocks]=React.useState({});
   const [mobileFull,setMobileFull]=React.useState({});
+  const [mobileKeys,setMobileKeys]=React.useState({});
   const [aiMap,setAiMap]=React.useState({});
   const [projMap,setProjMap]=React.useState({});
   const [catalog,setCatalog]=React.useState([]);
   const [assign,setAssign]=React.useState([]);
   const [mode,setMode]=React.useState('person');
   const [selUid,setSelUid]=React.useState(null);
-  const [prevUid,setPrevUid]=React.useState(null);
   const [selKey,setSelKey]=React.useState('nlquery');
   const [myUid,setMyUid]=React.useState(null);
   const [msg,setMsg]=React.useState('');
   const load=async()=>{
     try{
-      const [uRes,lk,mb,ai,pj,cat,asg]=await Promise.all([
+      const [uRes,lk,mb,mk,ai,pj,cat,asg]=await Promise.all([
         sb.from('app_users').select('user_id,full_name,role_keys,active,employee_id'),
-        loadConfigFromDB('jsr_hr_tab_locks_v1'), loadConfigFromDB('jsr_mobile_full_v1'),
+        loadConfigFromDB('jsr_hr_tab_locks_v1'), loadConfigFromDB('jsr_mobile_full_v1'), loadConfigFromDB('jsr_mobile_keys_v1'),
         sb.rpc('ai_access_overview'), sb.from('projects').select('id,name'),
         loadTaskCatalog(), sb.from('task_assignments').select('*')
       ]);
-      const us=(uRes.data||[]).filter(u=>u.active!==false).sort((a,b)=>String(a.full_name||'').localeCompare(String(b.full_name||'')));
-      setUsers(us); setLocks(lk||{}); setMobileFull(mb||{});
+      // Nur echte Back-Office-Zugaenge: mindestens eine Rolle, keine Kundenzugaenge (eigenes Portal).
+      const us=(uRes.data||[]).filter(u=>u.active!==false && Array.isArray(u.role_keys) && u.role_keys.length>0 && !u.role_keys.includes('kunde'))
+        .sort((a,b)=>String(a.full_name||'').localeCompare(String(b.full_name||'')));
+      setUsers(us); setLocks(lk||{}); setMobileFull(mb||{}); setMobileKeys(mk||{});
       const am={}; (ai.data||[]).forEach(r=>am[r.user_id]=r); setAiMap(am);
       const pm={}; (pj.data||[]).forEach(p=>pm[p.id]=p.name); setProjMap(pm);
       setCatalog(cat||[]); setAssign(asg.data||[]);
@@ -36377,6 +36398,7 @@ function AiWhoSeesView({team, employees, onOpenView}){
   if(users===null) return <div style={{padding:24,color:'var(--muted)'}}>Lädt…</div>;
 
   const uById=(id)=>users.find(u=>u.user_id===id);
+  const uName=(u)=> (u&&u.full_name) || (u&&aiMap[u.user_id]&&aiMap[u.user_id].email) || (u&&u.user_id) || '—';
   const empOf=(u)=> u&&u.employee_id ? (employees||[]).find(e=>e.id===u.employee_id):null;
   const ctxLine=(u)=>{ if(!u) return ''; const e=empOf(u); const roles=(u.role_keys||[]).map(r=>ROLE_LABELS[r]||r).join(', '); if(!e) return roles||'—'; const pj=e.project_id?(projMap[e.project_id]||e.project_id):null; return [ (e.position||''), pj, roles ].filter(Boolean).join(' · ')||'—'; };
   const toggleLock=(uid,key)=>{
@@ -36386,23 +36408,36 @@ function AiWhoSeesView({team, employees, onOpenView}){
     const i=cur.indexOf(key); if(i>=0) cur.splice(i,1); else cur.push(key);
     const next={...locks,[uid]:cur}; setLocks(next); setMsg(''); saveConfigToDB('jsr_hr_tab_locks_v1', next);
   };
-  const toggleMobile=(uid)=>{ const next={...mobileFull}; if(next[uid]) delete next[uid]; else next[uid]=true; setMobileFull(next); saveConfigToDB('jsr_mobile_full_v1', next); };
-  const selUserObj = (selUid && uById(selUid)) ? wsUserObj(uById(selUid), locks, mobileFull) : null;
-  const prevUserObj = (prevUid && uById(prevUid)) ? wsUserObj(uById(prevUid), locks, mobileFull) : null;
-  const pickUser=(id)=>{ setPrevUid(selUid); setSelUid(id); setMsg(''); };
+  // Mobil je Menuepunkt schalten: materialisiert die aktuelle Mobil-Auswahl (Kern-Liste als Startpunkt) und kippt den Key.
+  const toggleMobileKey=(uid,key)=>{
+    const uo=wsUserObj(uById(uid),locks,mobileFull,mobileKeys);
+    if(uo.mobile_full){ setMsg('„Mobil vollständig" ist an (zeigt alles). Für einzelne Punkte erst abschalten.'); return; }
+    const st=wsClassify(uo,key,wsOfferedKeys(uo));
+    if(st.d!=='on'){ setMsg('Mobil ist eine Teilmenge: den Punkt zuerst auf dem Desktop sichtbar schalten.'); return; }
+    const base=(Array.isArray(mobileKeys[uid])?mobileKeys[uid].slice():MOBILE_NAV_KEYS.slice());
+    const i=base.indexOf(key); if(i>=0) base.splice(i,1); else base.push(key);
+    const next={...mobileKeys,[uid]:base}; setMobileKeys(next); setMsg(''); saveConfigToDB('jsr_mobile_keys_v1', next);
+  };
+  const toggleMobileFull=(uid)=>{ const next={...mobileFull}; if(next[uid]) delete next[uid]; else next[uid]=true; setMobileFull(next); saveConfigToDB('jsr_mobile_full_v1', next); };
+  const selUserObj = (selUid && uById(selUid)) ? wsUserObj(uById(selUid), locks, mobileFull, mobileKeys) : null;
 
-  // Pip: kleiner Zustandspunkt mit Beschriftung.
-  const Pip=({state,label})=> (
-    <span title={label+': '+WS_STATE_TXT[state]} style={{display:'inline-flex',alignItems:'center',gap:3}}>
-      <span style={{fontSize:9,color:'var(--muted)',width:14,textTransform:'uppercase',letterSpacing:'.02em'}}>{label}</span>
-      <span style={{width:9,height:9,borderRadius:9,background:WS_STATE_COL[state],display:'inline-block',border:state==='na'?'1px solid var(--border)':'none'}}/>
+  // Pip: Zustandspunkt, optional anklickbar (D schaltet Desktop-Sperre, M schaltet Mobil).
+  const Pip=({state,label,onClick,editable})=> (
+    <span onClick={editable?onClick:undefined} title={label+': '+WS_STATE_TXT[state]+(editable?' — klicken zum Ändern':'')}
+      style={{display:'inline-flex',alignItems:'center',gap:3,cursor:editable?'pointer':'default',padding:'2px 4px',borderRadius:6,userSelect:'none',background:editable?'var(--surface-2)':'transparent'}}>
+      <span style={{fontSize:9,color:'var(--muted)',width:10,fontWeight:800}}>{label}</span>
+      <span style={{width:11,height:11,borderRadius:11,background:WS_STATE_COL[state],display:'inline-block',border:state==='na'?'1px solid var(--border)':'none'}}/>
     </span>
   );
   const Legend=()=> (
-    <div style={{display:'flex',gap:12,flexWrap:'wrap',fontSize:11,color:'var(--muted)'}}>
+    <div style={{display:'flex',gap:12,flexWrap:'wrap',fontSize:11,color:'var(--muted)',alignItems:'center'}}>
+      <span style={{fontWeight:700,color:'var(--text)'}}>D Desktop · M Mobil</span>
       {Object.keys(WS_STATE_TXT).map(k=> <span key={k} style={{display:'inline-flex',alignItems:'center',gap:5}}><span style={{width:9,height:9,borderRadius:9,background:WS_STATE_COL[k],display:'inline-block',border:k==='na'?'1px solid var(--border)':'none'}}/>{WS_STATE_TXT[k]}</span>)}
     </div>
   );
+  // Anklickbarkeit der Pips fuer eine Nutzer/Key-Kombi.
+  const dEditable=(uo,key)=> menuIsLockable(key) && wsOfferedKeys(uo).has(key);
+  const mEditable=(uo,key)=> !uo.mobile_full && wsClassify(uo,key,wsOfferedKeys(uo)).d==='on';
 
   // ── KI-Datenrechte als kleiner Baum ──
   const aiTree=(uid)=>{
@@ -36430,7 +36465,7 @@ function AiWhoSeesView({team, employees, onOpenView}){
       <div style={{display:'flex',alignItems:'flex-start',gap:12,flexWrap:'wrap',marginBottom:12}}>
         <div style={{flex:1,minWidth:240}}>
           <div style={{fontSize:20,fontWeight:800,color:'var(--text)'}}>Wer sieht was</div>
-          <div style={{fontSize:13,color:'var(--muted)',marginTop:3}}>Menüpunkte, KI-Datenrechte und Aufgaben je Zugang, auf einen Blick. Klick auf einen sperrbaren Punkt schaltet ihn direkt.</div>
+          <div style={{fontSize:13,color:'var(--muted)',marginTop:3}}>Menüpunkte, KI-Datenrechte und Aufgaben je Zugang, auf einen Blick. Klick auf den D-Punkt schaltet Desktop, auf den M-Punkt Mobil.</div>
         </div>
         <div style={{display:'inline-flex',gap:2,background:'var(--surface-2)',borderRadius:'var(--r)',padding:2}}>
           {[['person','Nach Person'],['menu','Nach Menüpunkt']].map(([m,l])=>
@@ -36441,17 +36476,16 @@ function AiWhoSeesView({team, employees, onOpenView}){
       {mode==='person' ? (
         <div>
           <div style={{display:'flex',alignItems:'center',gap:12,flexWrap:'wrap',marginBottom:12}}>
-            <select value={selUid||''} onChange={e=>pickUser(e.target.value)} style={{padding:'9px 12px',border:'1px solid var(--border)',borderRadius:'var(--r)',background:'var(--surface)',color:'var(--text)',fontSize:14,minWidth:220,fontWeight:600}}>
-              {users.map(u=> <option key={u.user_id} value={u.user_id}>{u.full_name||u.user_id}</option>)}
+            <select value={selUid||''} onChange={e=>{ setSelUid(e.target.value); setMsg(''); }} style={{padding:'9px 12px',border:'1px solid var(--border)',borderRadius:'var(--r)',background:'var(--surface)',color:'var(--text)',fontSize:14,minWidth:220,fontWeight:600}}>
+              {users.map(u=> <option key={u.user_id} value={u.user_id}>{uName(u)}</option>)}
             </select>
             {selUid && <div style={{fontSize:13,color:'var(--muted)'}}>{ctxLine(uById(selUid))}</div>}
-            {selUid && <label style={{display:'inline-flex',alignItems:'center',gap:6,fontSize:13,color:'var(--text)',cursor:'pointer',marginLeft:'auto'}}>
-              <input type="checkbox" checked={!!mobileFull[selUid]} onChange={()=>toggleMobile(selUid)}/> 📱 Mobil vollständig
+            {selUid && <label title="Zeigt auf dem Handy das volle Menü statt nur die Kern-Punkte. An = Mobil-Punkte einzeln nicht schaltbar." style={{display:'inline-flex',alignItems:'center',gap:6,fontSize:13,color:'var(--text)',cursor:'pointer',marginLeft:'auto'}}>
+              <input type="checkbox" checked={!!mobileFull[selUid]} onChange={()=>toggleMobileFull(selUid)}/> 📱 Mobil vollständig
             </label>}
           </div>
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8,marginBottom:8}}>
             <Legend/>
-            {prevUid && prevUid!==selUid && <div style={{fontSize:11,color:'var(--blue)',fontWeight:600}}>◆ = anders als bei {(uById(prevUid)||{}).full_name}</div>}
             {msg && <span style={{fontSize:12,color:'var(--amber)',fontWeight:600}}>{msg}</span>}
           </div>
           <div style={{display:'flex',gap:14,alignItems:'flex-start',flexWrap:'wrap'}}>
@@ -36465,16 +36499,16 @@ function AiWhoSeesView({team, employees, onOpenView}){
                   <div style={{display:'flex',flexDirection:'column',gap:3}}>
                     {sec.items.map(it=>{
                       const st=selUserObj?wsClassify(selUserObj,it.key,offered):{d:'na',m:'na'};
-                      const prevSt=prevUserObj?wsClassify(prevUserObj,it.key,wsOfferedKeys(prevUserObj)):null;
-                      const changed=prevSt && prevUid!==selUid && (prevSt.d!==st.d||prevSt.m!==st.m);
-                      const lockable=menuIsLockable(it.key) && offered.has(it.key);
                       return (
-                        <div key={it.key} onClick={lockable?()=>toggleLock(selUid,it.key):undefined}
-                          style={{display:'flex',alignItems:'center',gap:6,padding:'4px 6px',borderRadius:6,cursor:lockable?'pointer':'default',
-                            borderLeft:'3px solid '+WS_STATE_COL[st.d], background:changed?'var(--blue-bg)':'transparent', opacity:st.d==='na'?0.55:1}}>
+                        <div key={it.key}
+                          style={{display:'flex',alignItems:'center',gap:6,padding:'4px 6px',borderRadius:6,
+                            borderLeft:'3px solid '+WS_STATE_COL[st.d], opacity:st.d==='na'?0.55:1}}>
                           <span style={{fontSize:13}}>{it.icon}</span>
-                          <span style={{fontSize:12.5,color:'var(--text)',flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{it.label}{changed&&<span style={{color:'var(--blue)',fontWeight:800}}> ◆</span>}</span>
-                          <span style={{display:'inline-flex',gap:8}}><Pip label="D" state={st.d}/><Pip label="M" state={st.m}/></span>
+                          <span style={{fontSize:12.5,color:'var(--text)',flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{it.label}</span>
+                          <span style={{display:'inline-flex',gap:4}}>
+                            <Pip label="D" state={st.d} editable={selUserObj&&dEditable(selUserObj,it.key)} onClick={()=>toggleLock(selUid,it.key)}/>
+                            <Pip label="M" state={st.m} editable={selUserObj&&mEditable(selUserObj,it.key)} onClick={()=>toggleMobileKey(selUid,it.key)}/>
+                          </span>
                         </div>
                       );
                     })}
@@ -36510,23 +36544,25 @@ function AiWhoSeesView({team, employees, onOpenView}){
             <select value={selKey} onChange={e=>setSelKey(e.target.value)} style={{padding:'9px 12px',border:'1px solid var(--border)',borderRadius:'var(--r)',background:'var(--surface)',color:'var(--text)',fontSize:14,minWidth:240,fontWeight:600}}>
               {allMenu.map(sec=> <optgroup key={sec.sec} label={sec.sec}>{sec.items.map(it=><option key={it.key} value={it.key}>{it.icon+' '+it.label}</option>)}</optgroup>)}
             </select>
-            <div style={{fontSize:13,color:'var(--muted)'}}>{menuIsLockable(selKey)?'Klick auf eine Person schaltet die Sperre.':'Nicht sperrbar (immer sichtbar für berechtigte Rollen).'}</div>
+            <div style={{fontSize:13,color:'var(--muted)'}}>{menuIsLockable(selKey)?'Klick auf D schaltet Desktop, auf M schaltet Mobil.':'Nicht sperrbar (immer sichtbar für berechtigte Rollen).'}</div>
             {msg && <span style={{fontSize:12,color:'var(--amber)',fontWeight:600,marginLeft:'auto'}}>{msg}</span>}
           </div>
           <div style={{marginBottom:8}}><Legend/></div>
           <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(260px,1fr))',gap:8}}>
             {users.map(u=>{
-              const uo=wsUserObj(u,locks,mobileFull); const offered=wsOfferedKeys(uo);
+              const uo=wsUserObj(u,locks,mobileFull,mobileKeys); const offered=wsOfferedKeys(uo);
               const st=wsClassify(uo,selKey,offered);
-              const lockable=menuIsLockable(selKey)&&offered.has(selKey);
               return (
-                <div key={u.user_id} onClick={lockable?()=>toggleLock(u.user_id,selKey):undefined}
-                  style={{...card,padding:'9px 12px',display:'flex',alignItems:'center',gap:8,cursor:lockable?'pointer':'default',borderLeft:'3px solid '+WS_STATE_COL[st.d],opacity:st.d==='na'?0.6:1}}>
+                <div key={u.user_id}
+                  style={{...card,padding:'9px 12px',display:'flex',alignItems:'center',gap:8,borderLeft:'3px solid '+WS_STATE_COL[st.d],opacity:st.d==='na'?0.6:1}}>
                   <div style={{flex:1,minWidth:0}}>
-                    <div style={{fontSize:13.5,fontWeight:700,color:'var(--text)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{u.full_name||u.user_id}</div>
+                    <div style={{fontSize:13.5,fontWeight:700,color:'var(--text)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{uName(u)}</div>
                     <div style={{fontSize:11,color:'var(--muted)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{(u.role_keys||[]).map(r=>ROLE_LABELS[r]||r).join(', ')||'—'}</div>
                   </div>
-                  <span style={{display:'inline-flex',gap:8}}><Pip label="D" state={st.d}/><Pip label="M" state={st.m}/></span>
+                  <span style={{display:'inline-flex',gap:4}}>
+                    <Pip label="D" state={st.d} editable={dEditable(uo,selKey)} onClick={()=>toggleLock(u.user_id,selKey)}/>
+                    <Pip label="M" state={st.m} editable={mEditable(uo,selKey)} onClick={()=>toggleMobileKey(u.user_id,selKey)}/>
+                  </span>
                 </div>
               );
             })}
@@ -41098,6 +41134,7 @@ function App(){
       // (identische Daten, Architekturregel), nur team.locked blendet einzelne Tabs aus.
       let hrTabLocks={}; try{ const m=await loadConfigFromDB('jsr_hr_tab_locks_v1'); if(m&&typeof m==='object'&&!Array.isArray(m)) hrTabLocks=m; }catch(e){}
       let mobileFullCfg={}; try{ const mf=await loadConfigFromDB('jsr_mobile_full_v1'); if(mf&&typeof mf==='object'&&!Array.isArray(mf)) mobileFullCfg=mf; }catch(e){}
+      let mobileKeysCfg={}; try{ const mk=await loadConfigFromDB('jsr_mobile_keys_v1'); if(mk&&typeof mk==='object'&&!Array.isArray(mk)) mobileKeysCfg=mk; }catch(e){}
       let maImportCfg={}; try{ const mi=await loadConfigFromDB('jsr_ma_import_v1'); if(mi&&typeof mi==='object'&&!Array.isArray(mi)) maImportCfg=mi; }catch(e){}
       const loginPayload = {
         name: au.full_name || session.user.email,
@@ -41113,6 +41150,7 @@ function App(){
         portals: portals,
         user_id: session.user.id,   // fuer per-User-Cockpits (jsr_user_cockpits_v1) + Tab-Sperren
         mobile_full: !!mobileFullCfg[session.user.id],   // voller mobiler Zugriff (sonst reduziert)
+        mobile_keys: Array.isArray(mobileKeysCfg[session.user.id]) ? mobileKeysCfg[session.user.id] : null,   // per-Key-Mobil-Auswahl (sonst Kern-Liste)
         ma_import: !!maImportCfg[session.user.id],        // MA-Import/Vorlage sichtbar (Standard aus)
         employee_id: await matchEmployeeToUserSb(session.user.email, au.staff_number),  // 25a: Auto-Match über Supabase
         email: session.user.email
@@ -41858,7 +41896,7 @@ function App(){
             const vis=items.filter(n=>hasAccess(n.key)
               && (n.key!=='activity_log' || ((team.role_keys||[]).some(r=>r==='management'||r==='hr'||r==='finance')))
               && (_fullFin || !COST_VIEWS.includes(n.key))
-              && (!mobileRestrict || MOBILE_NAV_KEYS.includes(n.key)));
+              && (!mobileRestrict || mobileKeyAllowed(team, n.key)));
             if(!vis.length) return null;   // Sektion ohne sichtbare Punkte (v.a. mobil) ausblenden
             const _open=openNavSecs.has(sec);
             return (
