@@ -31087,6 +31087,7 @@ function logActivity(action, entity, id, label, details){
 
 // ── Feld-Diff fürs Protokoll — gegen den geladenen Frontend-State, KEIN Extra-Read ──
 let EMP_BY_ID = {};   // vom App-Effect aus dem employees-State gepflegt
+let CURRENT_TEAM = null;   // vom App-Effect gepflegt: aktueller Login (Rollen) fürs Schreib-Routing in saveEmployeeToDB
 let PROJ_BY_ID = {};  // aus dem projects-State
 let PAY_BY_KEY = {};  // aus salaryData (PayrollView), Key emp_id|month
 // EINSCHLUSSLISTE: NUR diese operativen Felder werden mit Klartext (alt/neu) protokolliert
@@ -31120,7 +31121,7 @@ const LOG_LABELS = { vacation_days_quota:'Urlaubstage', vacation_days:'Urlaubsta
 function logLabel(k){ return LOG_LABELS[k] || k; }
 
 // Payload-Build (Phone-Normalisierung, Legacy-Mapping, extra-Overflow) — geteilt von saveEmployeeToDB (Admin,
-// upsert+select) und createEmployeeDb (Lead, promote_employee-RPC).
+// upsert+select) und dem Lead-Zweig (promote_employee/update_employee_lead-RPC) in saveEmployeeToDB.
 function buildEmployeePayload(emp){
   if(!emp) throw new Error('emp required');
   // E.164-Normalisierung beim Speichern: nur bei sicher erkannter Vorwahl + plausibler Laenge
@@ -31175,22 +31176,23 @@ function buildEmployeePayload(emp){
   if(!uuidRx.test(String(emp.id||''))) delete payload.id;
   return {payload, wasNew:_wasNew, detail:_detail};
 }
+// EINE self-routing Schreibstelle für employees. Admins (management/hr/finance): upsert+select wie bisher.
+// Reine Leads (projektleiter/teamlead): Direkt-Write scheitert an zwei Wänden (RETURNING/.select() braucht
+// SELECT-Sichtbarkeit; Trigger protect_salary_on_update dreht Lead-Updates zurück) → über SECURITY-DEFINER-RPCs
+// (promote_employee beim Anlegen, update_employee_lead beim Ändern), nur eigenes Projekt, Gehalt/Bank verworfen.
+// So werden ALLE Aufrufstellen (Anlegen, Statuswechsel „Produktiv setzen", Feld-Edits) automatisch leadtauglich.
 async function saveEmployeeToDB(emp){
   const {payload, wasNew, detail}=buildEmployeePayload(emp);
-  const {data, error} = await sb.from('employees').upsert(payload).select().single();
-  if(error) throw error;
-  logActivity(wasNew?'create':'update', 'employee', data.id, ((data.first_name||'')+' '+(data.last_name||'')).trim(), detail);
-  return data;
-}
-// Anlegen leadtauglich: Admins via upsert+select; reine Leads (projektleiter/teamlead) via promote_employee-RPC,
-// die die RETURNING-SELECT-Wand umgeht (nur eigenes Projekt; Gehalt/Bank werden serverseitig verworfen).
-async function createEmployeeDb(emp, team){
-  const isAdmin=((team&&team.role_keys)||[]).some(r=>r==='management'||r==='hr'||r==='finance');
-  if(isAdmin) return saveEmployeeToDB(emp);
-  const {payload}=buildEmployeePayload(emp);
-  const {data, error}=await sb.rpc('promote_employee', {p_payload:payload});
-  if(error) throw error;
-  try{ logActivity('create','employee',data.id,((data.first_name||'')+' '+(data.last_name||'')).trim(),null); }catch(e){}
+  const isAdmin=((CURRENT_TEAM&&CURRENT_TEAM.role_keys)||[]).some(r=>r==='management'||r==='hr'||r==='finance');
+  let data;
+  if(isAdmin){
+    const r=await sb.from('employees').upsert(payload).select().single(); if(r.error) throw r.error; data=r.data;
+  } else {
+    const existing = payload.id && EMP_BY_ID[payload.id];   // Bestand? → Update, sonst Anlage
+    const r=await sb.rpc(existing?'update_employee_lead':'promote_employee', {p_payload:payload});
+    if(r.error) throw r.error; data=r.data;
+  }
+  try{ logActivity(wasNew?'create':'update', 'employee', data.id, ((data.first_name||'')+' '+(data.last_name||'')).trim(), detail); }catch(e){}
   return data;
 }
 // Abwesenheits-Write, leadtauglich: Admins (management/hr/finance) über saveEmployeeToDB (voller Datensatz),
@@ -41450,6 +41452,7 @@ function App(){
   // 25a: Employees kommen aus Supabase (Load + Realtime via useEffect unten)
   const [employees, setEmployees] = useState([]);
   useEffect(()=>{ const m={}; (employees||[]).forEach(e=>{ if(e&&e.id) m[e.id]=e; }); EMP_BY_ID=m; },[employees]); // Snapshot fürs Protokoll-Diff
+  useEffect(()=>{ CURRENT_TEAM=team; },[team]);   // aktueller Login fürs employees-Schreib-Routing (Admin vs. Lead)
   const [empLoadError, setEmpLoadError] = useState(false);   // Hebel 3: Mitarbeiterladung fehlgeschlagen (Netz/Rechte) → sichtbar statt still leer
   const [empReloadTick, setEmpReloadTick] = useState(0);     // manueller/erneuter Ladeversuch (Banner-Knopf), ohne Seiten-Reload
   // 25a: Client-Accounts analog
@@ -41653,7 +41656,8 @@ function App(){
       const i = es.findIndex(e=>e.id===saved.id);
       return i>=0 ? es.map((e,k)=>k===i?saved:e) : [...es, saved];
     });
-    // 25a: Persist nach Supabase; bei Fehler State bleibt, Toast informiert
+    // 25a: Persist nach Supabase; bei Fehler State bleibt, Toast informiert. saveEmployeeToDB routet selbst
+    // (Admin=upsert, Lead=promote_employee/update_employee_lead-RPC) und umgeht so die RETURNING-/Trigger-Wand.
     try{ await saveEmployeeToDB(saved); showToast('✓ Mitarbeiter gespeichert'); }
     catch(e){ console.error('[25a] saveEmployee', e); showToast('⚠ Speichern fehlgeschlagen: '+dbErrMsg(e), 'error'); }
     setModal(null);
@@ -41803,7 +41807,7 @@ function App(){
     };
     // 4a-2: Employee ZUERST in DB persistieren (war seit 25a lokal-only → Reload-Verlust). uuid via DB.
     let saved;
-    try{ saved = await createEmployeeDb(newEmp, team); }   // leadtauglich (Admin=upsert, Lead=promote_employee-RPC)
+    try{ saved = await saveEmployeeToDB(newEmp); }   // self-routing (Admin=upsert, Lead=promote_employee-RPC)
     catch(e){ showToast('⚠ Mitarbeiter anlegen fehlgeschlagen: '+dbErrMsg(e),'error'); return; }
     setEmployees(es=>es.some(x=>x.id===saved.id)?es:[...es,saved]);
     // Archive CV before removing (for audit trail)

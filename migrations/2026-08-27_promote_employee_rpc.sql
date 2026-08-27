@@ -15,7 +15,10 @@ begin
   if not is_adm then
     p_payload := p_payload - 'fixed_salary' - 'hourly_rate' - 'salary_currency' - 'salary_type' - 'guaranteed_pct' - 'bank';
   end if;
-  p_payload := p_payload - 'id';   -- immer neue uuid aus dem Spalten-Default
+  -- Client-generierte gültige uuid behalten (optimistisches UI passt); sonst DB-Default vergeben lassen.
+  if (p_payload->>'id') is null or (p_payload->>'id') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then
+    p_payload := p_payload - 'id';
+  end if;
   -- Dynamische Spaltenliste: nur vorhandene Keys, die echte employees-Spalten sind (Rest fällt weg).
   select string_agg(quote_ident(k), ','), string_agg('r.'||quote_ident(k), ',')
     into cols, sel
