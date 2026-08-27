@@ -7715,40 +7715,78 @@ function buildNavSections(f){
       ...(_isMgmt ? [{key:'whosees',label:'Wer sieht was',icon:'🗺'}] : []),   // Management-only
       {key:'hraccess',label:'HR-Zugriff',icon:'🛡'},
       {key:'tabperms',label:'Portal-Tabs',icon:'🔒'},
-      {key:'hrtablocks',label:'HR-Tab-Sperren',icon:'🚫'},
       {key:'activity_log',label:'Protokoll',icon:'📋'},
       ...(_isMgmt ? [{key:'useractivity',label:'Nutzung & Aktivität',icon:'📊'}] : []),   // Management-only
       ...(_isMgmt ? [{key:'taskadmin',label:'Aufgaben-Verwaltung',icon:'🗂'}] : []),   // Management-only
     ]},
   ];
 }
-// Zugriff eines beliebigen Nutzers auf einen view-key — spiegelt hasAccess() + die Render-Zusatzfilter
-// (activity_log, Kostenbereiche, Mobil). user: {role_keys, locked[], employee_id, mobile_full}.
+// ── Menü-Sichtbarkeit als EINE Wahrheit ──
+// Reihenfolge: explizite Freigabe (jsr_menu_grants_v1) → explizite Sperre (jsr_hr_tab_locks_v1, wirkt auch auf
+// sonst-immer-Punkte wie System) → Rollen-Default (Startwert). „Wer sieht was" setzt Grant/Deny; die Rolle
+// füllt nur ungesetzte Punkte. user: {role_keys, employee_id, locked[], granted[], mobile_full, mobile_keys}.
 const AI_COST_VIEWS=['profitability','productivity','locations','payroll'];
-function menuAccessFor(user, key, opts){
-  const rk=(user&&user.role_keys)||[]; const locked=Array.isArray(user&&user.locked)?user.locked:[];
-  const mobile=!!(opts&&opts.mobile);
-  let ok;
-  if(key==='daily_tasks' && hasDailyTasks({role_keys:rk})) ok=true;
-  else if(isLeadOnlyRoles(rk)) ok = LEAD_ALLOWED_TABS.includes(key) && !locked.includes(key);
-  else if(HR_ALWAYS_TABS.includes(key)) ok=true;
-  else if(locked.includes(key)) ok=false;
-  else ok=true;   // team.access ist architektonisch immer 'all'
-  if(!ok) return false;
+let _allMenuKeysCache=null;
+function allMenuKeys(){
+  if(!_allMenuKeysCache){ _allMenuKeysCache=new Set();
+    buildNavSections({mgmt:true,mgmtHr:true,mgmtLead:true,overhead:true,dailyTasks:false}).forEach(s=>s.items.forEach(it=>_allMenuKeysCache.add(it.key)));
+    _allMenuKeysCache.add('mein-plan');
+  }
+  return _allMenuKeysCache;
+}
+// Strukturell für eine Rolle angebotene Menü-Keys (vor Sperren/Freigaben).
+function offeredKeysForRole(rk, employee_id){
+  const flags=navFlagsForRoles(rk);
+  const secs=buildNavSections({...flags, dailyTasks:hasDailyTasks({role_keys:rk})});
+  const set=new Set(); secs.forEach(s=>s.items.forEach(it=>set.add(it.key)));
+  if(employee_id) set.add('mein-plan');
+  return set;
+}
+// Rollen-Default (Startwert) für einen Punkt — ohne Grant/Deny.
+function menuRoleDefault(user, key){
+  if(!allMenuKeys().has(key)) return true;            // Nicht-Menü-Keys (z.B. Handbuch-tab_keys) unverändert
+  const rk=(user&&user.role_keys)||[];
+  if(key==='daily_tasks' && hasDailyTasks({role_keys:rk})) return true;
+  if(isLeadOnlyRoles(rk)) return LEAD_ALLOWED_TABS.includes(key);
+  if(HR_ALWAYS_TABS.includes(key)) return true;
+  const offered=offeredKeysForRole(rk, user&&user.employee_id);
+  if(!offered.has(key)) return false;
   if(key==='activity_log' && !rk.some(r=>r==='management'||r==='hr'||r==='finance')) return false;
   if(AI_COST_VIEWS.includes(key) && !rk.some(r=>r==='management'||r==='finance')) return false;
-  if(mobile && !mobileKeyAllowed(user, key)) return false;
   return true;
 }
-// Mobil-Sichtbarkeit eines view-keys je Nutzer: „Mobil vollständig" zeigt alles; sonst eine per-Nutzer
-// gepflegte Key-Liste (jsr_mobile_keys_v1); ohne Eintrag greift die klassische Kern-Liste MOBILE_NAV_KEYS.
+// Effektive Desktop-Sichtbarkeit: Zuhause immer → Freigabe → Sperre → Rollen-Default.
+function menuDeskVisible(user, key){
+  if(!allMenuKeys().has(key)) return true;
+  const rk=(user&&user.role_keys)||[];
+  if(key==='daily_tasks' && hasDailyTasks({role_keys:rk})) return true;   // Tagesaufgaben = Zuhause der Aufgaben-Rollen
+  if(key==='start' && !hasDailyTasks({role_keys:rk})) return true;         // sonst ist die Startseite das Zuhause
+  if(Array.isArray(user&&user.granted) && user.granted.includes(key)) return true;
+  if(Array.isArray(user&&user.locked) && user.locked.includes(key)) return false;
+  return menuRoleDefault(user, key);
+}
+// Mobil-Startwert je Nutzer: „Mobil vollständig" → alles; sonst per-Nutzer-Liste (jsr_mobile_keys_v1) bzw. Kern-Liste.
 function mobileKeyAllowed(user, key){
   if(user && user.mobile_full) return true;
   const mk=user && user.mobile_keys;
   if(Array.isArray(mk)) return mk.includes(key);
   return MOBILE_NAV_KEYS.includes(key);
 }
-function menuIsLockable(key){ return HR_LOCKABLE_TABS.some(t=>t.key===key); }
+// Menüstruktur eines Nutzers inkl. explizit freigegebener, rollenfremder Punkte (sonst wären sie unsichtbar).
+function menuSectionsForUser(user){
+  const flags=navFlagsForRoles(user&&user.role_keys);
+  let secs=buildNavSections({...flags, dailyTasks:hasDailyTasks({role_keys:(user&&user.role_keys)||[]})});
+  const allow=(Array.isArray(user&&user.granted)?user.granted:[]);
+  const present=new Set(); secs.forEach(s=>s.items.forEach(it=>present.add(it.key)));
+  const missing=allow.filter(k=>!present.has(k) && k!=='mein-plan');
+  if(!missing.length) return secs;
+  const FULL=buildNavSections({mgmt:true,mgmtHr:true,mgmtLead:true,overhead:true,dailyTasks:false});
+  const info={}; FULL.forEach(s=>s.items.forEach(it=>{ info[it.key]={item:it, sec:s.sec}; }));
+  const clone=secs.map(s=>({sec:s.sec, items:s.items.slice()}));
+  const idx={}; clone.forEach((s,i)=>idx[s.sec]=i);
+  missing.forEach(k=>{ const nfo=info[k]; if(!nfo) return; let i=idx[nfo.sec]; if(i===undefined){ clone.push({sec:nfo.sec, items:[]}); i=clone.length-1; idx[nfo.sec]=i; } clone[i].items.push(nfo.item); });
+  return clone;
+}
 // Aufgaben-Rollen eines Zugangs (Manager EXTERN hat keine eigenen Aufgaben).
 const taskRolesOf = t => { const rk=(t&&t.role_keys)||[]; const ext=!!(t&&t.mgmt_external); return ['management','hr','finance','teamlead','projektleiter'].filter(r=>rk.includes(r)&&!(r==='management'&&ext)); };
 // Verwaltungs-Uebersicht (Management-only): wer hat welche Aufgaben (Rhythmus/Projekt/offen), zuweisen/umverteilen.
@@ -36331,36 +36369,31 @@ function AiAccessView({team, employees}){
 // „Wer sieht was" (Management-only): eine Ansicht, die je Nutzer Menuepunkte (Desktop+Mobil), KI-Datenrechte
 // und zugeordnete Aufgaben zeigt, und umgekehrt je Menuepunkt wer ihn hat. Aenderbar direkt (Sperren/Mobil).
 // Menue kommt aus derselben buildNavSections-Quelle wie die Live-Sidebar (kein Drift).
-const WS_STATE_COL={on:'var(--green)', locked:'var(--amber)', mobhidden:'var(--blue)', na:'var(--muted)'};
-const WS_STATE_TXT={on:'sichtbar', locked:'gesperrt', mobhidden:'mobil ausgeblendet', na:'nicht verfügbar (Rolle)'};
-function wsUserObj(u, locks, mobileFull, mobileKeys){
+const WS_COL={ allow:'var(--green)', on:'var(--green)', deny:'var(--red)', na:'var(--muted)', mon:'var(--green)', moff:'var(--blue)', mna:'var(--muted)' };
+const WS_TXT={ allow:'freigegeben', on:'sichtbar (Rollen-Standard)', deny:'gesperrt', na:'nicht sichtbar (Rollen-Standard)', mon:'mobil sichtbar', moff:'mobil aus', mna:'am Desktop nicht sichtbar' };
+const WS_CRIT_SELF=['superadmin','appusers','hraccess','tabperms','aiaccess','whosees'];   // eigene Verwaltung nie selbst sperrbar
+const WS_NODENY=['start','daily_tasks'];                                                    // Zuhause (Startseite/Tagesaufgaben) nie sperrbar
+function wsUserObj(u, locks, grants, mobileFull, mobileKeys){
   return { user_id:u.user_id, role_keys:u.role_keys||[], employee_id:u.employee_id||null,
     locked: (locks && locks[u.user_id]!==undefined) ? locks[u.user_id] : HR_DEFAULT_LOCKED_TABS.slice(),
+    granted: (grants && Array.isArray(grants[u.user_id])) ? grants[u.user_id] : [],
     mobile_full: !!(mobileFull && mobileFull[u.user_id]),
     mobile_keys: (mobileKeys && Array.isArray(mobileKeys[u.user_id])) ? mobileKeys[u.user_id] : null };
 }
-function wsOfferedKeys(u){
-  const flags=navFlagsForRoles(u.role_keys);
-  const secs=buildNavSections({...flags, dailyTasks:hasDailyTasks({role_keys:u.role_keys})});
-  const set=new Set(); secs.forEach(s=>s.items.forEach(it=>set.add(it.key)));
-  if(u.employee_id) set.add('mein-plan');
-  return set;
+// Desktop-Zustand: freigegeben (explizit) / gesperrt (explizit) / Rollen-Default sichtbar / Rollen-Default aus.
+function wsDeskState(uo, key){
+  if(Array.isArray(uo.granted) && uo.granted.includes(key)) return 'allow';
+  if(Array.isArray(uo.locked) && uo.locked.includes(key)) return 'deny';
+  return menuDeskVisible(uo, key) ? 'on' : 'na';
 }
-// Zustand eines view-keys fuer einen Nutzer, Desktop und Mobil getrennt.
-function wsClassify(u, key, offered){
-  if(!offered.has(key)) return {d:'na', m:'na'};
-  const accD=menuAccessFor(u, key, {mobile:false});
-  let d;
-  if(accD) d='on';
-  else if(menuIsLockable(key) && (u.locked||[]).includes(key)) d='locked';
-  else d='na';
-  let m=d;
-  if(d==='on'){ m = menuAccessFor(u, key, {mobile:true}) ? 'on' : 'mobhidden'; }
-  return {d, m};
+function wsMobState(uo, key){
+  if(!menuDeskVisible(uo, key)) return 'mna';
+  return mobileKeyAllowed(uo, key) ? 'mon' : 'moff';
 }
 function AiWhoSeesView({team, employees, onOpenView}){
   const [users,setUsers]=React.useState(null);
   const [locks,setLocks]=React.useState({});
+  const [grants,setGrants]=React.useState({});
   const [mobileFull,setMobileFull]=React.useState({});
   const [mobileKeys,setMobileKeys]=React.useState({});
   const [aiMap,setAiMap]=React.useState({});
@@ -36374,16 +36407,17 @@ function AiWhoSeesView({team, employees, onOpenView}){
   const [msg,setMsg]=React.useState('');
   const load=async()=>{
     try{
-      const [uRes,lk,mb,mk,ai,pj,cat,asg]=await Promise.all([
+      const [uRes,lk,gr,mb,mk,ai,pj,cat,asg]=await Promise.all([
         sb.from('app_users').select('user_id,full_name,role_keys,active,employee_id'),
-        loadConfigFromDB('jsr_hr_tab_locks_v1'), loadConfigFromDB('jsr_mobile_full_v1'), loadConfigFromDB('jsr_mobile_keys_v1'),
+        loadConfigFromDB('jsr_hr_tab_locks_v1'), loadConfigFromDB('jsr_menu_grants_v1'),
+        loadConfigFromDB('jsr_mobile_full_v1'), loadConfigFromDB('jsr_mobile_keys_v1'),
         sb.rpc('ai_access_overview'), sb.from('projects').select('id,name'),
         loadTaskCatalog(), sb.from('task_assignments').select('*')
       ]);
       // Nur echte Back-Office-Zugaenge: mindestens eine Rolle, keine Kundenzugaenge (eigenes Portal).
       const us=(uRes.data||[]).filter(u=>u.active!==false && Array.isArray(u.role_keys) && u.role_keys.length>0 && !u.role_keys.includes('kunde'))
         .sort((a,b)=>String(a.full_name||'').localeCompare(String(b.full_name||'')));
-      setUsers(us); setLocks(lk||{}); setMobileFull(mb||{}); setMobileKeys(mk||{});
+      setUsers(us); setLocks(lk||{}); setGrants(gr||{}); setMobileFull(mb||{}); setMobileKeys(mk||{});
       const am={}; (ai.data||[]).forEach(r=>am[r.user_id]=r); setAiMap(am);
       const pm={}; (pj.data||[]).forEach(p=>pm[p.id]=p.name); setProjMap(pm);
       setCatalog(cat||[]); setAssign(asg.data||[]);
@@ -36398,46 +36432,105 @@ function AiWhoSeesView({team, employees, onOpenView}){
   if(users===null) return <div style={{padding:24,color:'var(--muted)'}}>Lädt…</div>;
 
   const uById=(id)=>users.find(u=>u.user_id===id);
+  const userObj=(uid)=>{ const u=uById(uid); return u?wsUserObj(u,locks,grants,mobileFull,mobileKeys):null; };
   const uName=(u)=> (u&&u.full_name) || (u&&aiMap[u.user_id]&&aiMap[u.user_id].email) || (u&&u.user_id) || '—';
   const empOf=(u)=> u&&u.employee_id ? (employees||[]).find(e=>e.id===u.employee_id):null;
   const ctxLine=(u)=>{ if(!u) return ''; const e=empOf(u); const roles=(u.role_keys||[]).map(r=>ROLE_LABELS[r]||r).join(', '); if(!e) return roles||'—'; const pj=e.project_id?(projMap[e.project_id]||e.project_id):null; return [ (e.position||''), pj, roles ].filter(Boolean).join(' · ')||'—'; };
-  const toggleLock=(uid,key)=>{
-    if(!menuIsLockable(key)){ setMsg('Dieser Punkt ist nicht sperrbar.'); return; }
-    if(uid===myUid && (key==='hrtablocks'||key==='aiaccess'||key==='whosees')){ setMsg('Eigenen Verwaltungszugang nicht sperrbar (Selbstausschluss).'); return; }
-    const cur=(locks[uid]!==undefined?locks[uid].slice():HR_DEFAULT_LOCKED_TABS.slice());
-    const i=cur.indexOf(key); if(i>=0) cur.splice(i,1); else cur.push(key);
-    const next={...locks,[uid]:cur}; setLocks(next); setMsg(''); saveConfigToDB('jsr_hr_tab_locks_v1', next);
+
+  // Desktop-Override setzen: mode 'allow'|'deny'|'clear'. Schreibt Freigabe- + Sperr-Speicher (je Key nur in einem).
+  const writeDesk=(g,l)=>{ setGrants(g); setLocks(l); saveConfigToDB('jsr_menu_grants_v1', g); saveConfigToDB('jsr_hr_tab_locks_v1', l); };
+  const setDeskOne=(uid,key,mode)=>{
+    let g=grants[uid]?grants[uid].slice():[]; let l=(locks[uid]!==undefined?locks[uid].slice():HR_DEFAULT_LOCKED_TABS.slice());
+    g=g.filter(k=>k!==key); l=l.filter(k=>k!==key);
+    if(mode==='allow') g.push(key); else if(mode==='deny') l.push(key);
+    writeDesk({...grants,[uid]:g},{...locks,[uid]:l});
   };
-  // Mobil je Menuepunkt schalten: materialisiert die aktuelle Mobil-Auswahl (Kern-Liste als Startpunkt) und kippt den Key.
+  // Klick D: kippt effektive Sichtbarkeit und macht sie explizit (Rolle wird überstimmt).
+  const toggleDeskD=(uid,key)=>{
+    const uo=userObj(uid); if(!uo) return;
+    const vis=menuDeskVisible(uo,key);
+    if(vis){ // -> sperren
+      if(WS_NODENY.includes(key)){ setMsg('Die Startseite kann nicht gesperrt werden.'); return; }
+      if(uid===myUid && WS_CRIT_SELF.includes(key)){ setMsg('Eigenen Verwaltungszugang nicht sperrbar (Selbstausschluss).'); return; }
+      setDeskOne(uid,key,'deny');
+    } else setDeskOne(uid,key,'allow');   // -> freigeben
+    setMsg('');
+  };
+  // Sektion D auf einmal: alles sichtbar -> alles sperren; sonst -> alles freigeben (Eigen-/Startriegel übersprungen).
+  const toggleSectionD=(uid,sec)=>{
+    const uo=userObj(uid); if(!uo) return;
+    const keys=sec.items.map(i=>i.key);
+    const allVis=keys.every(k=>menuDeskVisible(uo,k));
+    const mode=allVis?'deny':'allow';
+    let g=grants[uid]?grants[uid].slice():[]; let l=(locks[uid]!==undefined?locks[uid].slice():HR_DEFAULT_LOCKED_TABS.slice());
+    keys.forEach(k=>{
+      if(mode==='deny' && (WS_NODENY.includes(k) || (uid===myUid && WS_CRIT_SELF.includes(k)))) return;
+      g=g.filter(x=>x!==k); l=l.filter(x=>x!==k);
+      if(mode==='allow') g.push(k); else l.push(k);
+    });
+    writeDesk({...grants,[uid]:g},{...locks,[uid]:l}); setMsg('');
+  };
+  // Mobil je Punkt (Teilmenge von Desktop): materialisiert die Mobil-Auswahl (Kern-Liste als Startpunkt) und kippt.
+  const setMobileSet=(uid,keys)=>{ const next={...mobileKeys,[uid]:keys}; setMobileKeys(next); saveConfigToDB('jsr_mobile_keys_v1', next); };
   const toggleMobileKey=(uid,key)=>{
-    const uo=wsUserObj(uById(uid),locks,mobileFull,mobileKeys);
+    const uo=userObj(uid); if(!uo) return;
     if(uo.mobile_full){ setMsg('„Mobil vollständig" ist an (zeigt alles). Für einzelne Punkte erst abschalten.'); return; }
-    const st=wsClassify(uo,key,wsOfferedKeys(uo));
-    if(st.d!=='on'){ setMsg('Mobil ist eine Teilmenge: den Punkt zuerst auf dem Desktop sichtbar schalten.'); return; }
+    if(!menuDeskVisible(uo,key)){ setMsg('Mobil ist eine Teilmenge: den Punkt zuerst auf dem Desktop sichtbar schalten.'); return; }
     const base=(Array.isArray(mobileKeys[uid])?mobileKeys[uid].slice():MOBILE_NAV_KEYS.slice());
     const i=base.indexOf(key); if(i>=0) base.splice(i,1); else base.push(key);
-    const next={...mobileKeys,[uid]:base}; setMobileKeys(next); setMsg(''); saveConfigToDB('jsr_mobile_keys_v1', next);
+    setMobileSet(uid,base); setMsg('');
+  };
+  const toggleSectionM=(uid,sec)=>{
+    const uo=userObj(uid); if(!uo) return;
+    if(uo.mobile_full){ setMsg('„Mobil vollständig" ist an. Für einzelne Punkte erst abschalten.'); return; }
+    const keys=sec.items.map(i=>i.key).filter(k=>menuDeskVisible(uo,k));
+    if(!keys.length){ setMsg('In dieser Sektion ist mobil nichts schaltbar (nichts am Desktop sichtbar).'); return; }
+    const allOn=keys.every(k=>mobileKeyAllowed(uo,k));
+    let base=(Array.isArray(mobileKeys[uid])?mobileKeys[uid].slice():MOBILE_NAV_KEYS.slice());
+    keys.forEach(k=>{ base=base.filter(x=>x!==k); if(!allOn) base.push(k); });
+    setMobileSet(uid,base); setMsg('');
   };
   const toggleMobileFull=(uid)=>{ const next={...mobileFull}; if(next[uid]) delete next[uid]; else next[uid]=true; setMobileFull(next); saveConfigToDB('jsr_mobile_full_v1', next); };
-  const selUserObj = (selUid && uById(selUid)) ? wsUserObj(uById(selUid), locks, mobileFull, mobileKeys) : null;
+  const resetPerson=(uid)=>{
+    const ng={...grants}; delete ng[uid]; const nl={...locks}; delete nl[uid];
+    const nmk={...mobileKeys}; delete nmk[uid]; const nmf={...mobileFull}; delete nmf[uid];
+    setGrants(ng); setLocks(nl); setMobileKeys(nmk); setMobileFull(nmf);
+    saveConfigToDB('jsr_menu_grants_v1', ng); saveConfigToDB('jsr_hr_tab_locks_v1', nl);
+    saveConfigToDB('jsr_mobile_keys_v1', nmk); saveConfigToDB('jsr_mobile_full_v1', nmf);
+    setMsg('Auf Rollen-Standard zurückgesetzt.');
+  };
+  const hasOverrides=(uid)=> (grants[uid]&&grants[uid].length) || locks[uid]!==undefined || mobileKeys[uid]!==undefined || mobileFull[uid];
+  const selUserObj = userObj(selUid);
 
-  // Pip: Zustandspunkt, optional anklickbar (D schaltet Desktop-Sperre, M schaltet Mobil).
-  const Pip=({state,label,onClick,editable})=> (
-    <span onClick={editable?onClick:undefined} title={label+': '+WS_STATE_TXT[state]+(editable?' — klicken zum Ändern':'')}
+  // Pip: Zustandspunkt, optional anklickbar. Explizit gesetzte (freigegeben/gesperrt) tragen einen Ring.
+  const Pip=({state,label,onClick,editable,explicit})=> (
+    <span onClick={editable?onClick:undefined} title={label+': '+WS_TXT[state]+(editable?' — klicken zum Ändern':'')}
       style={{display:'inline-flex',alignItems:'center',gap:3,cursor:editable?'pointer':'default',padding:'2px 4px',borderRadius:6,userSelect:'none',background:editable?'var(--surface-2)':'transparent'}}>
       <span style={{fontSize:9,color:'var(--muted)',width:10,fontWeight:800}}>{label}</span>
-      <span style={{width:11,height:11,borderRadius:11,background:WS_STATE_COL[state],display:'inline-block',border:state==='na'?'1px solid var(--border)':'none'}}/>
+      <span style={{width:11,height:11,borderRadius:11,background:WS_COL[state],display:'inline-block',
+        border:(state==='na'||state==='mna')?'1px solid var(--border)':'none',
+        boxShadow:explicit?('0 0 0 2px var(--card),0 0 0 3px '+WS_COL[state]):'none'}}/>
+    </span>
+  );
+  const SEC_COL={all:'var(--green)',none:'var(--muted)',mixed:'var(--amber)'};
+  const secDStateOf=(uo,sec)=>{ const ks=sec.items.map(i=>i.key); const on=ks.filter(k=>menuDeskVisible(uo,k)).length; return on===0?'none':(on===ks.length?'all':'mixed'); };
+  const secMStateOf=(uo,sec)=>{ const ks=sec.items.map(i=>i.key).filter(k=>menuDeskVisible(uo,k)); if(!ks.length) return 'none'; const on=ks.filter(k=>mobileKeyAllowed(uo,k)).length; return on===0?'none':(on===ks.length?'all':'mixed'); };
+  const SecToggle=({label,state,onClick,disabled})=> (
+    <span onClick={disabled?undefined:onClick} title={'Alle '+label+' dieser Sektion umschalten ('+(state==='all'?'alle frei':(state==='none'?'alle gesperrt':'gemischt'))+')'}
+      style={{display:'inline-flex',alignItems:'center',gap:3,cursor:disabled?'default':'pointer',opacity:disabled?0.4:1,padding:'1px 4px',borderRadius:5,background:'var(--surface-2)'}}>
+      <span style={{fontSize:9,fontWeight:800,color:'var(--muted)'}}>{label}</span>
+      <span style={{width:9,height:9,borderRadius:9,background:SEC_COL[state],display:'inline-block',border:state==='none'?'1px solid var(--border)':'none'}}/>
     </span>
   );
   const Legend=()=> (
     <div style={{display:'flex',gap:12,flexWrap:'wrap',fontSize:11,color:'var(--muted)',alignItems:'center'}}>
       <span style={{fontWeight:700,color:'var(--text)'}}>D Desktop · M Mobil</span>
-      {Object.keys(WS_STATE_TXT).map(k=> <span key={k} style={{display:'inline-flex',alignItems:'center',gap:5}}><span style={{width:9,height:9,borderRadius:9,background:WS_STATE_COL[k],display:'inline-block',border:k==='na'?'1px solid var(--border)':'none'}}/>{WS_STATE_TXT[k]}</span>)}
+      {[['on','sichtbar'],['allow','freigegeben'],['deny','gesperrt'],['na','aus (Rolle)']].map(([k,t])=> <span key={k} style={{display:'inline-flex',alignItems:'center',gap:5}}><span style={{width:9,height:9,borderRadius:9,background:WS_COL[k],display:'inline-block',border:k==='na'?'1px solid var(--border)':'none'}}/>{t}</span>)}
+      <span style={{color:'var(--muted)'}}>Ring = von dir gesetzt</span>
     </div>
   );
-  // Anklickbarkeit der Pips fuer eine Nutzer/Key-Kombi.
-  const dEditable=(uo,key)=> menuIsLockable(key) && wsOfferedKeys(uo).has(key);
-  const mEditable=(uo,key)=> !uo.mobile_full && wsClassify(uo,key,wsOfferedKeys(uo)).d==='on';
+  const dEditable=(uo,key)=> !(WS_NODENY.includes(key) && menuDeskVisible(uo,key));   // Startseite nicht sperrbar, sonst alles
+  const mEditable=(uo,key)=> !uo.mobile_full && menuDeskVisible(uo,key);
 
   // ── KI-Datenrechte als kleiner Baum ──
   const aiTree=(uid)=>{
@@ -36465,7 +36558,7 @@ function AiWhoSeesView({team, employees, onOpenView}){
       <div style={{display:'flex',alignItems:'flex-start',gap:12,flexWrap:'wrap',marginBottom:12}}>
         <div style={{flex:1,minWidth:240}}>
           <div style={{fontSize:20,fontWeight:800,color:'var(--text)'}}>Wer sieht was</div>
-          <div style={{fontSize:13,color:'var(--muted)',marginTop:3}}>Menüpunkte, KI-Datenrechte und Aufgaben je Zugang, auf einen Blick. Klick auf den D-Punkt schaltet Desktop, auf den M-Punkt Mobil.</div>
+          <div style={{fontSize:13,color:'var(--muted)',marginTop:3}}>Du bestimmst je Zugang, was sichtbar ist, unabhängig von der Rolle. Klick auf D gibt Desktop frei bzw. sperrt, Klick auf M dasselbe fürs Handy. Sektions-Kopf schaltet alle Punkte darunter.</div>
         </div>
         <div style={{display:'inline-flex',gap:2,background:'var(--surface-2)',borderRadius:'var(--r)',padding:2}}>
           {[['person','Nach Person'],['menu','Nach Menüpunkt']].map(([m,l])=>
@@ -36483,6 +36576,7 @@ function AiWhoSeesView({team, employees, onOpenView}){
             {selUid && <label title="Zeigt auf dem Handy das volle Menü statt nur die Kern-Punkte. An = Mobil-Punkte einzeln nicht schaltbar." style={{display:'inline-flex',alignItems:'center',gap:6,fontSize:13,color:'var(--text)',cursor:'pointer',marginLeft:'auto'}}>
               <input type="checkbox" checked={!!mobileFull[selUid]} onChange={()=>toggleMobileFull(selUid)}/> 📱 Mobil vollständig
             </label>}
+            {selUid && hasOverrides(selUid) && <button onClick={()=>resetPerson(selUid)} title="Alle gesetzten Freigaben/Sperren dieser Person entfernen" style={{padding:'7px 12px',border:'1px solid var(--border)',borderRadius:'var(--r)',cursor:'pointer',fontSize:12,fontWeight:600,background:'var(--surface)',color:'var(--text)'}}>↺ Auf Rollen-Standard zurücksetzen</button>}
           </div>
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8,marginBottom:8}}>
             <Legend/>
@@ -36492,22 +36586,28 @@ function AiWhoSeesView({team, employees, onOpenView}){
             {/* Menü-Raster */}
             <div style={{flex:'3 1 520px',minWidth:300,display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(230px,1fr))',gap:10,alignContent:'start'}}>
               {allMenu.map(sec=> {
-                const offered=selUserObj?wsOfferedKeys(selUserObj):new Set();
+                if(!selUserObj) return null;
+                const secD=secDStateOf(selUserObj,sec), secM=secMStateOf(selUserObj,sec);
                 return (
                 <div key={sec.sec} style={{...card,padding:10}}>
-                  <div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.05em',color:'var(--muted)',marginBottom:6}}>{sec.sec}</div>
+                  <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:6}}>
+                    <div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.05em',color:'var(--muted)',flex:1}}>{sec.sec}</div>
+                    <SecToggle label="D" state={secD} onClick={()=>toggleSectionD(selUid,sec)}/>
+                    <SecToggle label="M" state={secM} onClick={()=>toggleSectionM(selUid,sec)} disabled={!!selUserObj.mobile_full}/>
+                  </div>
                   <div style={{display:'flex',flexDirection:'column',gap:3}}>
                     {sec.items.map(it=>{
-                      const st=selUserObj?wsClassify(selUserObj,it.key,offered):{d:'na',m:'na'};
+                      const ds=wsDeskState(selUserObj,it.key), ms=wsMobState(selUserObj,it.key);
+                      const dExpl=(ds==='allow'||ds==='deny');
                       return (
                         <div key={it.key}
                           style={{display:'flex',alignItems:'center',gap:6,padding:'4px 6px',borderRadius:6,
-                            borderLeft:'3px solid '+WS_STATE_COL[st.d], opacity:st.d==='na'?0.55:1}}>
+                            borderLeft:'3px solid '+WS_COL[ds], opacity:ds==='na'?0.55:1}}>
                           <span style={{fontSize:13}}>{it.icon}</span>
                           <span style={{fontSize:12.5,color:'var(--text)',flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{it.label}</span>
                           <span style={{display:'inline-flex',gap:4}}>
-                            <Pip label="D" state={st.d} editable={selUserObj&&dEditable(selUserObj,it.key)} onClick={()=>toggleLock(selUid,it.key)}/>
-                            <Pip label="M" state={st.m} editable={selUserObj&&mEditable(selUserObj,it.key)} onClick={()=>toggleMobileKey(selUid,it.key)}/>
+                            <Pip label="D" state={ds} explicit={dExpl} editable={dEditable(selUserObj,it.key)} onClick={()=>toggleDeskD(selUid,it.key)}/>
+                            <Pip label="M" state={ms} editable={mEditable(selUserObj,it.key)} onClick={()=>toggleMobileKey(selUid,it.key)}/>
                           </span>
                         </div>
                       );
@@ -36544,24 +36644,24 @@ function AiWhoSeesView({team, employees, onOpenView}){
             <select value={selKey} onChange={e=>setSelKey(e.target.value)} style={{padding:'9px 12px',border:'1px solid var(--border)',borderRadius:'var(--r)',background:'var(--surface)',color:'var(--text)',fontSize:14,minWidth:240,fontWeight:600}}>
               {allMenu.map(sec=> <optgroup key={sec.sec} label={sec.sec}>{sec.items.map(it=><option key={it.key} value={it.key}>{it.icon+' '+it.label}</option>)}</optgroup>)}
             </select>
-            <div style={{fontSize:13,color:'var(--muted)'}}>{menuIsLockable(selKey)?'Klick auf D schaltet Desktop, auf M schaltet Mobil.':'Nicht sperrbar (immer sichtbar für berechtigte Rollen).'}</div>
+            <div style={{fontSize:13,color:'var(--muted)'}}>Klick auf D gibt Desktop frei bzw. sperrt, Klick auf M dasselbe fürs Handy.</div>
             {msg && <span style={{fontSize:12,color:'var(--amber)',fontWeight:600,marginLeft:'auto'}}>{msg}</span>}
           </div>
           <div style={{marginBottom:8}}><Legend/></div>
           <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(260px,1fr))',gap:8}}>
             {users.map(u=>{
-              const uo=wsUserObj(u,locks,mobileFull,mobileKeys); const offered=wsOfferedKeys(uo);
-              const st=wsClassify(uo,selKey,offered);
+              const uo=wsUserObj(u,locks,grants,mobileFull,mobileKeys);
+              const ds=wsDeskState(uo,selKey), ms=wsMobState(uo,selKey); const dExpl=(ds==='allow'||ds==='deny');
               return (
                 <div key={u.user_id}
-                  style={{...card,padding:'9px 12px',display:'flex',alignItems:'center',gap:8,borderLeft:'3px solid '+WS_STATE_COL[st.d],opacity:st.d==='na'?0.6:1}}>
+                  style={{...card,padding:'9px 12px',display:'flex',alignItems:'center',gap:8,borderLeft:'3px solid '+WS_COL[ds],opacity:ds==='na'?0.6:1}}>
                   <div style={{flex:1,minWidth:0}}>
                     <div style={{fontSize:13.5,fontWeight:700,color:'var(--text)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{uName(u)}</div>
                     <div style={{fontSize:11,color:'var(--muted)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{(u.role_keys||[]).map(r=>ROLE_LABELS[r]||r).join(', ')||'—'}</div>
                   </div>
                   <span style={{display:'inline-flex',gap:4}}>
-                    <Pip label="D" state={st.d} editable={dEditable(uo,selKey)} onClick={()=>toggleLock(u.user_id,selKey)}/>
-                    <Pip label="M" state={st.m} editable={mEditable(uo,selKey)} onClick={()=>toggleMobileKey(u.user_id,selKey)}/>
+                    <Pip label="D" state={ds} explicit={dExpl} editable={dEditable(uo,selKey)} onClick={()=>toggleDeskD(u.user_id,selKey)}/>
+                    <Pip label="M" state={ms} editable={mEditable(uo,selKey)} onClick={()=>toggleMobileKey(u.user_id,selKey)}/>
                   </span>
                 </div>
               );
@@ -41135,6 +41235,7 @@ function App(){
       let hrTabLocks={}; try{ const m=await loadConfigFromDB('jsr_hr_tab_locks_v1'); if(m&&typeof m==='object'&&!Array.isArray(m)) hrTabLocks=m; }catch(e){}
       let mobileFullCfg={}; try{ const mf=await loadConfigFromDB('jsr_mobile_full_v1'); if(mf&&typeof mf==='object'&&!Array.isArray(mf)) mobileFullCfg=mf; }catch(e){}
       let mobileKeysCfg={}; try{ const mk=await loadConfigFromDB('jsr_mobile_keys_v1'); if(mk&&typeof mk==='object'&&!Array.isArray(mk)) mobileKeysCfg=mk; }catch(e){}
+      let menuGrantsCfg={}; try{ const mg=await loadConfigFromDB('jsr_menu_grants_v1'); if(mg&&typeof mg==='object'&&!Array.isArray(mg)) menuGrantsCfg=mg; }catch(e){}
       let maImportCfg={}; try{ const mi=await loadConfigFromDB('jsr_ma_import_v1'); if(mi&&typeof mi==='object'&&!Array.isArray(mi)) maImportCfg=mi; }catch(e){}
       const loginPayload = {
         name: au.full_name || session.user.email,
@@ -41151,6 +41252,7 @@ function App(){
         user_id: session.user.id,   // fuer per-User-Cockpits (jsr_user_cockpits_v1) + Tab-Sperren
         mobile_full: !!mobileFullCfg[session.user.id],   // voller mobiler Zugriff (sonst reduziert)
         mobile_keys: Array.isArray(mobileKeysCfg[session.user.id]) ? mobileKeysCfg[session.user.id] : null,   // per-Key-Mobil-Auswahl (sonst Kern-Liste)
+        granted: Array.isArray(menuGrantsCfg[session.user.id]) ? menuGrantsCfg[session.user.id] : [],   // explizite Freigaben (überstimmen Rolle)
         ma_import: !!maImportCfg[session.user.id],        // MA-Import/Vorlage sichtbar (Standard aus)
         employee_id: await matchEmployeeToUserSb(session.user.email, au.staff_number),  // 25a: Auto-Match über Supabase
         email: session.user.email
@@ -41481,14 +41583,8 @@ function App(){
     const _home = hasDailyTasks(team) ? 'daily_tasks' : 'start';
     if(view==='start' && _home!=='start'){ setView(_home); return; }   // Landing: Startseite -> Tagesaufgaben
     if(view===_home || view==='start' || view==='daily_tasks') return; // Zuhause-Varianten nie wegleiten
-    if(isLeadOnlyRoles(team.role_keys)){           // reine Leads: alles außerhalb des Führungs-Sets zurück aufs Zuhause
-      if(!LEAD_ALLOWED_TABS.includes(view) || (Array.isArray(team.locked)&&team.locked.includes(view))) setView(_home);
-      return;
-    }
-    if(HR_ALWAYS_TABS.includes(view)) return;
-    const locked = Array.isArray(team.locked) && team.locked.includes(view);
-    const allowed = team.access==='all' || (Array.isArray(team.access) && team.access.includes(view));
-    if(locked || !allowed) setView(_home);
+    // Einheitliche Wahrheit: nicht sichtbar (Sperre ODER Rolle, sofern nicht freigegeben) -> zurück aufs Zuhause.
+    if(!menuDeskVisible(team, view)) setView(_home);
   }, [view, team]);
 
   if(loggedIn && !team){
@@ -41500,13 +41596,8 @@ function App(){
     );
   }
 
-  const hasAccess = (key) => { try{
-    if(key==='daily_tasks' && hasDailyTasks(team)) return true;   // Tagesaufgaben = Zuhause der Aufgaben-Rollen (auch Teamlead, obwohl Lead)
-    if(team && isLeadOnlyRoles(team.role_keys)){   // reine Leads: nur Führungs-Set (harte Obergrenze), Management kann darunter weiter sperren
-      if(!LEAD_ALLOWED_TABS.includes(key)) return false;
-      return !(Array.isArray(team.locked) && team.locked.includes(key));
-    }
-    if(HR_ALWAYS_TABS.includes(key)) return true; if(team&&Array.isArray(team.locked)&&team.locked.includes(key)) return false; return !team||(team.access==='all'||team.access.includes(key));}catch(e){return true;} };
+  // Eine Wahrheit für Sichtbarkeit (Freigabe → Sperre → Rollen-Default); auch von SystemManualView genutzt.
+  const hasAccess = (key) => { try{ return team ? menuDeskVisible(team, key) : true; }catch(e){return true;} };
   // Mobil auf die vier Kern-Bereiche reduzieren — außer der Nutzer hat mobile_full (per jsr_mobile_full_v1).
   const mobileRestrict = isMobileW && !(team && team.mobile_full);
 
@@ -41715,7 +41806,7 @@ function App(){
   const _isMgmtLead = team&&((team.role_keys||[]).some(r=>r==='management')||isLeadOnlyRoles(team.role_keys));
   const _isOverhead = team&&(team.role_keys||[]).some(r=>['management','projektleiter','teamlead','qm','trainer'].includes(r));   // Besprechungen: Management+Overhead
   // Menüstruktur zentral (buildNavSections, Top-Level) — dieselbe Quelle nutzt die „Wer sieht was"-Übersicht.
-  const navSections = buildNavSections({mgmt:_isMgmt, mgmtHr:_isMgmtHr, mgmtLead:_isMgmtLead, overhead:_isOverhead, dailyTasks:hasDailyTasks(team)});
+  const navSections = menuSectionsForUser(team);   // inkl. explizit freigegebener, rollenfremder Punkte
 
   function getIcon(key){
     const ICONS = {
@@ -41817,14 +41908,8 @@ function App(){
   };
   // Stale-Schutz: Sprung-Filter verfällt, sobald man die zugehörige Ansicht verlässt (z.B. übers Menü).
   useEffect(()=>{ setNavFilter(nf=> (nf && nf.view!==view) ? null : nf); },[view]);
-  // Kostenbereiche sind Management/Finance-Sache: landet HR per Sprung dort, zurück aufs Cockpit.
-  useEffect(()=>{ const ff=(team&&(team.role_keys||[]).some(r=>r==='management'||r==='finance'));
-    if(!ff && ['profitability','productivity','locations','payroll'].includes(view)) setView('cockpit'); },[view]);
-  // Präsentation/Datenimport: Management + Projektleiter (projektbezogen). Recruiting Marketing bleibt Management-only.
-  useEffect(()=>{ const mgmt=(team&&(team.role_keys||[]).some(r=>r==='management'));
-    const lead=(team&&isLeadOnlyRoles(team.role_keys));
-    if(!mgmt && !lead && (view==='praesentation'||view==='dataimport'||view==='uploads')) setView('cockpit');
-    if(!mgmt && (view==='recmkt'||view==='fcist'||view==='auswertung'||view==='nlquery'||view==='uploadplan'||view==='useractivity'||view==='taskadmin'||view==='aiaccess'||view==='whosees')) setView('cockpit'); },[view]);
+  // (Rollen-Redirects für Kosten/Management-only entfernt: der einheitliche Redirect oben via menuDeskVisible
+  //  deckt Sperre UND Rolle ab und respektiert explizite Freigaben — kein doppeltes Rauswerfen.)
   const allNavSections = isEmpUser
     ? [{sec:'Mein Bereich', items:[{key:'mein-plan',label:'Mein Schichtplan',icon:'📋'}]}, ...navSections]
     : navSections;
@@ -41889,14 +41974,8 @@ function App(){
         </div>
         <div className="nav">
           {allNavSections.map(({sec, items}) => {
-            // Kostenbereiche (Personalkosten/Marge) sind Management/Finance-Sache — für HR ausblenden,
-            // rollenbasiert (konsistent mit der RLS-Gruppe, kein Pflegeaufwand pro Zugang).
-            const _fullFin=(team.role_keys||[]).some(r=>r==='management'||r==='finance');
-            const COST_VIEWS=['profitability','productivity','locations','payroll'];
-            const vis=items.filter(n=>hasAccess(n.key)
-              && (n.key!=='activity_log' || ((team.role_keys||[]).some(r=>r==='management'||r==='hr'||r==='finance')))
-              && (_fullFin || !COST_VIEWS.includes(n.key))
-              && (!mobileRestrict || mobileKeyAllowed(team, n.key)));
+            // Sichtbarkeit = hasAccess (Freigabe/Sperre/Rolle inkl. Kosten+Protokoll) + Mobil-Teilmenge.
+            const vis=items.filter(n=>hasAccess(n.key) && (!mobileRestrict || mobileKeyAllowed(team, n.key)));
             if(!vis.length) return null;   // Sektion ohne sichtbare Punkte (v.a. mobil) ausblenden
             const _open=openNavSecs.has(sec);
             return (
