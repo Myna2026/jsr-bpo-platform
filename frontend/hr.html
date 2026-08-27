@@ -39036,6 +39036,57 @@ function calAutoOccThisMonth(ev){
 }
 const calFmtTime=t=>{ if(!t) return ''; const s=String(t); return s.slice(0,5); };
 
+// Max gehört der Kalender: oben eine persönliche Tageszusammenfassung (eigene Termine heute + offene Aufgaben),
+// knapp, in seinem Ton, mit seinem Gesicht. Gruß nach Tageszeit. Je Person verschieden (eigene Teilnahme/Aufgaben).
+function MaxDaySummary({team, employees, events, overrides}){
+  const uid=team&&team.user_id; const myEmpId=team&&team.employee_id; const myRoles=taskRolesOf(team);
+  const [openCount,setOpenCount]=useState(null);
+  const today=isoLocal(new Date());
+  const monday=(()=>{ const x=new Date(); x.setDate(x.getDate()-((x.getDay()+6)%7)); return isoLocal(x); })();
+  useEffect(()=>{ if(!uid){ setOpenCount(0); return; } let alive=true;
+    (async()=>{ try{ const [cat,a,d,s,oc]=await Promise.all([ loadTaskCatalog(),
+        sb.from('task_assignments').select('*').eq('user_id',uid),
+        sb.from('daily_tasks_done').select('task_key,date,assignee_user,project_id').in('date',[today,monday]),
+        sb.from('task_snooze').select('task_key,date,project_id,snooze_until').eq('user_id',uid).in('date',[today,monday]),
+        loadTaskOpenCounts() ]);
+      if(!alive) return;
+      const done={}; (d.data||[]).forEach(r=>{ done[taskDoneKey(r.task_key,r.date,r.assignee_user,r.project_id)]=true; });
+      const snz={}; (s.data||[]).forEach(r=>{ snz[r.task_key+'|'+r.date+'|'+(r.project_id||'')]=r.snooze_until; });
+      const monthWeek=Math.ceil(new Date().getDate()/7); const winA=t=>!t.window||t.window.includes(monthWeek);
+      const periodDate=t=>(t&&t.cadence==='weekly')?monday:today; const nowMs=Date.now();
+      const open=taskEffInstances(myRoles,a.data||[],cat).filter(t=>!t.auto_key && winA(t) && taskGatePass(t,oc)).filter(t=>{ const dd=periodDate(t);
+        if(done[taskDoneKey(t.key,dd,uid,t.project_id)]||(!t.project_id&&done[taskDoneKey(t.key,dd,null,null)])) return false;
+        const sv=snz[t.key+'|'+dd+'|'+(t.project_id||'')]; if(sv&&new Date(sv).getTime()>nowMs) return false; return true; });
+      setOpenCount(open.length);
+    }catch(e){ if(alive) setOpenCount(0); } })();
+    return ()=>{alive=false;}; },[uid]);
+  const appts=React.useMemo(()=>{ if(!myEmpId) return []; const out=[];
+    (events||[]).forEach(ev=>{ if(!(ev.participants||[]).includes(myEmpId)) return;
+      let occ=[]; try{ occ=calOccurrences(ev,today,today); }catch(e){}
+      if(!occ.includes(today)) return; const ov=(overrides||{})[ev.id+'|'+today]; if(ov&&ov.hidden) return;
+      out.push({start:(ov&&ov.start_time)||ev.start_time, participants:(ev.participants||[]).filter(id=>id!==myEmpId)}); });
+    out.sort((x,y)=>String(x.start||'99').localeCompare(String(y.start||'99'))); return out; },[events,overrides,myEmpId,today]);
+  const empName=id=>{ const e=(employees||[]).find(x=>x&&x.id===id); return e?(e.first_name||e.last_name||''):''; };
+  const firstName=(()=>{ const e=(employees||[]).find(x=>x&&x.id===myEmpId); return (e&&e.first_name)||((team&&(team.full_name||team.name)||'').split(' ')[0])||''; })();
+  const h=new Date().getHours(); const greet=h<11?'Guten Morgen':h<14?'Guten Mittag':h<18?'Guten Nachmittag':'Guten Abend';
+  const nowHM=String(new Date().getHours()).padStart(2,'0')+':'+String(new Date().getMinutes()).padStart(2,'0');
+  const nextA=appts.find(a=>calFmtTime(a.start) && calFmtTime(a.start)>=nowHM)||null;
+  const acc=(AI_AGENTS['max']&&AI_AGENTS['max'].accent)||'#2563eb';
+  const withNames=nextA?nextA.participants.map(empName).filter(Boolean).slice(0,2).join(' und '):'';
+  return <div style={{display:'flex',gap:12,alignItems:'center',padding:'12px 15px',marginBottom:16,borderRadius:14,background:'linear-gradient(100deg,'+acc+'16,'+acc+'06 62%,transparent)',border:'1px solid '+acc+'2e'}}>
+    <span style={{flexShrink:0}}><AgentAvatar agentKey="max" size={40} color={acc} live={false}/></span>
+    <div style={{minWidth:0,flex:1}}>
+      <div style={{display:'flex',alignItems:'center',gap:7,marginBottom:2}}><span style={{fontWeight:800,fontSize:13}}>Max</span>
+        <span style={{fontSize:9,fontWeight:800,textTransform:'uppercase',letterSpacing:'.05em',color:acc}}>dein Tag</span></div>
+      <div style={{fontSize:14,lineHeight:1.5,color:'var(--text)'}}>
+        {greet}{firstName?' '+firstName:''}.{' '}
+        {appts.length===0 ? 'Heute keine Termine.'
+          : <span>Heute {appts.length===1?'ein Termin':appts.length+' Termine'}{nextA?<span>, der nächste um <b style={{color:acc}}>{calFmtTime(nextA.start)}</b>{withNames?' mit '+withNames:''}</span>:', alle schon durch'}.</span>}
+        {openCount>0 && <span> Dazu {openCount} offene {openCount===1?'Aufgabe':'Aufgaben'}.</span>}
+      </div>
+    </div>
+  </div>;
+}
 function CalendarView({team, projects, employees, showToast, isMobileW, jumpTo, onJumpConsumed}){
   const [events,setEvents]=useState([]);
   const [overrides,setOverrides]=useState({});   // `${event_id}|${date}` -> row
@@ -39144,6 +39195,7 @@ function CalendarView({team, projects, employees, showToast, isMobileW, jumpTo, 
   const navArrow={width:44,height:44,borderRadius:'50%',border:'1px solid var(--border)',background:'#fff',fontSize:24,fontWeight:700,cursor:'pointer',color:'#0F5661',lineHeight:1,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,boxShadow:'0 1px 3px rgba(0,0,0,.06)'};
   return (
     <div>
+      <MaxDaySummary team={team} employees={employees} events={events} overrides={overrides}/>
       <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:10,flexWrap:'wrap',marginBottom:14}}>
         <div>
           <div style={{fontSize:20,fontWeight:800}}>Terminkalender</div>
