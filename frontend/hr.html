@@ -31119,7 +31119,9 @@ const LOG_LABELS = { vacation_days_quota:'Urlaubstage', vacation_days:'Urlaubsta
   referral_bonus:'Referral-Bonus', target_bonus:'Ziel-Bonus', special_bonus:'Sonderbonus', deduction_tax:'Abzug Steuer', deduction_social:'Abzug Sozial', deduction_other:'Abzug Sonstige', overtime_hours:'Überstunden', saturday_hours:'Samstag-Std.', sunday_hours:'Sonntag-Std.', holiday_hours:'Feiertag-Std.', night_hours:'Nacht-Std.' };
 function logLabel(k){ return LOG_LABELS[k] || k; }
 
-async function saveEmployeeToDB(emp){
+// Payload-Build (Phone-Normalisierung, Legacy-Mapping, extra-Overflow) — geteilt von saveEmployeeToDB (Admin,
+// upsert+select) und createEmployeeDb (Lead, promote_employee-RPC).
+function buildEmployeePayload(emp){
   if(!emp) throw new Error('emp required');
   // E.164-Normalisierung beim Speichern: nur bei sicher erkannter Vorwahl + plausibler Laenge
   // (phoneClassify, identisch zur Migration). Unklares bleibt unveraendert und taucht im Report auf.
@@ -31171,9 +31173,24 @@ async function saveEmployeeToDB(emp){
   }
   // ID-Handling: Legacy-Non-UUID → DB vergibt neue uuid
   if(!uuidRx.test(String(emp.id||''))) delete payload.id;
+  return {payload, wasNew:_wasNew, detail:_detail};
+}
+async function saveEmployeeToDB(emp){
+  const {payload, wasNew, detail}=buildEmployeePayload(emp);
   const {data, error} = await sb.from('employees').upsert(payload).select().single();
   if(error) throw error;
-  logActivity(_wasNew?'create':'update', 'employee', data.id, ((data.first_name||'')+' '+(data.last_name||'')).trim(), _detail);
+  logActivity(wasNew?'create':'update', 'employee', data.id, ((data.first_name||'')+' '+(data.last_name||'')).trim(), detail);
+  return data;
+}
+// Anlegen leadtauglich: Admins via upsert+select; reine Leads (projektleiter/teamlead) via promote_employee-RPC,
+// die die RETURNING-SELECT-Wand umgeht (nur eigenes Projekt; Gehalt/Bank werden serverseitig verworfen).
+async function createEmployeeDb(emp, team){
+  const isAdmin=((team&&team.role_keys)||[]).some(r=>r==='management'||r==='hr'||r==='finance');
+  if(isAdmin) return saveEmployeeToDB(emp);
+  const {payload}=buildEmployeePayload(emp);
+  const {data, error}=await sb.rpc('promote_employee', {p_payload:payload});
+  if(error) throw error;
+  try{ logActivity('create','employee',data.id,((data.first_name||'')+' '+(data.last_name||'')).trim(),null); }catch(e){}
   return data;
 }
 // Abwesenheits-Write, leadtauglich: Admins (management/hr/finance) über saveEmployeeToDB (voller Datensatz),
@@ -41786,7 +41803,7 @@ function App(){
     };
     // 4a-2: Employee ZUERST in DB persistieren (war seit 25a lokal-only → Reload-Verlust). uuid via DB.
     let saved;
-    try{ saved = await saveEmployeeToDB(newEmp); }
+    try{ saved = await createEmployeeDb(newEmp, team); }   // leadtauglich (Admin=upsert, Lead=promote_employee-RPC)
     catch(e){ showToast('⚠ Mitarbeiter anlegen fehlgeschlagen: '+dbErrMsg(e),'error'); return; }
     setEmployees(es=>es.some(x=>x.id===saved.id)?es:[...es,saved]);
     // Archive CV before removing (for audit trail)
