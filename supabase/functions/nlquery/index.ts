@@ -1,8 +1,9 @@
 // Edge Function: Datenabfrage per Sprache.
-// - Prueft, dass der Aufrufer Management ist (app_users.role_keys), sonst 403.
-// - Schema hybrid: kuratierter Kern + Live-Glossar aus kpi_config/projects.
+// - Zugang = aktiver Back-Office-Nutzer (app_users). WELCHE Daten sichtbar sind, entscheidet der DB-Scope:
+//   nlquery_exec laeuft nur ueber ai_scoped-Views (Zeilen-/Gehaltsscope je Nutzer, GUC app.ai_uid = auth.uid()).
+// - Schema hybrid: kuratierter Kern + Live-Glossar aus kpi_config/projects. Tabellennamen UNQUALIFIZIERT
+//   (search_path=ai_scoped); public.* ist fuer die Read-only-Rolle gesperrt.
 // - Fuehrt (clarify) ODER sagt was nicht geht (cannot) ODER erzeugt eine SELECT-Abfrage (sql).
-// - SELECTs laufen ausschliesslich ueber die DB-Funktion nlquery_exec (Read-only-Rolle).
 // Deploy: supabase functions deploy nlquery ; Secret: supabase secrets set ANTHROPIC_API_KEY=...
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
@@ -198,9 +199,10 @@ Deno.serve(async (req) => {
   const { data: udata } = await sb.auth.getUser();
   const uid = udata?.user?.id;
   if (!uid) return json({ error: "Sitzung ungueltig." }, 401);
-  const { data: au } = await sb.from("app_users").select("role_keys").eq("user_id", uid).single();
-  const roles: string[] = (au?.role_keys as string[]) || [];
-  if (!roles.includes("management")) return json({ error: "Nur fuer Management freigegeben." }, 403);
+  // Zugang = aktiver Back-Office-Nutzer. Welche DATEN er sieht, entscheidet der DB-Scope (ai_scoped-Views,
+  // gesteuert ueber die Einstellung je Nutzer). Management sieht per Default alles, andere ihren Ausschnitt.
+  const { data: au } = await sb.from("app_users").select("active").eq("user_id", uid).maybeSingle();
+  if (!au || au.active === false) return json({ error: "Kein Zugang zur Datenabfrage." }, 403);
 
   let body: any;
   try { body = await req.json(); } catch { return json({ error: "Ungueltiger Body." }, 400); }
