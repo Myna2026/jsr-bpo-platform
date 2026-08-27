@@ -161,9 +161,23 @@ Deno.serve(async (req)=>{
       if(!s){ const parts:string[]=[]; mFind.slice(0,3).forEach((f:any)=>parts.push(f.detail)); if(rem>0)parts.push(`${rem} Erinnerungen verschickt`); s="Max: "+parts.join("; ")+"."; }
       await put("max","Max",s,{...mx,rem_prev:remP, watch:mByCat, findings: mFind.slice(0,60)});
     }
-    // Paul
+    // Paul — eigene Tätigkeit + Forecast-gegen-Ist-Überwachung (Stunden-Abweichungen je Projekt/Skill)
     const pl=g(cur,"paul"), plP=g(prv,"paul"); const sums=(pl.summary||0)+(pl.analysis||0), sumsP=(plP.summary||0)+(plP.analysis||0), pol=pl.polish||0, polP=plP.polish||0;
-    if(sums>0||pol>0){ const facts:any[]=[]; if(sums>0)facts.push({label:"Zusammenfassungen und Analysen erstellt", current:sums, prior:sumsP}); if(pol>0)facts.push({label:"Texte gesäubert", current:pol, prior:polP}); let s=""; try{ s=await colleagueLine("Paul", await personaOf("paul"), {facts, confidence:"exakt"}); }catch(_e){} if(!s){ const b:string[]=[]; if(sums>0)b.push(`${sums} Zusammenfassungen und Analysen erstellt`); if(pol>0)b.push(`${pol} Texte gesäubert`); s="Paul hat "+b.join(" und ")+"."; } await put("paul","Paul",s,{...pl}); }
+    let pFind:any[]=[];
+    try{ const {data}=await sb.rpc("paul_forecast_scan",{p_date:date}); (data||[]).forEach((f:any)=>pFind.push(f)); }catch(_e){}
+    const pOrder:Record<string,number>={fc_unterdeckung_trend:0,fc_ueberdeckung_trend:1,fc_unterdeckung:2,fc_ueberdeckung:3};
+    pFind.sort((a,b)=>(pOrder[a.category]??99)-(pOrder[b.category]??99));
+    const pByCat:Record<string,number>={}; pFind.forEach((f:any)=>{ pByCat[f.category]=(pByCat[f.category]||0)+1; });
+    if(sums>0||pol>0||pFind.length){
+      const facts:any[]=[];
+      // Abweichungs-Funde ZUERST (das ist Pauls Auftrag), eigene Tätigkeit danach.
+      pFind.slice(0,3).forEach((f:any)=>facts.push({label:f.subject+" — "+f.detail}));
+      if(sums>0)facts.push({label:"Zusammenfassungen und Analysen erstellt", current:sums, prior:sumsP});
+      if(pol>0)facts.push({label:"Texte gesäubert", current:pol, prior:polP});
+      let s=""; try{ s=await colleagueLine("Paul", await personaOf("paul"), {facts, confidence:"exakt"}); }catch(_e){}
+      if(!s){ const b:string[]=[]; pFind.slice(0,3).forEach((f:any)=>b.push(f.detail)); if(sums>0)b.push(`${sums} Zusammenfassungen und Analysen erstellt`); if(pol>0)b.push(`${pol} Texte gesäubert`); s="Paul: "+b.join("; ")+"."; }
+      await put("paul","Paul",s,{...pl, watch:pByCat, findings:pFind.slice(0,60)});
+    }
     // Anna
     const an=g(cur,"anna"), anP=g(prv,"anna"); const q=(an.assistant||0)+(an.nlquery||0), qP=(anP.assistant||0)+(anP.nlquery||0);
     if(q>0){ let s=""; try{ s=await colleagueLine("Anna", await personaOf("anna"), {facts:[{label:"Fragen beantwortet", current:q, prior:qP}], confidence:"exakt"}); }catch(_e){} if(!s) s=`Anna hat ${q} Fragen beantwortet.`; await put("anna","Anna",s,{...an}); }
