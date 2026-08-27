@@ -135,9 +135,20 @@ Deno.serve(async (req)=>{
     const bucket=(from:string,to:string)=>{ const c:Record<string,Record<string,number>>={}; (acts||[]).forEach((x:any)=>{ const d=String(x.at).slice(0,10); if(d>=from && d<to){ (c[x.agent_key]=c[x.agent_key]||{}); c[x.agent_key][x.kind]=(c[x.agent_key][x.kind]||0)+1; } }); return c; };
     const cur=bucket(date,n1), prv=bucket(p,date); const g=(c:any,k:string)=>c[k]||{};
     const put=async (key:string,name:string,summary:string,metrics:any)=>{ await sb.from("agent_digests").upsert({day:date,agent_key:key,name,summary,metrics},{onConflict:"day,agent_key"}); };
-    // Max
+    // Max: Erinnerungen (bestehend) + AKTIVE Upload-Überwachung mit Kontext (nicht nur die Ampel).
     const mx=g(cur,"max"), mxP=g(prv,"max"); const rem=(mx.reminder_slack||0)+(mx.reminder_cliq||0), remP=(mxP.reminder_slack||0)+(mxP.reminder_cliq||0);
-    if(rem>0){ let s=""; try{ s=await colleagueLine("Max", await personaOf("max"), {facts:[{label:"Erinnerungen verschickt", current:rem, prior:remP}], confidence:"exakt"}); }catch(_e){} if(!s) s=`Max hat ${rem} Erinnerungen verschickt.`; await put("max","Max",s,{...mx,rem_prev:remP}); }
+    let upFindings:any[]=[]; try{ const {data:uf}=await sb.rpc("max_upload_scan"); upFindings=(uf||[]) as any[]; }catch(_e){}
+    const upOrder:Record<string,number>={ueberfaellig:0,unvollstaendig:1,wenig_zeilen:2,muster:3};
+    upFindings.sort((a,b)=>(upOrder[a.category]??9)-(upOrder[b.category]??9));
+    const upByCat:Record<string,number>={}; upFindings.forEach((f:any)=>{ upByCat[f.category]=(upByCat[f.category]||0)+1; });
+    if(rem>0 || upFindings.length){
+      const facts:any[]=[];
+      if(rem>0) facts.push({label:"Erinnerungen verschickt", current:rem, prior:remP});
+      upFindings.slice(0,4).forEach((f:any)=>facts.push({label:f.subject+" — "+f.detail}));
+      let s=""; try{ s=await colleagueLine("Max", await personaOf("max"), {facts, confidence:"exakt"}); }catch(_e){}
+      if(!s){ const parts:string[]=[]; if(rem>0)parts.push(`${rem} Erinnerungen verschickt`); upFindings.slice(0,3).forEach((f:any)=>parts.push(f.detail)); s="Max: "+parts.join("; ")+"."; }
+      await put("max","Max",s,{...mx,rem_prev:remP, uploads:upByCat, upload_findings: upFindings.slice(0,40)});
+    }
     // Paul
     const pl=g(cur,"paul"), plP=g(prv,"paul"); const sums=(pl.summary||0)+(pl.analysis||0), sumsP=(plP.summary||0)+(plP.analysis||0), pol=pl.polish||0, polP=plP.polish||0;
     if(sums>0||pol>0){ const facts:any[]=[]; if(sums>0)facts.push({label:"Zusammenfassungen und Analysen erstellt", current:sums, prior:sumsP}); if(pol>0)facts.push({label:"Texte gesäubert", current:pol, prior:polP}); let s=""; try{ s=await colleagueLine("Paul", await personaOf("paul"), {facts, confidence:"exakt"}); }catch(_e){} if(!s){ const b:string[]=[]; if(sums>0)b.push(`${sums} Zusammenfassungen und Analysen erstellt`); if(pol>0)b.push(`${pol} Texte gesäubert`); s="Paul hat "+b.join(" und ")+"."; } await put("paul","Paul",s,{...pl}); }
