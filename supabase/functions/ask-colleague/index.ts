@@ -60,6 +60,7 @@ Deno.serve(async (req)=>{
     "Hausregeln: Deutsch als Zweitsprache — kurze Sätze, kein Konjunktiv, keine Redewendungen. Keine Emotionen. "+
     "Erfinde NICHTS: nutze nur das gegebene Wissen und die Live-Zahlen. Reicht es nicht, sag ehrlich, dass du es so nicht weißt, "+
     "und verweise auf den passenden Bereich oder einen anderen Kollegen. Keine Zusagen. Höchstens fünf Sätze. "+
+    "Duze den Nutzer immer (per Du), niemals Sie. "+
     "Du bist eine Maschine, kein Mensch — beurteile niemanden.";
   const user = "FRAGE: "+question+"\n\nLIVE-ZAHLEN: "+facts+"\n\nWISSEN:\n"+(knowledge||"(leer)");
 

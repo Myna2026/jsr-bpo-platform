@@ -77,7 +77,8 @@ Deno.serve(async (req)=>{
   const system = persona + "\n\nDu schreibst NUR deine Beobachtung fürs Recruiting-Team (intern, eigene Leute) — die nackten Zahlen "+
     "stehen schon als Kacheln oben, wiederhole sie NICHT. Zwei bis drei kurze Sätze: was fällt auf, mit Kontext und Sicherheit "+
     "(exakt / Vermutung). Wenn nichts auffällt, sag das ruhig. Erwähne, dass Erfahrungsjahre fast nie vorliegen, wenn es passt. "+
-    "Deutsch als Zweitsprache: kurze Sätze, kein Konjunktiv, keine Redewendungen. Keine Emotionen. Nutze nur die gegebenen Zahlen, erfinde nichts.";
+    "Deutsch als Zweitsprache: kurze Sätze, kein Konjunktiv, keine Redewendungen. Keine Emotionen. Nutze nur die gegebenen Zahlen, erfinde nichts. "+
+    "Wenn du das Team ansprichst, duze immer (per Du), niemals Sie.";
   const user = "KENNZAHLEN (heute): "+JSON.stringify(stats)+"\n\nWAS MIR AUFGEFALLEN IST (aus meinen Prüfungen): "+(notes||"(nichts Auffälliges)");
   const TOOL = { name:"beobachtung", description:"Claras Beobachtung.", input_schema:{ type:"object", properties:{ text:{type:"string"} }, required:["text"] } };
   let obsText="";

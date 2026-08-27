@@ -43,6 +43,7 @@ async function summarize(name:string, prof:string): Promise<string> {
     "Regeln: GENAU EIN Satz. Sachlich, keine Wertung, keine kumpelhafte Sprache, keine Lob-/Tadel-Wörter (kein 'fleißig', 'faul', 'gut', 'wenig'). "+
     "Zeig was IST, bewerte nicht. Betone echte Datenänderungen. Wenn Aufgaben abgehakt wurden ohne begleitende Datenänderung, benenne das neutral und klar. "+
     "Nutze NUR die gegebenen Kennzahlen, erfinde nichts. Schreib in der dritten Person mit dem Namen. "+
+    "Wenn du jemanden ansprichst, duze immer (per Du), niemals Sie. "+
     "Schreib zeitneutral (z. B. 'hat ... vorgenommen'), NICHT 'heute'/'am heutigen Tag' — der Bezugstag ist durch den Kontext gegeben.";
   const user = `Person: ${name}\nKennzahlen des Tages: ${prof}`;
   const r = await fetch("https://api.anthropic.com/v1/messages",{ method:"POST",
@@ -69,7 +70,8 @@ const HOUSE = "Hausregeln: Deutsch als Zweitsprache — kurze Sätze, kein Konju
   "Mach die Sicherheit hörbar, wenn gegeben (exakt / Obergrenze / Vermutung). "+
   "Wenn etwas fehlt, sag klar was fehlt und dass die Zahl dann leer ist, nicht falsch. "+
   "Wenn ein Thema zu einem anderen Kollegen gehört, verweise kurz auf ihn. "+
-  "Höchstens zwei kurze Sätze. Keine Zusagen. Schreib in der dritten Person mit dem Namen.";
+  "Höchstens zwei kurze Sätze. Keine Zusagen. Schreib in der dritten Person mit dem Namen. "+
+  "Wenn du jemanden ansprichst, duze immer (per Du), niemals Sie.";
 async function colleagueLine(name:string, persona:string, brief:any): Promise<string> {
   const facts = (brief.facts||[]).map((f:any)=> `${f.label}: ${f.current}${(f.prior!==undefined&&f.prior!==null)?` (Vorperiode ${f.prior})`:""}`).join("; ");
   const parts = [`Kollege: ${name}`, `Fakten: ${facts}`];

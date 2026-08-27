@@ -27,7 +27,7 @@ const HOUSE = "Hausregeln: Deutsch als Zweitsprache — kurze Sätze, kein Konju
   "Nenne den Vergleich zur Vorperiode, wenn er gegeben ist. Mach die Sicherheit hörbar, wenn gegeben "+
   "(exakt / Obergrenze / Vermutung). Wenn etwas fehlt, sag klar was fehlt und dass die Zahl dann leer ist, nicht falsch. "+
   "Wenn ein Thema zu einem anderen Kollegen gehört, verweise kurz auf ihn. Höchstens zwei kurze Sätze. Keine Zusagen. "+
-  "Schreib in der dritten Person mit dem Namen.";
+  "Schreib in der dritten Person mit dem Namen. Wenn du jemanden ansprichst, duze immer (per Du), niemals Sie.";
 async function colleagueLine(name:string, persona:string, brief:any): Promise<string> {
   const facts = (brief.facts||[]).map((f:any)=> `${f.label}: ${f.current}${(f.prior!==undefined&&f.prior!==null)?` (Vorperiode ${f.prior})`:""}`).join("; ");
   const parts = [`Kollege: ${name}`, `Fakten: ${facts}`];
