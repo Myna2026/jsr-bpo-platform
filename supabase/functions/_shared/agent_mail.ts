@@ -82,6 +82,34 @@ export function observation(brand: AgentBrand, text: string): string {
     + '<td style="padding:14px;font-size:15px;line-height:1.55;color:#1f2937;">' + esc(text).replace(/\n/g, "<br>") + '</td></tr></table></td></tr>';
 }
 
+// Metrik-Karte: Name + Notiz links, große farbige Zahl + Delta rechts. tone steuert die Farbe.
+//   'bad' = rot (schlechter), 'good' = grün (besser), 'neutral' = dunkel. Für „wer ist schwach/stark".
+export function metricCard(o: { name: string; value: string | number; unit?: string; deltaText?: string; tone?: string; note?: string }): string {
+  const tone = o.tone || "neutral";
+  const col = tone === "bad" ? "#dc2626" : tone === "good" ? "#16a34a" : "#0f2830";
+  const bg = tone === "bad" ? "#fef2f2" : tone === "good" ? "#f0fdf4" : "#f5f7f8";
+  const bd = tone === "bad" ? "#fecaca" : tone === "good" ? "#bbf7d0" : "#e6ecee";
+  return '<tr><td style="padding:5px 22px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:' + bg + ";border:1px solid " + bd + ';border-radius:12px;"><tr>'
+    + '<td style="padding:12px 14px;"><div style="font-size:15px;font-weight:700;color:#0f2830;">' + esc(o.name) + "</div>"
+    + (o.note ? '<div style="font-size:12.5px;color:#5b6b70;margin-top:3px;line-height:1.4;">' + esc(o.note) + "</div>" : "")
+    + '</td><td width="130" valign="top" style="padding:12px 14px;text-align:right;white-space:nowrap;">'
+    + '<div style="font-size:24px;font-weight:800;color:' + col + ';line-height:1;">' + esc(o.value) + esc(o.unit || "") + "</div>"
+    + (o.deltaText ? '<div style="font-size:11px;font-weight:700;color:' + col + ';margin-top:4px;">' + esc(o.deltaText) + "</div>" : "")
+    + "</td></tr></table></td></tr>";
+}
+
+// Callout: abgesetzter, farbig umrandeter Block mit Titel — z. B. „Was hilft".
+export function callout(title: string, text: string, accent: string): string {
+  return '<tr><td style="padding:14px 22px 4px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:' + accent + '10;border-left:4px solid ' + accent + ';border-radius:10px;"><tr>'
+    + '<td style="padding:12px 15px;"><div style="font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;color:' + accent + ';margin-bottom:5px;">' + esc(title) + "</div>"
+    + '<div style="font-size:14px;line-height:1.55;color:#1f2937;">' + esc(text) + "</div></td></tr></table></td></tr>";
+}
+
+// Kleine Bezugsgröße (z. B. Team-Schnitt) als abgesetzte Zeile.
+export function refLine(text: string): string {
+  return '<tr><td style="padding:2px 22px 8px;"><span style="display:inline-block;background:#f0f3f4;border:1px solid #e0e6e8;border-radius:20px;padding:4px 12px;font-size:12px;color:#5b6b70;font-weight:600;">' + esc(text) + "</span></td></tr>";
+}
+
 export function button(href: string, label: string, accent: string): string {
   return '<tr><td align="center" style="padding:8px 22px 24px;"><a href="' + esc(href) + '" style="display:inline-block;background:' + accent + ';color:#ffffff;text-decoration:none;font-size:16px;font-weight:bold;padding:14px 30px;border-radius:10px;">' + esc(label) + '</a></td></tr>';
 }

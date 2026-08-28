@@ -4,7 +4,7 @@
 // Wechselnd (nie derselbe wie zuletzt), 2–3×/Woche (Mo–Fr, ≥2 Tage Abstand je Leiter). Mail (max@) + Slack.
 // Team = (Projekt, Skill); Leiter = Position 'Teamleiter'. Cron: Mo–Fr. Deploy: functions deploy leader-nudges --no-verify-jwt --use-api
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { agentBrand, shell, lead, button, PORTAL_URL } from "../_shared/agent_mail.ts";
+import { agentBrand, shell, lead, button, metricCard, callout, refLine, PORTAL_URL } from "../_shared/agent_mail.ts";
 import { smtpSend, slackDM, agentMailSender } from "../_shared/agent_send.ts";
 import { isWeekendBerlin } from "../_shared/schedule.ts";
 
@@ -32,41 +32,57 @@ const LOWER_BETTER: Record<string, boolean> = { AHT: true, ACW: true };
 const kpiUnit = (k: string) => k === "AHT" ? " min" : "";
 function fmtN(v: any) { return (v == null) ? "" : String(v).replace(".", ","); }
 
-// Reiche Analyse der schwachen Agenten: was ist, was bedeutet es (Trend + Team-Vergleich + Ursache), was tun.
-function weakAnalysis(weak: any[]): string {
-  if (!weak || !weak.length) return "";
+const esc = (s: any) => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+
+// Strukturierte Analyse der schwachen Agenten (geteilt von Text- und HTML-Ausgabe). Sortiert: verschlechtert ZUERST.
+function weakData(weak: any[]): any {
+  if (!weak || !weak.length) return null;
   const byKpi: Record<string, any[]> = {};
   weak.forEach((w) => { (byKpi[w.kpi] = byKpi[w.kpi] || []); if (!byKpi[w.kpi].some((x) => x.name === w.name)) byKpi[w.kpi].push(w); });
   const dom = Object.entries(byKpi).sort((a, b) => b[1].length - a[1].length)[0];
-  const kpi = dom[0]; const agents = dom[1].slice(0, 3); const low = LOWER_BETTER[kpi];
-  const teamAvg = agents[0].team_avg;
-  const unit = kpiUnit(kpi);
-  const intro = joinUnd(agents.map((a) => a.name)) + " liegen diese Woche bei " + kpi + " im kritischen Bereich"
-    + (teamAvg != null ? " (Team-Schnitt " + fmtN(teamAvg) + unit + ")" : "") + ".";
-  const lines = agents.map((a) => {
-    let trend = "";
-    if (a.prev != null) { const worse = low ? (a.value > a.prev) : (a.value < a.prev);
-      const same = Math.abs(a.value - a.prev) < (low ? 0.3 : 0.05);
-      trend = same ? "etwa wie letzte Woche" : (worse ? "schlechter als letzte Woche (" + fmtN(a.prev) + ")" : "besser als letzte Woche (" + fmtN(a.prev) + ")"); }
-    else trend = "neu diese Woche";
+  if (!dom) return null;
+  const kpi = dom[0]; const low = LOWER_BETTER[kpi]; const unit = kpiUnit(kpi); const teamAvg = dom[1][0].team_avg;
+  const agents = dom[1].slice(0, 4).map((a) => {
+    let tone = "neutral"; let deltaText = "neu diese Woche";
+    if (a.prev != null) { const worse = low ? (a.value > a.prev) : (a.value < a.prev); const same = Math.abs(a.value - a.prev) < (low ? 0.3 : 0.05);
+      tone = same ? "neutral" : (worse ? "bad" : "good");
+      deltaText = same ? ("≈ wie Vorwoche (" + fmtN(a.prev) + ")") : (worse ? ("schlechter als Vorwoche (" + fmtN(a.prev) + ")") : ("besser als Vorwoche (" + fmtN(a.prev) + ")")); }
     let cause = "";
     if (a.hold_sec != null && a.hold_sec >= 200) cause = "hält im Schnitt lange (" + Math.round(a.hold_sec) + " s)";
     else if (a.acw_sec != null && a.acw_sec >= 150) cause = "lange Nachbearbeitung (" + Math.round(a.acw_sec) + " s ACW)";
     else if (a.tenure_weeks != null && a.tenure_weeks < 8) cause = "erst " + a.tenure_weeks + " Wochen dabei";
-    else if (a.last_fb_days == null) cause = "hatte noch kein Feedbackgespräch";
+    else if (a.last_fb_days == null) cause = "noch kein Feedbackgespräch";
     else if (a.tenure_weeks != null && a.tenure_weeks < 16) cause = a.tenure_weeks + " Wochen dabei";
-    return a.name + ": " + fmtN(a.value) + unit + (trend ? ", " + trend : "") + (cause ? " – " + cause : "") + ".";
+    return { name: a.name, value: fmtN(a.value), unit, tone, deltaText, cause };
   });
-  // Hebel je nach dominanter Ursache
-  const anyNew = agents.some((a) => a.tenure_weeks != null && a.tenure_weeks < 8);
-  const anyTime = agents.some((a) => (a.hold_sec != null && a.hold_sec >= 200) || (a.acw_sec != null && a.acw_sec >= 150));
-  const anyNoFb = agents.some((a) => a.last_fb_days == null);
+  agents.sort((a, b) => { const rank = (t: string) => t === "bad" ? 0 : t === "neutral" ? 1 : 2; return rank(a.tone) - rank(b.tone); });
+  const anyNew = dom[1].some((a) => a.tenure_weeks != null && a.tenure_weeks < 8);
+  const anyTime = dom[1].some((a) => (a.hold_sec != null && a.hold_sec >= 200) || (a.acw_sec != null && a.acw_sec >= 150));
+  const anyNoFb = dom[1].some((a) => a.last_fb_days == null);
   let lever;
   if (anyNew) lever = "Die Neuen brauchen Begleitung bei der Gesprächsführung – eine Hospitation oder Side-by-Side hilft mehr als Zahlen.";
   else if (anyTime) lever = "Schau mit ihnen, wo die Zeit hingeht: langes Halten und Nachbearbeitung lassen sich gezielt üben.";
   else if (anyNoFb) lever = "Plan mit ihnen ein Feedbackgespräch – die Grundlage fehlt noch.";
   else lever = "Hör dir ein paar ihrer Calls an, dann siehst du, woran es hakt.";
-  return intro + "\n" + lines.join("\n") + "\n\nWas hilft: " + lever;
+  return { kpi, unit, teamAvg, agents, lever, names: dom[1].slice(0, 3).map((a) => a.name) };
+}
+
+// Text-Fassung (Slack) — dieselbe Analyse, ohne Farben.
+function weakAnalysis(weak: any[]): string {
+  const d = weakData(weak); if (!d) return "";
+  const intro = joinUnd(d.names) + " liegen diese Woche bei " + d.kpi + " im kritischen Bereich" + (d.teamAvg != null ? " (Team-Schnitt " + fmtN(d.teamAvg) + d.unit + ")" : "") + ".";
+  const lines = d.agents.map((a: any) => a.name + ": " + a.value + a.unit + ", " + a.deltaText + (a.cause ? " – " + a.cause : "") + ".");
+  return intro + "\n" + lines.join("\n") + "\n\nWas hilft: " + d.lever;
+}
+
+// HTML-Fassung (Mail): farbige Karten je Agent (rot schlechter / grün besser), Team-Schnitt abgesetzt, Was-hilft-Block.
+function weakRichHtml(weak: any[], brand: any): string {
+  const d = weakData(weak); if (!d) return "";
+  let out = lead("<b>" + esc(joinUnd(d.names)) + "</b> liegen diese Woche bei " + esc(d.kpi) + " im kritischen Bereich. Zuerst, wer sich verschlechtert hat:");
+  if (d.teamAvg != null) out += refLine("Team-Schnitt " + fmtN(d.teamAvg) + d.unit);
+  d.agents.forEach((a: any) => { out += metricCard({ name: a.name, value: a.value, unit: a.unit, deltaText: a.deltaText, tone: a.tone, note: a.cause }); });
+  out += callout("Was hilft", d.lever, brand.accent);
+  return out;
 }
 
 function fill(tpl: string, s: any) {
@@ -155,11 +171,14 @@ Deno.serve(async (req) => {
       if (!pick) { results.push({ leader: L.name, skipped: "kein Anstoß" }); continue; }
 
       const text = fill(pick.template, s);
+      const isWeakRich = pick.template.includes("{weak_analysis}") && (s.weak || []).length;
+      const inner = isWeakRich
+        ? (weakRichHtml(s.weak, brand) + button(PORTAL_URL, "Zum Team →", brand.accent))
+        : (lead(text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/\n/g, "<br>")) + button(PORTAL_URL, "Zum Team →", brand.accent));
+      const html = shell(brand, "Ein Anstoß für dein Team", scope, inner);
       const email = previewTo || emailBy[uid];
-      if (dry) { results.push({ leader: L.name, scope, key: pick.key, text, email }); continue; }
+      if (dry) { results.push({ leader: L.name, scope, key: pick.key, text, html, email }); continue; }
       if (previewTo) { const dk = scope + "|" + pick.key; if (sentPreview.has(dk)) { results.push({ leader: L.name, skipped: "preview-dup" }); continue; } sentPreview.add(dk); }
-      const htmlText = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/\n/g, "<br>");
-      const html = shell(brand, "Ein Anstoß für dein Team", scope, lead(htmlText) + button(PORTAL_URL, "Zum Team →", brand.accent));
       const subj = previewTo ? ("[Vorschau] Anstoß · " + L.name + " (" + scope + ")") : "Ein Anstoß für dein Team";
       const mr = (sender && email) ? await smtpSend(sender, email, subj, html) : { ok: false, error: "kein Empfänger" };
       const sr = previewTo ? "skip-preview" : await slackDM(email, "*Max · Anstoß*\n" + text);
