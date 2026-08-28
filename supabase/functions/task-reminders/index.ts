@@ -4,6 +4,7 @@
 // Wer alles erledigt hat oder keinen Kanal-Account hat, bekommt nichts. Nur DMs.
 // (Faellige/ueberfaellige UPLOADS kommen in 5b.)
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { isWeekendBerlin } from '../_shared/schedule.ts';
 
 const SUPA_URL = Deno.env.get('SUPABASE_URL')!;
 const SERVICE  = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
@@ -115,6 +116,8 @@ Deno.serve(async (req)=>{
   const dry   = new URL(req.url).searchParams.get('dry')==='1';     // berechnen, aber NICHT senden (Verifikation)
   const berlinHour = Number(new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Berlin',hour:'2-digit',hour12:false}).format(new Date()));
   if(![9,12,16].includes(berlinHour) && !force) return json({skipped:'off-hours', berlinHour});
+  // Kein-Wochenende-Regel: nur Mo–Fr. Was Sa/So fällig wäre, kommt am Montag (der nächste Werktags-Lauf).
+  if(isWeekendBerlin() && !force) return json({skipped:'weekend'});
 
   const sb = createClient(SUPA_URL, SERVICE);
   const now=new Date(); const today=isoLocal(now);

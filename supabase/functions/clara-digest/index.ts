@@ -15,6 +15,7 @@ const Z_HOST = Deno.env.get("ZOHO_SMTP_HOST") || "smtppro.zoho.eu";
 const Z_PORT = Number(Deno.env.get("ZOHO_SMTP_PORT") || "465");
 const sb = createClient(SB_URL, SERVICE);
 
+import { isWeekendBerlin } from "../_shared/schedule.ts";
 const berlinHour = ()=> Number(new Intl.DateTimeFormat("en-GB",{timeZone:"Europe/Berlin",hour:"2-digit",hour12:false}).format(new Date()));
 const berlinDate = ()=>{ const b=new Date(new Date().toLocaleString("en-US",{timeZone:"Europe/Berlin"})); return b.toISOString().slice(0,10); };
 
@@ -61,6 +62,8 @@ Deno.serve(async (req)=>{
   const dateP = sp.get("date")||"";
   const bh = berlinHour();
   if(bh < 7 && !force) return json({skipped:"off-hours", berlinHour:bh});
+  // Kein-Wochenende-Regel: nur Mo–Fr (force/dry umgehen sie für Tests).
+  if(isWeekendBerlin() && !force && sp.get("dry")!=="1") return json({skipped:"weekend"});
   const day = /^\d{4}-\d{2}-\d{2}$/.test(dateP) ? dateP : berlinDate();
   // Einmal pro Tag.
   const { data:last } = await sb.from("app_config").select("value").eq("key","jsr_clara_digest_last_v1").maybeSingle();

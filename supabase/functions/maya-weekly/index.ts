@@ -9,6 +9,7 @@
 // Optik aus der geteilten Grundlage _shared/agent_mail.ts. Deploy: supabase functions deploy maya-weekly --no-verify-jwt --use-api
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { agentBrand, tiles, barChart, hBars, observation, button, shell, delta, PORTAL_URL } from "../_shared/agent_mail.ts";
+import { isWeekendBerlin } from "../_shared/schedule.ts";
 
 const SB_URL  = Deno.env.get("SUPABASE_URL")!;
 const SERVICE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -93,20 +94,22 @@ function foldMetrics(rows:any[], into:Record<string,Agg>){
     const wbe=m.writes_by_entity||{}; Object.keys(wbe).forEach(k=>{ a.ent[k]=(a.ent[k]||0)+Number(wbe[k]||0); }); });
 }
 
-// Slack-Text. Anmeldungen (aus dem Protokoll) sobald vorhanden; Zeit nur mit Sitzungsdaten.
-function personText(a:Agg, fromD:string, toD:string, loginsOn:boolean, minutesOn:boolean){
+// Slack-Text. Anmeldungen werden NICHT gezeigt: der Login-Eintrag entsteht nur bei NEUER Sitzung, nicht bei
+// Wiederkehr -> die Zahl wäre sichtbar falsch (0 trotz Präsenz). Verlässlich sind die aktiven Tage. Zeit nur
+// mit Sitzungsdaten (Heartbeat).
+function personText(a:Agg, fromD:string, toD:string, minutesOn:boolean){
   const period="vom "+deDate(fromD)+" bis "+deDate(toD);
   if(!isActive(a)) return "Deine Woche "+period+": keine Aktivität im System.";
   const top=Object.entries(a.ent).sort((x,y)=>y[1]-x[1]).slice(0,3).map(([k])=>entityLabel(k));
-  const pres = loginsOn ? (a.logins+" Anmeldungen"+(minutesOn?", "+fmtMins(a.mins)+" im System":"")+", ") : "";
+  const pres = minutesOn ? (fmtMins(a.mins)+" im System, ") : "";
   return "Deine Woche "+period+": "+pres+"aktiv "+anTagen(a.days.size)+", "+a.writes+" Einträge bearbeitet"+(top.length?" ("+top.join(", ")+")":"")+", "+a.done+" Aufgaben erledigt"+(a.empty>0?", davon "+a.empty+" ohne erkennbare Änderung":"")+".";
 }
 
 // Mayas Beobachtung, nüchtern: Vergleich zur Vorwoche, kein Wertungswort.
 // Leere Häkchen (abgehakt ohne Datenänderung) werden nüchtern benannt, ohne Wertung.
-function personObs(a:Agg, p:Agg|undefined, loginsOn:boolean, minutesOn:boolean){
+function personObs(a:Agg, p:Agg|undefined, minutesOn:boolean){
   if(!isActive(a)) return "Diese Woche keine Aktivität im System. In der Vorwoche "+anTagen((p&&p.days.size)||0)+" aktiv.";
-  const pres = loginsOn ? ("Angemeldet "+a.logins+"×"+(minutesOn?", "+fmtMins(a.mins)+" im System":"")+", ") : "";
+  const pres = minutesOn ? (fmtMins(a.mins)+" im System, ") : "";
   const s1=pres+"aktiv "+anTagen(a.days.size)+(p?" (Vorwoche "+p.days.size+")":"")+". "+a.writes+" Einträge bearbeitet"+(p?" (Vorwoche "+p.writes+")":"")+".";
   let s2="";
   if(p){ const d=(a.writes+a.days.size)-(p.writes+p.days.size); s2=d===0?" Etwa gleich wie in der Vorwoche.":(d>0?" Mehr Bewegung als in der Vorwoche.":" Weniger Bewegung als in der Vorwoche."); }
@@ -114,24 +117,23 @@ function personObs(a:Agg, p:Agg|undefined, loginsOn:boolean, minutesOn:boolean){
   return s1+s2+s3;
 }
 
-function personInner(brand:any, a:Agg, p:Agg|undefined, fromD:string, toD:string, loginsOn:boolean, minutesOn:boolean){
+function personInner(brand:any, a:Agg, p:Agg|undefined, fromD:string, toD:string, minutesOn:boolean){
   const days=daysBetween(fromD,toD);
   const pt:any[]=[{ big:a.days.size, label:"aktive Tage", sub: p?delta(a.days.size,p.days.size):"" }];
-  if(loginsOn)  pt.push({ big:a.logins, label:"Anmeldungen", sub: p?delta(a.logins,p.logins):"" });
   if(minutesOn) pt.push({ big:fmtMins(a.mins), label:"Zeit im System", sub:"" });
   pt.push({ big:a.writes, label:"Änderungen", sub: p?delta(a.writes,p.writes):"" });
   if(pt.length<4) pt.push({ big:a.done, label:"Aufgaben erledigt", sub: a.empty>0 ? ("davon "+a.empty+" ohne Änderung") : (p?delta(a.done,p.done):"") });
   const t = tiles(pt.slice(0,4));
   const bars = barChart("Wochenverlauf · bearbeitete Einträge je Tag", days.map(d=>({label:wdLabel(d), value:a.perDay[d]||0})), brand.accent);
-  return t + bars + observation(brand, personObs(a,p,loginsOn,minutesOn)) + button(PORTAL_URL, "Zum System →", brand.accent);
+  return t + bars + observation(brand, personObs(a,p,minutesOn)) + button(PORTAL_URL, "Zum System →", brand.accent);
 }
 
-// Beobachtung je Funktion, nüchtern. Führung: wer war (nicht) angemeldet. Doer: Umfang der Änderungen.
-function perFuncObs(f:any, ppl:Agg[], loginsOn:boolean){
+// Beobachtung je Funktion, nüchtern. Führung: wer war (nicht) im System (nach aktiven Tagen). Doer: Änderungen.
+function perFuncObs(f:any, ppl:Agg[]){
   const idle = ppl.filter(a=>!isActive(a)).map(a=>a.name);
   if(f.lead){
-    const top=ppl.slice().sort((x,y)=>(y.logins-x.logins)||(y.days.size-x.days.size))[0];
-    if(top && top.logins>0) return f.label+": "+top.name+" am häufigsten angemeldet ("+top.logins+"×)"+(idle.length?", nicht drin: "+idle.join(", "):"")+".";
+    const top=ppl.slice().sort((x,y)=>y.days.size-x.days.size)[0];
+    if(top && top.days.size>0) return f.label+": "+top.name+" am häufigsten im System ("+tage(top.days.size)+")"+(idle.length?", nicht drin: "+idle.join(", "):"")+".";
     if(idle.length) return f.label+": nicht im System: "+idle.join(", ")+".";
     return f.label+": alle waren im System.";
   }
@@ -139,31 +141,29 @@ function perFuncObs(f:any, ppl:Agg[], loginsOn:boolean){
   return f.label+": "+totW+" Änderungen"+(idle.length?", ohne Aktivität: "+idle.join(", "):"")+".";
 }
 
-function overviewInner(brand:any, list:Agg[], prevTot:{writes:number,active:number,logins:number,done:number}, fromD:string, toD:string, loginsOn:boolean, minutesOn:boolean){
+function overviewInner(brand:any, list:Agg[], prevTot:{writes:number,active:number,done:number}, fromD:string, toD:string, minutesOn:boolean){
   const active=list.filter(isActive);
-  const totLogins=list.reduce((s,a)=>s+a.logins,0), totMin=list.reduce((s,a)=>s+a.mins,0), totW=list.reduce((s,a)=>s+a.writes,0), totDone=list.reduce((s,a)=>s+a.done,0), totEmpty=list.reduce((s,a)=>s+a.empty,0);
+  const totMin=list.reduce((s,a)=>s+a.mins,0), totW=list.reduce((s,a)=>s+a.writes,0), totDone=list.reduce((s,a)=>s+a.done,0), totEmpty=list.reduce((s,a)=>s+a.empty,0);
   const doneSub = totEmpty>0 ? ("davon "+totEmpty+" ohne Änderung") : delta(totDone, prevTot.done);
   const ot:any[]=[{ big:active.length+"/"+list.length, label:"Zugänge aktiv", sub: delta(active.length, prevTot.active) }];
-  if(loginsOn)  ot.push({ big:totLogins, label:"Anmeldungen", sub: delta(totLogins, prevTot.logins) });
   if(minutesOn) ot.push({ big:fmtMins(totMin), label:"Zeit im System", sub:"" });
   ot.push({ big:totW, label:"Änderungen", sub: delta(totW, prevTot.writes) });
   if(ot.length<4) ot.push({ big:totDone, label:"Aufgaben erledigt", sub: doneSub });
   const t = tiles(ot.slice(0,4));
-  // Nach Funktion gruppiert — Vergleich NUR innerhalb der Gruppe. Führung nach Anwesenheit (Anmeldungen)
-  // sobald Daten da, sonst nach Änderungen. Präsenz zählt Login/View/Änderung/Aufgabe/Sitzung.
+  // Nach Funktion gruppiert — Vergleich NUR innerhalb der Gruppe. Führung nach AKTIVEN TAGEN (verlässliche
+  // Präsenz: Login/View/Änderung/Aufgabe/Sitzung), HR/Mitarbeiter nach Änderungen.
   let sections="";
   const funcObs:string[]=[];
   FUNCS.forEach(f=>{ const ppl=list.filter(a=>a.funcKey===f.key); if(!ppl.length) return;
-    const byPres = loginsOn && f.lead;
-    const rows = ppl.slice().sort((x,y)=> byPres ? ((y.logins-x.logins)||(y.days.size-x.days.size)) : ((y.writes-x.writes)||(y.days.size-x.days.size)))
-      .map(a=>{ const anm=loginsOn?(a.logins+" Anm"):null, zeit=minutesOn?fmtMins(a.mins):null;
-        const parts = byPres ? [anm, zeit, a.writes+" Änd", tage(a.days.size)] : [a.writes+" Änd", anm, tage(a.days.size)];
-        return { label:a.name, value: byPres ? (a.logins||a.days.size) : a.writes, note: parts.filter(Boolean).join(" · ") }; });
-    sections += hBars(f.label+" ("+ppl.length+")"+(byPres?" · nach Anwesenheit":""), rows, brand.accent);
-    funcObs.push(perFuncObs(f, ppl, loginsOn));
+    const rows = ppl.slice().sort((x,y)=> f.lead ? ((y.days.size-x.days.size)||(y.writes-x.writes)) : ((y.writes-x.writes)||(y.days.size-x.days.size)))
+      .map(a=>{ const zeit=minutesOn?fmtMins(a.mins):null;
+        const parts = f.lead ? [tage(a.days.size), zeit, a.writes+" Änd"] : [a.writes+" Änd", tage(a.days.size)];
+        return { label:a.name, value: f.lead ? a.days.size : a.writes, note: parts.filter(Boolean).join(" · ") }; });
+    sections += hBars(f.label+" ("+ppl.length+")"+(f.lead?" · nach Anwesenheit":""), rows, brand.accent);
+    funcObs.push(perFuncObs(f, ppl));
   });
   const tasksLine = totDone>0 ? (" Insgesamt "+totDone+" Aufgaben erledigt"+(totEmpty>0?", davon "+totEmpty+" ohne erkennbare Änderung":"")+".") : "";
-  const noteZeit = (loginsOn && !minutesOn) ? " Anwesenheitszeit (Minuten) füllt sich ab jetzt." : (!loginsOn ? " Anwesenheit wird ab dieser Woche erfasst." : "");
+  const noteZeit = minutesOn ? "" : " Zeit im System füllt sich ab jetzt.";
   const obs = funcObs.join(" ") + tasksLine + noteZeit;
   return t + sections + observation(brand, obs) + button(PORTAL_URL, "Zum System →", brand.accent);
 }
@@ -172,6 +172,8 @@ Deno.serve(async (req)=>{
   if(req.method==="OPTIONS") return new Response("ok",{headers:cors});
   let body:any={}; try{ body=await req.json(); }catch(_e){}
   const mode = body.mode==="preview" ? "preview" : "send";
+  // Kein-Wochenende-Regel: der reguläre Versand läuft nur Mo–Fr (Cron ist ohnehin Freitag). preview/dry/force frei.
+  if(mode==="send" && isWeekendBerlin() && !body.force) return json({ok:true,skipped:"weekend"});
   const toD = (typeof body.to==="string"&&/^\d{4}-\d{2}-\d{2}$/.test(body.to)) ? body.to : addDays(berlinToday(),-1);
   const fromD = (typeof body.from==="string"&&/^\d{4}-\d{2}-\d{2}$/.test(body.from)) ? body.from : addDays(toD,-6);
   const pToD = addDays(fromD,-1), pFromD = addDays(pToD,-6);   // Vorwoche
@@ -200,9 +202,8 @@ Deno.serve(async (req)=>{
   foldMetrics(metrics||[], aggBy); foldMetrics(pMetrics||[], pAggBy);
   const aggList=Object.values(aggBy);
   const prevActive=Object.values(pAggBy).filter(isActive).length;
-  const prevTot={ writes:Object.values(pAggBy).reduce((s,a)=>s+a.writes,0), active:prevActive, logins:Object.values(pAggBy).reduce((s,a)=>s+a.logins,0), done:Object.values(pAggBy).reduce((s,a)=>s+a.done,0) };
-  // Anmeldungen kommen aus dem Protokoll (jetzt vorhanden); Zeit/Minuten aus dem Heartbeat (füllt sich).
-  const loginsOn = aggList.some(a=>a.logins>0);
+  const prevTot={ writes:Object.values(pAggBy).reduce((s,a)=>s+a.writes,0), active:prevActive, done:Object.values(pAggBy).reduce((s,a)=>s+a.done,0) };
+  // Anmeldungen werden nicht gezeigt (Login nur bei neuer Sitzung -> unzuverlässig). Zeit aus dem Heartbeat.
   const minutesOn = aggList.some(a=>a.mins>0);
 
   const mgrUids=(users||[]).filter(u=>u.active&&(u.role_keys||[]).includes("management")&&!(String(u.full_name||"").toLowerCase().match(/tive master|test/))).map(u=>u.user_id);
@@ -214,28 +215,28 @@ Deno.serve(async (req)=>{
   if(body.dry){
     const sample = aggList.slice().sort((x,y)=>(y.writes+y.mins)-(x.writes+x.mins))[0];
     return json({ok:true,dry:true,
-      html_person: sample?shell(brand,"Deine Woche im System",sub,personInner(brand,sample,pAggBy[sample.uid],fromD,toD,loginsOn,minutesOn)):null,
-      html_overview: shell(brand,"Nutzung über alle",sub,overviewInner(brand,aggList,prevTot,fromD,toD,loginsOn,minutesOn)) });
+      html_person: sample?shell(brand,"Deine Woche im System",sub,personInner(brand,sample,pAggBy[sample.uid],fromD,toD,minutesOn)):null,
+      html_overview: shell(brand,"Nutzung über alle",sub,overviewInner(brand,aggList,prevTot,fromD,toD,minutesOn)) });
   }
   if(mode==="preview"){
     const to = (typeof body.preview_to==="string"&&body.preview_to.includes("@")) ? body.preview_to : OWNER_MAIL;
     const sample = aggList.slice().sort((x,y)=>(y.writes+y.mins)-(x.writes+x.mins))[0];
     if(sample){ const p=pAggBy[sample.uid];
-      const html=shell(brand, "Deine Woche im System", sub+" · Vorschau (Muster: "+sample.name+")", personInner(brand,sample,p,fromD,toD,loginsOn,minutesOn));
+      const html=shell(brand, "Deine Woche im System", sub+" · Vorschau (Muster: "+sample.name+")", personInner(brand,sample,p,fromD,toD,minutesOn));
       const r=await smtpSend(sender,to,"Vorschau · Maya Wochenmeldung (persönliche Fassung)",html); results.push({kind:"preview_person",sample:sample.name,mail:r.ok?"sent":r.error}); }
-    const html2=shell(brand, "Nutzung über alle", sub+" · Vorschau", overviewInner(brand,aggList,prevTot,fromD,toD,loginsOn,minutesOn));
+    const html2=shell(brand, "Nutzung über alle", sub+" · Vorschau", overviewInner(brand,aggList,prevTot,fromD,toD,minutesOn));
     const r2=await smtpSend(sender,to,"Vorschau · Maya Wochenmeldung (Zusammenfassung über alle)",html2); results.push({kind:"preview_overview",mail:r2.ok?"sent":r2.error});
     return json({ok:true,mode,to,window:{from:fromD,to:toD},persons:aggList.length,managers:mgrMails,results});
   }
 
   for(const a of aggList){ const email=emailBy[a.uid]; const p=pAggBy[a.uid];
-    const html=shell(brand, "Deine Woche im System", sub, personInner(brand,a,p,fromD,toD,loginsOn,minutesOn));
+    const html=shell(brand, "Deine Woche im System", sub, personInner(brand,a,p,fromD,toD,minutesOn));
     const mr = email ? await smtpSend(sender,email,"Deine Woche im System · "+deDate(fromD)+"–"+deDate(toD),html) : {ok:false,error:"no-email"};
-    const sr = await slackDM(email, personText(a,fromD,toD,loginsOn,minutesOn));
+    const sr = await slackDM(email, personText(a,fromD,toD,minutesOn));
     results.push({person:a.name,mail:mr.ok?"sent":mr.error,slack:sr});
     await logAction("weekly_person",{user:a.name,mail:mr.ok,slack:sr});
   }
-  for(const mail of mgrMails){ const html=shell(brand, "Nutzung über alle", sub, overviewInner(brand,aggList,prevTot,fromD,toD,loginsOn,minutesOn));
+  for(const mail of mgrMails){ const html=shell(brand, "Nutzung über alle", sub, overviewInner(brand,aggList,prevTot,fromD,toD,minutesOn));
     const mr=await smtpSend(sender,mail,"Nutzung über alle · Woche "+deDate(fromD)+"–"+deDate(toD),html);
     const sr=await slackDM(mail, "*Maya · Nutzung über alle* ("+deDate(fromD)+"–"+deDate(toD)+")\n"+aggList.filter(isActive).length+" von "+aggList.length+" Zugängen aktiv. Details in der Mail.");
     results.push({overview_to:mail,mail:mr.ok?"sent":mr.error,slack:sr});
