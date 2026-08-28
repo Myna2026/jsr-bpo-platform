@@ -150,8 +150,15 @@ function overviewInner(brand:any, list:Agg[], prevTot:{writes:number,active:numb
   ot.push({ big:totW, label:"Änderungen", sub: delta(totW, prevTot.writes) });
   if(ot.length<4) ot.push({ big:totDone, label:"Aufgaben erledigt", sub: doneSub });
   const t = tiles(ot.slice(0,4));
-  // Nach Funktion gruppiert — Vergleich NUR innerhalb der Gruppe. Führung nach AKTIVEN TAGEN (verlässliche
-  // Präsenz: Login/View/Änderung/Aufgabe/Sitzung), HR/Mitarbeiter nach Änderungen.
+  // Nach Funktion gruppiert — die Reihenfolge/Gruppierung ist fachlich, aber die BALKEN müssen über die ganze
+  // Mail vergleichbar sein, nicht je Gruppe neu skalieren. Zwei gemeinsame Skalen:
+  //  - Tage (Führungsgruppen): feste 5 (Arbeitswoche) -> 4 Tage sind sichtbar kürzer als 5, überall gleich.
+  //  - Änderungen (HR/Mitarbeiter): eine geteilte Skala über alle Doer; bei großer Spannweite gestaucht (log),
+  //    damit Mergims 2 nicht so lang wirkt wie Hajrijes 668 und die 2 trotzdem sichtbar bleibt.
+  const DAYS_MAX = 5;
+  const doerWrites = list.filter(a=>!(FUNCS.find(f=>f.key===a.funcKey)||{}).lead).map(a=>a.writes);
+  const CHANGES_MAX = Math.max(1, ...doerWrites);
+  const CHANGES_COMPRESS = CHANGES_MAX > 20;   // Spannweite zu groß -> gestauchte Skala
   let sections="";
   const funcObs:string[]=[];
   FUNCS.forEach(f=>{ const ppl=list.filter(a=>a.funcKey===f.key); if(!ppl.length) return;
@@ -159,7 +166,8 @@ function overviewInner(brand:any, list:Agg[], prevTot:{writes:number,active:numb
       .map(a=>{ const zeit=minutesOn?fmtMins(a.mins):null;
         const parts = f.lead ? [tage(a.days.size), zeit, a.writes+" Änd"] : [a.writes+" Änd", tage(a.days.size)];
         return { label:a.name, value: f.lead ? a.days.size : a.writes, note: parts.filter(Boolean).join(" · ") }; });
-    sections += hBars(f.label+" ("+ppl.length+")"+(f.lead?" · nach Anwesenheit":""), rows, brand.accent);
+    const scale = f.lead ? { max:DAYS_MAX } : { max:CHANGES_MAX, compress:CHANGES_COMPRESS };
+    sections += hBars(f.label+" ("+ppl.length+")"+(f.lead?" · nach Anwesenheit":""), rows, brand.accent, scale);
     funcObs.push(perFuncObs(f, ppl));
   });
   const tasksLine = totDone>0 ? (" Insgesamt "+totDone+" Aufgaben erledigt"+(totEmpty>0?", davon "+totEmpty+" ohne erkennbare Änderung":"")+".") : "";

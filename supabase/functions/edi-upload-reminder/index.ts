@@ -7,7 +7,7 @@
 // Vollständigkeit = deckt report_forecast die kommenden Wochen ab (der Forecast-Upload schreibt dorthin).
 // Deploy: supabase functions deploy edi-upload-reminder --no-verify-jwt --use-api
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { agentBrand, shell, lead, block, button, PORTAL_URL } from "../_shared/agent_mail.ts";
+import { agentBrand, shell, lead, taskCard, callout, linkGoto } from "../_shared/agent_mail.ts";
 import { smtpSend, slackDM, agentMailSender } from "../_shared/agent_send.ts";
 import { scheduleDue, getSchedule, personOverride } from "../_shared/schedule.ts";
 
@@ -43,20 +43,24 @@ Deno.serve(async (req) => {
   const projName: Record<string, string> = {};
   for (const s of srcs) { if (!projName[s.project_id]) { const { data } = await sb.from("projects").select("name").eq("id", s.project_id).maybeSingle(); projName[s.project_id] = (data && data.name) || "?"; } }
 
-  const open: { label: string; missing: any[] }[] = [];
+  const deDate = (iso: string) => { const [y, m, d] = iso.slice(0, 10).split("-"); return d + "." + m + "." + y; };
+  const open: { label: string; missing: any[]; project_id: string; source_type: string; since: string | null }[] = [];
   for (const s of srcs) {
     let missing: any[] = [];
+    // "seit wann": letzter Upload dieser Quelle (egal welcher Monat) -> zeigt, wie lange schon offen.
+    const { data: lastImp } = await sb.from("data_imports").select("created_at").eq("project_id", s.project_id).eq("source_type", s.source_type).order("created_at", { ascending: false }).limit(1);
+    const since = (lastImp && lastImp[0]) ? deDate(lastImp[0].created_at) : null;
     if (String(s.source_type).startsWith("forecast_")) {
       const skill = String(s.source_type).replace("forecast_", "");
       const orC = reqWeeks.map((w) => `and(year.eq.${w.year},kw.eq.${w.kw})`).join(",");
       const { data: fc } = await sb.from("report_forecast").select("year,kw").eq("project_id", s.project_id).eq("skill", skill).gt("fc_hours", 0).or(orC);
       const covered = new Set((fc || []).map((r: any) => r.year + "-" + r.kw));
       missing = forceOpen ? reqWeeks : reqWeeks.filter((w) => !covered.has(w.year + "-" + w.kw));
-      if (missing.length) open.push({ label: "Forecast " + skillLabel(skill) + " (" + projName[s.project_id] + ")", missing });
+      if (missing.length) open.push({ label: "Forecast " + skillLabel(skill) + " (" + projName[s.project_id] + ")", missing, project_id: s.project_id, source_type: s.source_type, since });
     } else {
       const mStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
       const { count } = await sb.from("data_imports").select("*", { count: "exact", head: true }).eq("project_id", s.project_id).eq("source_type", s.source_type).gte("created_at", mStart);
-      if (forceOpen || (count || 0) === 0) open.push({ label: s.source_type + " (" + projName[s.project_id] + ")", missing: reqWeeks });
+      if (forceOpen || (count || 0) === 0) open.push({ label: s.source_type + " (" + projName[s.project_id] + ")", missing: reqWeeks, project_id: s.project_id, source_type: s.source_type, since });
     }
   }
 
@@ -72,14 +76,21 @@ Deno.serve(async (req) => {
   const allOpen = open.length === srcs.length;
   const list = open.map((o) => o.label);
   const leadTxt = allOpen
-    ? "Der Forecast für Holidaycheck fehlt noch – für die kommenden Wochen ist noch keiner hinterlegt:"
-    : "Fast vollständig. Ein Teil fehlt noch:";
-  const listHtml = '<ul style="margin:6px 0 0;padding-left:20px;font-size:14px;line-height:1.7;color:#1f2937">' + list.map((l) => "<li>" + l.replace(/</g, "&lt;") + "</li>").join("") + "</ul>"
-    + '<div style="margin-top:10px;font-size:14px;line-height:1.6;color:#1f2937">Dadurch steht im Cockpit „Forecast vs. Ist" und im Wochenbericht <b>keine Soll-Ist-Zahl für ' + joinUnd(missKws) + '</b>. Die Planung sieht dann nicht, ob genug Leute eingeteilt sind.</div>'
-    + '<div style="margin-top:8px;font-size:14px;line-height:1.6;color:#1f2937"><b>Was zu tun ist:</b> Den aktuellen Forecast (Blatt 5) im Datenimport hochladen.</div>';
+    ? "Für die kommenden Wochen ist noch kein Forecast hinterlegt. Das fehlt, seit wann, und was daran hängt:"
+    : "Fast vollständig, das hier fehlt noch:";
+  // Je offene Quelle eine Karte: Status, seit wann offen, betroffene KWs, Deep-Link direkt in den Datenimport
+  // (Projekt + Quelle + erste fehlende Woche vorgewählt).
+  const cards = open.map((o) => {
+    const w0 = o.missing[0] || {};
+    const kws = o.missing.map((w: any) => "KW " + w.kw).join(", ");
+    const detail = "Fehlt für " + kws + (o.since ? (" · zuletzt geladen am " + o.since) : " · diesen Monat noch nicht geladen");
+    const href = linkGoto("import", { project: o.project_id, source: o.source_type, kw: w0.kw, year: w0.year });
+    return taskCard({ title: o.label, state: "offen", tone: "warn", detail, href, cta: "Hochladen" });
+  }).join("");
+  const folge = callout("Was daran hängt", "Ohne diese Uploads steht im Cockpit (Forecast vs. Ist) und im Wochenbericht keine Soll-Ist-Zahl für " + joinUnd(missKws) + ". Die Planung sieht dann nicht, ob genug Leute eingeteilt sind. Es ist der Forecast von Blatt 5.", "#2563eb");
 
   const brand = await agentBrand(sb, "max", "#2563eb");
-  const inner = lead(leadTxt) + block(listHtml) + button(PORTAL_URL, "Zum Datenimport →", brand.accent);
+  const inner = lead(leadTxt) + cards + folge;
   const html = shell(brand, allOpen ? "Uploads stehen aus" : "Uploads fast vollständig", "Forecast Holidaycheck", inner);
   const slackText = "*Max · Uploads*\n" + leadTxt + "\n• " + list.join("\n• ")
     + "\nDadurch fehlt im Cockpit und Wochenbericht die Soll-Ist-Zahl für " + joinUnd(missKws) + ". Bitte den Forecast im Datenimport hochladen.";

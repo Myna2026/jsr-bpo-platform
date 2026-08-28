@@ -34699,7 +34699,11 @@ const ROHDATEN_FIELDS=[
   {key:'sales_calls',     label:'sales_calls',      req:false, cand:['sales_calls','sales calls','salescalls']},
 ];
 function cqNormHead(s){ return String(s==null?'':s).trim().toLowerCase().replace(/[\s.\-]+/g,'_'); }
-function cqNormName(s){ return String(s==null?'':s).trim().toLowerCase().replace(/\s+/g,' '); }
+// Diakritika falten (ë->e, ç->c, ä->a …), damit kosovarische/albanische Namen aus der Auftraggeber-CSV
+// auf die DB-Schreibweise matchen. Sonst fällt jeder Name mit Sonderzeichen still in "nicht zuordenbar".
+function cqNormName(s){ return String(s==null?'':s).normalize("NFD").replace(/[\u0300-\u036f]/g,"").trim().toLowerCase().replace(/\s+/g,' '); }
+// Reihenfolge-unabhängiger Schlüssel (Vorname/Nachname vertauscht in der CSV): Namens-Tokens sortiert.
+function cqNameKey(s){ return cqNormName(s).split(' ').filter(Boolean).sort().join(' '); }
 function cqSec(v){ const n=Number(String(v==null?'':v).toString().replace(',','.')); return isNaN(n)?0:n; }
 function cqHours(sec){ return Math.round((Number(sec)||0)/3600*100)/100; }
 function cqAutoMap(headers, fields){ const m={}; const H=headers.map(cqNormHead); (fields||ROHDATEN_FIELDS).forEach(f=>{ let idx=-1;
@@ -35043,8 +35047,9 @@ function PivotImport({projId, employees, source, fields, table, accept, hint, on
     const {data:aliasRows}=await sb.from('import_aliases').select('alias_name,employee_id').eq('project_id',projId);
     const aliasMap={}, ignoredSet={}; (aliasRows||[]).forEach(a=>{ const k=cqNormName(a.alias_name); if(a.employee_id) aliasMap[k]=a.employee_id; else ignoredSet[k]=true; });
     const emps=(employees||[]).filter(e=>e&&e.project_id===projId);
-    const empById={}, byName={}; emps.forEach(e=>{ empById[e.id]=e; byName[cqNormName((e.first_name||'')+' '+(e.last_name||''))]=e; });
-    const resolve=nm=>{ const n=cqNormName(nm); if(aliasMap[n]) return empById[aliasMap[n]]||null; return byName[n]||null; };
+    const empById={}, byName={}, byKey={}; emps.forEach(e=>{ const full=(e.first_name||'')+' '+(e.last_name||''); empById[e.id]=e; byName[cqNormName(full)]=e; const k=cqNameKey(full); if(k) byKey[k]=e; });
+    // exakt (diakritika-gefaltet) → sonst reihenfolge-unabhängig (Vorname/Nachname getauscht). Alias hat Vorrang.
+    const resolve=nm=>{ const n=cqNormName(nm); if(aliasMap[n]) return empById[aliasMap[n]]||null; return byName[n]||byKey[cqNameKey(nm)]||null; };
     const seen={}, facts=[], unmatched={}, dups=[]; let ignoredCount=0;
     (sheet.rows||[]).forEach(r=>{ const nm=String(r[map.name]==null?'':r[map.name]).trim(); if(!nm) return;
       if(ignoredSet[cqNormName(nm)]){ ignoredCount++; return; }
@@ -35061,11 +35066,15 @@ function PivotImport({projId, employees, source, fields, table, accept, hint, on
     if(dups.length) warnings.push({type:'duplicate',message:dups.length+' doppelte Namen (nur erste Zeile übernommen)',details:dups});
     setResult({facts,unmatched:unmatchedList,warnings,ignoredCount}); setBusy(false); setStep('preview');
   }
-  async function assignAlias(nm, empId){ if(!empId) return; setBusy(true);
-    await sb.from('import_aliases').insert({project_id:projId, alias_name:nm, employee_id:empId}); await process();
+  async function assignAlias(nm, empId){ if(!empId) return; setBusy(true); setErr('');
+    const {error}=await sb.from('import_aliases').insert({project_id:projId, alias_name:nm, employee_id:empId});
+    if(error){ setErr('Zuordnung nicht gespeichert: '+(error.message||error.code||'Zugriff verweigert')); setBusy(false); return; }
+    await process();
   }
-  async function ignoreAlias(nm){ setBusy(true);
-    await sb.from('import_aliases').insert({project_id:projId, alias_name:nm, employee_id:null}); await process();
+  async function ignoreAlias(nm){ setBusy(true); setErr('');
+    const {error}=await sb.from('import_aliases').insert({project_id:projId, alias_name:nm, employee_id:null});
+    if(error){ setErr('Konnte nicht ignorieren: '+(error.message||error.code||'Zugriff verweigert')); setBusy(false); return; }
+    await process();
   }
   async function save(){ if(!result||busy) return; setBusy(true); setErr('');
     const ts=isoLocal(new Date())+'_'+fileHash; const path=projId+'/'+source+'/'+ts+'_'+(file.name||source);
@@ -35224,8 +35233,9 @@ function BookingImportAgent({projId, employees, onSaved, initKw, initYear}){
     const {data:aliasRows}=await sb.from('import_aliases').select('alias_name,employee_id').eq('project_id',projId);
     const aliasMap={}, ignoredSet={}; (aliasRows||[]).forEach(a=>{ const k=cqNormName(a.alias_name); if(a.employee_id) aliasMap[k]=a.employee_id; else ignoredSet[k]=true; });
     const emps=(employees||[]).filter(e=>e&&e.project_id===projId);
-    const empById={}, byName={}; emps.forEach(e=>{ empById[e.id]=e; byName[cqNormName((e.first_name||'')+' '+(e.last_name||''))]=e; });
-    const resolve=nm=>{ const n=cqNormName(nm); if(aliasMap[n]) return empById[aliasMap[n]]||null; return byName[n]||null; };
+    const empById={}, byName={}, byKey={}; emps.forEach(e=>{ const full=(e.first_name||'')+' '+(e.last_name||''); empById[e.id]=e; byName[cqNormName(full)]=e; const k=cqNameKey(full); if(k) byKey[k]=e; });
+    // exakt (diakritika-gefaltet) → sonst reihenfolge-unabhängig (Vorname/Nachname getauscht). Alias hat Vorrang.
+    const resolve=nm=>{ const n=cqNormName(nm); if(aliasMap[n]) return empById[aliasMap[n]]||null; return byName[n]||byKey[cqNameKey(nm)]||null; };
     const seen={}, facts=[], unmatched={}, dups=[]; let ignoredCount=0;
     (sheet.rows||[]).forEach(r=>{ const nm=String(r[map.name]==null?'':r[map.name]).trim(); if(!nm) return;
       if(ignoredSet[cqNormName(nm)]){ ignoredCount++; return; }
@@ -38819,7 +38829,7 @@ function DataImportView({projects, employees}){
   const [imports,setImports]=useState(null); const [tick,setTick]=useState(0);
   const [status,setStatus]=useState({});   // key -> importiert für gewählte Periode?
   // Sprung aus dem Upload-Status: Projekt + Quelle vorwählen und den Uploader öffnen.
-  useEffect(()=>{ if(UPLOAD_JUMP){ const j=UPLOAD_JUMP; UPLOAD_JUMP=null; if(j.projId) setProjId(j.projId); if(j.source) setOpen(j.source); } },[]);
+  useEffect(()=>{ if(UPLOAD_JUMP){ const j=UPLOAD_JUMP; UPLOAD_JUMP=null; if(j.projId) setProjId(j.projId); if(j.source) setOpen(j.source); if(j.kw!=null&&!isNaN(j.kw)) setKw(j.kw); if(j.year!=null&&!isNaN(j.year)) setYear(j.year); } },[]);
   const SOURCES=UPLOAD_SOURCES;
   const srcLabel={}; SOURCES.forEach(s=>srcLabel[s.key]=s.label); srcLabel.booking_team='Booking-Team';
   // Letzte Importe (alle Quellen dieses Projekts).
@@ -42422,6 +42432,24 @@ function App(){
   };
   // Stale-Schutz: Sprung-Filter verfällt, sobald man die zugehörige Ansicht verlässt (z.B. übers Menü).
   useEffect(()=>{ setNavFilter(nf=> (nf && nf.view!==view) ? null : nf); },[view]);
+  // Deep-Link aus Agenten-Mails: ?goto=… beim ersten Laden auf die Handlungsstelle springen, dann URL säubern.
+  // Genutzt von den Mail-Bausteinen (linkGoto in _shared/agent_mail.ts). Bekannte Ziele:
+  //   fx (Wechselkurse) · import(&project&source&kw&year) · emp(&id&tab, z.B. Vertrag) · cvs(&filter, Trichter) · <viewkey> generisch.
+  const urlJumpDoneRef = React.useRef(false);
+  useEffect(()=>{ if(!loggedIn || urlJumpDoneRef.current) return;
+    let p; try{ p=new URLSearchParams(window.location.search); }catch(e){ return; }
+    const goto=p.get('goto'); if(!goto){ urlJumpDoneRef.current=true; return; }
+    if(goto==='emp' && !(employees&&employees.length)) return;   // auf geladene Mitarbeiter warten
+    urlJumpDoneRef.current=true;
+    try{
+      if(goto==='fx') dqNavigate({kind:'view', view:'superadmin', sysSection:'fx_rates'});
+      else if(goto==='import'){ const kw=p.get('kw'), yr=p.get('year'); try{ UPLOAD_JUMP={projId:p.get('project')||null, source:p.get('source')||null, kw:kw?Number(kw):null, year:yr?Number(yr):null}; }catch(e){} dqNavigate({kind:'view', view:'dataimport'}); }
+      else if(goto==='emp' && p.get('id')) dqNavigate({kind:'emp', id:p.get('id'), tab:p.get('tab')||'hr'});
+      else if(goto==='cvs'){ const f=p.get('filter'); dqNavigate({kind:'view', view:'cvs', navFilter:f?{type:'cv_'+f, label:'Bewerber'}:null}); }
+      else dqNavigate({kind:'view', view:goto});   // generisch: jeder gültige View-Key
+    }catch(e){}
+    try{ window.history.replaceState({}, '', window.location.pathname); }catch(e){}
+  }, [loggedIn, employees]);
   // (Rollen-Redirects für Kosten/Management-only entfernt: der einheitliche Redirect oben via menuDeskVisible
   //  deckt Sperre UND Rolle ab und respektiert explizite Freigaben — kein doppeltes Rauswerfen.)
   const allNavSections = isEmpUser

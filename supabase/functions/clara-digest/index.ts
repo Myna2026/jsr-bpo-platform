@@ -101,6 +101,7 @@ Deno.serve(async (req)=>{
   const arrow = delta>0 ? "▲ "+delta+" mehr als gestern" : delta<0 ? "▼ "+(-delta)+" weniger als gestern" : "gleich wie gestern";
   const acc=(cl&&cl.accent)||"#7c3aed"; const photo="https://hr.tive360.de/"+((cl&&cl.avatar_url)||"assets/agents/clara.png");
   const portal="https://hr.tive360.de";
+  const recruitLink=portal+"/hr.html?goto=cvs&filter=inbox";   // Deep-Link direkt in den Bewerber-Trichter (Eingang)
   const dateLbl = new Date(day+"T12:00:00").toLocaleDateString("de-DE",{weekday:"long",day:"2-digit",month:"long"});
   const subject = "Recruiting heute Morgen · "+dateLbl;
 
@@ -144,7 +145,7 @@ Deno.serve(async (req)=>{
     +"Davon neu: "+neu+"\nDubletten offen: "+dub+"\n\n"
     +"Sprachniveau: hoch "+hoch+", mittel "+mit+", niedrig "+nied+", unbekannt "+unb+"\n"
     +"Qualität: TOP "+qTop+", GUT "+qGut+", Rest "+qRest+"\n\n"
-    +obsText+"\n\nZum Recruiting: "+portal+"\n\n— Clara, digitale Kollegin im Recruiting";
+    +obsText+"\n\nZum Recruiting: "+recruitLink+"\n\n— Clara, digitale Kollegin im Recruiting";
   const slackText = "*Recruiting heute Morgen · "+dateLbl+"*\n"
     +"📥 Bewerbungen heute: *"+nt+"*  ("+arrow+")\n🆕 Davon neu: *"+neu+"*    👥 Dubletten offen: *"+dub+"*\n"
     +"Sprache: hoch "+hoch+" · mittel "+mit+" · niedrig "+nied+" · unbekannt "+unb+"\n"

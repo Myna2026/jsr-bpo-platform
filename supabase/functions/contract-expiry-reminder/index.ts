@@ -4,7 +4,7 @@
 // Von Lena (lena@). Kein Wochenende. Cron Tage 1–3 und 15–17; 7-Tage-Sperre -> einmal je Monatshälfte.
 // Deploy: supabase functions deploy contract-expiry-reminder --no-verify-jwt --use-api
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { agentBrand, shell, lead, block, button, PORTAL_URL } from "../_shared/agent_mail.ts";
+import { agentBrand, shell, lead, taskCard, button, linkGoto } from "../_shared/agent_mail.ts";
 import { smtpSend, slackDM, agentMailSender } from "../_shared/agent_send.ts";
 import { scheduleDue, getSchedule } from "../_shared/schedule.ts";
 
@@ -36,10 +36,10 @@ Deno.serve(async (req) => {
   const iso = (dt: Date) => dt.toISOString().slice(0, 10);
   const from = iso(today), to = iso(new Date(today.getTime() + HORIZON * 864e5));
 
-  const { data: emps } = await sb.from("employees").select("first_name,last_name,status,termination_date,contract,project_id").in("status", EMPLOYED);
+  const { data: emps } = await sb.from("employees").select("id,first_name,last_name,status,termination_date,contract,project_id").in("status", EMPLOYED);
   const projName: Record<string, string> = {}; { const { data: pr } = await sb.from("projects").select("id,name"); (pr || []).forEach((p: any) => projName[p.id] = p.name); }
 
-  type Row = { name: string; end: string; project: string; project_id: string; decided: boolean; note: string };
+  type Row = { id: string; name: string; end: string; project: string; project_id: string; decided: boolean; note: string };
   const rows: Row[] = [];
   (emps || []).forEach((e: any) => {
     const end = e.contract && e.contract.end; if (!end) return;
@@ -48,23 +48,27 @@ Deno.serve(async (req) => {
     const note = decided
       ? ("entschieden: wird beendet" + (e.termination_date ? " zum " + deDate(String(e.termination_date).slice(0, 10)) : ""))
       : "Entscheidung steht aus: verlängern oder auslaufen lassen";
-    rows.push({ name: (e.first_name + " " + e.last_name).trim(), end, project: projName[e.project_id] || "?", project_id: e.project_id, decided, note });
+    rows.push({ id: e.id, name: (e.first_name + " " + e.last_name).trim(), end, project: projName[e.project_id] || "?", project_id: e.project_id, decided, note });
   });
   rows.sort((a, b) => a.end.localeCompare(b.end));
 
   const brand = await agentBrand(sb, "lena", "#db2777");
-  const renderList = (list: Row[]) => '<div style="font-size:14px;line-height:1.65;color:#1f2937">' + list.map((r) =>
-    '<div style="padding:8px 0;border-top:1px solid #eef2f7">'
-    + '<b>' + r.name.replace(/</g, "&lt;") + '</b> · ' + r.project.replace(/</g, "&lt;")
-    + '<br><span style="color:#5b6b70">Vertrag endet ' + deDate(r.end) + ' — </span>'
-    + '<span style="color:' + (r.decided ? "#5b6b70" : "#b45309") + ';font-weight:600">' + r.note + '</span></div>').join("") + "</div>";
+  // Je Vertrag eine Karte mit Deep-Link direkt zum Mitarbeiter (je Name ein eigener Link).
+  const renderList = (list: Row[]) => list.map((r) => taskCard({
+    title: r.name + " · " + r.project,
+    state: r.decided ? "entschieden" : "offen",
+    tone: r.decided ? "neutral" : "warn",
+    detail: "Vertrag endet " + deDate(r.end) + " · " + r.note,
+    href: linkGoto("emp", { id: r.id }),
+    cta: "Zum Profil",
+  })).join("");
 
   async function buildMail(list: Row[], scope: string) {
     const openN = list.filter((r) => !r.decided).length;
     const leadTxt = list.length === 0
       ? "In den nächsten " + HORIZON + " Tagen läuft kein Vertrag aus."
       : list.length + (list.length === 1 ? " Vertrag läuft" : " Verträge laufen") + " in den nächsten " + HORIZON + " Tagen aus" + (openN ? ", davon " + openN + " noch ohne Entscheidung" : ", alle bereits entschieden") + ".";
-    const inner = lead(leadTxt) + (list.length ? block(renderList(list)) : "") + button(PORTAL_URL, "Zu den Mitarbeitern →", brand.accent);
+    const inner = lead(leadTxt) + renderList(list) + button(linkGoto("employees"), "Zu den Mitarbeitern", brand.accent);
     return shell(brand, "Vertragsübersicht" + (scope ? " · " + scope : ""), "Nächste " + HORIZON + " Tage", inner);
   }
   const slackFor = (list: Row[]) => "*Lena · Vertragsübersicht*\n" + (list.length ? list.map((r) => "• " + r.name + " (" + r.project + "), endet " + deDate(r.end) + " — " + r.note).join("\n") : "Kein Vertrag läuft in den nächsten " + HORIZON + " Tagen aus.");

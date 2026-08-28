@@ -56,10 +56,20 @@ export function barChart(title: string, bars: { label: string; value: number }[]
 }
 
 // Horizontale Balken: Name links, Balken, Wert rechts. Für Vergleiche über viele Zeilen (z. B. Personen).
-export function hBars(title: string, rows: { label: string; value: number; note?: string }[], accent: string): string {
-  const max = Math.max(1, ...rows.map((r) => r.value));
+// opts.max: gemeinsame Skala über MEHRERE hBars-Aufrufe hinweg (sonst skaliert jeder Aufruf für sich, dann
+//   sind Balken aus verschiedenen Gruppen NICHT vergleichbar). opts.compress: gestauchte (log-)Skala bei
+//   großer Spannweite, damit ein kleiner Wert neben einem sehr großen noch sichtbar ist.
+export function hBars(title: string, rows: { label: string; value: number; note?: string }[], accent: string,
+                      opts?: { max?: number; compress?: boolean }): string {
+  const max = Math.max(1, opts?.max != null ? opts.max : Math.max(1, ...rows.map((r) => r.value)));
+  const compress = opts?.compress === true;
+  const width = (v: number) => {
+    if (v <= 0) return 0;
+    const frac = compress ? Math.log(1 + v) / Math.log(1 + max) : v / max;
+    return Math.max(2, Math.min(100, Math.round(100 * frac)));
+  };
   const body = rows.map((r) => {
-    const w = r.value > 0 ? Math.max(2, Math.round(100 * r.value / max)) : 0;
+    const w = width(r.value);
     const rest = 100 - w;
     // Beide Zellen mit expliziter Breite (Summe 100), sonst verteilt table-layout:fixed eine 0%-Zelle falsch.
     const barCells = w > 0
@@ -103,6 +113,66 @@ export function callout(title: string, text: string, accent: string): string {
   return '<tr><td style="padding:14px 22px 4px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:' + accent + '10;border-left:4px solid ' + accent + ';border-radius:10px;"><tr>'
     + '<td style="padding:12px 15px;"><div style="font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;color:' + accent + ';margin-bottom:5px;">' + esc(title) + "</div>"
     + '<div style="font-size:14px;line-height:1.55;color:#1f2937;">' + esc(text) + "</div></td></tr></table></td></tr>";
+}
+
+// Deep-Link an die Handlungsstelle im HR-Portal. Der Router in hr.html liest ?goto=… beim Laden und
+// springt genau dorthin (statt nur "Zum System"). Ziele: fx · import(&project&source&kw&year) ·
+// emp(&id&tab) · cvs(&filter) · <viewkey> generisch. So kommt man aus jeder Mail direkt zum Handeln.
+export function linkGoto(goto: string, params?: Record<string, any>): string {
+  const q = new URLSearchParams({ goto });
+  if (params) for (const k of Object.keys(params)) { const v = params[k]; if (v != null && v !== "") q.set(k, String(v)); }
+  return PORTAL_URL + "?" + q.toString();
+}
+
+// Leistungs-Zeile: Name (verlinkbar) + große farbige Zahl + Ampel-Zeichen, darunter ein Balken auf
+// GEMEINSAMER Skala mit dem Team-Schnitt als Marke (▲). So sieht man ohne Lesen, wer wo steht.
+//   tone: 'bad'(rot) | 'warn'(orange) | 'good'(grün) | 'neutral'.  badge: rohes HTML (farbiger Pfeil/Stern).
+//   valuePct/avgPct: 0..100 auf der gemeinsamen Skala (der Aufrufer rechnet sie über alle Zeilen gleich).
+export function perfRow(o: { name: string; href?: string; value: string | number; unit?: string; tone?: string; badge?: string; deltaText?: string; note?: string; valuePct?: number; avgPct?: number }): string {
+  const tone = o.tone || "neutral";
+  const col = tone === "bad" ? "#dc2626" : tone === "warn" ? "#d97706" : tone === "good" ? "#16a34a" : "#0f2830";
+  const bg = tone === "bad" ? "#fef2f2" : tone === "warn" ? "#fffbeb" : tone === "good" ? "#f0fdf4" : "#f5f7f8";
+  const bd = tone === "bad" ? "#fecaca" : tone === "warn" ? "#fde68a" : tone === "good" ? "#bbf7d0" : "#e6ecee";
+  const vp = Math.max(3, Math.min(100, Math.round(o.valuePct || 0))), vr = 100 - vp;
+  const ap = Math.max(0, Math.min(98, Math.round(o.avgPct || 0)));
+  const nameHtml = o.href
+    ? '<a href="' + esc(o.href) + '" style="color:#0f2830;text-decoration:none;border-bottom:1.5px solid ' + col + ';">' + esc(o.name) + "</a>"
+    : '<span style="color:#0f2830;">' + esc(o.name) + "</span>";
+  const badge = o.badge ? '<span style="font-size:15px;">' + o.badge + "</span> " : "";
+  const bar = '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="table-layout:fixed;"><tr>'
+    + '<td width="' + vp + '%" bgcolor="' + col + '" style="height:11px;border-radius:6px;font-size:0;line-height:0;">&nbsp;</td>'
+    + '<td width="' + vr + '%" bgcolor="#e6ecee" style="font-size:0;line-height:0;">&nbsp;</td></tr></table>';
+  const tick = '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="table-layout:fixed;"><tr>'
+    + '<td width="' + ap + '%" style="font-size:0;line-height:0;">&nbsp;</td>'
+    + '<td style="font-size:11px;color:#5b6b70;line-height:1;white-space:nowrap;">&#9650;</td></tr></table>';
+  return '<tr><td style="padding:5px 22px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:' + bg + ";border:1px solid " + bd + ';border-radius:12px;"><tr>'
+    + '<td style="padding:11px 14px;">'
+    + '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>'
+    + '<td style="font-size:14.5px;font-weight:700;">' + badge + nameHtml + "</td>"
+    + '<td style="text-align:right;white-space:nowrap;"><span style="font-size:22px;font-weight:800;color:' + col + ';">' + esc(o.value) + esc(o.unit || "") + "</span></td>"
+    + "</tr></table>"
+    + (o.deltaText ? '<div style="font-size:11.5px;color:#5b6b70;margin-top:2px;">' + esc(o.deltaText) + "</div>" : "")
+    + '<div style="height:7px;font-size:0;line-height:0;">&nbsp;</div>' + bar + tick
+    + (o.note ? '<div style="font-size:12px;color:#5b6b70;margin-top:3px;line-height:1.4;">' + esc(o.note) + "</div>" : "")
+    + "</td></tr></table></td></tr>";
+}
+
+// Aufgaben-/Status-Karte: Titel + Status-Chip, Detailzeile, optionaler Aktions-Link (Deep-Link) direkt
+// an die Handlungsstelle. Für Erinnerungen mit einer Liste offener Dinge (z. B. fehlende Uploads je Quelle).
+export function taskCard(o: { title: string; state?: string; tone?: string; detail?: string; href?: string; cta?: string }): string {
+  const tone = o.tone || "warn";
+  const col = tone === "bad" ? "#dc2626" : tone === "warn" ? "#d97706" : tone === "good" ? "#16a34a" : "#0f2830";
+  const bg = tone === "bad" ? "#fef2f2" : tone === "warn" ? "#fffbeb" : tone === "good" ? "#f0fdf4" : "#f5f7f8";
+  const bd = tone === "bad" ? "#fecaca" : tone === "warn" ? "#fde68a" : tone === "good" ? "#bbf7d0" : "#e6ecee";
+  return '<tr><td style="padding:5px 22px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:' + bg + ";border:1px solid " + bd + ';border-radius:12px;"><tr>'
+    + '<td style="padding:12px 14px;">'
+    + '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>'
+    + '<td style="font-size:14.5px;font-weight:700;color:#0f2830;">' + esc(o.title) + "</td>"
+    + (o.state ? '<td style="text-align:right;white-space:nowrap;"><span style="font-size:10.5px;font-weight:800;text-transform:uppercase;letter-spacing:.04em;color:' + col + ";background:#ffffff;border:1px solid " + bd + ';border-radius:20px;padding:3px 9px;">' + esc(o.state) + "</span></td>" : "")
+    + "</tr></table>"
+    + (o.detail ? '<div style="font-size:12.5px;color:#5b6b70;margin-top:5px;line-height:1.45;">' + esc(o.detail) + "</div>" : "")
+    + (o.href && o.cta ? '<div style="margin-top:9px;"><a href="' + esc(o.href) + '" style="display:inline-block;background:' + col + ';color:#ffffff;text-decoration:none;font-size:12.5px;font-weight:700;padding:8px 14px;border-radius:8px;">' + esc(o.cta) + "</a></div>" : "")
+    + "</td></tr></table></td></tr>";
 }
 
 // Kleine Bezugsgröße (z. B. Team-Schnitt) als abgesetzte Zeile.

@@ -4,7 +4,7 @@
 // Wechselnd (nie derselbe wie zuletzt), 2–3×/Woche (Mo–Fr, ≥2 Tage Abstand je Leiter). Mail (max@) + Slack.
 // Team = (Projekt, Skill); Leiter = Position 'Teamleiter'. Cron: Mo–Fr. Deploy: functions deploy leader-nudges --no-verify-jwt --use-api
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { agentBrand, shell, lead, button, metricCard, callout, refLine, PORTAL_URL } from "../_shared/agent_mail.ts";
+import { agentBrand, shell, lead, button, callout, refLine, perfRow, linkGoto } from "../_shared/agent_mail.ts";
 import { smtpSend, slackDM, agentMailSender } from "../_shared/agent_send.ts";
 import { scheduleDue, getSchedule } from "../_shared/schedule.ts";
 
@@ -42,27 +42,39 @@ function weakData(weak: any[]): any {
   const dom = Object.entries(byKpi).sort((a, b) => b[1].length - a[1].length)[0];
   if (!dom) return null;
   const kpi = dom[0]; const low = LOWER_BETTER[kpi]; const unit = kpiUnit(kpi); const teamAvg = dom[1][0].team_avg;
-  const agents = dom[1].slice(0, 4).map((a) => {
-    let tone = "neutral"; let deltaText = "neu diese Woche";
+  // Gemeinsame Skala über alle Werte + Team-Schnitt (etwas Luft), damit die Balken vergleichbar sind
+  // und der große Abstand (z. B. 7,5 vs. 12,88) auch optisch sichtbar wird.
+  const nums = dom[1].map((a) => Number(a.value)).concat(teamAvg != null ? [Number(teamAvg)] : []).filter((x) => !isNaN(x));
+  const lo = Math.min(...nums) * 0.9, hi = Math.max(...nums) * 1.05; const span = (hi - lo) || 1;
+  const pct = (v: any) => Math.max(0, Math.min(100, Math.round((Number(v) - lo) / span * 100)));
+  const agents = dom[1].slice(0, 5).map((a) => {
+    const band = a.band || "Kritisch";
+    const tone = band === "Kritisch" ? "bad" : band === "Schlecht" ? "warn" : "neutral";   // Zahl-Farbe = Schwere-Band
+    let trend = "new"; let badge = ""; let deltaText = "neu diese Woche";
     if (a.prev != null) { const worse = low ? (a.value > a.prev) : (a.value < a.prev); const same = Math.abs(a.value - a.prev) < (low ? 0.3 : 0.05);
-      tone = same ? "neutral" : (worse ? "bad" : "good");
-      deltaText = same ? ("≈ wie Vorwoche (" + fmtN(a.prev) + ")") : (worse ? ("schlechter als Vorwoche (" + fmtN(a.prev) + ")") : ("besser als Vorwoche (" + fmtN(a.prev) + ")")); }
+      trend = same ? "same" : (worse ? "worse" : "better");
+      badge = same ? "" : (worse ? '<span style="color:#dc2626">&#9660;</span>' : '<span style="color:#16a34a">&#9650;</span>');
+      deltaText = same ? ("etwa wie Vorwoche (" + fmtN(a.prev) + unit + ")") : (worse ? ("schlechter als Vorwoche (" + fmtN(a.prev) + unit + ")") : ("besser als Vorwoche (" + fmtN(a.prev) + unit + ")")); }
     let cause = "";
     if (a.hold_sec != null && a.hold_sec >= 200) cause = "hält im Schnitt lange (" + Math.round(a.hold_sec) + " s)";
     else if (a.acw_sec != null && a.acw_sec >= 150) cause = "lange Nachbearbeitung (" + Math.round(a.acw_sec) + " s ACW)";
     else if (a.tenure_weeks != null && a.tenure_weeks < 8) cause = "erst " + a.tenure_weeks + " Wochen dabei";
     else if (a.last_fb_days == null) cause = "noch kein Feedbackgespräch";
     else if (a.tenure_weeks != null && a.tenure_weeks < 16) cause = a.tenure_weeks + " Wochen dabei";
-    return { name: a.name, value: fmtN(a.value), unit, tone, deltaText, cause };
+    return { name: a.name, emp_id: a.emp_id, band, value: fmtN(a.value), unit, tone, badge, trend, deltaText, cause,
+      valuePct: pct(a.value), avgPct: pct(teamAvg), href: a.emp_id ? linkGoto("emp", { id: a.emp_id }) : null };
   });
-  agents.sort((a, b) => { const rank = (t: string) => t === "bad" ? 0 : t === "neutral" ? 1 : 2; return rank(a.tone) - rank(b.tone); });
+  // Dringlichkeit: verschlechtert zuerst, dann kritisch vor schlecht.
+  const trank = (t: string) => t === "worse" ? 0 : (t === "same" || t === "new") ? 1 : 2;
+  const brank = (b: string) => b === "bad" ? 0 : b === "warn" ? 1 : 2;
+  agents.sort((a, b) => (trank(a.trend) - trank(b.trend)) || (brank(a.tone) - brank(b.tone)));
   const anyNew = dom[1].some((a) => a.tenure_weeks != null && a.tenure_weeks < 8);
   const anyTime = dom[1].some((a) => (a.hold_sec != null && a.hold_sec >= 200) || (a.acw_sec != null && a.acw_sec >= 150));
   const anyNoFb = dom[1].some((a) => a.last_fb_days == null);
   let lever;
-  if (anyNew) lever = "Die Neuen brauchen Begleitung bei der Gesprächsführung – eine Hospitation oder Side-by-Side hilft mehr als Zahlen.";
+  if (anyNew) lever = "Die Neuen brauchen Begleitung bei der Gesprächsführung, eine Hospitation oder Side-by-Side hilft mehr als Zahlen.";
   else if (anyTime) lever = "Schau mit ihnen, wo die Zeit hingeht: langes Halten und Nachbearbeitung lassen sich gezielt üben.";
-  else if (anyNoFb) lever = "Plan mit ihnen ein Feedbackgespräch – die Grundlage fehlt noch.";
+  else if (anyNoFb) lever = "Plan mit ihnen ein Feedbackgespräch, die Grundlage fehlt noch.";
   else lever = "Hör dir ein paar ihrer Calls an, dann siehst du, woran es hakt.";
   return { kpi, unit, teamAvg, agents, lever, names: dom[1].slice(0, 3).map((a) => a.name) };
 }
@@ -78,9 +90,13 @@ function weakAnalysis(weak: any[]): string {
 // HTML-Fassung (Mail): farbige Karten je Agent (rot schlechter / grün besser), Team-Schnitt abgesetzt, Was-hilft-Block.
 function weakRichHtml(weak: any[], brand: any): string {
   const d = weakData(weak); if (!d) return "";
-  let out = lead("<b>" + esc(joinUnd(d.names)) + "</b> liegen diese Woche bei " + esc(d.kpi) + " im kritischen Bereich. Zuerst, wer sich verschlechtert hat:");
-  if (d.teamAvg != null) out += refLine("Team-Schnitt " + fmtN(d.teamAvg) + d.unit);
-  d.agents.forEach((a: any) => { out += metricCard({ name: a.name, value: a.value, unit: a.unit, deltaText: a.deltaText, tone: a.tone, note: a.cause }); });
+  const links = d.agents.slice(0, 3).map((a: any) => a.href
+    ? '<a href="' + a.href + '" style="color:#0f2830;font-weight:700;text-decoration:none;border-bottom:1.5px solid ' + brand.accent + ';">' + esc(a.name) + "</a>"
+    : "<b>" + esc(a.name) + "</b>");
+  const intro = links.length <= 1 ? (links[0] || "") : links.slice(0, -1).join(", ") + " und " + links[links.length - 1];
+  let out = lead(intro + " liegen diese Woche bei " + esc(d.kpi) + " unter dem Ziel. Zuerst, wer sich verschlechtert hat:");
+  if (d.teamAvg != null) out += refLine("Team-Schnitt (▲ im Balken): " + fmtN(d.teamAvg) + d.unit);
+  d.agents.forEach((a: any) => { out += perfRow({ name: a.name, href: a.href, value: a.value, unit: a.unit, tone: a.tone, badge: a.badge, deltaText: a.deltaText, note: a.cause, valuePct: a.valuePct, avgPct: a.avgPct }); });
   out += callout("Was hilft", d.lever, brand.accent);
   return out;
 }
@@ -174,8 +190,8 @@ Deno.serve(async (req) => {
       const text = fill(pick.template, s);
       const isWeakRich = pick.template.includes("{weak_analysis}") && (s.weak || []).length;
       const inner = isWeakRich
-        ? (weakRichHtml(s.weak, brand) + button(PORTAL_URL, "Zum Team →", brand.accent))
-        : (lead(text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/\n/g, "<br>")) + button(PORTAL_URL, "Zum Team →", brand.accent));
+        ? (weakRichHtml(s.weak, brand) + button(linkGoto("performance"), "Zum Team ansehen", brand.accent))
+        : (lead(text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/\n/g, "<br>")) + button(linkGoto("performance"), "Zum Team ansehen", brand.accent));
       const html = shell(brand, "Ein Anstoß für dein Team", scope, inner);
       const email = previewTo || emailBy[uid];
       if (dry) { results.push({ leader: L.name, scope, key: pick.key, text, html, email }); continue; }

@@ -4,7 +4,7 @@
 // Cron: Tage 3–9, Mo–Fr; 2-Tage-Sperre gegen tägliches Nörgeln. Kanäle Mail (max@) + Slack.
 // Deploy: supabase functions deploy fx-rate-reminder --no-verify-jwt --use-api
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { agentBrand, shell, lead, button, PORTAL_URL } from "../_shared/agent_mail.ts";
+import { agentBrand, shell, lead, tiles, metricCard, callout, button, linkGoto } from "../_shared/agent_mail.ts";
 import { smtpSend, slackDM, agentMailSender } from "../_shared/agent_send.ts";
 import { scheduleDue, getSchedule } from "../_shared/schedule.ts";
 
@@ -43,8 +43,21 @@ Deno.serve(async (req) => {
     if (last && last[0] && (Date.now() - new Date(last[0].at).getTime()) < CADENCE_MS) return json({ ok: true, skipped: "cadence", month: key }); }
 
   const brand = await agentBrand(sb, "max", "#2563eb");
-  const leadTxt = "Der Wechselkurs für <b>" + monLabel + "</b> ist noch nicht eingetragen. Der Lohnlauf am 10. rechnet damit die Gehälter in Fremdwährung um. Bitte vorher im Lohn-Bereich eintragen, sonst rechnet der Lauf mit einem veralteten oder fehlenden Kurs.";
-  const html = shell(brand, "Wechselkurs fehlt für den Lohnlauf", "Zielmonat " + monLabel, lead(leadTxt) + button(PORTAL_URL, "Zum Lohn-Bereich →", brand.accent));
+  // Letzte zwei Monatskurse zur Größenordnung + Zielmonat deutlich als fehlend.
+  const mkey = (d: Date) => d.getUTCFullYear() + "-" + String(d.getUTCMonth() + 1).padStart(2, "0");
+  const mlab = (d: Date) => MON[d.getUTCMonth()] + " " + d.getUTCFullYear();
+  const p1 = new Date(Date.UTC(prev.getUTCFullYear(), prev.getUTCMonth() - 1, 1));
+  const p2 = new Date(Date.UTC(prev.getUTCFullYear(), prev.getUTCMonth() - 2, 1));
+  const fmtRate = (r: any) => (r != null && r !== "" && Number(r) > 0) ? Number(r).toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : null;
+  const r1 = fmtRate(rates[mkey(p1)]), r2 = fmtRate(rates[mkey(p2)]);
+  const leadTxt = "Der Wechselkurs für den Lohnlauf am 10. fehlt noch. So lagen die letzten Monate, und das ist die Lücke:";
+  const knownTiles = tiles([
+    { big: r2 || "—", label: mlab(p2), sub: r2 ? "ALL / 1 €" : "kein Wert" },
+    { big: r1 || "—", label: mlab(p1), sub: r1 ? "ALL / 1 €" : "kein Wert" },
+  ]);
+  const missing = metricCard({ name: mlab(prev) + " (Zielmonat)", value: "fehlt", tone: "bad", note: "Diesen Kurs braucht der Lohnlauf am 10." });
+  const folge = callout("Ohne Kurs kein Lohnlauf", "Ist der Kurs am 10. nicht eingetragen, rechnet der Lauf mit einem veralteten oder gar keinem Kurs, und die LEK-Gehälter stimmen nicht. Zwei Minuten jetzt sparen die Korrektur hinterher.", brand.accent);
+  const html = shell(brand, "Wechselkurs fehlt für den Lohnlauf", "Zielmonat " + monLabel, lead(leadTxt) + knownTiles + missing + folge + button(linkGoto("fx"), "Kurs jetzt eintragen", brand.accent));
   const slackText = "*Max · Wechselkurs*\nDer Kurs für " + monLabel + " fehlt noch. Der Lohnlauf am 10. braucht ihn — bitte vorher eintragen.";
 
   // Empfänger auflösen (bei Vorschau nur an dich)
