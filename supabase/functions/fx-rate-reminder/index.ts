@@ -1,0 +1,61 @@
+// Max erinnert rechtzeitig vor dem Lohnlauf am 10. an den Wechselkurs — damit er eingetragen ist, wenn
+// gerechnet wird. An Shkurte, Rajner und info@mynaai.de. Nur wenn der Kurs des zu zahlenden Monats FEHLT.
+// jsr_fx_rates_v1 = { "YYYY-MM": kurs }. Der Lohnlauf am 10. zahlt den Vormonat -> Zielmonat = Vormonat.
+// Cron: Tage 3–9, Mo–Fr; 2-Tage-Sperre gegen tägliches Nörgeln. Kanäle Mail (max@) + Slack.
+// Deploy: supabase functions deploy fx-rate-reminder --no-verify-jwt --use-api
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { agentBrand, shell, lead, button, PORTAL_URL } from "../_shared/agent_mail.ts";
+import { smtpSend, slackDM, agentMailSender } from "../_shared/agent_send.ts";
+import { isWeekendBerlin } from "../_shared/schedule.ts";
+
+const sb = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+const cors = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type", "Access-Control-Allow-Methods": "POST, OPTIONS" };
+const json = (b: unknown, s = 200) => new Response(JSON.stringify(b), { status: s, headers: { ...cors, "Content-Type": "application/json" } });
+const CADENCE_MS = 2 * 864e5;
+// Empfänger: Rajner + Shkurte (per uid) und „mich".
+const RECIP_UIDS = ["14a5001c-9efb-4f76-b8f8-145e24b4be5f", "54f067ab-b6f8-47a1-afa7-6dcb86b89b29"];
+const OWNER_MAIL = "info@mynaai.de";
+const MON = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"];
+
+function berlinNow() { return new Date(new Date().toLocaleString("en-US", { timeZone: "Europe/Berlin" })); }
+
+Deno.serve(async (req) => {
+  if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
+  let body: any = {}; try { body = await req.json(); } catch (_e) { /* Cron */ }
+  const force = body.force === true, dry = body.dry === true;
+  if (isWeekendBerlin() && !force) return json({ ok: true, skipped: "weekend" });
+
+  // Zielmonat = Vormonat (der Lohnlauf am 10. zahlt den abgelaufenen Monat)
+  const n = berlinNow();
+  const prev = new Date(Date.UTC(n.getFullYear(), n.getMonth() - 1, 1));
+  const key = prev.getUTCFullYear() + "-" + String(prev.getUTCMonth() + 1).padStart(2, "0");
+  const monLabel = MON[prev.getUTCMonth()] + " " + prev.getUTCFullYear();
+
+  const { data: cfg } = await sb.from("app_config").select("value").eq("key", "jsr_fx_rates_v1").maybeSingle();
+  const rates = (cfg && cfg.value) || {};
+  const rate = rates[key];
+  if (rate != null && rate !== "" && Number(rate) > 0) return json({ ok: true, state: "set", month: key, rate });
+
+  // Kadenz: nur alle 2 Tage
+  if (!force) { const { data: last } = await sb.from("agent_actions").select("at").eq("agent_key", "max").eq("kind", "fx_rate_reminder").order("at", { ascending: false }).limit(1);
+    if (last && last[0] && (Date.now() - new Date(last[0].at).getTime()) < CADENCE_MS) return json({ ok: true, skipped: "cadence", month: key }); }
+
+  const brand = await agentBrand(sb, "max", "#2563eb");
+  const leadTxt = "Der Wechselkurs für <b>" + monLabel + "</b> ist noch nicht eingetragen. Der Lohnlauf am 10. rechnet damit die Gehälter in Fremdwährung um. Bitte vorher im Lohn-Bereich eintragen, sonst rechnet der Lauf mit einem veralteten oder fehlenden Kurs.";
+  const html = shell(brand, "Wechselkurs fehlt für den Lohnlauf", "Zielmonat " + monLabel, lead(leadTxt) + button(PORTAL_URL, "Zum Lohn-Bereich →", brand.accent));
+  const slackText = "*Max · Wechselkurs*\nDer Kurs für " + monLabel + " fehlt noch. Der Lohnlauf am 10. braucht ihn — bitte vorher eintragen.";
+
+  // Empfänger auflösen
+  let emails: string[] = [OWNER_MAIL];
+  try { const { data: al } = await sb.auth.admin.listUsers({ perPage: 200 }); const byId: Record<string, string> = {}; (al?.users || []).forEach((u: any) => { if (u.email) byId[u.id] = u.email; });
+    RECIP_UIDS.forEach((uid) => { if (byId[uid]) emails.push(byId[uid]); }); } catch (_e) {}
+  emails = [...new Set(emails)];
+  if (dry) return json({ ok: true, dry: true, month: key, emails, html });
+
+  const sender = await agentMailSender(sb, "max");
+  const results: any[] = [];
+  for (const to of emails) { const mr = sender ? await smtpSend(sender, to, "Wechselkurs für den Lohnlauf (" + monLabel + ")", html) : { ok: false, error: "kein Absender" };
+    const sr = await slackDM(to, slackText); results.push({ to, mail: mr.ok ? "sent" : mr.error, slack: sr }); }
+  try { await sb.from("agent_actions").insert({ agent_key: "max", kind: "fx_rate_reminder", meta: { month: key, recipients: emails.length } }); } catch (_e) {}
+  return json({ ok: true, state: "reminded", month: key, results });
+});
