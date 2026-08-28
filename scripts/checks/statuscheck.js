@@ -1,35 +1,44 @@
 #!/usr/bin/env node
-// Deploy-Check: STATUS_FLOW (frontend/hr.html) vs. DB-Constraint cvs_status_valid.
+// Deploy-Check: Frontend-Allow-Listen gegen ihre DB-CHECK-Constraints.
+//   (1) STATUS_FLOW           -> cvs_status_valid
+//   (2) UPLOAD_SOURCES        -> data_imports_source_type_check
 //
-// STATUS_FLOW und die CHECK-Constraint sind zweimal dieselbe Wahrheit. Laufen sie auseinander, wird ein im UI
-// gesetzter Status vom DB-Update STILL abgelehnt (z.B. Kuendigung "kommt nicht an") — und faellt erst auf, wenn
+// Jeweils zweimal dieselbe Wahrheit. Laufen sie auseinander, wird ein im UI gesetzter Wert vom DB-Insert/Update
+// STILL abgelehnt (Kuendigung "kommt nicht an", Upload scheitert an der Constraint) — und faellt erst auf, wenn
 // jemand nicht arbeiten kann. Dieser Check meldet das VOR dem Deploy.
 //
-// Blockt, wenn ein STATUS_FLOW-Status in der Constraint FEHLT (schaedliche Richtung: UI setzt, DB weist ab).
-// Constraint-Werte, die nicht in STATUS_FLOW stehen (z.B. terminated_by_*), sind nur ein Hinweis.
-// Ist die DB/CLI nicht erreichbar -> SKIP (kein Block, damit der Deploy nicht hart an der DB haengt).
+// Blockt, wenn ein Frontend-Wert in der Constraint FEHLT (schaedliche Richtung: UI setzt, DB weist ab).
+// Constraint-Werte ohne Frontend-Pendant sind nur ein Hinweis. DB/CLI nicht erreichbar -> SKIP (kein Block).
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const HTML = path.join(ROOT, 'frontend', 'hr.html');
+const SRC = fs.readFileSync(HTML, 'utf8');
 
 function statusFlowKeys() {
-  const src = fs.readFileSync(HTML, 'utf8');
-  const m = src.match(/const STATUS_FLOW\s*=\s*\[([\s\S]*?)\n\];/);
+  const m = SRC.match(/const STATUS_FLOW\s*=\s*\[([\s\S]*?)\n\];/);
   if (!m) throw new Error('STATUS_FLOW-Array in frontend/hr.html nicht gefunden.');
   const keys = [...m[1].matchAll(/key:\s*'([a-z0-9_]+)'/g)].map(x => x[1]);
   if (!keys.length) throw new Error('Keine STATUS_FLOW-Keys geparst.');
   return [...new Set(keys)];
 }
 
-function constraintValues() {
+function uploadSourceKeys() {
+  const m = SRC.match(/const UPLOAD_SOURCES\s*=\s*\[([\s\S]*?)\n\];/);
+  if (!m) throw new Error('UPLOAD_SOURCES-Array in frontend/hr.html nicht gefunden.');
+  const keys = [...m[1].matchAll(/key:\s*'([a-z0-9_]+)'/g)].map(x => x[1]);
+  if (!keys.length) throw new Error('Keine UPLOAD_SOURCES-Keys geparst.');
+  return [...new Set(keys)];
+}
+
+function constraintValues(name) {
   let out;
   try {
     out = execSync(
-      'supabase db query --linked "select pg_get_constraintdef(oid) as def from pg_constraint where conname=\'cvs_status_valid\'"',
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000 }
+      'supabase db query --linked "select pg_get_constraintdef(oid) as def from pg_constraint where conname=\'' + name + '\'"',
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000, cwd: ROOT }
     );
   } catch (e) {
     return null; // supabase-CLI/DB nicht verfuegbar
@@ -38,29 +47,32 @@ function constraintValues() {
   return vals.length ? [...new Set(vals)] : null;
 }
 
-const flow = statusFlowKeys();
-const cons = constraintValues();
-
-if (!cons) {
-  console.log('SKIP: cvs_status_valid nicht abfragbar (supabase/DB nicht erreichbar) — Status-Abgleich uebersprungen.');
-  process.exit(0);
+// Ein Abgleich: Frontend-Liste muss vollstaendig in der Constraint enthalten sein.
+function check(label, frontendKeys, constraintName, notImported) {
+  const cons = constraintValues(constraintName);
+  if (!cons) { console.log('SKIP: ' + constraintName + ' nicht abfragbar (DB/CLI nicht erreichbar).'); return true; }
+  const expect = frontendKeys.filter(k => !(notImported || []).includes(k));
+  const missing = expect.filter(k => !cons.includes(k));
+  const extra = cons.filter(k => !frontendKeys.includes(k));
+  if (extra.length) console.log('Hinweis: in ' + constraintName + ', aber nicht in ' + label + ' (unkritisch): ' + extra.join(', '));
+  if (missing.length) {
+    console.error('✗ ' + label + ' hat Werte, die ' + constraintName + ' NICHT erlaubt — der DB-Schreibvorgang');
+    console.error('  wird STILL abgelehnt (Setzen/Upload "kommt nicht an"). Fehlend in der Constraint:');
+    console.error('    ' + missing.join(', '));
+    console.error('  Fix: Migration, die ' + constraintName + ' um diese Werte erweitert, einspielen, dann deployen.');
+    return false;
+  }
+  console.log('OK: ' + expect.length + ' ' + label + '-Werte alle in ' + constraintName + ' erlaubt.');
+  return true;
 }
 
-const missingInDb = flow.filter(k => !cons.includes(k));
-const extraInDb = cons.filter(k => !flow.includes(k));
+let ok = true;
+// (1) STATUS_FLOW -> cvs_status_valid
+ok = check('STATUS_FLOW', statusFlowKeys(), 'cvs_status_valid') && ok;
+// (2) UPLOAD_SOURCES -> data_imports_source_type_check. 'longterm' schreibt in report_longterm, keinen
+//     data_imports-Satz — trotzdem in der Constraint gefuehrt (schadet nicht), darum kein notImported noetig.
+ok = check('UPLOAD_SOURCES', uploadSourceKeys(), 'data_imports_source_type_check') && ok;
 
-if (extraInDb.length) {
-  console.log('Hinweis: in cvs_status_valid, aber nicht in STATUS_FLOW (unkritisch): ' + extraInDb.join(', '));
-}
-
-if (missingInDb.length) {
-  console.error('✗ STATUS_FLOW hat Status, die cvs_status_valid NICHT erlaubt — ein Setzen wird von der DB');
-  console.error('  still abgelehnt (z.B. Kuendigung "kommt nicht an"). Fehlend in der Constraint:');
-  console.error('    ' + missingInDb.join(', '));
-  console.error('  Fix: Migration, die cvs_status_valid um diese Werte erweitert (Muster: migrations/*_cvs_status_*.sql),');
-  console.error('  einspielen, dann erneut deployen.');
-  process.exit(1);
-}
-
-console.log('RESULT: PASS (' + flow.length + ' STATUS_FLOW-Status alle in cvs_status_valid erlaubt)');
+if (!ok) process.exit(1);
+console.log('RESULT: PASS');
 process.exit(0);

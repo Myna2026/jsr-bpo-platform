@@ -27,9 +27,12 @@ Deno.serve(async (req) => {
   const sched = await getSchedule(sb, "fx_rate");
   if (!force && !scheduleDue(sched)) return json({ ok: true, skipped: "not-scheduled" });
 
-  // Zielmonat = Vormonat (der Lohnlauf am 10. zahlt den abgelaufenen Monat)
+  // Zielmonat = der Monat, den der NÄCHSTE Lohnlauf (nächster 10.) zahlt = Monat vor diesem 10.
+  // Wichtig: nach dem 10. ist der nächste Lauf erst im Folgemonat -> er zahlt den AKTUELLEN Monat.
+  // (Sonst würde am 28.8. fälschlich Juli als Ziel gelten, obwohl der 10.9.-Lauf den August zahlt.)
   const n = berlinNow();
-  const prev = new Date(Date.UTC(n.getFullYear(), n.getMonth() - 1, 1));
+  const nextTenth = n.getDate() <= 10 ? new Date(Date.UTC(n.getFullYear(), n.getMonth(), 10)) : new Date(Date.UTC(n.getFullYear(), n.getMonth() + 1, 10));
+  const prev = new Date(Date.UTC(nextTenth.getUTCFullYear(), nextTenth.getUTCMonth() - 1, 1));
   const key = prev.getUTCFullYear() + "-" + String(prev.getUTCMonth() + 1).padStart(2, "0");
   const monLabel = MON[prev.getUTCMonth()] + " " + prev.getUTCFullYear();
 

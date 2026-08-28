@@ -4,7 +4,7 @@
 // Wechselnd (nie derselbe wie zuletzt), 2–3×/Woche (Mo–Fr, ≥2 Tage Abstand je Leiter). Mail (max@) + Slack.
 // Team = (Projekt, Skill); Leiter = Position 'Teamleiter'. Cron: Mo–Fr. Deploy: functions deploy leader-nudges --no-verify-jwt --use-api
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { agentBrand, shell, lead, button, callout, refLine, perfRow, linkGoto } from "../_shared/agent_mail.ts";
+import { agentBrand, shell, lead, button, callout, refLine, tiles, metricCard, perfRow, linkGoto } from "../_shared/agent_mail.ts";
 import { smtpSend, slackDM, agentMailSender } from "../_shared/agent_send.ts";
 import { scheduleDue, getSchedule } from "../_shared/schedule.ts";
 
@@ -87,17 +87,36 @@ function weakAnalysis(weak: any[]): string {
   return intro + "\n" + lines.join("\n") + "\n\nWas hilft: " + d.lever;
 }
 
-// HTML-Fassung (Mail): farbige Karten je Agent (rot schlechter / grün besser), Team-Schnitt abgesetzt, Was-hilft-Block.
-function weakRichHtml(weak: any[], brand: any): string {
-  const d = weakData(weak); if (!d) return "";
-  const links = d.agents.slice(0, 3).map((a: any) => a.href
-    ? '<a href="' + a.href + '" style="color:#0f2830;font-weight:700;text-decoration:none;border-bottom:1.5px solid ' + brand.accent + ';">' + esc(a.name) + "</a>"
-    : "<b>" + esc(a.name) + "</b>");
-  const intro = links.length <= 1 ? (links[0] || "") : links.slice(0, -1).join(", ") + " und " + links[links.length - 1];
-  let out = lead(intro + " liegen diese Woche bei " + esc(d.kpi) + " unter dem Ziel. Zuerst, wer sich verschlechtert hat:");
-  if (d.teamAvg != null) out += refLine("Team-Schnitt (▲ im Balken): " + fmtN(d.teamAvg) + d.unit);
-  d.agents.forEach((a: any) => { out += perfRow({ name: a.name, href: a.href, value: a.value, unit: a.unit, tone: a.tone, badge: a.badge, deltaText: a.deltaText, note: a.cause, valuePct: a.valuePct, avgPct: a.avgPct }); });
-  out += callout("Was hilft", d.lever, brand.accent);
+// Kleiner Abschnitts-Titel.
+function sectionLabel(t: string): string {
+  return '<tr><td style="padding:13px 22px 2px;"><div style="font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;color:#5b6b70;">' + esc(t) + "</div></td></tr>";
+}
+const bandTone = (b: string) => b === "Sehr gut" ? "good" : b === "Kritisch" ? "bad" : b === "Schlecht" ? "warn" : "neutral";
+
+// Die LAGE grafisch — immer, auch wenn niemand schwach ist: Anwesenheit, KPI-Schnitt je Kennzahl,
+// Schwache (mit Balken gegen Team-Schnitt) und Starke (grün, verlinkt). So sieht der Leiter die Zahlen,
+// nicht nur eine Floskel.
+function situationHtml(s: any, brand: any): string {
+  const size = s.team_size || 0;
+  const absent = uniq((s.absent || []).map((x: any) => x.name));
+  const present = Math.max(0, size - absent.length);
+  let out = tiles([
+    { big: String(size), label: "im Team" },
+    { big: String(present), label: "anwesend" },
+    { big: absent.length ? String(absent.length) : "0", label: absent.length ? "abwesend" : "niemand fehlt", sub: absent.length ? absentReason(s.absent) : "" },
+  ]);
+  const kpis = s.kpis || [];
+  if (kpis.length) { out += sectionLabel("Kennzahlen im Schnitt");
+    kpis.forEach((k: any) => { out += metricCard({ name: k.kpi, value: fmtN(k.avg) + (kpiUnit(k.kpi) || ""), tone: bandTone(k.band), note: "Team-Schnitt · " + (k.band || "") }); }); }
+  const wd = weakData(s.weak);
+  if (wd) { out += sectionLabel("Unter dem Ziel bei " + wd.kpi);
+    if (wd.teamAvg != null) out += refLine("Team-Schnitt (▲ im Balken): " + fmtN(wd.teamAvg) + wd.unit);
+    wd.agents.forEach((a: any) => { out += perfRow({ name: a.name, href: a.href, value: a.value, unit: a.unit, tone: a.tone, badge: a.badge, deltaText: a.deltaText, note: a.cause, valuePct: a.valuePct, avgPct: a.avgPct }); }); }
+  const byName: Record<string, any> = {}; (s.strong || []).forEach((a: any) => { if (!byName[a.name]) byName[a.name] = a; });
+  const uStrong = Object.values(byName);
+  if (uStrong.length) { out += sectionLabel("Stark diese Woche");
+    uStrong.slice(0, 4).forEach((a: any) => { out += metricCard({ name: a.name, value: fmtN(a.value) + (kpiUnit(a.kpi) || ""), tone: "good", note: a.kpi + " · sehr gut", href: a.emp_id ? linkGoto("emp", { id: a.emp_id }) : undefined }); });
+    if (uStrong.length > 4) out += refLine("und " + numW(uStrong.length - 4) + " weitere im grünen Bereich"); }
   return out;
 }
 
@@ -187,11 +206,17 @@ Deno.serve(async (req) => {
       else if (generals.length) { const idx = (new Date().getUTCDate() + L.name.length) % generals.length; pick = generals[idx]; }
       if (!pick) { results.push({ leader: L.name, skipped: "kein Anstoß" }); continue; }
 
-      const text = fill(pick.template, s);
-      const isWeakRich = pick.template.includes("{weak_analysis}") && (s.weak || []).length;
-      const inner = isWeakRich
-        ? (weakRichHtml(s.weak, brand) + button(linkGoto("performance"), "Zum Team ansehen", brand.accent))
-        : (lead(text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/\n/g, "<br>")) + button(linkGoto("performance"), "Zum Team ansehen", brand.accent));
+      const text = fill(pick.template, s);   // Slack-Text (voll, mit Analyse)
+      // Advice fürs HTML: bei {weak_analysis}-Templates nur den Hebel (die Karten zeigen die Analyse schon),
+      // sonst der gefüllte Template-Text. Immer: erst die Lage (Zahlen), dann der Anstoß.
+      const wd = weakData(s.weak);
+      const advice = pick.template.includes("{weak_analysis}")
+        ? (wd ? wd.lever : fill(pick.template, s))
+        : fill(pick.template, s);
+      const inner = lead("Die Lage in deinem Team " + esc(scope) + " diese Woche, dann mein Anstoß:")
+        + situationHtml(s, brand)
+        + callout("Mein Anstoß", advice, brand.accent)
+        + button(linkGoto("performance"), "Zum Team ansehen", brand.accent);
       const html = shell(brand, "Ein Anstoß für dein Team", scope, inner);
       const email = previewTo || emailBy[uid];
       if (dry) { results.push({ leader: L.name, scope, key: pick.key, text, html, email }); continue; }

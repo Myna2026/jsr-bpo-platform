@@ -94,13 +94,16 @@ export function observation(brand: AgentBrand, text: string): string {
 
 // Metrik-Karte: Name + Notiz links, große farbige Zahl + Delta rechts. tone steuert die Farbe.
 //   'bad' = rot (schlechter), 'good' = grün (besser), 'neutral' = dunkel. Für „wer ist schwach/stark".
-export function metricCard(o: { name: string; value: string | number; unit?: string; deltaText?: string; tone?: string; note?: string }): string {
+export function metricCard(o: { name: string; value: string | number; unit?: string; deltaText?: string; tone?: string; note?: string; href?: string }): string {
   const tone = o.tone || "neutral";
-  const col = tone === "bad" ? "#dc2626" : tone === "good" ? "#16a34a" : "#0f2830";
-  const bg = tone === "bad" ? "#fef2f2" : tone === "good" ? "#f0fdf4" : "#f5f7f8";
-  const bd = tone === "bad" ? "#fecaca" : tone === "good" ? "#bbf7d0" : "#e6ecee";
+  const col = tone === "bad" ? "#dc2626" : tone === "good" ? "#16a34a" : tone === "warn" ? "#d97706" : "#0f2830";
+  const bg = tone === "bad" ? "#fef2f2" : tone === "good" ? "#f0fdf4" : tone === "warn" ? "#fffbeb" : "#f5f7f8";
+  const bd = tone === "bad" ? "#fecaca" : tone === "good" ? "#bbf7d0" : tone === "warn" ? "#fde68a" : "#e6ecee";
+  const nameHtml = o.href
+    ? '<a href="' + esc(o.href) + '" style="color:#0f2830;text-decoration:none;border-bottom:1.5px solid ' + col + ';">' + esc(o.name) + "</a>"
+    : esc(o.name);
   return '<tr><td style="padding:5px 22px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:' + bg + ";border:1px solid " + bd + ';border-radius:12px;"><tr>'
-    + '<td style="padding:12px 14px;"><div style="font-size:15px;font-weight:700;color:#0f2830;">' + esc(o.name) + "</div>"
+    + '<td style="padding:12px 14px;"><div style="font-size:15px;font-weight:700;color:#0f2830;">' + nameHtml + "</div>"
     + (o.note ? '<div style="font-size:12.5px;color:#5b6b70;margin-top:3px;line-height:1.4;">' + esc(o.note) + "</div>" : "")
     + '</td><td width="130" valign="top" style="padding:12px 14px;text-align:right;white-space:nowrap;">'
     + '<div style="font-size:24px;font-weight:800;color:' + col + ';line-height:1;">' + esc(o.value) + esc(o.unit || "") + "</div>"
