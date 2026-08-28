@@ -6,7 +6,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { agentBrand, shell, lead, block, button, PORTAL_URL } from "../_shared/agent_mail.ts";
 import { smtpSend, slackDM, agentMailSender } from "../_shared/agent_send.ts";
-import { isWeekendBerlin } from "../_shared/schedule.ts";
+import { scheduleDue, getSchedule } from "../_shared/schedule.ts";
 
 const sb = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 const cors = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type", "Access-Control-Allow-Methods": "POST, OPTIONS" };
@@ -26,7 +26,8 @@ Deno.serve(async (req) => {
   let body: any = {}; try { body = await req.json(); } catch (_e) { /* Cron */ }
   const previewTo = (typeof body.preview_to === "string" && body.preview_to.includes("@")) ? body.preview_to : null;
   const force = body.force === true || !!previewTo, dry = body.dry === true;
-  if (isWeekendBerlin() && !force) return json({ ok: true, skipped: "weekend" });
+  const sched = await getSchedule(sb, "contract_expiry");
+  if (!force && !scheduleDue(sched)) return json({ ok: true, skipped: "not-scheduled" });
 
   if (!force && !dry) { const { data: last } = await sb.from("agent_actions").select("at").eq("agent_key", "lena").eq("kind", "contract_expiry").order("at", { ascending: false }).limit(1);
     if (last && last[0] && (Date.now() - new Date(last[0].at).getTime()) < CADENCE_MS) return json({ ok: true, skipped: "cadence" }); }

@@ -9,7 +9,7 @@
 // Optik aus der geteilten Grundlage _shared/agent_mail.ts. Deploy: supabase functions deploy maya-weekly --no-verify-jwt --use-api
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { agentBrand, tiles, barChart, hBars, observation, button, shell, delta, PORTAL_URL } from "../_shared/agent_mail.ts";
-import { isWeekendBerlin } from "../_shared/schedule.ts";
+import { scheduleDue, getSchedule } from "../_shared/schedule.ts";
 
 const SB_URL  = Deno.env.get("SUPABASE_URL")!;
 const SERVICE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -172,8 +172,11 @@ Deno.serve(async (req)=>{
   if(req.method==="OPTIONS") return new Response("ok",{headers:cors});
   let body:any={}; try{ body=await req.json(); }catch(_e){}
   const mode = body.mode==="preview" ? "preview" : "send";
-  // Kein-Wochenende-Regel: der reguläre Versand läuft nur Mo–Fr (Cron ist ohnehin Freitag). preview/dry/force frei.
-  if(mode==="send" && isWeekendBerlin() && !body.force) return json({ok:true,skipped:"weekend"});
+  // Zentrale Zeitsteuerung: der reguläre Versand feuert nur zur geplanten Zeit (Standard Fr 09:00). preview/dry/force frei.
+  if(mode==="send"){ const sched=await getSchedule(sb,"maya_weekly"); if(!body.force && !scheduleDue(sched)) return json({ok:true,skipped:"not-scheduled"}); }
+  // Personen, die die Wochenmeldung abbestellt haben (reminder_schedule je Person, active=false).
+  const {data:_optOut}=await sb.from("reminder_schedule").select("user_id").eq("reminder_key","maya_weekly").eq("active",false).not("user_id","is",null);
+  const optOff=new Set((_optOut||[]).map((r:any)=>r.user_id));
   const toD = (typeof body.to==="string"&&/^\d{4}-\d{2}-\d{2}$/.test(body.to)) ? body.to : addDays(berlinToday(),-1);
   const fromD = (typeof body.from==="string"&&/^\d{4}-\d{2}-\d{2}$/.test(body.from)) ? body.from : addDays(toD,-6);
   const pToD = addDays(fromD,-1), pFromD = addDays(pToD,-6);   // Vorwoche
@@ -229,7 +232,7 @@ Deno.serve(async (req)=>{
     return json({ok:true,mode,to,window:{from:fromD,to:toD},persons:aggList.length,managers:mgrMails,results});
   }
 
-  for(const a of aggList){ const email=emailBy[a.uid]; const p=pAggBy[a.uid];
+  for(const a of aggList){ if(optOff.has(a.uid)){ results.push({person:a.name,skipped:"opt-out"}); continue; } const email=emailBy[a.uid]; const p=pAggBy[a.uid];
     const html=shell(brand, "Deine Woche im System", sub, personInner(brand,a,p,fromD,toD,minutesOn));
     const mr = email ? await smtpSend(sender,email,"Deine Woche im System · "+deDate(fromD)+"–"+deDate(toD),html) : {ok:false,error:"no-email"};
     const sr = await slackDM(email, personText(a,fromD,toD,minutesOn));

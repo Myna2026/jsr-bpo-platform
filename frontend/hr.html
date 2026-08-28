@@ -37168,15 +37168,22 @@ function UsageDetailModal({userId, userName, onClose}){
 // Katalog der aktiven Erinnerungs-Regeln (Crons + Einblendungen). last-send kommt live aus agent_actions.kind.
 // Editierbar je Person: Kanal (notify_prefs) + welche Agenten Einblendungen schicken dürfen (agent_prefs).
 const REMINDER_CATALOG = [
-  {agent:'maya',  title:'Wochenmeldung (Nutzung & Aktivität)', channels:['mail','slack'], rhythm:'Freitag ~09:00',        audience:'jede interne Person einzeln + Gesamt an Geschäftsleitung', kinds:['weekly_person','weekly_overview']},
-  {agent:'max',   title:'Tagesaufgaben-Erinnerung',            channels:['slack'],         rhythm:'werktags 9/12/16 Uhr', audience:'jede Person mit offenen Aufgaben', kinds:['reminder_slack','reminder_cliq']},
-  {agent:'max',   title:'Upload-Erinnerung',                   channels:['mail','slack'],  rhythm:'alle 2 Werktage',      audience:'Edi Shaqiri (Holidaycheck-Forecast)', kinds:['edi_upload_reminder']},
-  {agent:'max',   title:'Wechselkurs vor dem Lohnlauf',        channels:['mail','slack'],  rhythm:'Tage 3–9, vor dem 10.', audience:'Shkurte, Rajner, Christian', kinds:['fx_rate_reminder']},
-  {agent:'max',   title:'Teamleiter-Anstöße',                  channels:['mail','slack'],  rhythm:'2–3×/Woche, wechselnd', audience:'Teamleiter je Skill-Gruppe (aus der Position)', kinds:['leader_nudge']},
-  {agent:'lena',  title:'Vertragsübersicht (auslaufend)',      channels:['mail','slack'],  rhythm:'1. + 15. im Monat',    audience:'Gesamt an Shkurte/Rajner/Thorsten; Ylli & Edi je ihr Team', kinds:['contract_expiry']},
-  {agent:'clara', title:'Recruiting-Morgenmail',               channels:['mail','slack'],  rhythm:'werktags früh',        audience:'Recruiting-Team', recipientsConfig:'jsr_clara_digest_recipients_v1', kinds:[]},
+  {agent:'maya',  title:'Wochenmeldung (Nutzung & Aktivität)', channels:['mail','slack'], schedKey:'maya_weekly',     audience:'jede interne Person einzeln + Gesamt an Geschäftsleitung', kinds:['weekly_person','weekly_overview']},
+  {agent:'max',   title:'Tagesaufgaben-Erinnerung',            channels:['slack'],         schedKey:'task_reminders', audience:'jede Person mit offenen Aufgaben', kinds:['reminder_slack','reminder_cliq']},
+  {agent:'max',   title:'Upload-Erinnerung',                   channels:['mail','slack'],  schedKey:'edi_upload',     audience:'Edi Shaqiri (Holidaycheck-Forecast)', kinds:['edi_upload_reminder']},
+  {agent:'max',   title:'Wechselkurs vor dem Lohnlauf',        channels:['mail','slack'],  schedKey:'fx_rate',        audience:'Shkurte, Rajner, Christian', kinds:['fx_rate_reminder']},
+  {agent:'max',   title:'Teamleiter-Anstöße',                  channels:['mail','slack'],  schedKey:'leader_nudges',  audience:'Teamleiter je Skill-Gruppe (aus der Position)', kinds:['leader_nudge']},
+  {agent:'lena',  title:'Vertragsübersicht (auslaufend)',      channels:['mail','slack'],  schedKey:'contract_expiry',audience:'Gesamt an Shkurte/Rajner/Thorsten; Ylli & Edi je ihr Team', kinds:['contract_expiry']},
+  {agent:'clara', title:'Recruiting-Morgenmail',               channels:['mail','slack'],  schedKey:'clara_digest',   audience:'Recruiting-Team', recipientsConfig:'jsr_clara_digest_recipients_v1', kinds:[]},
   {agent:'__all__',title:'Einblendungen im System',            channels:['system'],        rhythm:'werktags, im passenden Bereich', audience:'je Person konfigurierbar (unten)', kinds:[], perPerson:true},
 ];
+const CADENCE_OPTS = [['daily','täglich'],['weekly','wöchentlich'],['every_2_days','alle 2 Tage'],['monthly','monatlich'],['twice_monthly','2× im Monat']];
+const WD_OPTS = [[1,'Mo'],[2,'Di'],[3,'Mi'],[4,'Do'],[5,'Fr']];
+function schedRhythmText(s){ if(!s) return '—'; const cad=(CADENCE_OPTS.find(c=>c[0]===s.cadence)||['',s.cadence])[1];
+  const hrs=(s.hours||[]).join(', ')+' Uhr'; let extra='';
+  if(s.cadence==='weekly') extra=' · '+((WD_OPTS.find(w=>w[0]===s.weekday)||[0,'?'])[1]);
+  else if(s.cadence==='monthly'||s.cadence==='twice_monthly') extra=' · Tag '+((s.month_days||[]).join(','));
+  return cad+extra+' um '+hrs; }
 const CHANNEL_LABEL = {mail:'Mail', slack:'Slack', cliq:'Zoho Cliq', system:'im System', none:'aus'};
 
 function RemindersView({team}){
@@ -37186,10 +37193,13 @@ function RemindersView({team}){
   const [users,setUsers]=useState([]); const [prefs,setPrefs]=useState({}); const [chan,setChan]=useState({}); const [defChan,setDefChan]=useState('slack');
   const [nudges,setNudges]=useState([]); const [nAdd,setNAdd]=useState({key:'',template:'',cond:'',prio:1});
   const [recipCfg,setRecipCfg]=useState({});
+  const [sched,setSched]=useState({});   // reminder_key -> global schedule row
+  const [schedPerson,setSchedPerson]=useState({});   // reminder_key|user_id -> override row
+  const [schedEdit,setSchedEdit]=useState('');   // welcher Zeitplan gerade aufgeklappt
   const [busy,setBusy]=useState('');
   const INTERNAL=['management','hr','teamlead','projektleiter','mitarbeiter','trainer','qm','finance'];
   const load=React.useCallback(async()=>{ try{
-    const [aa,au,ap,np,dc,lnp,cfg]=await Promise.all([
+    const [aa,au,ap,np,dc,lnp,cfg,rsched]=await Promise.all([
       sb.from('agent_actions').select('kind,at').order('at',{ascending:false}).limit(500),
       sb.from('app_users').select('user_id,full_name,role_keys,active'),
       sb.from('agent_prefs').select('user_id,settings'),
@@ -37197,9 +37207,11 @@ function RemindersView({team}){
       sb.from('app_config').select('value').eq('key','jsr_notify_channel_default').maybeSingle(),
       sb.from('leader_nudge_prompts').select('*').order('prio',{ascending:false}),
       sb.from('app_config').select('key,value').in('key',['jsr_clara_digest_recipients_v1']),
+      sb.from('reminder_schedule').select('*'),
     ]);
     setNudges(lnp.data||[]);
     const rc={}; (cfg.data||[]).forEach(r=>{ rc[r.key]=r.value; }); setRecipCfg(rc);
+    const sm={}, sp={}; (rsched.data||[]).forEach(r=>{ if(r.user_id==null) sm[r.reminder_key]=r; else sp[r.reminder_key+'|'+r.user_id]=r; }); setSched(sm); setSchedPerson(sp);
     const lk={}; (aa.data||[]).forEach(r=>{ if(!lk[r.kind]) lk[r.kind]=r.at; }); setLastByKind(lk);
     setUsers((au.data||[]).filter(u=>u.active && (u.role_keys||[]).some(r=>INTERNAL.includes(r)) && !/tive master|test|holidaycheck ag/i.test(u.full_name||'')));
     const pm={}; (ap.data||[]).forEach(r=>{ pm[r.user_id]=(r.settings&&r.settings.agents)||{}; }); setPrefs(pm);
@@ -37229,6 +37241,23 @@ function RemindersView({team}){
     setBusy('addn'); try{ await sb.from('leader_nudge_prompts').insert({key, template:tpl, cond:nAdd.cond||'', prio:Number(nAdd.prio)||1, active:true}); setNAdd({key:'',template:'',cond:'',prio:1}); await load(); }catch(e){ window.alert('Konnte nicht anlegen: '+(e.message||'evtl. Kürzel doppelt')); } setBusy(''); }
   async function saveNudge(n, patch){ setBusy(n.key); try{ await sb.from('leader_nudge_prompts').update(patch).eq('key',n.key); setNudges(list=>list.map(x=>x.key===n.key?{...x,...patch}:x)); }catch(e){} setBusy(''); }
   async function delNudge(n){ if(!(await uiConfirm({title:'Löschen', text:'Anstoß „'+n.key+'" löschen?', confirmLabel:'Löschen'}))) return; setBusy(n.key); try{ await sb.from('leader_nudge_prompts').delete().eq('key',n.key); setNudges(list=>list.filter(x=>x.key!==n.key)); }catch(e){} setBusy(''); }
+  // Zeitplan je Erinnerung (Global-Zeile) ändern — die Function feuert danach nach diesen Werten.
+  async function saveSched(key, patch){ setBusy('s'+key);
+    const cur=sched[key]||{reminder_key:key,active:true,hours:[8],cadence:'daily'}; const next={...cur,...patch};
+    setSched(m=>({...m,[key]:next}));
+    try{ await sb.from('reminder_schedule').update({active:next.active, hours:next.hours, cadence:next.cadence, weekday:next.weekday??null, month_days:next.month_days??null, updated_at:new Date().toISOString()}).eq('reminder_key',key).is('user_id',null); }catch(e){ window.alert('Konnte nicht speichern: '+(e.message||'')); }
+    setBusy('');
+  }
+  const parseInts=s=>String(s||'').split(/[,\s]+/).map(x=>parseInt(x,10)).filter(n=>!isNaN(n));
+  // Person-Ausnahme: aus = Zeile active:false, an = Ausnahme löschen (Global-Regel greift wieder).
+  const personOn=(key,uid)=>{ const r=schedPerson[key+'|'+uid]; return !r || r.active!==false; };
+  async function setPersonReminder(key, uid, on){ setBusy('p'+key+uid); const k=key+'|'+uid; const exists=!!schedPerson[k];
+    try{
+      if(on){ if(exists){ await sb.from('reminder_schedule').delete().eq('reminder_key',key).eq('user_id',uid); setSchedPerson(m=>{const n={...m}; delete n[k]; return n;}); } }
+      else { if(exists){ await sb.from('reminder_schedule').update({active:false}).eq('reminder_key',key).eq('user_id',uid); } else { await sb.from('reminder_schedule').insert({reminder_key:key,user_id:uid,active:false}); } setSchedPerson(m=>({...m,[k]:{reminder_key:key,user_id:uid,active:false}})); }
+    }catch(e){ window.alert('Konnte nicht speichern: '+(e.message||'')); }
+    setBusy('');
+  }
   const agentName=k=>{ const a=AI_AGENTS[k]; return a?a.name:k; };
 
   return <div style={{maxWidth:1100}}>
@@ -37253,20 +37282,52 @@ function RemindersView({team}){
               <div style={{fontSize:12,color:'var(--muted)',marginTop:1}}>An: {(()=>{ const cfg=r.recipientsConfig&&recipCfg[r.recipientsConfig]; if(Array.isArray(cfg)){ const act=cfg.filter(x=>x&&x.active!==false).map(x=>x.name||x.email); return act.length?act.join(', '):'(keine aktiven Empfänger konfiguriert)'; } return r.audience; })()}</div>
             </div>
             <div style={{display:'flex',gap:4,alignItems:'center',flexWrap:'wrap'}}>{r.channels.map(chanChip)}</div>
-            <div style={{fontSize:12,color:'var(--muted)',minWidth:120}}>{r.rhythm}</div>
+            {r.schedKey ? (()=>{ const s=sched[r.schedKey]; const open=schedEdit===r.schedKey; return (
+              <div style={{minWidth:150,textAlign:'right'}}>
+                <div style={{fontSize:12,color: s&&s.active===false?'#dc2626':'var(--muted)'}}>{s&&s.active===false?'ausgeschaltet':schedRhythmText(s)}</div>
+                <button onClick={()=>setSchedEdit(open?'':r.schedKey)} style={{border:'none',background:'none',color:'#0F5661',fontSize:11.5,fontWeight:700,cursor:'pointer',padding:0,marginTop:2}}>{open?'schließen':'Zeit ändern'}</button>
+              </div>
+            ); })() : <div style={{fontSize:12,color:'var(--muted)',minWidth:120,textAlign:'right'}}>{r.rhythm}</div>}
             <div style={{fontSize:11.5,fontWeight:700,color: lastSend(r)?'#059669':'var(--muted)',minWidth:110,textAlign:'right'}}>{r.kinds&&r.kinds.length?('zuletzt '+ago(lastSend(r))):'—'}</div>
+            {r.schedKey && schedEdit===r.schedKey && (()=>{ const s=sched[r.schedKey]||{reminder_key:r.schedKey,active:true,hours:[8],cadence:'daily'};
+              return <div style={{flexBasis:'100%',marginTop:8,padding:'10px 12px',background:'var(--surface-2)',borderRadius:8,display:'flex',flexWrap:'wrap',gap:14,alignItems:'center'}}>
+                <label style={{display:'flex',alignItems:'center',gap:6,fontSize:12.5,fontWeight:600,cursor:'pointer'}}>
+                  <input type="checkbox" checked={s.active!==false} onChange={e=>saveSched(r.schedKey,{active:e.target.checked})}/> aktiv
+                </label>
+                <label style={{fontSize:12.5,color:'var(--muted)'}}>Rhythmus{' '}
+                  <select className="form-select" style={{width:'auto',display:'inline-block',fontSize:12,padding:'3px 6px'}} value={s.cadence} onChange={e=>saveSched(r.schedKey,{cadence:e.target.value})}>
+                    {CADENCE_OPTS.map(([v,l])=><option key={v} value={v}>{l}</option>)}
+                  </select>
+                </label>
+                {s.cadence==='weekly' && <label style={{fontSize:12.5,color:'var(--muted)'}}>Wochentag{' '}
+                  <select className="form-select" style={{width:'auto',display:'inline-block',fontSize:12,padding:'3px 6px'}} value={s.weekday||5} onChange={e=>saveSched(r.schedKey,{weekday:parseInt(e.target.value,10)})}>
+                    {WD_OPTS.map(([v,l])=><option key={v} value={v}>{l}</option>)}
+                  </select>
+                </label>}
+                {(s.cadence==='monthly'||s.cadence==='twice_monthly') && <label style={{fontSize:12.5,color:'var(--muted)'}}>Monatstage{' '}
+                  <input className="form-input" style={{width:110,display:'inline-block',fontSize:12,padding:'3px 6px'}} defaultValue={(s.month_days||[]).join(', ')} onBlur={e=>saveSched(r.schedKey,{month_days:parseInts(e.target.value)})} placeholder="z.B. 3, 4, 5"/>
+                </label>}
+                <label style={{fontSize:12.5,color:'var(--muted)'}}>Uhrzeit{' '}
+                  <input className="form-input" style={{width:90,display:'inline-block',fontSize:12,padding:'3px 6px'}} defaultValue={(s.hours||[8]).join(', ')} onBlur={e=>{ const h=parseInts(e.target.value).filter(n=>n>=0&&n<=23); if(h.length) saveSched(r.schedKey,{hours:h}); }} placeholder="8"/>
+                  <span style={{marginLeft:4}}>Uhr</span>
+                </label>
+                {busy==='s'+r.schedKey && <span style={{fontSize:11.5,color:'#059669'}}>gespeichert</span>}
+                <span style={{flexBasis:'100%',fontSize:11,color:'var(--muted)'}}>Nur Mo–Fr. Mehrere Uhrzeiten mit Komma. Fällt der Termin aufs Wochenende, geht es Montag raus.</span>
+              </div>; })()}
           </div>)}</div>
         </div>;
       })}
     </div>}
 
     {tab==='person' && <div>
-      <div style={{fontSize:12,color:'var(--muted)',marginBottom:10}}>Kanal steuert Slack/Cliq-Erinnerungen (Standard: {CHANNEL_LABEL[defChan]||defChan}). Die Häkchen steuern, welche Agenten <b>Einblendungen im System</b> schicken dürfen. Feste Erinnerungen (Wochenmeldung, Vertragsübersicht …) folgen ihrer Regel oben.</div>
+      <div style={{fontSize:12,color:'var(--muted)',marginBottom:10}}>Kanal steuert Slack/Cliq-Erinnerungen (Standard: {CHANNEL_LABEL[defChan]||defChan}). <b>Wochenmeldung</b> und <b>Aufgaben-Erinnerung</b> lassen sich je Person abschalten (Häkchen weg = diese Person bekommt sie nicht). Die Agenten-Häkchen steuern, welche Agenten <b>Einblendungen im System</b> schicken dürfen. Zeit/Rhythmus stellst du oben unter „Je Agent" ein.</div>
       <div style={{overflowX:'auto',border:'1px solid var(--border)',borderRadius:10}}>
       <table style={{width:'100%',borderCollapse:'collapse',fontSize:12.5,whiteSpace:'nowrap'}}>
         <thead><tr style={{background:'var(--surface-2)'}}>
           <th style={{textAlign:'left',padding:'8px 10px',position:'sticky',left:0,background:'var(--surface-2)'}}>Person</th>
           <th style={{textAlign:'left',padding:'8px 10px'}}>Kanal</th>
+          <th style={{padding:'8px 8px',textAlign:'center'}}>Wochen&shy;meldung</th>
+          <th style={{padding:'8px 8px',textAlign:'center'}}>Aufgaben&shy;-Erinnerung</th>
           {AGENT_ORDER.map(ak=><th key={ak} style={{padding:'8px 8px',textAlign:'center'}}>{agentName(ak)}</th>)}
         </tr></thead>
         <tbody>{users.slice().sort((a,b)=>String(a.full_name||'').localeCompare(String(b.full_name||''),'de')).map(u=>{
@@ -37278,6 +37339,12 @@ function RemindersView({team}){
                 <option value="">Standard ({CHANNEL_LABEL[defChan]})</option>
                 <option value="slack">Slack</option><option value="cliq">Zoho Cliq</option><option value="none">aus</option>
               </select>
+            </td>
+            <td style={{padding:'6px 8px',textAlign:'center'}}>
+              <input type="checkbox" checked={personOn('maya_weekly',u.user_id)} disabled={busy==='pmaya_weekly'+u.user_id} onChange={e=>setPersonReminder('maya_weekly',u.user_id,e.target.checked)} style={{cursor:'pointer',width:16,height:16}}/>
+            </td>
+            <td style={{padding:'6px 8px',textAlign:'center'}}>
+              <input type="checkbox" checked={personOn('task_reminders',u.user_id)} disabled={busy==='ptask_reminders'+u.user_id} onChange={e=>setPersonReminder('task_reminders',u.user_id,e.target.checked)} style={{cursor:'pointer',width:16,height:16}}/>
             </td>
             {AGENT_ORDER.map(ak=>{ const on = ag[ak]!==false; return <td key={ak} style={{padding:'6px 8px',textAlign:'center'}}>
               <input type="checkbox" checked={on} disabled={busy===u.user_id+ak} onChange={()=>toggleAgentFor(u.user_id, ak)} style={{cursor:'pointer',width:16,height:16}}/>

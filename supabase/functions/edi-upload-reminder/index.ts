@@ -9,7 +9,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { agentBrand, shell, lead, block, button, PORTAL_URL } from "../_shared/agent_mail.ts";
 import { smtpSend, slackDM, agentMailSender } from "../_shared/agent_send.ts";
-import { isWeekendBerlin } from "../_shared/schedule.ts";
+import { scheduleDue, getSchedule, personOverride } from "../_shared/schedule.ts";
 
 const sb = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 const cors = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type", "Access-Control-Allow-Methods": "POST, OPTIONS" };
@@ -28,7 +28,9 @@ Deno.serve(async (req) => {
   const previewTo = (typeof body.preview_to === "string" && body.preview_to.includes("@")) ? body.preview_to : null;
   const force = body.force === true || !!previewTo;
   const dry = body.dry === true;
-  if (isWeekendBerlin() && !force) return json({ ok: true, skipped: "weekend" });
+  // Zentrale Zeitsteuerung: Edis Über­schreibung schlägt global. Feuert nur zur geplanten Stunde/Rhythmus (Mo–Fr).
+  const sched = (await personOverride(sb, "edi_upload", EDI_UID)) || (await getSchedule(sb, "edi_upload"));
+  if (!force && !scheduleDue(sched)) return json({ ok: true, skipped: "not-scheduled" });
 
   // Edis aktive Upload-Quellen
   const { data: srcs } = await sb.from("upload_schedule").select("project_id,source_type").eq("active", true).eq("responsible_user", EDI_UID);
@@ -60,9 +62,10 @@ Deno.serve(async (req) => {
 
   if (!open.length) { try { await sb.from("agent_actions").insert({ agent_key: "max", kind: "edi_upload_complete", meta: {} }); } catch (_e) {} return json({ ok: true, state: "complete" }); }
 
-  // Kadenz: nur alle 2 Tage, nicht täglich nörgeln
-  if (!force) { const { data: last } = await sb.from("agent_actions").select("at").eq("agent_key", "max").eq("kind", "edi_upload_reminder").order("at", { ascending: false }).limit(1);
-    if (last && last[0] && (Date.now() - new Date(last[0].at).getTime()) < CADENCE_MS) return json({ ok: true, skipped: "cadence", open: open.map((o) => o.label) }); }
+  // Abstand nach Rhythmus: 'daily' -> kein Mindestabstand, sonst 2 Tage (nicht täglich nörgeln)
+  const cadMs = (sched && sched.cadence === "daily") ? 0 : CADENCE_MS;
+  if (!force && cadMs > 0) { const { data: last } = await sb.from("agent_actions").select("at").eq("agent_key", "max").eq("kind", "edi_upload_reminder").order("at", { ascending: false }).limit(1);
+    if (last && last[0] && (Date.now() - new Date(last[0].at).getTime()) < cadMs) return json({ ok: true, skipped: "cadence", open: open.map((o) => o.label) }); }
 
   // Betroffene KWs (Folge). was ist / was bedeutet / was tun.
   const missKws = uniq(open.flatMap((o) => o.missing).map((w: any) => "KW " + w.kw));

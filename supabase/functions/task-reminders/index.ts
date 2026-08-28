@@ -4,7 +4,7 @@
 // Wer alles erledigt hat oder keinen Kanal-Account hat, bekommt nichts. Nur DMs.
 // (Faellige/ueberfaellige UPLOADS kommen in 5b.)
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
-import { isWeekendBerlin } from '../_shared/schedule.ts';
+import { scheduleDue, getSchedule } from '../_shared/schedule.ts';
 
 const SUPA_URL = Deno.env.get('SUPABASE_URL')!;
 const SERVICE  = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
@@ -115,11 +115,12 @@ Deno.serve(async (req)=>{
   const only  = new URL(req.url).searchParams.get('only') || '';    // gezielter Test: nur diese uid ODER E-Mail
   const dry   = new URL(req.url).searchParams.get('dry')==='1';     // berechnen, aber NICHT senden (Verifikation)
   const berlinHour = Number(new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Berlin',hour:'2-digit',hour12:false}).format(new Date()));
-  if(![9,12,16].includes(berlinHour) && !force) return json({skipped:'off-hours', berlinHour});
-  // Kein-Wochenende-Regel: nur Mo–Fr. Was Sa/So fällig wäre, kommt am Montag (der nächste Werktags-Lauf).
-  if(isWeekendBerlin() && !force) return json({skipped:'weekend'});
-
   const sb = createClient(SUPA_URL, SERVICE);
+  // Zentrale Zeitsteuerung: feuert nur zu den geplanten Stunden (Standard 9/12/16, Mo–Fr). Editierbar in der Übersicht.
+  const _sched = await getSchedule(sb, 'task_reminders');
+  if(!force && !scheduleDue(_sched)) return json({skipped:'not-scheduled', berlinHour});
+  const _optOut = await sb.from('reminder_schedule').select('user_id').eq('reminder_key','task_reminders').eq('active',false).not('user_id','is',null);
+  const _taskOff = new Set((_optOut.data||[]).map((r)=>r.user_id));
   const now=new Date(); const today=isoLocal(now);
   const mon=new Date(now); mon.setDate(now.getDate()-((now.getDay()+6)%7)); const monday=isoLocal(mon);
   const monthWeek=Math.ceil(now.getDate()/7);
@@ -213,6 +214,7 @@ Deno.serve(async (req)=>{
     }catch(_e){ /* Eskalation optional */ }
 
     if(!open.length && !dueU.length) continue;                   // nichts offen + keine Uploads -> keine Nachricht
+    if(_taskOff.has(u.user_id)){ results.push({u:u.full_name,skip:'opt-out'}); continue; }
     const channel = prefBy[u.user_id] || defChannel;
     if(channel==='none') { results.push({u:u.full_name,skip:'channel-none'}); continue; }
     const parts:string[]=[greet];
