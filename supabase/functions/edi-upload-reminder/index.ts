@@ -23,7 +23,8 @@ function skillLabel(s: string) { return s === "sales" ? "Sales" : s === "support
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   let body: any = {}; try { body = await req.json(); } catch (_e) { /* leerer Body ok (Cron) */ }
-  const force = body.force === true;
+  const previewTo = (typeof body.preview_to === "string" && body.preview_to.includes("@")) ? body.preview_to : null;
+  const force = body.force === true || !!previewTo;
   const dry = body.dry === true;
   if (isWeekendBerlin() && !force) return json({ ok: true, skipped: "weekend" });
 
@@ -33,8 +34,8 @@ Deno.serve(async (req) => {
 
   // Kommende zwei Wochen, die der Forecast abdecken muss
   const now = new Date();
-  // demo (nur mit body.demo, nie im Cron): erzwingt den Offen-Zustand zum Prüfen der Nachricht.
-  const weeks = body.demo ? [{ year: 2099, kw: 1 }, { year: 2099, kw: 2 }] : [isoOf(new Date(now.getTime() + 7 * 864e5)), isoOf(new Date(now.getTime() + 14 * 864e5))];
+  // demo/preview (nie im Cron): erzwingt den Offen-Zustand zum Prüfen der Nachricht.
+  const weeks = (body.demo || previewTo) ? [{ year: 2099, kw: 1 }, { year: 2099, kw: 2 }] : [isoOf(new Date(now.getTime() + 7 * 864e5)), isoOf(new Date(now.getTime() + 14 * 864e5))];
   const projName: Record<string, string> = {};
   for (const s of srcs) { if (!projName[s.project_id]) { const { data } = await sb.from("projects").select("name").eq("id", s.project_id).maybeSingle(); projName[s.project_id] = (data && data.name) || "?"; } }
 
@@ -77,11 +78,11 @@ Deno.serve(async (req) => {
   const slackText = "*Max · Uploads*\n" + leadTxt + "\n• " + list.join("\n• ");
 
   const sender = await agentMailSender(sb, "max");
-  const email = "edi.shaqiri@25hrs.net";
+  const email = previewTo || "edi.shaqiri@25hrs.net";
   if (dry) return json({ ok: true, dry: true, state: allOpen ? "nothing" : "partial", open: list, html });
 
-  const mr = sender ? await smtpSend(sender, email, "Deine offenen Uploads", html) : { ok: false, error: "kein Absender" };
-  const sr = await slackDM(email, slackText);
-  try { await sb.from("agent_actions").insert({ agent_key: "max", kind: "edi_upload_reminder", meta: { open: list, mail: mr.ok, slack: sr } }); } catch (_e) {}
-  return json({ ok: true, state: allOpen ? "nothing" : "partial", open: list, mail: mr.ok ? "sent" : mr.error, slack: sr });
+  const mr = sender ? await smtpSend(sender, email, (previewTo ? "[Vorschau] " : "") + "Deine offenen Uploads", html) : { ok: false, error: "kein Absender" };
+  const sr = previewTo ? "skip-preview" : await slackDM(email, slackText);
+  if (!previewTo) { try { await sb.from("agent_actions").insert({ agent_key: "max", kind: "edi_upload_reminder", meta: { open: list, mail: mr.ok, slack: sr } }); } catch (_e) {} }
+  return json({ ok: true, preview: !!previewTo, state: allOpen ? "nothing" : "partial", open: list, mail: mr.ok ? "sent" : mr.error, slack: sr });
 });

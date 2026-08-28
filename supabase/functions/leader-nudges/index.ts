@@ -74,7 +74,8 @@ function condHolds(cond: string, s: any): boolean {
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   let body: any = {}; try { body = await req.json(); } catch (_e) { /* Cron */ }
-  const force = body.force === true, dry = body.dry === true;
+  const previewTo = (typeof body.preview_to === "string" && body.preview_to.includes("@")) ? body.preview_to : null;
+  const force = body.force === true || !!previewTo, dry = body.dry === true;
   if (isWeekendBerlin() && !force) return json({ ok: true, skipped: "weekend" });
 
   const { data: sits, error } = await sb.rpc("leader_situations");
@@ -91,6 +92,7 @@ Deno.serve(async (req) => {
   const brand = await agentBrand(sb, "max", "#2563eb");
   const sender = await agentMailSender(sb, "max");
   const results: any[] = [];
+  const sentPreview = new Set<string>();   // Vorschau: je Gruppe+Anstoß nur einmal (keine Co-Leiter-Dubletten)
 
   for (const g of (sits || [])) {
     const s = g.situation || {};
@@ -110,14 +112,16 @@ Deno.serve(async (req) => {
       if (!pick) { results.push({ leader: L.name, skipped: "kein Anstoß" }); continue; }
 
       const text = fill(pick.template, s);
-      const email = emailBy[uid];
+      const email = previewTo || emailBy[uid];
       if (dry) { results.push({ leader: L.name, scope, key: pick.key, text, email }); continue; }
+      if (previewTo) { const dk = scope + "|" + pick.key; if (sentPreview.has(dk)) { results.push({ leader: L.name, skipped: "preview-dup" }); continue; } sentPreview.add(dk); }
       const html = shell(brand, "Ein Anstoß für dein Team", scope, lead(text) + button(PORTAL_URL, "Zum Team →", brand.accent));
-      const mr = (sender && email) ? await smtpSend(sender, email, "Ein Anstoß für dein Team", html) : { ok: false, error: "kein Empfänger" };
-      const sr = await slackDM(email, "*Max · Anstoß*\n" + text);
-      try { await sb.from("agent_actions").insert({ agent_key: "max", kind: "leader_nudge", meta: { user_id: uid, key: pick.key, group: scope } }); } catch (_e) {}
-      lastAt[uid] = new Date().toISOString(); lastKey[uid] = pick.key;   // im selben Lauf nicht doppelt
-      results.push({ leader: L.name, scope, key: pick.key, mail: mr.ok ? "sent" : mr.error, slack: sr });
+      const subj = previewTo ? ("[Vorschau] Anstoß · " + L.name + " (" + scope + ")") : "Ein Anstoß für dein Team";
+      const mr = (sender && email) ? await smtpSend(sender, email, subj, html) : { ok: false, error: "kein Empfänger" };
+      const sr = previewTo ? "skip-preview" : await slackDM(email, "*Max · Anstoß*\n" + text);
+      if (!previewTo) { try { await sb.from("agent_actions").insert({ agent_key: "max", kind: "leader_nudge", meta: { user_id: uid, key: pick.key, group: scope } }); } catch (_e) {}
+        lastAt[uid] = new Date().toISOString(); lastKey[uid] = pick.key; }
+      results.push({ leader: L.name, scope, key: pick.key, preview: !!previewTo, mail: mr.ok ? "sent" : mr.error, slack: sr });
     }
   }
   return json({ ok: true, groups: (sits || []).length, results });

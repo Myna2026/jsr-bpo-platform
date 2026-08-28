@@ -24,7 +24,8 @@ const deDate = (d: string) => { const [y, m, da] = d.split("-"); return da + "."
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   let body: any = {}; try { body = await req.json(); } catch (_e) { /* Cron */ }
-  const force = body.force === true, dry = body.dry === true;
+  const previewTo = (typeof body.preview_to === "string" && body.preview_to.includes("@")) ? body.preview_to : null;
+  const force = body.force === true || !!previewTo, dry = body.dry === true;
   if (isWeekendBerlin() && !force) return json({ ok: true, skipped: "weekend" });
 
   if (!force && !dry) { const { data: last } = await sb.from("agent_actions").select("at").eq("agent_key", "lena").eq("kind", "contract_expiry").order("at", { ascending: false }).limit(1);
@@ -77,6 +78,11 @@ Deno.serve(async (req) => {
     const mr = sender ? await smtpSend(sender, to, "Vertragsübersicht" + (scope ? " · " + scope : "") + " (" + list.length + ")", html) : { ok: false, error: "kein Absender" };
     const sr = await slackDM(to, slackFor(list)); results.push({ to, scope, count: list.length, mail: mr.ok ? "sent" : mr.error, slack: sr });
   }
+
+  // Vorschau: nur die Gesamt-Fassung an dich, keine echten Empfänger/kein Log
+  if (previewTo) { const html = await buildMail(rows, "Gesamt");
+    const mr = sender ? await smtpSend(sender, previewTo, "[Vorschau] Vertragsübersicht (" + rows.length + ")", html) : { ok: false, error: "kein Absender" };
+    return json({ ok: true, preview: true, total: rows.length, mail: mr.ok ? "sent" : mr.error }); }
 
   // Gesamt an Shkurte/Rajner/Thorsten (immer, auch wenn leer — es ist die Übersicht)
   for (const uid of GESAMT_UIDS) { if (emailBy[uid]) await send(emailBy[uid], rows, "Gesamt"); }
