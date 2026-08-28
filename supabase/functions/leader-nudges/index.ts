@@ -27,6 +27,48 @@ function absentReason(absent: any[]) {
   return Object.entries(byType).map(([t, n]) => numW(n) + " " + (lbl[t] || "abwesend")).join(" und ");
 }
 
+// KPI-Richtung: niedriger = besser?
+const LOWER_BETTER: Record<string, boolean> = { AHT: true, ACW: true };
+const kpiUnit = (k: string) => k === "AHT" ? " min" : "";
+function fmtN(v: any) { return (v == null) ? "" : String(v).replace(".", ","); }
+
+// Reiche Analyse der schwachen Agenten: was ist, was bedeutet es (Trend + Team-Vergleich + Ursache), was tun.
+function weakAnalysis(weak: any[]): string {
+  if (!weak || !weak.length) return "";
+  const byKpi: Record<string, any[]> = {};
+  weak.forEach((w) => { (byKpi[w.kpi] = byKpi[w.kpi] || []); if (!byKpi[w.kpi].some((x) => x.name === w.name)) byKpi[w.kpi].push(w); });
+  const dom = Object.entries(byKpi).sort((a, b) => b[1].length - a[1].length)[0];
+  const kpi = dom[0]; const agents = dom[1].slice(0, 3); const low = LOWER_BETTER[kpi];
+  const teamAvg = agents[0].team_avg;
+  const unit = kpiUnit(kpi);
+  const intro = joinUnd(agents.map((a) => a.name)) + " liegen diese Woche bei " + kpi + " im kritischen Bereich"
+    + (teamAvg != null ? " (Team-Schnitt " + fmtN(teamAvg) + unit + ")" : "") + ".";
+  const lines = agents.map((a) => {
+    let trend = "";
+    if (a.prev != null) { const worse = low ? (a.value > a.prev) : (a.value < a.prev);
+      const same = Math.abs(a.value - a.prev) < (low ? 0.3 : 0.05);
+      trend = same ? "etwa wie letzte Woche" : (worse ? "schlechter als letzte Woche (" + fmtN(a.prev) + ")" : "besser als letzte Woche (" + fmtN(a.prev) + ")"); }
+    else trend = "neu diese Woche";
+    let cause = "";
+    if (a.hold_sec != null && a.hold_sec >= 200) cause = "hält im Schnitt lange (" + Math.round(a.hold_sec) + " s)";
+    else if (a.acw_sec != null && a.acw_sec >= 150) cause = "lange Nachbearbeitung (" + Math.round(a.acw_sec) + " s ACW)";
+    else if (a.tenure_weeks != null && a.tenure_weeks < 8) cause = "erst " + a.tenure_weeks + " Wochen dabei";
+    else if (a.last_fb_days == null) cause = "hatte noch kein Feedbackgespräch";
+    else if (a.tenure_weeks != null && a.tenure_weeks < 16) cause = a.tenure_weeks + " Wochen dabei";
+    return a.name + ": " + fmtN(a.value) + unit + (trend ? ", " + trend : "") + (cause ? " – " + cause : "") + ".";
+  });
+  // Hebel je nach dominanter Ursache
+  const anyNew = agents.some((a) => a.tenure_weeks != null && a.tenure_weeks < 8);
+  const anyTime = agents.some((a) => (a.hold_sec != null && a.hold_sec >= 200) || (a.acw_sec != null && a.acw_sec >= 150));
+  const anyNoFb = agents.some((a) => a.last_fb_days == null);
+  let lever;
+  if (anyNew) lever = "Die Neuen brauchen Begleitung bei der Gesprächsführung – eine Hospitation oder Side-by-Side hilft mehr als Zahlen.";
+  else if (anyTime) lever = "Schau mit ihnen, wo die Zeit hingeht: langes Halten und Nachbearbeitung lassen sich gezielt üben.";
+  else if (anyNoFb) lever = "Plan mit ihnen ein Feedbackgespräch – die Grundlage fehlt noch.";
+  else lever = "Hör dir ein paar ihrer Calls an, dann siehst du, woran es hakt.";
+  return intro + "\n" + lines.join("\n") + "\n\nWas hilft: " + lever;
+}
+
 function fill(tpl: string, s: any) {
   const weakAll = uniq((s.weak || []).map((x: any) => x.name));
   const strongNames = uniq((s.strong || []).map((x: any) => x.name));
@@ -44,6 +86,7 @@ function fill(tpl: string, s: any) {
   const nofbNames = nofb.length <= 3 ? joinUnd(nofb) : joinUnd(nofb.slice(0, 2)) + " und " + numW(nofb.length - 2) + " weitere";
   const newNames = joinUnd(s.new_joiners || []);
   return tpl
+    .replace(/\{weak_analysis\}/g, weakAnalysis(s.weak))
     .replace(/\{weak_names\}/g, joinUnd(weakAll.slice(0, 2)))
     .replace(/\{weak_kpi_names\}/g, joinUnd(weakKpiNames.slice(0, 3)))
     .replace(/\{strong_names\}/g, joinUnd(strongNames.slice(0, 2)))
@@ -115,7 +158,8 @@ Deno.serve(async (req) => {
       const email = previewTo || emailBy[uid];
       if (dry) { results.push({ leader: L.name, scope, key: pick.key, text, email }); continue; }
       if (previewTo) { const dk = scope + "|" + pick.key; if (sentPreview.has(dk)) { results.push({ leader: L.name, skipped: "preview-dup" }); continue; } sentPreview.add(dk); }
-      const html = shell(brand, "Ein Anstoß für dein Team", scope, lead(text) + button(PORTAL_URL, "Zum Team →", brand.accent));
+      const htmlText = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/\n/g, "<br>");
+      const html = shell(brand, "Ein Anstoß für dein Team", scope, lead(htmlText) + button(PORTAL_URL, "Zum Team →", brand.accent));
       const subj = previewTo ? ("[Vorschau] Anstoß · " + L.name + " (" + scope + ")") : "Ein Anstoß für dein Team";
       const mr = (sender && email) ? await smtpSend(sender, email, subj, html) : { ok: false, error: "kein Empfänger" };
       const sr = previewTo ? "skip-preview" : await slackDM(email, "*Max · Anstoß*\n" + text);

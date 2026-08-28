@@ -19,6 +19,8 @@ const CADENCE_MS = 2 * 864e5;   // alle 2 Tage
 
 function isoOf(d: Date) { const x = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())); const day = (x.getUTCDay() + 6) % 7; x.setUTCDate(x.getUTCDate() - day + 3); const firstTh = new Date(Date.UTC(x.getUTCFullYear(), 0, 4)); const week = 1 + Math.round(((x.getTime() - firstTh.getTime()) / 86400000 - 3 + ((firstTh.getUTCDay() + 6) % 7)) / 7); return { year: x.getUTCFullYear(), kw: week }; }
 function skillLabel(s: string) { return s === "sales" ? "Sales" : s === "support" ? "Support" : s; }
+const uniq = (a: string[]) => [...new Set(a)];
+const joinUnd = (a: string[]) => a.length <= 1 ? (a[0] || "") : a.slice(0, -1).join(", ") + " und " + a[a.length - 1];
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
@@ -34,27 +36,25 @@ Deno.serve(async (req) => {
 
   // Kommende zwei Wochen, die der Forecast abdecken muss
   const now = new Date();
-  // demo/preview (nie im Cron): erzwingt den Offen-Zustand zum Prüfen der Nachricht.
-  const weeks = (body.demo || previewTo) ? [{ year: 2099, kw: 1 }, { year: 2099, kw: 2 }] : [isoOf(new Date(now.getTime() + 7 * 864e5)), isoOf(new Date(now.getTime() + 14 * 864e5))];
+  const forceOpen = body.demo === true || !!previewTo;   // Vorschau/Demo: Offen-Zustand erzwingen
+  const reqWeeks = [isoOf(new Date(now.getTime() + 7 * 864e5)), isoOf(new Date(now.getTime() + 14 * 864e5))];  // echte kommende KWs
   const projName: Record<string, string> = {};
   for (const s of srcs) { if (!projName[s.project_id]) { const { data } = await sb.from("projects").select("name").eq("id", s.project_id).maybeSingle(); projName[s.project_id] = (data && data.name) || "?"; } }
 
-  const open: { label: string }[] = [];
+  const open: { label: string; missing: any[] }[] = [];
   for (const s of srcs) {
-    let complete = false;
+    let missing: any[] = [];
     if (String(s.source_type).startsWith("forecast_")) {
       const skill = String(s.source_type).replace("forecast_", "");
-      const orC = weeks.map((w) => `and(year.eq.${w.year},kw.eq.${w.kw})`).join(",");
+      const orC = reqWeeks.map((w) => `and(year.eq.${w.year},kw.eq.${w.kw})`).join(",");
       const { data: fc } = await sb.from("report_forecast").select("year,kw").eq("project_id", s.project_id).eq("skill", skill).gt("fc_hours", 0).or(orC);
       const covered = new Set((fc || []).map((r: any) => r.year + "-" + r.kw));
-      complete = weeks.every((w) => covered.has(w.year + "-" + w.kw));
-      if (!complete) open.push({ label: "Forecast " + skillLabel(skill) + " (" + projName[s.project_id] + ")" });
+      missing = forceOpen ? reqWeeks : reqWeeks.filter((w) => !covered.has(w.year + "-" + w.kw));
+      if (missing.length) open.push({ label: "Forecast " + skillLabel(skill) + " (" + projName[s.project_id] + ")", missing });
     } else {
-      // Fallback für andere Quellen: im aktuellen Monat ein data_imports-Eintrag vorhanden?
       const mStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
       const { count } = await sb.from("data_imports").select("*", { count: "exact", head: true }).eq("project_id", s.project_id).eq("source_type", s.source_type).gte("created_at", mStart);
-      complete = (count || 0) > 0;
-      if (!complete) open.push({ label: s.source_type + " (" + projName[s.project_id] + ")" });
+      if (forceOpen || (count || 0) === 0) open.push({ label: s.source_type + " (" + projName[s.project_id] + ")", missing: reqWeeks });
     }
   }
 
@@ -64,18 +64,22 @@ Deno.serve(async (req) => {
   if (!force) { const { data: last } = await sb.from("agent_actions").select("at").eq("agent_key", "max").eq("kind", "edi_upload_reminder").order("at", { ascending: false }).limit(1);
     if (last && last[0] && (Date.now() - new Date(last[0].at).getTime()) < CADENCE_MS) return json({ ok: true, skipped: "cadence", open: open.map((o) => o.label) }); }
 
-  // Nachricht in Max' Stimme, je nach Zustand
+  // Betroffene KWs (Folge). was ist / was bedeutet / was tun.
+  const missKws = uniq(open.flatMap((o) => o.missing).map((w: any) => "KW " + w.kw));
   const allOpen = open.length === srcs.length;
   const list = open.map((o) => o.label);
   const leadTxt = allOpen
-    ? "Deine Upload-Aufgaben stehen noch komplett aus. Ohne den Forecast bleibt der Soll-Ist-Vergleich für die kommenden Wochen leer:"
-    : "Fast vollständig. Es fehlt noch, dann ist es komplett:";
-  const listHtml = '<ul style="margin:6px 0 0;padding-left:20px;font-size:14px;line-height:1.7;color:#1f2937">' + list.map((l) => "<li>" + l.replace(/</g, "&lt;") + "</li>").join("") + "</ul>";
+    ? "Der Forecast für Holidaycheck fehlt noch – für die kommenden Wochen ist noch keiner hinterlegt:"
+    : "Fast vollständig. Ein Teil fehlt noch:";
+  const listHtml = '<ul style="margin:6px 0 0;padding-left:20px;font-size:14px;line-height:1.7;color:#1f2937">' + list.map((l) => "<li>" + l.replace(/</g, "&lt;") + "</li>").join("") + "</ul>"
+    + '<div style="margin-top:10px;font-size:14px;line-height:1.6;color:#1f2937">Dadurch steht im Cockpit „Forecast vs. Ist" und im Wochenbericht <b>keine Soll-Ist-Zahl für ' + joinUnd(missKws) + '</b>. Die Planung sieht dann nicht, ob genug Leute eingeteilt sind.</div>'
+    + '<div style="margin-top:8px;font-size:14px;line-height:1.6;color:#1f2937"><b>Was zu tun ist:</b> Den aktuellen Forecast (Blatt 5) im Datenimport hochladen.</div>';
 
   const brand = await agentBrand(sb, "max", "#2563eb");
   const inner = lead(leadTxt) + block(listHtml) + button(PORTAL_URL, "Zum Datenimport →", brand.accent);
   const html = shell(brand, allOpen ? "Uploads stehen aus" : "Uploads fast vollständig", "Forecast Holidaycheck", inner);
-  const slackText = "*Max · Uploads*\n" + leadTxt + "\n• " + list.join("\n• ");
+  const slackText = "*Max · Uploads*\n" + leadTxt + "\n• " + list.join("\n• ")
+    + "\nDadurch fehlt im Cockpit und Wochenbericht die Soll-Ist-Zahl für " + joinUnd(missKws) + ". Bitte den Forecast im Datenimport hochladen.";
 
   const sender = await agentMailSender(sb, "max");
   const email = previewTo || "edi.shaqiri@25hrs.net";
