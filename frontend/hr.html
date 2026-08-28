@@ -37183,16 +37183,19 @@ function RemindersView({team}){
   const [tab,setTab]=useState('agent');
   const [lastByKind,setLastByKind]=useState(null);
   const [users,setUsers]=useState([]); const [prefs,setPrefs]=useState({}); const [chan,setChan]=useState({}); const [defChan,setDefChan]=useState('slack');
+  const [nudges,setNudges]=useState([]); const [nAdd,setNAdd]=useState({key:'',template:'',cond:'',prio:1});
   const [busy,setBusy]=useState('');
   const INTERNAL=['management','hr','teamlead','projektleiter','mitarbeiter','trainer','qm','finance'];
   const load=React.useCallback(async()=>{ try{
-    const [aa,au,ap,np,dc]=await Promise.all([
+    const [aa,au,ap,np,dc,lnp]=await Promise.all([
       sb.from('agent_actions').select('kind,at').order('at',{ascending:false}).limit(500),
       sb.from('app_users').select('user_id,full_name,role_keys,active'),
       sb.from('agent_prefs').select('user_id,settings'),
       sb.from('notify_prefs').select('user_id,channel'),
       sb.from('app_config').select('value').eq('key','jsr_notify_channel_default').maybeSingle(),
+      sb.from('leader_nudge_prompts').select('*').order('prio',{ascending:false}),
     ]);
+    setNudges(lnp.data||[]);
     const lk={}; (aa.data||[]).forEach(r=>{ if(!lk[r.kind]) lk[r.kind]=r.at; }); setLastByKind(lk);
     setUsers((au.data||[]).filter(u=>u.active && (u.role_keys||[]).some(r=>INTERNAL.includes(r)) && !/tive master|test|holidaycheck ag/i.test(u.full_name||'')));
     const pm={}; (ap.data||[]).forEach(r=>{ pm[r.user_id]=(r.settings&&r.settings.agents)||{}; }); setPrefs(pm);
@@ -37216,13 +37219,19 @@ function RemindersView({team}){
   async function setChannelFor(uid, c){ if(busy) return; setBusy(uid+'chan'); setChan(m=>({...m,[uid]:c}));
     try{ await sb.from('notify_prefs').upsert({user_id:uid, channel:c}); }catch(e){} setBusy('');
   }
+  // Anstöße-Katalog CRUD (Management, RLS management-only). Erweiterbar ohne Code.
+  async function addNudge(){ const key=(nAdd.key||'').trim().toLowerCase().replace(/[^a-z0-9_]/g,'_'); const tpl=(nAdd.template||'').trim();
+    if(!key||!tpl){ window.alert('Kürzel und Text sind Pflicht.'); return; }
+    setBusy('addn'); try{ await sb.from('leader_nudge_prompts').insert({key, template:tpl, cond:nAdd.cond||'', prio:Number(nAdd.prio)||1, active:true}); setNAdd({key:'',template:'',cond:'',prio:1}); await load(); }catch(e){ window.alert('Konnte nicht anlegen: '+(e.message||'evtl. Kürzel doppelt')); } setBusy(''); }
+  async function saveNudge(n, patch){ setBusy(n.key); try{ await sb.from('leader_nudge_prompts').update(patch).eq('key',n.key); setNudges(list=>list.map(x=>x.key===n.key?{...x,...patch}:x)); }catch(e){} setBusy(''); }
+  async function delNudge(n){ if(!(await uiConfirm({title:'Löschen', text:'Anstoß „'+n.key+'" löschen?', confirmLabel:'Löschen'}))) return; setBusy(n.key); try{ await sb.from('leader_nudge_prompts').delete().eq('key',n.key); setNudges(list=>list.filter(x=>x.key!==n.key)); }catch(e){} setBusy(''); }
   const agentName=k=>{ const a=AI_AGENTS[k]; return a?a.name:k; };
 
   return <div style={{maxWidth:1100}}>
     <div style={{fontSize:20,fontWeight:700,marginBottom:4}}>🔔 Erinnerungen</div>
     <div style={{fontSize:13,color:'var(--muted)',marginBottom:14}}>Wer bekommt welche Erinnerung von welchem Agenten, über welchen Kanal und wann. Änderbar direkt hier. Nur Mo–Fr; was am Wochenende fällig wäre, kommt am Montag.</div>
     <div style={{display:'flex',gap:8,marginBottom:16}}>
-      {[['agent','Je Agent'],['person','Je Person']].map(([k,l])=><button key={k} onClick={()=>setTab(k)} style={{border:'1px solid var(--border)',background:tab===k?'var(--blue-bg)':'var(--card)',color:tab===k?'#0F5661':'var(--text)',borderRadius:8,padding:'6px 14px',fontSize:13,fontWeight:tab===k?700:500,cursor:'pointer'}}>{l}</button>)}
+      {[['agent','Je Agent'],['person','Je Person'],['nudges','Anstöße-Katalog']].map(([k,l])=><button key={k} onClick={()=>setTab(k)} style={{border:'1px solid var(--border)',background:tab===k?'var(--blue-bg)':'var(--card)',color:tab===k?'#0F5661':'var(--text)',borderRadius:8,padding:'6px 14px',fontSize:13,fontWeight:tab===k?700:500,cursor:'pointer'}}>{l}</button>)}
     </div>
 
     {tab==='agent' && <div style={{display:'flex',flexDirection:'column',gap:10}}>
@@ -37272,6 +37281,37 @@ function RemindersView({team}){
           </tr>;
         })}</tbody>
       </table>
+      </div>
+    </div>}
+
+    {tab==='nudges' && <div>
+      <div style={{fontSize:12,color:'var(--muted)',marginBottom:10,lineHeight:1.6}}>
+        Anstöße, die Max den <b>Teamleitern</b> gibt (2–3×/Woche, wechselnd). Du erweiterst sie hier ohne Code. Bedingung „—" = allgemeiner Anstoß (immer erlaubt). Mit Bedingung erscheint der Anstoß nur, wenn die Lage sie <b>belegt</b> hergibt; die Platzhalter füllt Max aus den echten Daten.<br/>
+        <span style={{color:'var(--dim)'}}>Platzhalter: {'{weak_kpi_names} {weak_names} {strong_names} {weak_kpi} {size} {present} {absent_reason} {nofb_names} {new_names}'}. Bedingungen: weak_strong · weak · absent_stable · no_feedback · new_joiner.</span>
+      </div>
+      <div style={{display:'flex',flexDirection:'column',gap:8,marginBottom:16}}>
+        {nudges.map(n=><div key={n.key} style={{border:'1px solid var(--border)',borderRadius:10,padding:'10px 12px',opacity:n.active?1:0.55}}>
+          <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:6,flexWrap:'wrap'}}>
+            <span style={{fontSize:11,fontWeight:800,fontFamily:'var(--mono)',color:'var(--muted)'}}>{n.key}</span>
+            <span style={{fontSize:10.5,fontWeight:700,padding:'1px 7px',borderRadius:20,background:n.cond?'#eff6ff':'var(--surface-2)',border:'1px solid var(--border)',color:n.cond?'#1d4ed8':'var(--muted)'}}>{n.cond||'allgemein'}</span>
+            <span style={{fontSize:11,color:'var(--muted)'}}>Prio <input type="number" value={n.prio} onChange={e=>saveNudge(n,{prio:Number(e.target.value)||1})} style={{width:48,padding:'2px 5px',border:'1px solid var(--border)',borderRadius:6,fontSize:12}}/></span>
+            <label style={{fontSize:11.5,display:'inline-flex',alignItems:'center',gap:4,cursor:'pointer'}}><input type="checkbox" checked={!!n.active} onChange={e=>saveNudge(n,{active:e.target.checked})}/> aktiv</label>
+            <button className="btn btn-sm" style={{marginLeft:'auto',color:'#dc2626'}} onClick={()=>delNudge(n)}>Löschen</button>
+          </div>
+          <textarea defaultValue={n.template} onBlur={e=>{ if(e.target.value!==n.template) saveNudge(n,{template:e.target.value}); }} rows={2} style={{width:'100%',padding:'7px 9px',border:'1px solid var(--border)',borderRadius:8,fontSize:13,lineHeight:1.5,resize:'vertical',boxSizing:'border-box'}}/>
+        </div>)}
+      </div>
+      <div style={{border:'1px dashed var(--border)',borderRadius:10,padding:'12px 14px'}}>
+        <div style={{fontSize:12,fontWeight:700,marginBottom:8}}>Neuen Anstoß hinzufügen</div>
+        <div style={{display:'flex',gap:8,marginBottom:8,flexWrap:'wrap'}}>
+          <input placeholder="Kürzel (z. B. g_lob)" value={nAdd.key} onChange={e=>setNAdd(a=>({...a,key:e.target.value}))} style={{padding:'6px 9px',border:'1px solid var(--border)',borderRadius:8,fontSize:13,width:160}}/>
+          <select className="form-select" style={{width:'auto',fontSize:13}} value={nAdd.cond} onChange={e=>setNAdd(a=>({...a,cond:e.target.value}))}>
+            <option value="">— allgemein —</option><option value="weak_strong">weak_strong</option><option value="weak">weak</option><option value="absent_stable">absent_stable</option><option value="no_feedback">no_feedback</option><option value="new_joiner">new_joiner</option>
+          </select>
+          <span style={{fontSize:12,alignSelf:'center'}}>Prio <input type="number" value={nAdd.prio} onChange={e=>setNAdd(a=>({...a,prio:e.target.value}))} style={{width:52,padding:'4px 6px',border:'1px solid var(--border)',borderRadius:6}}/></span>
+        </div>
+        <textarea placeholder="Text des Anstoßes, mit Platzhaltern wo passend" value={nAdd.template} onChange={e=>setNAdd(a=>({...a,template:e.target.value}))} rows={2} style={{width:'100%',padding:'7px 9px',border:'1px solid var(--border)',borderRadius:8,fontSize:13,lineHeight:1.5,resize:'vertical',boxSizing:'border-box',marginBottom:8}}/>
+        <button className="btn btn-sm btn-primary" disabled={busy==='addn'} onClick={addNudge}>Hinzufügen</button>
       </div>
     </div>}
   </div>;
