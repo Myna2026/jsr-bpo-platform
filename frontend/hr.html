@@ -19084,13 +19084,9 @@ function CVModal({cv, projects, team, onSave, onClose, initialTab}){
     else setClaraMsg('Clara konnte nichts lesen, zu wenig Freitext oder ein Fehler.');
   }
 
+  // CEFR-Sprachprobe (Schrift/Audio) läuft über Clara (clara-level), nicht mehr per Browser-Key.
+  // Eine KI-Quelle im Bewerberbereich. Ergebnis bleibt FYI, füllt die finale HR-Bewertung NICHT.
   async function runAiAssessment(type){
-    const apiKey = localStorage.getItem('jsr_anthropic_key')||'';
-    if(!apiKey){
-      alert('Kein Anthropic API-Key hinterlegt.\nBitte in Admin → System → API-Keys eintragen.');
-      return;
-    }
-
     const LEVELS = {
       A2:{label:'A2',color:'#dc2626',bg:'#fef2f2',desc:'Sehr einfach, viele Fehler'},
       B1:{label:'B1',color:'#d97706',bg:'#fffbeb',desc:'Verständlich, aber Fehler'},
@@ -19098,87 +19094,23 @@ function CVModal({cv, projects, team, onSave, onClose, initialTab}){
       C1:{label:'C1',color:'#2563eb',bg:'#eff6ff',desc:'Sehr gut, kaum Fehler'},
       C2:{label:'C2',color:'#7c3aed',bg:'#f5f3ff',desc:'Muttersprachliches Niveau'},
     };
-
+    const text = (type==='writing' ? (form.writing_sample||'') : (form.audio_transcript||'')).trim();
+    if(!text || text.length < 20){
+      alert(type==='writing' ? 'Bitte zuerst eine Schriftprobe eingeben.' : 'Bitte zuerst ein Transkript der Hörprobe eingeben.');
+      return;
+    }
     setAiLoading(l=>({...l,[type]:true}));
     setAiResult(r=>({...r,[type]:null}));
-
     try {
-      let prompt = '';
-      if(type==='writing'){
-        const text = (form.writing_sample||'').trim();
-        if(!text || text.length < 20){
-          alert('Bitte zuerst eine Schriftprobe eingeben.');
-          setAiLoading(l=>({...l,[type]:false}));
-          return;
-        }
-        prompt = `Du bist ein Sprachexperte der deutschen Sprache. Bewerte folgenden Text eines Bewerbers für eine deutschsprachige Kundendienst-Stelle.
-
-Aufgabe des Bewerbers war: Eine kurze Antwort-Mail auf eine Kunden-E-Mail schreiben (Problem mit doppelter Buchungsabbuchung).
-
-Bewerber-Antwort:
-"${text}"
-
-Gib genau folgendes JSON zurück (nur JSON, kein Markdown):
-{
-  "level": "B2",
-  "confidence": "hoch",
-  "strengths": "kurze Stärken (max 1 Satz)",
-  "weaknesses": "kurze Schwächen (max 1 Satz, leer wenn keine)",
-  "reasoning": "1-2 Sätze warum dieses Level"
-}
-
-Levels: A2 (Sehr einfach), B1 (Verständlich mit Fehlern), B2 (Gut & professionell), C1 (Sehr gut), C2 (Nahezu muttersprachlich).
-Sei streng aber fair. Für Kundenservice ist B2 das Minimum.`;
-      } else {
-        // Audio: HR gibt Transkript ein
-        const transcript = (form.audio_transcript||'').trim();
-        if(!transcript || transcript.length < 20){
-          alert('Bitte zuerst ein Transkript der Hörprobe eingeben.');
-          setAiLoading(l=>({...l,[type]:false}));
-          return;
-        }
-        prompt = `Du bist ein Sprachexperte der deutschen Sprache. Bewerte folgendes Transkript einer mündlichen Äußerung eines Bewerbers für eine deutschsprachige Kundendienst-Stelle.
-
-Vorlesetext war: "Guten Tag, mein Name ist [Name]. Ich freue mich, heute bei TIVE 360° vorzusprechen. Im Kundenkontakt ist mir eine freundliche und klare Kommunikation besonders wichtig, denn zufriedene Kunden sind das Ziel jedes guten Gesprächs."
-
-Transkript (vom HR-Mitarbeiter nach Anhören eingetragen):
-"${transcript}"
-
-Gib genau folgendes JSON zurück (nur JSON, kein Markdown):
-{
-  "level": "B2",
-  "confidence": "mittel",
-  "strengths": "kurze Stärken (max 1 Satz)",
-  "weaknesses": "kurze Schwächen (max 1 Satz, leer wenn keine)",
-  "reasoning": "1-2 Sätze warum dieses Level"
-}
-
-Levels: A2, B1, B2, C1, C2. Für Kundenservice ist B2 das Minimum.`;
-      }
-
-      const res = await fetch('https://api.anthropic.com/v1/messages',{
+      let tok=null; try{ const s=await sb.auth.getSession(); tok=s&&s.data&&s.data.session&&s.data.session.access_token; }catch(_e){}
+      const res = await fetch(SB_URL+'/functions/v1/clara-level',{
         method:'POST',
-        headers:{
-          'Content-Type':'application/json',
-          'x-api-key':apiKey,
-          'anthropic-version':'2023-06-01',
-          'anthropic-dangerous-direct-browser-access':'true'
-        },
-        body:JSON.stringify({
-          model:'claude-sonnet-4-20250514',
-          max_tokens:300,
-          messages:[{role:'user',content:prompt}]
-        })
+        headers:{'Content-Type':'application/json','Authorization':'Bearer '+tok,'apikey':SB_KEY},
+        body:JSON.stringify({type, text})
       });
-
       const data = await res.json();
-      if(data.error) throw new Error(data.error.message);
-
-      const raw = data.content?.[0]?.text || '{}';
-      const clean = raw.replace(/```json|```/g,'').trim();
-      const result = JSON.parse(clean);
-
-      // Save AI assessment separately (FYI only — does NOT auto-fill HR final rating)
+      if(!res.ok || data.error) throw new Error(data.error||('Fehler '+res.status));
+      const result = data.result;
       const lvl = result.level;
       if(['A2','B1','B2','C1','C2'].includes(lvl)){
         if(type==='writing'){
@@ -19192,7 +19124,6 @@ Levels: A2, B1, B2, C1, C2. Für Kundenservice ist B2 das Minimum.`;
           set('ai_reasoning_audio', result.reasoning||'');
         }
       }
-
       setAiResult(r=>({...r,[type]:{...result, levelMeta: LEVELS[lvl]||LEVELS['B2']}}));
     } catch(err){
       setAiResult(r=>({...r,[type]:{error:'Fehler: '+err.message}}));
@@ -19390,7 +19321,7 @@ Levels: A2, B1, B2, C1, C2. Für Kundenservice ist B2 das Minimum.`;
                       style={{background:'linear-gradient(135deg,#0F5661,#7c3aed)',color:'#fff',border:'none',gap:5,fontSize:11}}>
                       {aiLoading.audio
                         ?<><span style={{animation:'spin 1s linear infinite',display:'inline-block'}}>⟳</span> Analysiere…</>
-                        :<>✨ KI-Einschätzung</>}
+                        :<>✨ Clara einschätzen</>}
                     </button>
                   </div>
                   {/* Transkript-Eingabe für Audio */}
@@ -19400,7 +19331,7 @@ Levels: A2, B1, B2, C1, C2. Für Kundenservice ist B2 das Minimum.`;
                     </label>
                     <textarea className="form-input" rows={2}
                       value={form.audio_transcript||''} onChange={e=>set('audio_transcript',e.target.value)}
-                      placeholder="Was hat der Bewerber gesagt? Kurz mittippen: dann KI-Einschätzung starten…"
+                      placeholder="Was hat der Bewerber gesagt? Kurz mittippen: dann Clara einschätzen lassen…"
                       style={{fontSize:12,lineHeight:1.6,minHeight:60}}
                     />
                   </div>
@@ -19414,7 +19345,7 @@ Levels: A2, B1, B2, C1, C2. Für Kundenservice ist B2 das Minimum.`;
                         :<>
                           <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:6}}>
                             <span style={{fontWeight:900,fontSize:18,color:aiResult.audio.levelMeta?.color}}>✨ {aiResult.audio.level}</span>
-                            <span style={{fontSize:11,color:'var(--muted)'}}>KI-Einschätzung · Konfidenz: {aiResult.audio.confidence}</span>
+                            <span style={{fontSize:11,color:'var(--muted)'}}>Claras Einschätzung · Konfidenz: {aiResult.audio.confidence}</span>
                           </div>
                           <div style={{fontSize:12,color:'var(--text)',lineHeight:1.5,marginBottom:4}}>{aiResult.audio.reasoning}</div>
                           {aiResult.audio.strengths&&<div style={{fontSize:11,color:'var(--green)'}}>✓ {aiResult.audio.strengths}</div>}
@@ -19498,7 +19429,7 @@ Levels: A2, B1, B2, C1, C2. Für Kundenservice ist B2 das Minimum.`;
                       style={{background:'linear-gradient(135deg,#0F5661,#7c3aed)',color:'#fff',border:'none',gap:5,fontSize:11}}>
                       {aiLoading.writing
                         ?<><span style={{animation:'spin 1s linear infinite',display:'inline-block'}}>⟳</span> Analysiere…</>
-                        :<>✨ KI-Einschätzung</>}
+                        :<>✨ Clara einschätzen</>}
                     </button>
                   </div>
                   {/* AI Result */}
@@ -19511,7 +19442,7 @@ Levels: A2, B1, B2, C1, C2. Für Kundenservice ist B2 das Minimum.`;
                         :<>
                           <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:6}}>
                             <span style={{fontWeight:900,fontSize:18,color:aiResult.writing.levelMeta?.color}}>✨ {aiResult.writing.level}</span>
-                            <span style={{fontSize:11,color:'var(--muted)'}}>KI-Einschätzung · Konfidenz: {aiResult.writing.confidence}</span>
+                            <span style={{fontSize:11,color:'var(--muted)'}}>Claras Einschätzung · Konfidenz: {aiResult.writing.confidence}</span>
                           </div>
                           <div style={{fontSize:12,color:'var(--text)',lineHeight:1.5,marginBottom:4}}>{aiResult.writing.reasoning}</div>
                           {aiResult.writing.strengths&&<div style={{fontSize:11,color:'var(--green)'}}>✓ {aiResult.writing.strengths}</div>}
