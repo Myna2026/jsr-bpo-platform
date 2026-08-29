@@ -1387,7 +1387,7 @@ const MENU_BADGE_MAIN_ITEMS = [
   {key:'useractivity',label:'Nutzung & Aktivität'},{key:'reminders',label:'Erinnerungen'},{key:'taskadmin',label:'Aufgaben-Verwaltung'},
   {key:'superadmin',label:'System / Konfiguration'},{key:'tabperms',label:'Portal-Tabs'},
   {key:'aisettings',label:'KI-Einstellungen'},{key:'aiendpoint',label:'KI-Anbindung'},{key:'cvsync',label:'CV-Sync'},
-  {key:'cockpits',label:'Cockpits'},{key:'hraccess',label:'HR-Zugriff'},{key:'appusers',label:'App-User'},{key:'aiaccess',label:'KI-Datenzugriff'},{key:'whosees',label:'Wer sieht was'},
+  {key:'cockpits',label:'Cockpits'},{key:'hraccess',label:'HR-Zugriff'},{key:'appusers',label:'App-User'},{key:'rechte',label:'Rechte'},{key:'aiaccess',label:'KI-Datenzugriff'},{key:'whosees',label:'Wer sieht was'},
   {key:'skillmatrix',label:'Skill Matrix'},{key:'elearning',label:'E-Learning'},{key:'knowledge',label:'Wissensbasis'},
   {key:'languagetest',label:'Wissenstest'},{key:'test_editor',label:'Test Editor'},{key:'test_preview',label:'Test Vorschau'},
 ];
@@ -7711,6 +7711,7 @@ function buildNavSections(f){
     ]},
     {sec:'Zugänge & Protokoll', items:[   // was man bedient: Rechte + Audit
       {key:'appusers',label:'App-User',icon:'👤'},
+      ...(_isMgmt ? [{key:'rechte',label:'Rechte',icon:'🛡'}] : []),   // Management-only (feingranulare Rechte je Rolle/Person)
       ...(_isMgmt ? [{key:'aiaccess',label:'KI-Datenzugriff',icon:'🧠'}] : []),   // Management-only
       ...(_isMgmt ? [{key:'whosees',label:'Wer sieht was',icon:'🗺'}] : []),   // Management-only
       {key:'hraccess',label:'HR-Zugriff',icon:'🛡'},
@@ -36263,6 +36264,124 @@ function aiEffectText(s, projMap){
   parts.push(s.overhead_mgmt?'inkl. Management & Overhead':'ohne Management & Overhead');
   return parts.join(' · ');
 }
+// Rechte-Vorhaben Schnitt 2: Admin-Oberfläche. Je Rolle (Standard) und je Person (Override) je Bereich
+// sichtbar / lesen-bearbeiten / Ausschnitt. Schreibt role_permissions / user_permissions (Reset = Zeile löschen).
+// NOCH NICHT SCHARF — keine Policy liest das; die Durchsetzung kommt in einem späteren Schnitt.
+function RechteView({team}){
+  const isMgmt = team&&(team.role_keys||[]).some(x=>x==='management');
+  const [areas,setAreas]=React.useState(null);
+  const [rolePerms,setRolePerms]=React.useState({});
+  const [userPerms,setUserPerms]=React.useState({});
+  const [users,setUsers]=React.useState([]);
+  const [projects,setProjects]=React.useState([]);
+  const [tab,setTab]=React.useState('role');
+  const [selRole,setSelRole]=React.useState('management');
+  const [selUser,setSelUser]=React.useState('');
+  const [msg,setMsg]=React.useState('');
+  const [busy,setBusy]=React.useState('');
+  const ROLES=[['management','Management'],['hr','HR'],['finance','Finance'],['projektleiter','Projektleiter'],['teamlead','Teamleiter']];
+  const MODES=[['read','lesen'],['edit','bearbeiten']];
+  const SAL=[['none','keins'],['own','eigenes Projekt'],['all','alle']];
+  const DIR=[['down','absteigend'],['side','gleiche Ebene'],['up','auch aufsteigend']];
+  const PRJ=[['own','eigenes'],['list','ausgewählte'],['all','alle']];
+  const SKL=[['own','eigener'],['all','alle']];
+  const DEF={visible:false,mode:'none',salary:'none',direction:'down',projects:'own',project_ids:[],skill:'all'};
+
+  const load=async()=>{ try{
+    const [ar,rp,up,us,pj]=await Promise.all([
+      sb.from('permission_areas').select('*').order('seq'),
+      sb.from('role_permissions').select('*'),
+      sb.from('user_permissions').select('*'),
+      sb.from('app_users').select('user_id,full_name,role_keys,active').eq('active',true),
+      sb.from('projects').select('id,name'),
+    ]);
+    setAreas(ar.data||[]);
+    const rm={}; (rp.data||[]).forEach(r=>{ rm[r.role_key+'|'+r.area_key]=r; }); setRolePerms(rm);
+    const um={}; (up.data||[]).forEach(r=>{ um[r.user_id+'|'+r.area_key]=r; }); setUserPerms(um);
+    setUsers((us.data||[]).filter(u=>(u.role_keys||[]).some(r=>HR_PORTAL_ROLES.includes(r))).sort((a,b)=>String(a.full_name||'').localeCompare(String(b.full_name||''),'de')));
+    setProjects(pj.data||[]);
+  }catch(e){ setAreas([]); } };
+  React.useEffect(()=>{ if(isMgmt) load(); },[]);
+
+  const rankPick=(rows,field,order)=>{ let best=order[0]; rows.forEach(r=>{ if(order.indexOf(r[field])>order.indexOf(best)) best=r[field]; }); return best; };
+  const roleUnion=(role_keys,area)=>{ const rows=(role_keys||[]).map(rk=>rolePerms[rk+'|'+area]).filter(Boolean);
+    if(!rows.length) return {...DEF};
+    return { visible:rows.some(r=>r.visible), mode:rankPick(rows,'mode',['none','read','edit']), salary:rankPick(rows,'salary',['none','own','all']),
+      direction:rankPick(rows,'direction',['down','side','up']), projects:rankPick(rows,'projects',['own','list','all']), project_ids:[], skill:rankPick(rows,'skill',['own','all']) }; };
+
+  async function saveRole(area, patch){ const key=selRole+'|'+area; const cur=rolePerms[key]||{...DEF}; const next={...cur,...patch};
+    setRolePerms(m=>({...m,[key]:{role_key:selRole,area_key:area,...next}})); setBusy(key); setMsg('');
+    const {error}=await sb.from('role_permissions').upsert({role_key:selRole,area_key:area,visible:next.visible,mode:next.mode,salary:next.salary,direction:next.direction,projects:next.projects,project_ids:next.project_ids||[],skill:next.skill});
+    setBusy(''); setMsg(error?('Fehler: '+error.message):'Gespeichert.');
+  }
+  const selUserObj=users.find(u=>u.user_id===selUser);
+  async function saveUser(area, patch){ if(!selUserObj) return; const key=selUser+'|'+area; const base=userPerms[key]||roleUnion(selUserObj.role_keys,area); const next={...base,...patch};
+    setUserPerms(m=>({...m,[key]:{user_id:selUser,area_key:area,...next}})); setBusy(key); setMsg('');
+    const {error}=await sb.from('user_permissions').upsert({user_id:selUser,area_key:area,visible:next.visible,mode:next.mode,salary:next.salary,direction:next.direction,projects:next.projects,project_ids:next.project_ids||[],skill:next.skill,updated_at:new Date().toISOString()});
+    setBusy(''); setMsg(error?('Fehler: '+error.message):'Gespeichert.');
+  }
+  async function resetUser(area){ if(!selUserObj) return; const key=selUser+'|'+area; setBusy(key); setMsg('');
+    const {error}=await sb.from('user_permissions').delete().eq('user_id',selUser).eq('area_key',area);
+    setBusy(''); if(error){ setMsg('Fehler: '+error.message); return; }
+    setUserPerms(m=>{ const n={...m}; delete n[key]; return n; }); setMsg('Auf Rollen-Standard zurückgesetzt.');
+  }
+
+  const Seg=({value,onChange,options})=> <div style={{display:'inline-flex',gap:2,background:'var(--surface-2)',borderRadius:8,padding:2,flexWrap:'wrap'}}>
+    {options.map(([v,l])=><button key={v} onClick={()=>onChange(v)} style={{padding:'5px 11px',border:'none',borderRadius:6,cursor:'pointer',fontSize:12.5,fontWeight:600,background:value===v?'var(--blue)':'transparent',color:value===v?'#fff':'var(--text)'}}>{l}</button>)}
+  </div>;
+  function AreaRow({area, eff, onPatch, overridden, onReset}){
+    const ax=area.axes||{}; const off = eff.visible===false;
+    return <div style={{borderTop:'1px solid var(--border)',padding:'12px 0'}}>
+      <div style={{display:'flex',alignItems:'center',gap:12,flexWrap:'wrap'}}>
+        <div style={{flex:'1 1 160px',minWidth:150,fontWeight:700,fontSize:14}}>{area.label}{overridden&&<span style={{marginLeft:8,fontSize:10.5,fontWeight:800,color:'#b45309',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:20,padding:'1px 8px'}}>ANGEPASST</span>}</div>
+        <label style={{display:'flex',alignItems:'center',gap:6,fontSize:12.5,fontWeight:600,cursor:'pointer'}}>
+          <input type="checkbox" checked={eff.visible!==false} onChange={e=>onPatch({visible:e.target.checked, mode:e.target.checked?(eff.mode==='none'?'read':eff.mode):'none'})}/> sichtbar
+        </label>
+        {!off && <Seg value={eff.mode} onChange={v=>onPatch({mode:v})} options={MODES}/>}
+        {overridden && <button onClick={onReset} style={{border:'none',background:'none',color:'#0F5661',fontSize:11.5,fontWeight:700,cursor:'pointer'}}>zurücksetzen</button>}
+      </div>
+      {!off && (ax.gehalt||ax.hierarchie||ax.projekt||ax.skill) && <div style={{display:'flex',gap:16,flexWrap:'wrap',marginTop:10}}>
+        {ax.gehalt && <div style={{fontSize:12,color:'var(--muted)'}}>Gehalt<div style={{marginTop:3}}><Seg value={eff.salary} onChange={v=>onPatch({salary:v})} options={SAL}/></div></div>}
+        {ax.hierarchie && <div style={{fontSize:12,color:'var(--muted)'}}>Hierarchie<div style={{marginTop:3}}><Seg value={eff.direction} onChange={v=>onPatch({direction:v})} options={DIR}/></div></div>}
+        {ax.projekt && <div style={{fontSize:12,color:'var(--muted)'}}>Projekte<div style={{marginTop:3}}><Seg value={eff.projects} onChange={v=>onPatch({projects:v})} options={PRJ}/></div></div>}
+        {ax.skill && <div style={{fontSize:12,color:'var(--muted)'}}>Skill<div style={{marginTop:3}}><Seg value={eff.skill} onChange={v=>onPatch({skill:v})} options={SKL}/></div></div>}
+      </div>}
+      {!off && ax.projekt && eff.projects==='list' && <div style={{marginTop:8,display:'flex',gap:6,flexWrap:'wrap'}}>
+        {(projects||[]).map(p=>{ const on=(eff.project_ids||[]).includes(p.id); return <button key={p.id} onClick={()=>{ const ids=on?(eff.project_ids||[]).filter(x=>x!==p.id):[...(eff.project_ids||[]),p.id]; onPatch({project_ids:ids}); }} style={{fontSize:11.5,padding:'3px 9px',borderRadius:20,border:'1px solid '+(on?'var(--blue)':'var(--border)'),background:on?'var(--blue-bg)':'var(--card)',color:on?'#0F5661':'var(--text)',cursor:'pointer',fontWeight:on?700:500}}>{p.name}</button>; })}
+      </div>}
+    </div>;
+  }
+
+  if(!isMgmt) return <div style={{padding:24,color:'var(--muted)'}}>Dieser Bereich ist dem Management vorbehalten.</div>;
+  if(areas===null) return <div style={{padding:24,color:'var(--muted)'}}>Lädt…</div>;
+  return <div style={{padding:'4px 2px',maxWidth:900}}>
+    <div style={{marginBottom:14}}>
+      <div style={{fontSize:20,fontWeight:800}}>Rechte</div>
+      <div style={{fontSize:13,color:'var(--muted)',marginTop:3,maxWidth:790}}>Je Bereich: sichtbar, lesen oder bearbeiten, und der Ausschnitt (Gehalt, Hierarchie, Projekt, Skill). Standard je Rolle, pro Person anpassbar. <b>Noch nicht scharf</b>: diese Einstellungen werden erst in einem späteren Schritt in der Datenbank durchgesetzt, heute ändern sie nichts.</div>
+    </div>
+    <div style={{display:'flex',gap:8,marginBottom:14}}>
+      {[['role','Je Rolle'],['person','Je Person']].map(([k,l])=><button key={k} onClick={()=>setTab(k)} style={{border:'1px solid var(--border)',background:tab===k?'var(--blue-bg)':'var(--card)',color:tab===k?'#0F5661':'var(--text)',borderRadius:8,padding:'6px 14px',fontSize:13,fontWeight:tab===k?700:500,cursor:'pointer'}}>{l}</button>)}
+    </div>
+    {msg&&<div style={{fontSize:12.5,color:msg.startsWith('Fehler')?'#dc2626':'#059669',marginBottom:10}}>{msg}</div>}
+    {tab==='role' && <div>
+      <div style={{marginBottom:12}}><select className="form-select" style={{width:'auto',fontWeight:700}} value={selRole} onChange={e=>setSelRole(e.target.value)}>{ROLES.map(([v,l])=><option key={v} value={v}>{l}</option>)}</select>
+        <span style={{fontSize:12,color:'var(--muted)',marginLeft:10}}>Standard-Rechte dieser Rolle. Abweichungen je Person unter „Je Person".</span></div>
+      <div className="card" style={{padding:'4px 16px'}}>
+        {areas.map(a=><AreaRow key={a.key} area={a} eff={rolePerms[selRole+'|'+a.key]||{...DEF}} onPatch={p=>saveRole(a.key,p)}/>)}
+      </div>
+    </div>}
+    {tab==='person' && <div>
+      <div style={{marginBottom:12}}><select className="form-select" style={{width:'auto',fontWeight:700}} value={selUser} onChange={e=>setSelUser(e.target.value)}>
+        <option value="">Person wählen…</option>
+        {users.map(u=><option key={u.user_id} value={u.user_id}>{u.full_name} ({(u.role_keys||[]).join(', ')})</option>)}
+      </select></div>
+      {!selUserObj ? <div style={{color:'var(--muted)',fontSize:13,padding:12}}>Wähle eine Person, um ihre Abweichungen vom Rollen-Standard zu setzen. „Zurücksetzen" stellt den Rollen-Standard wieder her.</div> :
+      <div className="card" style={{padding:'4px 16px'}}>
+        {areas.map(a=>{ const ov=userPerms[selUser+'|'+a.key]; const eff=ov||roleUnion(selUserObj.role_keys,a.key); return <AreaRow key={a.key} area={a} eff={eff} overridden={!!ov} onReset={()=>resetUser(a.key)} onPatch={p=>saveUser(a.key,p)}/>; })}
+      </div>}
+    </div>}
+  </div>;
+}
 function AiAccessView({team, employees}){
   const [rows,setRows]=React.useState(null);
   const [projects,setProjects]=React.useState([]);
@@ -42392,6 +42511,7 @@ function App(){
       'nlquery':'<path fill-rule="evenodd" d="M10.5 3.75a6.75 6.75 0 1 0 0 13.5 6.75 6.75 0 0 0 0-13.5ZM2.25 10.5a8.25 8.25 0 1 1 14.59 5.28l4.69 4.69a.75.75 0 1 1-1.06 1.06l-4.69-4.69A8.25 8.25 0 0 1 2.25 10.5Z" clip-rule="evenodd"/>',
       'aiaccess':'<path fill-rule="evenodd" d="M18.75 12.75h1.5a.75.75 0 0 0 0-1.5h-1.5a.75.75 0 0 0 0 1.5ZM12 6a.75.75 0 0 1 .75-.75h7.5a.75.75 0 0 1 0 1.5h-7.5A.75.75 0 0 1 12 6ZM12 18a.75.75 0 0 1 .75-.75h7.5a.75.75 0 0 1 0 1.5h-7.5A.75.75 0 0 1 12 18ZM3.75 6.75h1.5a.75.75 0 1 0 0-1.5h-1.5a.75.75 0 0 0 0 1.5ZM5.25 18.75h-1.5a.75.75 0 0 1 0-1.5h1.5a.75.75 0 0 1 0 1.5ZM3 12a.75.75 0 0 1 .75-.75h7.5a.75.75 0 0 1 0 1.5h-7.5A.75.75 0 0 1 3 12ZM9 3.75a2.25 2.25 0 1 0 0 4.5 2.25 2.25 0 0 0 0-4.5ZM12.75 12a2.25 2.25 0 1 1 4.5 0 2.25 2.25 0 0 1-4.5 0ZM9 15.75a2.25 2.25 0 1 0 0 4.5 2.25 2.25 0 0 0 0-4.5Z" clip-rule="evenodd"/>',
       'whosees':'<path fill-rule="evenodd" d="M8.161 2.58a1.875 1.875 0 0 1 1.678 0l4.993 2.498c.106.052.23.052.336 0l3.869-1.935A1.875 1.875 0 0 1 21.75 4.82v12.485c0 .71-.401 1.36-1.037 1.677l-4.875 2.437a1.875 1.875 0 0 1-1.676 0l-4.994-2.497a.375.375 0 0 0-.336 0l-3.868 1.935A1.875 1.875 0 0 1 2.25 19.18V6.695c0-.71.401-1.36 1.036-1.677l4.875-2.437ZM9 6a.75.75 0 0 1 .75.75V15a.75.75 0 0 1-1.5 0V6.75A.75.75 0 0 1 9 6Zm6.75 3a.75.75 0 0 0-1.5 0v8.25a.75.75 0 0 0 1.5 0V9Z" clip-rule="evenodd"/>',
+      'rechte':'<path fill-rule="evenodd" d="M6.32 2.577a49.255 49.255 0 0 1 11.36 0c1.497.174 2.57 1.46 2.57 2.93V21a.75.75 0 0 1-1.085.67L12 18.089l-7.165 3.583A.75.75 0 0 1 3.75 21V5.507c0-1.47 1.073-2.756 2.57-2.93ZM15.75 9a.75.75 0 0 0-1.5 0v.878a2.25 2.25 0 1 0 1.5 0V9Z" clip-rule="evenodd"/>',
       'superadmin':'<path fill-rule="evenodd" d="M11.078 2.25c-.917 0-1.699.663-1.85 1.567L9.05 4.889c-.02.12-.115.26-.297.348a7.493 7.493 0 0 0-.986.57c-.166.115-.334.126-.45.083L6.3 5.508a1.875 1.875 0 0 0-2.282.819l-.922 1.597a1.875 1.875 0 0 0 .432 2.385l.84.692c.095.078.17.229.154.43a7.598 7.598 0 0 0 0 1.139c.015.2-.059.352-.153.43l-.841.692a1.875 1.875 0 0 0-.432 2.385l.922 1.597a1.875 1.875 0 0 0 2.282.818l1.019-.382c.115-.043.283-.031.45.082.312.214.641.405.985.57.182.088.277.228.297.35l.178 1.071c.151.904.933 1.567 1.85 1.567h1.844c.916 0 1.699-.663 1.85-1.567l.178-1.072c.02-.12.114-.26.297-.349.344-.165.673-.356.985-.57.167-.114.335-.125.45-.082l1.02.382a1.875 1.875 0 0 0 2.28-.819l.923-1.597a1.875 1.875 0 0 0-.432-2.385l-.84-.692c-.095-.078-.17-.229-.154-.43a7.614 7.614 0 0 0 0-1.139c-.016-.2.059-.352.153-.43l.84-.692c.708-.582.891-1.59.433-2.385l-.922-1.597a1.875 1.875 0 0 0-2.282-.818l-1.02.382c-.114.043-.282.031-.449-.083a7.49 7.49 0 0 0-.985-.57c-.183-.087-.277-.227-.297-.348l-.179-1.072a1.875 1.875 0 0 0-1.85-1.567h-1.843ZM12 15.75a3.75 3.75 0 1 0 0-7.5 3.75 3.75 0 0 0 0 7.5Z" clip-rule="evenodd"/>',
       'skillmatrix':'<path fill-rule="evenodd" d="M1.5 5.625c0-1.036.84-1.875 1.875-1.875h17.25c1.035 0 1.875.84 1.875 1.875v12.75c0 1.035-.84 1.875-1.875 1.875H3.375A1.875 1.875 0 0 1 1.5 18.375V5.625ZM21 9.375A.375.375 0 0 0 20.625 9h-7.5a.375.375 0 0 0-.375.375v1.5c0 .207.168.375.375.375h7.5a.375.375 0 0 0 .375-.375v-1.5Zm0 3.75a.375.375 0 0 0-.375-.375h-7.5a.375.375 0 0 0-.375.375v1.5c0 .207.168.375.375.375h7.5a.375.375 0 0 0 .375-.375v-1.5Zm0 3.75a.375.375 0 0 0-.375-.375h-7.5a.375.375 0 0 0-.375.375v1.5c0 .207.168.375.375.375h7.5a.375.375 0 0 0 .375-.375v-1.5ZM10.875 18.75a.375.375 0 0 0 .375-.375v-1.5a.375.375 0 0 0-.375-.375h-7.5a.375.375 0 0 0-.375.375v1.5c0 .207.168.375.375.375h7.5ZM3.375 15h7.5a.375.375 0 0 0 .375-.375v-1.5a.375.375 0 0 0-.375-.375h-7.5a.375.375 0 0 0-.375.375v1.5c0 .207.168.375.375.375Zm0-3.75h7.5a.375.375 0 0 0 .375-.375v-1.5A.375.375 0 0 0 10.875 9h-7.5A.375.375 0 0 0 3 9.375v1.5c0 .207.168.375.375.375Z" clip-rule="evenodd"/>',
       'elearning':'<path d="M11.7 2.805a.75.75 0 0 1 .6 0A60.65 60.65 0 0 1 22.83 8.72a.75.75 0 0 1-.231 1.337 49.948 49.948 0 0 0-9.902 3.912l-.003.002c-.114.06-.227.119-.34.18a.75.75 0 0 1-.707 0A50.88 50.88 0 0 0 7.5 12.173v-.224c0-.131.067-.248.172-.311a54.615 54.615 0 0 1 4.653-2.52.75.75 0 0 0-.65-1.352 56.123 56.123 0 0 0-4.78 2.589 1.858 1.858 0 0 0-.859 1.228 49.803 49.803 0 0 0-4.634-1.527.75.75 0 0 1-.231-1.337A60.653 60.653 0 0 1 11.7 2.805Z"/> <path d="M13.06 15.473a48.45 48.45 0 0 1 7.666-3.282c.134 1.414.22 2.843.255 4.284a.75.75 0 0 1-.46.711 47.87 47.87 0 0 0-8.105 4.342.75.75 0 0 1-.832 0 47.87 47.87 0 0 0-8.104-4.342.75.75 0 0 1-.461-.71c.035-1.442.121-2.87.255-4.286.921.304 1.83.634 2.726.99v1.27a1.5 1.5 0 0 0-.14 2.508c-.09.38-.222.753-.397 1.11.452.213.901.434 1.346.66a6.727 6.727 0 0 0 .551-1.607 1.5 1.5 0 0 0 .14-2.67v-.645a48.549 48.549 0 0 1 3.44 1.667 2.25 2.25 0 0 0 2.12 0Z"/> <path d="M4.462 19.462c.42-.419.753-.89 1-1.395.453.214.902.435 1.347.662a6.742 6.742 0 0 1-1.286 1.794.75.75 0 0 1-1.06-1.06Z"/>',
@@ -42668,6 +42788,7 @@ function App(){
           {view==='uploadplan'&&<UploadScheduleAdminView team={team} projects={projects}/>}
           {view==='recmkt'&&<RecruitingMarketingView employees={employees}/>}
           {view==='nlquery'&&<NlQueryView team={team}/>}
+          {view==='rechte'&&<RechteView team={team}/>}
           {view==='aiaccess'&&<AiAccessView team={team} employees={employees}/>}
           {view==='whosees'&&<AiWhoSeesView team={team} employees={employees} onOpenView={setView}/>}
           {view==='useractivity'&&<LoginActivityView team={team}/>}
