@@ -157,6 +157,9 @@ echo "→ Geteilte Rechenkerne (shared/jsr-calc.js → beide Portale)..."
 rsync -az --progress "$LOCAL_DIR/shared/" "$SERVER:$REMOTE_BASE/hr/shared/"
 rsync -az --progress "$LOCAL_DIR/shared/" "$SERVER:$REMOTE_BASE/mitarbeiter/shared/"
 
+echo "→ Build-Kennung (build.txt je Portal, für den Neue-Fassung-Hinweis)..."
+ssh "$SERVER" "for d in hr mitarbeiter client root; do printf '%s' '$BUILD' > $REMOTE_BASE/\$d/build.txt; done"
+
 echo "→ Assets (Logo/Favicon)..."
 rsync -az --progress "$LOCAL_DIR/assets/" "$SERVER:$REMOTE_BASE/hr/assets/"
 rsync -az --progress "$LOCAL_DIR/assets/" "$SERVER:$REMOTE_BASE/mitarbeiter/assets/"
