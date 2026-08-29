@@ -59,15 +59,25 @@ try {
   if (!niCount) await fail("nach dem Anmelden erscheint kein Menue (Login fehlgeschlagen oder Absturz beim Start). pageErrors: " + JSON.stringify(pageErrors.slice(0, 3)));
   if (pageErrors.length) await fail("Fehler direkt nach dem Start: " + pageErrors[0]);
 
-  // Alle einklappbaren Sektionen oeffnen, damit alle Menuepunkte im DOM sind.
-  await page.evaluate(() => {
-    for (const s of document.querySelectorAll(".sidebar .nav-section")) {
-      let el = s.nextElementSibling, hasNi = false;
-      while (el && !el.classList.contains("nav-section")) { if (el.classList && el.classList.contains("ni")) { hasNi = true; break; } el = el.nextElementSibling; }
-      if (!hasNi) s.click();
-    }
+  // Alle einklappbaren Sektionen oeffnen, damit ALLE Menuepunkte im DOM sind.
+  // Wichtig: einzeln mit await, damit React zwischen den Klicks committet — sonst liest der
+  // Offen-Check veraltetes DOM und ueberspringt Sektionen (stille blinde Flecken).
+  const isSecOpen = (sec) => sec.evaluate((s) => {
+    let el = s.nextElementSibling;
+    while (el && !el.classList.contains("nav-section")) { if (el.classList && el.classList.contains("ni")) return true; el = el.nextElementSibling; }
+    return false;
   });
-  await page.waitForTimeout(400);
+  const secLoc = page.locator(".sidebar .nav-section");
+  const secN = await secLoc.count();
+  for (let i = 0; i < secN; i++) {
+    const sec = secLoc.nth(i);
+    if (!(await isSecOpen(sec))) { await sec.click(); await page.waitForTimeout(150); }
+  }
+  // Sicherstellen, dass wirklich keine Sektion mehr zu ist (sonst waeren ihre Ansichten ungeprueft).
+  let stillClosed = [];
+  for (let i = 0; i < secN; i++) { const sec = secLoc.nth(i); if (!(await isSecOpen(sec))) stillClosed.push(await sec.innerText()); }
+  if (stillClosed.length) await fail("Menue-Sektion(en) liessen sich nicht aufklappen, ihre Ansichten blieben ungeprueft: " + stillClosed.join(", "));
+  await page.waitForTimeout(200);
 
   // Menuepunkte einsammeln (Label + Index) und der Reihe nach anklicken.
   const labels = await page.locator(".sidebar .ni .ni-label").allInnerTexts();
