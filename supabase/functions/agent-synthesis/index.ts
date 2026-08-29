@@ -17,8 +17,9 @@ const TOOL = { name:"handoffs", description:"Gemeinsame Erkenntnisse aus den Bef
   handoffs:{ type:"array", items:{ type:"object", properties:{
     topic:{type:"string", description:"kurzer Slug, stabil (dedupe je Tag), z.B. marketing_ohne_ertrag"},
     contributors:{ type:"array", items:{ type:"object", properties:{
-      agent:{type:"string", enum:AGENTS}, ref:{type:"integer", description:"die Nummer (ref) des Befunds aus der Liste"} }, required:["agent","ref"] },
-      description:"mindestens ZWEI verschiedene Kollegen" },
+      agent:{type:"string", enum:AGENTS}, ref:{type:"integer", description:"die Nummer (ref) des Befunds aus der Liste"},
+      note:{type:"string", description:"der KERN dieses Beitrags in max. 5 Wörtern, z.B. 'Stunden eingebrochen' oder 'kein Forecast'"} }, required:["agent","ref","note"] },
+      description:"ZWEI VERSCHIEDENE Kollegen (nie zweimal derselbe Kollege)" },
     by_agent:{type:"string", enum:AGENTS, description:"wer die Verbindung zieht"},
     insight:{type:"string", description:"die gemeinsame Erkenntnis, ein Satz, Deutsch, mit den Zahlen"},
     severity:{type:"string", enum:["info","warn","high"]}
@@ -35,7 +36,9 @@ Deno.serve(async (req)=>{
   // verbunden werden kann), mit den lesbaren Fakten.
   const { data:obs } = await sb.from("agent_observations").select("id,agent_key,okey,severity,title,facts,day")
     .gte("day", addDays(day,-1)).lte("day", day).order("day",{ascending:false});
-  const list = (obs||[]);
+  // Entdubletten: nur der NEUESTE Befund je (Agent, okey) — sonst taucht derselbe Befund über zwei Tage
+  // mehrfach auf und wird fälschlich als „Verbindung" mit sich selbst gepaart.
+  const seenK = new Set<string>(); const list = (obs||[]).filter((o:any)=>{ const k=o.agent_key+"|"+o.okey; if(seenK.has(k)) return false; seenK.add(k); return true; });
   const agentsPresent = new Set(list.map((o:any)=>o.agent_key));
   if(agentsPresent.size < 2) return json({ ok:true, day, note:"weniger als zwei Kollegen mit Befunden — nichts zu verbinden", handoffs:[] });
 
@@ -44,19 +47,16 @@ Deno.serve(async (req)=>{
     fakten:(o.facts||[]).map((f:any)=>f.label+": "+f.current+(f.prior!=null?(" (vorher "+f.prior+")"):"")) }));
 
   const system = "Du bist die Verbindungsstelle zwischen sechs digitalen Kollegen (Clara Bewerber, Max Aufgaben/Daten, "+
-    "Anna Wissen, Paul Analyse, Maya Systemnutzung, Lena Mitarbeiterdaten). Dir liegen ihre heutigen Befunde vor. "+
-    "Finde Zusammenhänge ZWISCHEN Kollegen — mindestens zwei VERSCHIEDENE Kollegen —, die zusammen etwas zeigen, das "+
-    "keiner allein sieht. Beispiel: Clara meldet weniger Bewerbungen UND Max meldet fehlende Uploads -> zusammen: die "+
-    "Datenlage bremst das Recruiting. Auch KOMPLEMENTÄRE Befunde zählen: meldet ein Kollege ein Ergebnis und ein "+
-    "anderer eine fehlende Grundlage dafür, ist das ein echter Zusammenhang (z.B. Paul liefert Stundenzahlen, Max "+
-    "meldet fehlende Forecasts -> wir messen Leistung, können sie aber für diese Projekte nicht gegen einen Plan "+
-    "stellen). Weitere Muster: ein Einbruch bei einem Kollegen (z.B. weniger gelieferte Stunden) und ein Ausfall "+
-    "bei einem anderen (z.B. inaktive Zugänge) deuten oft auf dieselbe Ursache; mehrere fehlende Datenpflege-Stände "+
-    "bei verschiedenen Kollegen (Bank fehlt, Forecast fehlt) zeigen zusammen, dass die Datenpflege an mehreren "+
-    "Stellen hakt. Sei nicht ZU streng: wenn zwei Befunde verschiedener Kollegen plausibel zusammenhängen und du es "+
-    "mit den Zahlen belegen kannst, nimm die Verbindung. Regeln: NUR belegbare Zusammenhänge aus den gegebenen Befunden, erfinde "+
-    "nichts. Jede Erkenntnis in einem Satz, Deutsch, kurz, mit den konkreten Zahlen. Verweise je Beitrag auf die "+
-    "observation_id. Wenn es keinen echten Zusammenhang gibt, gib eine leere Liste. Höchstens drei Verbindungen.";
+    "Anna Wissen, Paul Analyse, Maya Systemnutzung, Lena Mitarbeiterdaten). Dir liegen ihre Befunde vor, jeder mit "+
+    "einer Nummer ref. Finde Zusammenhänge ZWISCHEN zwei VERSCHIEDENEN Kollegen, deren Kombination eine FOLGE hat, "+
+    "die keiner allein nennt. GUTES Beispiel, das du nehmen sollst: Paul meldet einen Stunden-Einbruch UND Max "+
+    "meldet fehlenden Forecast -> zusammen lässt sich der Einbruch nicht gegen einen Plan prüfen, er könnte geplant "+
+    "oder ein echtes Problem sein. Zweites Beispiel: Paul meldet weniger gelieferte Stunden UND Maya meldet inaktive "+
+    "Zugänge -> zusammen könnte ein Personalausfall den Rückgang erklären. NICHT nehmen: "+
+    "bloße Umformulierungen oder Sammel-Aussagen (z.B. 'an mehreren "+
+    "Stellen fehlt Datenpflege') und NIE zwei Befunde desselben Kollegen. Erfinde nichts, nutze nur die Befunde. "+
+    "Höchstens ZWEI, lieber eine gute als zwei schwache. Jede Erkenntnis ein Satz, Deutsch, kurz, mit den Zahlen. "+
+    "Je Beitrag: agent, ref und note (der Kern in max 5 Wörtern). Keine echte Folge-Verbindung -> leere Liste.";
   const user = "BEFUNDE HEUTE (jeder mit einer Nummer ref):\n"+JSON.stringify(compact)+"\n\nVerweise je Beitrag mit ref auf den Befund.";
 
   let tool:any;
@@ -69,20 +69,23 @@ Deno.serve(async (req)=>{
     tool = (d.content||[]).find((c:any)=>c.type==="tool_use");
   }catch(e){ return json({ error:"KI nicht erreichbar: "+((e as Error).message||"") }, 502); }
 
-  const raw = (tool&&tool.input&&tool.input.handoffs) || [];
+  const raw = Array.isArray(tool&&tool.input&&tool.input.handoffs) ? tool.input.handoffs : [];
   const byRef = (r:any)=>{ const i=Number(r)-1; return (i>=0 && i<list.length) ? list[i] : null; };
   const out:any[] = [];
   for(const h of raw){
-    const obsList = (h.contributors||[]).map((c:any)=>byRef(c.ref)).filter(Boolean);
-    const distinct = new Set(obsList.map((o:any)=>o.agent_key));   // echter Agent aus dem Befund, nicht die KI-Angabe
-    if(distinct.size < 2) continue;   // echte Übergabe braucht mindestens zwei Kollegen
-    const seen=new Set(); const contributors = obsList.filter((o:any)=>{ if(seen.has(o.id)) return false; seen.add(o.id); return true; })
-      .map((o:any)=>({ agent:o.agent_key, observation_id:o.id, fact:o.title }));
+    const cs = (h.contributors||[]).map((c:any)=>({ obs:byRef(c.ref), note:c.note })).filter((c:any)=>c.obs);
+    // je Agent nur EINEN Beitrag (nie zwei Befunde desselben Kollegen) und mindestens ZWEI verschiedene Kollegen.
+    const perAgent = new Map<string,any>(); for(const c of cs){ const k=c.obs.agent_key; if(!perAgent.has(k)) perAgent.set(k,c); }
+    if(perAgent.size < 2) continue;
+    const contributors = [...perAgent.values()].map((c:any)=>({ agent:c.obs.agent_key, observation_id:c.obs.id,
+      fact: (c.note && String(c.note).trim()) ? String(c.note).trim() : ((c.obs.facts&&c.obs.facts[0]&&c.obs.facts[0].label) || c.obs.title) }));
     out.push({ day, topic:String(h.topic||"handoff").slice(0,60), by_agent:h.by_agent||"maya",
       contributors, insight:h.insight, severity:["info","warn","high"].includes(h.severity)?h.severity:"info" });
   }
-  if(dry) return json({ ok:true, day, dry:true, considered:list.length, handoffs:out });
+  // „Lieber eine gute pro Tag als mehrere belanglose": nur die stärkste behalten (die KI führt sie zuerst).
+  const top = out.slice(0, 1);
+  if(dry) return json({ ok:true, day, dry:true, considered:list.length, handoffs:top });
   let stored=0;
-  for(const h of out){ const { error } = await sb.from("agent_handoffs").upsert(h,{onConflict:"day,topic"}); if(!error) stored++; }
-  return json({ ok:true, day, considered:list.length, stored, handoffs:out });
+  for(const h of top){ const { error } = await sb.from("agent_handoffs").upsert(h,{onConflict:"day,topic"}); if(!error) stored++; }
+  return json({ ok:true, day, considered:list.length, stored, handoffs:top });
 });
