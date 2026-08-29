@@ -62,6 +62,31 @@ else
   run_check "sharedcheck.js (shared/jsr-calc.js)" node  "$CHECKS/sharedcheck.js"
   run_check "statuscheck.js (STATUS_FLOW ↔ cvs_status_valid)" node "$CHECKS/statuscheck.js"
   run_check "menucheck.js (Menue ↔ HR-Tab-Sperren-Katalog)" node "$CHECKS/menucheck.js"
+
+  # Smoke-Test: startet einen lokalen Server auf dem NEUEN frontend/-Stand, meldet sich mit dem
+  # Claude-Test-Zugang an und klickt durch alle Ansichten. Exit 1 = Absturz/leere Ansicht -> Abbruch;
+  # Exit 2 = nicht lauffaehig (kein Browser/kein Passwort) -> Warnung, kein Block.
+  printf "  %-30s " "smoketest (Login + Ansichten)"
+  if bash "$CHECKS/smoketest/run.sh" > /tmp/tive_smoke.out 2>&1; then
+    echo "OK"
+  else
+    rc=$?
+    if [ "$rc" = "2" ]; then
+      echo "UEBERSPRUNGEN"
+      sed -n 's/^/    /p' /tmp/tive_smoke.out | tail -3
+    else
+      echo "FEHLGESCHLAGEN"
+      echo ""
+      echo "✗ ABBRUCH — der Smoke-Test hat eine kaputte/leere Ansicht gefunden. Es wurde NICHTS uebertragen."
+      echo "────────────────────────────────────────────────────────────"
+      cat /tmp/tive_smoke.out
+      echo "────────────────────────────────────────────────────────────"
+      echo "Screenshot des Fehlers: $CHECKS/smoketest/smoke-fail.png"
+      echo "Notausgang (nur im Notfall): ./deploy.sh --force"
+      exit 1
+    fi
+  fi
+
   echo "  → alle Checks bestanden."
   echo ""
 fi

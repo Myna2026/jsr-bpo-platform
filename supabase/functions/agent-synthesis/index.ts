@@ -15,13 +15,13 @@ function addDays(d:string,n:number){ const x=new Date(d+"T00:00:00Z"); x.setUTCD
 const AGENTS = ["clara","max","anna","paul","maya","lena"];
 const TOOL = { name:"handoffs", description:"Gemeinsame Erkenntnisse aus den Befunden mehrerer Kollegen.", input_schema:{ type:"object", properties:{
   handoffs:{ type:"array", items:{ type:"object", properties:{
-    topic:{type:"string", description:"kurzer Slug, stabil (dedupe je Tag), z.B. marketing_ohne_ertrag"},
-    contributors:{ type:"array", items:{ type:"object", properties:{
-      agent:{type:"string", enum:AGENTS}, ref:{type:"integer", description:"die Nummer (ref) des Befunds aus der Liste"},
-      note:{type:"string", description:"der KERN dieses Beitrags in max. 5 Wörtern, z.B. 'Stunden eingebrochen' oder 'kein Forecast'"} }, required:["agent","ref","note"] },
-      description:"ZWEI VERSCHIEDENE Kollegen (nie zweimal derselbe Kollege)" },
-    by_agent:{type:"string", enum:AGENTS, description:"wer die Verbindung zieht"},
-    insight:{type:"string", description:"die gemeinsame Erkenntnis, ein Satz, Deutsch, mit den Zahlen"},
+    topic:{type:"string", description:"kurzer Slug, stabil (dedupe je Tag), z.B. rueckgang_ohne_forecast"},
+    contributors:{ type:"array", description:"ZWEI VERSCHIEDENE Kollegen (nie zweimal derselbe Kollege), in Reihenfolge des Gesprächs",
+      items:{ type:"object", properties:{
+        agent:{type:"string", enum:AGENTS}, ref:{type:"integer", description:"Nummer (ref) des Befunds aus der Liste"},
+        say:{type:"string", description:"optional: wie dieser Kollege seinen Befund im Kanal sagt (erste Person, kurz, mit der Zahl)"} }, required:["agent","ref"] } },
+    by_agent:{type:"string", enum:AGENTS, description:"wer die Schlussfolgerung zieht"},
+    insight:{type:"string", description:"die Schlussfolgerung als letzter Satz ('Zusammen heißt das ...')"},
     severity:{type:"string", enum:["info","warn","high"]}
   }, required:["topic","contributors","by_agent","insight","severity"] } } }, required:["handoffs"] } };
 
@@ -46,24 +46,22 @@ Deno.serve(async (req)=>{
   const compact = list.map((o:any,i:number)=>({ ref:i+1, agent:o.agent_key, okey:o.okey, severity:o.severity, satz:o.title,
     fakten:(o.facts||[]).map((f:any)=>f.label+": "+f.current+(f.prior!=null?(" (vorher "+f.prior+")"):"")) }));
 
-  const system = "Du bist die Verbindungsstelle zwischen sechs digitalen Kollegen (Clara Bewerber, Max Aufgaben/Daten, "+
-    "Anna Wissen, Paul Analyse, Maya Systemnutzung, Lena Mitarbeiterdaten). Dir liegen ihre Befunde vor, jeder mit "+
-    "einer Nummer ref. Finde Zusammenhänge ZWISCHEN zwei VERSCHIEDENEN Kollegen, deren Kombination eine FOLGE hat, "+
-    "die keiner allein nennt. GUTES Beispiel, das du nehmen sollst: Paul meldet einen Stunden-Einbruch UND Max "+
-    "meldet fehlenden Forecast -> zusammen lässt sich der Einbruch nicht gegen einen Plan prüfen, er könnte geplant "+
-    "oder ein echtes Problem sein. Zweites Beispiel: Paul meldet weniger gelieferte Stunden UND Maya meldet inaktive "+
-    "Zugänge -> zusammen könnte ein Personalausfall den Rückgang erklären. NICHT nehmen: "+
-    "bloße Umformulierungen oder Sammel-Aussagen (z.B. 'an mehreren "+
-    "Stellen fehlt Datenpflege') und NIE zwei Befunde desselben Kollegen. Erfinde nichts, nutze nur die Befunde. "+
-    "Höchstens ZWEI, lieber eine gute als zwei schwache. Jede Erkenntnis ein Satz, Deutsch, kurz, mit den Zahlen. "+
-    "Je Beitrag: agent, ref und note (der Kern in max 5 Wörtern). Keine echte Folge-Verbindung -> leere Liste.";
-  const user = "BEFUNDE HEUTE (jeder mit einer Nummer ref):\n"+JSON.stringify(compact)+"\n\nVerweise je Beitrag mit ref auf den Befund.";
+  const system = "Sechs digitale Kollegen melden Befunde (Clara Bewerber, Max Aufgaben/Daten, Anna Wissen, Paul "+
+    "Analyse, Maya Systemnutzung, Lena Mitarbeiterdaten), jeder mit einer Nummer ref. Finde EINEN echten Zusammenhang "+
+    "zwischen ZWEI VERSCHIEDENEN Kollegen, bei dem der eine Befund den anderen erst deutbar oder bedenklich macht. "+
+    "Gutes Beispiel, das du nehmen sollst: Paul meldet einen Stunden-Einbruch UND Max meldet fehlenden Forecast -> "+
+    "zusammen weiß man nicht, ob der Einbruch geplant war. Für jeden beteiligten Kollegen: agent, ref und 'say' — wie "+
+    "er seinen Befund im Kanal sagt (erste Person, kurz, mit der Zahl). Dann by_agent und insight: die "+
+    "Schlussfolgerung als letzter Satz ('Zusammen heißt das ...'). Erfinde nichts, nutze nur die gegebenen Zahlen. "+
+    "NICHT nehmen: bloße Umformulierungen oder Sammel-Aussagen ('an mehreren Stellen fehlt Datenpflege'), und nie "+
+    "zweimal derselbe Kollege. Kein echter Zusammenhang -> leere Liste.";
+  const user = "BEFUNDE HEUTE (jeder mit ref):\n"+JSON.stringify(compact);
 
   let tool:any;
   try{
     const r = await fetch("https://api.anthropic.com/v1/messages",{ method:"POST",
       headers:{ "x-api-key":ANTHROPIC_KEY, "anthropic-version":"2023-06-01", "content-type":"application/json" },
-      body: JSON.stringify({ model:MODEL, max_tokens:900, system, tools:[TOOL], tool_choice:{type:"tool",name:"handoffs"}, messages:[{role:"user",content:user}] }) });
+      body: JSON.stringify({ model:MODEL, max_tokens:1300, system, tools:[TOOL], tool_choice:{type:"tool",name:"handoffs"}, messages:[{role:"user",content:user}] }) });
     const d = await r.json();
     if(!r.ok) return json({ error:(d?.error?.message)||("HTTP "+r.status) }, 502);
     tool = (d.content||[]).find((c:any)=>c.type==="tool_use");
@@ -71,16 +69,27 @@ Deno.serve(async (req)=>{
 
   const raw = Array.isArray(tool&&tool.input&&tool.input.handoffs) ? tool.input.handoffs : [];
   const byRef = (r:any)=>{ const i=Number(r)-1; return (i>=0 && i<list.length) ? list[i] : null; };
+  // Beiträge bekommen morgens ansteigende Zeitstempel (Beobachtung ~07:30 Berlin, Schluss etwas später).
+  const base = Date.parse(day+"T07:30:00+02:00");
+  // Fallback-Satz, wenn die KI kein 'say' liefert: den Befund-Titel entschlacken ("Paul meldet: …", "exakt …").
+  const clean = (t:string)=> String(t||"").replace(/^\s*[A-Za-zÄÖÜäöü]+\s+meldet:?\s*/,"").replace(/,?\s*exakt[^.]*\.?/i,".").replace(/\s{2,}/g," ").trim();
   const out:any[] = [];
   for(const h of raw){
-    const cs = (h.contributors||[]).map((c:any)=>({ obs:byRef(c.ref), note:c.note })).filter((c:any)=>c.obs);
-    // je Agent nur EINEN Beitrag (nie zwei Befunde desselben Kollegen) und mindestens ZWEI verschiedene Kollegen.
+    const cs = (h.contributors||[]).map((c:any)=>({ obs:byRef(c.ref), say:c.say })).filter((c:any)=>c.obs);
+    // je Agent nur EIN Beitrag (nie zwei Befunde desselben Kollegen), mindestens ZWEI verschiedene Kollegen.
     const perAgent = new Map<string,any>(); for(const c of cs){ const k=c.obs.agent_key; if(!perAgent.has(k)) perAgent.set(k,c); }
     if(perAgent.size < 2) continue;
-    const contributors = [...perAgent.values()].map((c:any)=>({ agent:c.obs.agent_key, observation_id:c.obs.id,
-      fact: (c.note && String(c.note).trim()) ? String(c.note).trim() : ((c.obs.facts&&c.obs.facts[0]&&c.obs.facts[0].label) || c.obs.title) }));
-    out.push({ day, topic:String(h.topic||"handoff").slice(0,60), by_agent:h.by_agent||"maya",
-      contributors, insight:h.insight, severity:["info","warn","high"].includes(h.severity)?h.severity:"info" });
+    const ordered = [...perAgent.values()];
+    const contributors = ordered.map((c:any)=>({ agent:c.obs.agent_key, observation_id:c.obs.id,
+      fact: (c.obs.facts&&c.obs.facts[0]&&c.obs.facts[0].label) || c.obs.title }));
+    // Der Verlauf: jeder Befund als Beitrag (wie der Kollege es sagt), dann die Schlussfolgerung als letzter.
+    const thread = ordered.map((c:any,i:number)=>({ agent:c.obs.agent_key,
+      text:String((c.say&&String(c.say).trim())||clean(c.obs.title)).slice(0,300), observation_id:c.obs.id, at:new Date(base + i*90000).toISOString() }));
+    const byA = h.by_agent||ordered[ordered.length-1].obs.agent_key;
+    thread.push({ agent:byA, text:String(h.insight||"").slice(0,400), observation_id:null, at:new Date(base + thread.length*90000).toISOString() });
+    if(!String(h.insight||"").trim()) continue;
+    out.push({ day, topic:String(h.topic||"handoff").slice(0,60), by_agent:byA, contributors, thread,
+      insight:h.insight, severity:["info","warn","high"].includes(h.severity)?h.severity:"info" });
   }
   // „Lieber eine gute pro Tag als mehrere belanglose": nur die stärkste behalten (die KI führt sie zuerst).
   const top = out.slice(0, 1);
