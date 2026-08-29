@@ -51,10 +51,11 @@ Deno.serve(async (req)=>{
   try{
     const r = await fetch("https://api.anthropic.com/v1/messages",{ method:"POST",
       headers:{ "x-api-key":ANTHROPIC_KEY, "anthropic-version":"2023-06-01", "content-type":"application/json" },
-      body: JSON.stringify({ model:MODEL, max_tokens:200, system, messages:[{role:"user",content:user}] }) });
+      body: JSON.stringify({ model:MODEL, max_tokens:400, system, messages:[{role:"user",content:user}] }) });
     const d = await r.json();
     if(!r.ok) return json({ error:(d?.error?.message)||("HTTP "+r.status) }, 502);
-    const after = ((d.content||[]).find((c:any)=>c.type==="text")?.text || "").trim();
+    const after = (d.content||[]).filter((c:any)=>c.type==="text").map((c:any)=>c.text||"").join(" ").trim();
+    if(!after) return json({ error:"leere Antwort vom Modell, bitte nochmal versuchen" }, 502);
     return json({ ok:true, before, after, basis:factLines, had_real:!!o });
   }catch(e){ return json({ error:"KI nicht erreichbar: "+((e as Error).message||"") }, 502); }
 });
