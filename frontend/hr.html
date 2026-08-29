@@ -20353,7 +20353,7 @@ function CVsView({cvList, setCvList, projects, onPromoteToEmployee, team, showTo
               return(
                 <tr key={cv.id} onClick={()=>setQuickView(cv)} style={{cursor:'pointer'}} className="table-row-hover">
                   <td>
-                    <div style={{display:'flex',alignItems:'center',gap:6}}>{(()=>{const q=applicantRank(cv);return q.tier?rankBadge(q.tier):null;})()}<div style={{fontWeight:600,fontSize:13}}>{cv.first_name} {cv.last_name}</div></div>
+                    <div style={{display:'flex',alignItems:'center',gap:6}}>{(()=>{const q=applicantRank(cv);return q.tier?<React.Fragment>{rankBadge(q.tier)}<WhyButton make={()=>applicantWhy(cv)}/></React.Fragment>:null;})()}<div style={{fontWeight:600,fontSize:13}}>{cv.first_name} {cv.last_name}</div></div>
                     <div style={{fontSize:11,color:'var(--muted)',display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}><span>{cv.city}</span>{cv.source==='LP'&&<span style={{fontSize:9,padding:'1px 5px',borderRadius:20,background:'var(--green-bg)',color:'var(--green)',fontWeight:700}}>LP</span>}{cv.source==='meta'&&<AgentChip agentKey="clara" prefix="Von " size={13}/>}</div>
                     {(()=>{const q=applicantRank(cv);if(!q.chips.length)return null;return <div style={{display:'flex',gap:4,flexWrap:'wrap',marginTop:4}}>{q.chips.map((c,i)=><span key={i} style={{fontSize:9.5,fontWeight:700,padding:'1px 6px',borderRadius:10,background:'var(--surface-2)',color:'var(--muted)'}}>{c}</span>)}</div>;})()}
                   </td>
@@ -21396,6 +21396,67 @@ function rankBadge(tier, big){ if(!tier) return null;
     color:tier==='A'?'#fff':'#8a5a00',
     boxShadow:tier==='A'?'0 1px 5px rgba(217,119,6,.5)':'none',
     border:tier==='A'?'none':'1px solid #f4cd55'}}>{tier==='A'?'⭐ TOP':'★ GUT'}</span>; }
+// ── Begründungen (Vorhaben 1, Schnitt 1) ──────────────────────────────────────
+// Ein Agent erklärt sein Urteil mit den Werten dahinter. Geteilte Bausteine, damit „Warum" überall
+// gleich aussieht (Start: Claras Bewerber-Rang; später Einblendungen, Ränge, KPIs).
+//   evidence = { agent, headline, factors:[{label,value,weight,good?,bad?}], conclusion }
+function WhyPopover({evidence, onClose}){
+  const a=(typeof AI_AGENTS!=='undefined'&&AI_AGENTS[evidence.agent])||{}; const acc=a.accent||'#0F5661';
+  return <div onClick={onClose} style={{position:'fixed',inset:0,zIndex:1400,background:'rgba(6,14,22,.5)',display:'flex',justifyContent:'center',alignItems:'center',padding:16}}>
+    <div onClick={e=>e.stopPropagation()} style={{background:'var(--card)',borderRadius:16,maxWidth:440,width:'100%',boxShadow:'0 20px 50px -12px rgba(2,10,16,.5)',overflow:'hidden'}}>
+      <div style={{height:3,background:acc}}/>
+      <div style={{padding:'16px 18px'}}>
+        <div style={{display:'flex',gap:11,alignItems:'flex-start',marginBottom:12}}>
+          <span style={{flexShrink:0}}><AgentAvatar agentKey={evidence.agent} size={38} color={acc} live={false}/></span>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontWeight:800,fontSize:14.5}}>{evidence.headline}</div>
+            <div style={{fontSize:11.5,color:'var(--muted)'}}>{(a.name||evidence.agent)} erklärt die Werte dahinter</div>
+          </div>
+          <button onClick={onClose} title="Schließen" style={{border:'none',background:'transparent',fontSize:17,cursor:'pointer',color:'var(--muted)',lineHeight:1,flexShrink:0}}>✕</button>
+        </div>
+        <div style={{display:'flex',flexDirection:'column',gap:7,marginBottom:12}}>
+          {(evidence.factors||[]).map((f,i)=><div key={i} style={{display:'flex',alignItems:'center',gap:8,fontSize:13}}>
+            <span style={{width:8,height:8,borderRadius:'50%',flexShrink:0,background:f.good?'#16a34a':f.bad?'#dc2626':'#94a3b8'}}/>
+            <span style={{flex:1}}>{f.label}: <b>{f.value}</b></span>
+            {f.weight&&<span style={{fontSize:10,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.04em'}}>{f.weight}</span>}
+          </div>)}
+        </div>
+        {evidence.conclusion&&<div style={{fontSize:13,lineHeight:1.55,color:'var(--text)',background:acc+'14',borderLeft:'3px solid '+acc,borderRadius:8,padding:'10px 12px'}}>{evidence.conclusion}</div>}
+      </div>
+    </div>
+  </div>;
+}
+// „Warum?"-Auslöser. make() liefert die evidence erst beim Klick (kein Rechnen im Ruhezustand).
+function WhyButton({make, size}){
+  const [ev,setEv]=useState(null);
+  return <React.Fragment>
+    <button onClick={e=>{ e.stopPropagation(); try{ setEv(make()); }catch(_e){} }} title="Warum?" aria-label="Warum?"
+      style={{border:'1px solid var(--border)',background:'var(--card)',color:'var(--muted)',borderRadius:20,width:size||18,height:size||18,fontSize:11,fontWeight:800,cursor:'pointer',lineHeight:1,padding:0,flexShrink:0,display:'inline-flex',alignItems:'center',justifyContent:'center'}}>?</button>
+    {ev && <WhyPopover evidence={ev} onClose={()=>setEv(null)}/>}
+  </React.Fragment>;
+}
+// Claras Begründung für die Vorreihung eines Bewerbers — dieselben Werte, aus denen applicantRank den Rang bildet.
+function applicantWhy(item){
+  const lang=cvLang(item), exp=cvExp(item), full=cvFull(item), phone=cvPhoneOk(item), tx=cvTextScore(item);
+  const r=applicantRank(item);
+  const factors=[
+    {label:'Deutsch', value: lang||'unter B1', weight:'entscheidend', good: lang==='C1'||lang==='B2', bad: !lang},
+    {label:'Call-Center-Erfahrung', value: exp===true?'ja':exp===false?'nein':'unklar', weight:'stark', good: exp===true, bad: exp===false},
+    {label:'Arbeitszeit', value: full==='vollzeit'?'Vollzeit':full==='teilzeit'?'Teilzeit':'unbekannt', good: full==='vollzeit'},
+    {label:'Telefon', value: phone?'plausibel':'fehlt oder zu kurz', good: phone, bad: !phone},
+  ];
+  if(tx.early) factors.push({label:'Verfügbarkeit', value:'sofort', good:true});
+  else if(tx.s<0) factors.push({label:'Freitext im CV', value:'schwaches Signal', bad:true});
+  let conclusion;
+  if(r.tier==='A') conclusion='C1 und belegte Erfahrung, das ist Tier A (Top). Deutsch ist bei uns der harte Faktor: ohne C1 wird niemand Top, egal wie gut der Rest ist.';
+  else if(r.tier==='B') conclusion = lang==='C1'
+    ? 'C1, aber Erfahrung nicht belegt, das ist Tier B (Gut). Mit belegter Call-Center-Erfahrung würde daraus Top.'
+    : 'B2 mit Erfahrung, das ist Tier B (Gut). Ein C1 würde weiter nach oben ziehen.';
+  else conclusion = lang
+    ? (lang+', das reicht noch nicht für eine Vorreihung. Ab B2 mit belegter Erfahrung geht es nach oben.')
+    : 'Kein belegtes Deutsch ab B1, deshalb keine Vorreihung. Die Sprache ist der harte Faktor.';
+  return { agent:'clara', headline: r.tier?('Warum '+(r.tier==='A'?'⭐ TOP':'★ GUT')):'Warum keine Vorreihung', factors, conclusion };
+}
 function RecruitingKanban({employees, setEmployees, cvList, setCvList, projects, onPromoteToEmployee, showToast, onNavigate}){
   const [dragging, setDragging] = useState(null);
   const [dragType, setDragType] = useState(null); // 'cv' | 'emp'
@@ -21524,7 +21585,7 @@ function RecruitingKanban({employees, setEmployees, cvList, setCvList, projects,
           border:'1px solid '+(isEmp?'rgba(5,150,105,.35)':'rgba(15,86,97,.22)'),
           borderLeft:'4px solid '+accent,
           borderRadius:'var(--r)',cursor:'grab',fontSize:11,boxShadow:'0 1px 3px rgba(0,0,0,.06)'}}>
-        {hi&&<div style={{marginBottom:5}}>{rankBadge(hi)}</div>}
+        {hi&&<div style={{marginBottom:5,display:'flex',alignItems:'center',gap:6}}>{rankBadge(hi)}<WhyButton make={()=>applicantWhy(item)}/></div>}
         {!isEmp && item.source==='meta' && <div style={{marginBottom:4}}><AgentChip agentKey="clara" prefix="Von " size={13}/></div>}
         <div style={{display:'flex',alignItems:'center',gap:4,marginBottom:3}}>
           <span style={{fontSize:8.5,padding:'1px 6px',borderRadius:8,fontWeight:800,
