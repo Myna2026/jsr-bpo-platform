@@ -135,14 +135,30 @@ Deno.serve(async (req)=>{
         facts:[{label:"neue Fragen ohne Antwort im Wissen", current:gapsToday}], metrics:{gapsToday}});
   }catch(_e){}
 
-  // Paul: gelieferte Stunden diese Woche vs. Vorwoche
+  // Paul: gelieferte Stunden PRO PROJEKT diese Woche vs. Vorwoche. Projekt (und Skill, wenn eindeutig) als
+  // FELD mitführen, damit der Gefragte im Dialog gezielt nach diesem Projekt suchen kann statt zu raten.
   try{
     const w=isoWeek(date), wp=isoWeek(d7);
-    const sumH=async (yr:number,kw:number)=>{ const {data}=await sb.from("weekly_hours").select("hours").eq("year",yr).eq("kw",kw); return (data||[]).reduce((a:number,r:any)=>a+(Number(r.hours)||0),0); };
-    const hThis=await sumH(w.year,w.week), hPrev=await sumH(wp.year,wp.week);
-    if(hThis>0 && hPrev>0 && Math.abs((hThis-hPrev)/hPrev)>=0.15)
-      checks.paul.findings.push({okey:"paul_hours_week", severity: hThis<hPrev?"warn":"info", confidence:"exakt",
-        facts:[{label:"gelieferte Stunden diese Woche (KW "+w.week+")", current:Math.round(hThis), prior:Math.round(hPrev)}], metrics:{hThis:Math.round(hThis),hPrev:Math.round(hPrev)}});
+    const load=async (yr:number,kw:number)=>{ const {data}=await sb.from("weekly_hours").select("project_id,skill,hours").eq("year",yr).eq("kw",kw); return data||[]; };
+    const rowsThis=await load(w.year,w.week), rowsPrev=await load(wp.year,wp.week);
+    const { data:projs } = await sb.from("projects").select("id,name");
+    const pmap:Record<string,string>={}; (projs||[]).forEach((p:any)=>{ pmap[p.id]=p.name; });
+    const aggBy=(rows:any[])=>{ const m:Record<string,{h:number,skills:Set<string>}>={};
+      for(const r of rows){ const pid=r.project_id; if(!pid) continue; (m[pid] ||= {h:0,skills:new Set()}); m[pid].h+=Number(r.hours)||0; if(r.skill) m[pid].skills.add(r.skill); } return m; };
+    const aThis=aggBy(rowsThis), aPrev=aggBy(rowsPrev);
+    // Union beider Wochen — ein Projekt, das auf 0 einbricht, ist der GRÖSSTE Einbruch und darf nicht durchfallen.
+    const pids = new Set([...Object.keys(aThis), ...Object.keys(aPrev)]);
+    const movers = [...pids].map((pid)=>{ const hThis=aThis[pid]?.h||0, hPrev=aPrev[pid]?.h||0;
+        return { pid, hThis, hPrev, delta:hThis-hPrev, rel: hPrev>0?Math.abs((hThis-hPrev)/hPrev):(hThis>0?1:0),
+                 skills:[...((aThis[pid]?.skills)||(aPrev[pid]?.skills)||new Set())] }; })
+      .filter((m)=> m.hPrev>0 && m.rel>=0.15)   // etabliertes Projekt mit deutlicher Veränderung (auch Einbruch auf 0)
+      .sort((a,b)=>Math.abs(b.delta)-Math.abs(a.delta)).slice(0,3);   // nur die stärksten Bewegungen, kein Rauschen
+    for(const m of movers){ const pname=pmap[m.pid]||m.pid; const skill = m.skills.length===1?m.skills[0]:null;
+      checks.paul.findings.push({ okey:"paul_hours_week_"+m.pid, severity: m.hThis<m.hPrev?"warn":"info", confidence:"exakt",
+        project_id:m.pid, skill,
+        facts:[{label:"gelieferte Stunden diese Woche (KW "+w.week+", "+pname+(skill?", "+skill:"")+")", current:Math.round(m.hThis), prior:Math.round(m.hPrev)}],
+        metrics:{hThis:Math.round(m.hThis),hPrev:Math.round(m.hPrev),project:m.pid,skill,kw:w.week}});
+    }
   }catch(_e){}
 
   // Maya: Zugänge mit plötzlichem Abbruch (vorher regelmäßig, letzte 7 Tage nichts)
@@ -184,6 +200,7 @@ Deno.serve(async (req)=>{
       const gaps = weeks.filter((w:any)=>w.status==="ok" && Number(w.gap_people)>=2).sort((a:any,b:any)=>(a.year*100+a.kw)-(b.year*100+b.kw));
       if(gaps.length){ const g=gaps[0];
         checks.paul.findings.push({okey:"paul_staffing_gap_"+pid, severity:"high", confidence:"exakt",
+          project_id:pid, skill:g.skill,
           facts:[{label:"fehlende Leute in KW "+g.kw+" ("+pname+", "+g.skill+")", current:g.gap_people}], metrics:{kw:g.kw, skill:g.skill, gap:g.gap_people, project:pid}});
       }
       const hasForecast = sf.has_forecast===true;
@@ -194,6 +211,7 @@ Deno.serve(async (req)=>{
       if(!anyPlanned)  missing.push("der Schichtplan für die kommenden Wochen");
       if(missing.length && !anyComplete){
         checks.max.findings.push({okey:"max_forecast_data_"+pid, severity:"warn", confidence:"exakt", missing:true,
+          project_id:pid,
           facts:[{label:"fehlt bei "+pname+" für die Personal-Vorschau", current: missing.join(" und ")},
                  {label:"Folge", current:"ohne diese Daten keine Vorausschau für dieses Projekt"}],
           metrics:{project:pid, missing}});
@@ -215,7 +233,7 @@ Deno.serve(async (req)=>{
     for(const f of c.findings){
       let title=""; try{ title=await colleagueLine(NAMES[key], persona, {facts:f.facts, confidence:f.confidence, missing:f.missing}); }catch(_e){}
       if(!title) title = f.facts.map((x:any)=>`${x.label}: ${x.current}`).join("; ");
-      const { data:obsRow } = await sb.from("agent_observations").upsert({ day:date, okey:f.okey, agent_key:key, severity:f.severity, title, metrics:f.metrics||null, confidence:f.confidence||null, facts:f.facts||null },{onConflict:"day,okey"}).select("id").maybeSingle();
+      const { data:obsRow } = await sb.from("agent_observations").upsert({ day:date, okey:f.okey, agent_key:key, severity:f.severity, title, metrics:f.metrics||null, confidence:f.confidence||null, facts:f.facts||null, project_id:f.project_id||null, skill:f.skill||null },{onConflict:"day,okey"}).select("id").maybeSingle();
       const tgts=targetsFor(key); const ctx=AGENT_CONTEXT[key]||null;
       if(tgts.length){
         // facts + confidence denormalisiert mit auf die Einblendung -> der „Warum"-Knopf zeigt die Werte, ohne

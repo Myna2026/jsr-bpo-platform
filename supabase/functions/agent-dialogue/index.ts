@@ -73,7 +73,7 @@ function schemaText(tables:string[]):string{
 }
 
 // Zug 2: der Gefragte antwortet aus SEINEN Daten (echte SELECTs) oder ehrlich "weiß nicht".
-async function answerFromData(asked:string, question:string){
+async function answerFromData(asked:string, question:string, ctx:string){
   const schema = schemaText(DOMAIN_TABLES[asked]||[]);
   const sys = "Du bist "+NAMES[asked]+". Dein Gebiet: "+DOMAIN_DESC[asked]+".\n"+
     "Du hast NUR Zugriff auf deine eigenen Tabellen:\n"+schema+"\n\n"+
@@ -88,7 +88,7 @@ async function answerFromData(asked:string, question:string){
       text:{type:"string", description:"kurze Antwort in erster Person mit echter Zahl; bei weiss_nicht: ehrlicher Satz was fehlt"},
       weiss_nicht:{type:"boolean"} }, required:["text","weiss_nicht"] } },
   ];
-  const messages:any[] = [{ role:"user", content:"Frage von einem Kollegen: "+question }];
+  const messages:any[] = [{ role:"user", content:"Frage von einem Kollegen: "+question+(ctx?("\n"+ctx):"") }];
   for(let round=0; round<4; round++){
     const d = await callClaude({ model:MODEL, max_tokens:700, system:sys, tools, tool_choice:{type:"any"}, messages });
     const tu = (d.content||[]).find((c:any)=>c.type==="tool_use");
@@ -135,13 +135,17 @@ Deno.serve(async (req)=>{
   try{ const { data } = await sb.from("app_config").select("value").eq("key","jsr_agent_dialogue_v1").maybeSingle();
     const m = Number((data?.value as any)?.max_per_day); if(Number.isFinite(m)&&m>0) maxPerDay=Math.min(m,6); }catch(_e){}
 
+  const { data:projRows } = await sb.from("projects").select("id,name");
+  const pmap:Record<string,string> = {}; (projRows||[]).forEach((p:any)=>{ pmap[p.id]=p.name; });
+
   // Befunde der letzten 2 Tage, entdubliziert (neuester je Agent+okey).
-  const { data:obs } = await sb.from("agent_observations").select("id,agent_key,okey,severity,title,facts,day")
+  const { data:obs } = await sb.from("agent_observations").select("id,agent_key,okey,severity,title,facts,day,project_id,skill")
     .gte("day", addDays(day,-1)).lte("day", day).order("day",{ascending:false});
   const seen = new Set<string>(); const list = (obs||[]).filter((o:any)=>{ const k=o.agent_key+"|"+o.okey; if(seen.has(k)) return false; seen.add(k); return true; });
   if(new Set(list.map((o:any)=>o.agent_key)).size < 2) return json({ ok:true, day, note:"weniger als zwei Kollegen mit Befunden", stored:0 });
 
   const compact = list.map((o:any,i:number)=>({ ref:i+1, kollege:o.agent_key, satz:o.title,
+    projekt: o.project_id ? (pmap[o.project_id]||o.project_id) : null, skill: o.skill||null,
     fakten:(o.facts||[]).map((f:any)=>f.label+": "+f.current+(f.prior!=null?(" (vorher "+f.prior+")"):"")) }));
 
   // Zug 1: echte Lücken finden (bis maxPerDay). Fragender = Eigentümer der Beobachtung (ref).
@@ -152,7 +156,9 @@ Deno.serve(async (req)=>{
     "ANDERER (nie derselbe), dessen Gebiet die Lücke füllt. Formuliere die Frage in der Stimme des Fragenden, konkret, "+
     "mit Bezug (Projekt/Zeitraum). NUR echte Lücken, bei denen die Antwort des anderen den Befund erst deutbar macht "+
     "(Beispiel: Paul sieht Stunden-Einbruch bei Fabletics und fragt Max, ob dafür ein Forecast vorliegt und seit wann nicht). "+
-    "Lieber WENIGER oder GAR KEINE als erzwungene. Keine Frage, die der Fragende selbst beantworten könnte.";
+    "Trägt ein Befund ein Projekt und/oder einen Skill (Felder projekt/skill), NENNE sie in der Frage konkret, "+
+    "damit der Gefragte gezielt danach suchen kann. Lieber WENIGER oder GAR KEINE als erzwungene. "+
+    "Keine Frage, die der Fragende selbst beantworten könnte.";
   let dialoguesRaw:any[] = [];
   try{
     const tool1 = { name:"luecken", description:"Echte Lücken als Fragen zwischen Kollegen.", input_schema:{ type:"object", properties:{
@@ -176,8 +182,11 @@ Deno.serve(async (req)=>{
     const asker = askerObs.agent_key; const asked = dlg.gefragt; const question = String(dlg.frage||"").trim();
     if(!question || asked===asker || !AGENTS.includes(asked)) continue;
 
-    // Zug 2: Antwort aus eigenen Daten.
-    let ans; try{ ans = await answerFromData(asked, question); }catch(_e){ ans = { text:"", weiss_nicht:true, queried:false }; }
+    // Zug 2: Antwort aus eigenen Daten. Projekt/Skill-Bezug mitgeben, damit gezielt (nicht geraten) gesucht wird.
+    const pctx = askerObs.project_id
+      ? ("Bezug: Projekt "+(pmap[askerObs.project_id]||askerObs.project_id)+" (project_id='"+askerObs.project_id+"', filtere deine Abfrage darauf)"+(askerObs.skill?(", Skill "+askerObs.skill):""))
+      : "";
+    let ans; try{ ans = await answerFromData(asked, question, pctx); }catch(_e){ ans = { text:"", weiss_nicht:true, queried:false }; }
     const answerText = ans.text || "Dazu finde ich in meinen Daten nichts.";
 
     // Zug 3: Schluss nur, wenn die Antwort etwas hergibt.
