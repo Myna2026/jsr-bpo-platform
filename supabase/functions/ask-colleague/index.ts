@@ -62,7 +62,14 @@ Deno.serve(async (req)=>{
     "und verweise auf den passenden Bereich oder einen anderen Kollegen. Keine Zusagen. Höchstens fünf Sätze. "+
     "Duze den Nutzer immer (per Du), niemals Sie. "+
     "Du bist eine Maschine, kein Mensch — beurteile niemanden.";
-  const user = "FRAGE: "+question+"\n\nLIVE-ZAHLEN: "+facts+"\n\nWISSEN:\n"+(knowledge||"(leer)");
+  // Optionaler Kontext (Vorhaben 1, Schnitt 4): die Werte hinter einem Urteil, damit der Kollege
+  // GENAU zu diesem Datensatz antwortet (nicht nur allgemein). Kommt aus dem „Warum"-Popover.
+  const ctxStr = (()=>{ const c=body.context; if(!c) return ""; if(typeof c==="string") return c;
+    try{ const f=(c.factors||[]).map((x:any)=>"- "+x.label+": "+x.value+(x.weight?" ["+x.weight+"]":"")).join("\n");
+      return (c.headline?c.headline+"\n":"")+f+(c.conclusion?("\n"+c.conclusion):""); }catch(_e){ return ""; } })();
+  const user = "FRAGE: "+question
+    + (ctxStr?("\n\nKONTEXT ZU DIESEM FALL (die Werte hinter deinem Urteil — beziehe dich darauf, nenne die Zahlen):\n"+ctxStr):"")
+    + "\n\nLIVE-ZAHLEN: "+facts+"\n\nWISSEN:\n"+(knowledge||"(leer)");
 
   let tool:any;
   try{
