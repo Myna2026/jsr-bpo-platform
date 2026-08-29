@@ -38038,8 +38038,25 @@ function AgentDetail({agent, team, onNavigate, onClose}){
   const [obs,setObs]=useState(null); const [chk,setChk]=useState(undefined);   // Beobachtungen + „zuletzt geprüft"
   const [learn,setLearn]=useState(null);   // Wirkung meiner Hinweise (Selbstmessung)
   const isMgmt=((team&&team.role_keys)||[]).some(r=>r==='management'); const g=ag.guardrails||{};
-  const [persona,setPersona]=useState(ag.persona||''); const [edit,setEdit]=useState(false); const [saving,setSaving]=useState(false); const [saveErr,setSaveErr]=useState('');
-  async function savePersona(){ setSaving(true); setSaveErr(''); try{ const {error}=await sb.from('ai_agents').update({persona}).eq('key',ag.key); if(error) setSaveErr(error.message||'Speichern fehlgeschlagen'); else { ag.persona=persona; setEdit(false); } }catch(e){ setSaveErr((e&&e.message)||'Fehler'); } setSaving(false); }
+  // Editierbare Ebene, drei getrennte Bereiche. Functions lesen persona → beim Speichern aus den drei komponiert.
+  const [charText,setCharText]=useState(ag.char_text||ag.persona||'');
+  const [focusText,setFocusText]=useState(ag.focus_text||'');
+  const [langText,setLangText]=useState(ag.language_text||'');
+  const [edit,setEdit]=useState(false); const [saving,setSaving]=useState(false); const [saveErr,setSaveErr]=useState('');
+  const [pvBusy,setPvBusy]=useState(false); const [pv,setPv]=useState(null); const [pvErr,setPvErr]=useState('');
+  const composePersona=(c,f,l)=>[ (c||'').trim(),
+    (f||'').trim()?('Worauf ich achte, was ich melde, ab welcher Schwelle: '+(f||'').trim()):'',
+    (l||'').trim()?('Sprachregeln: '+(l||'').trim()):'' ].filter(Boolean).join('\n\n');
+  async function saveBehavior(){ setSaving(true); setSaveErr('');
+    const persona=composePersona(charText,focusText,langText);
+    try{ const {error}=await sb.from('ai_agents').update({char_text:charText,focus_text:focusText,language_text:langText,persona}).eq('key',ag.key);
+      if(error) setSaveErr(error.message||'Speichern fehlgeschlagen'); else { ag.char_text=charText; ag.focus_text=focusText; ag.language_text=langText; ag.persona=persona; setEdit(false); }
+    }catch(e){ setSaveErr((e&&e.message)||'Fehler'); } setSaving(false); }
+  async function runPreview(){ setPvBusy(true); setPvErr(''); setPv(null);
+    let tok=null; try{ const s=await sb.auth.getSession(); tok=s&&s.data&&s.data.session&&s.data.session.access_token; }catch(_e){}
+    try{ const r=await fetch(SB_URL+'/functions/v1/agent-voice-preview',{method:'POST',headers:{'Authorization':'Bearer '+tok,'apikey':SB_KEY,'content-type':'application/json'},body:JSON.stringify({agent_key:ag.key,char_text:charText,focus_text:focusText,language_text:langText})});
+      const d=await r.json(); if(!r.ok||d.error) setPvErr(d.error||('Fehler '+r.status)); else setPv(d);
+    }catch(e){ setPvErr('Nicht erreichbar'); } setPvBusy(false); }
   const lbl=k=>((MENU_BADGE_MAIN_ITEMS.find(m=>m&&m.key===k)||{}).label)||k;
   const secLbl={fontSize:11,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em',margin:'0 0 10px'};
   useEffect(()=>{ const h=e=>{ if(e.key==='Escape') onClose&&onClose(); }; window.addEventListener('keydown',h); return ()=>window.removeEventListener('keydown',h); },[]);
@@ -38152,23 +38169,60 @@ function AgentDetail({agent, team, onNavigate, onClose}){
           </div>
           <div style={{fontSize:11,color:'var(--dim)',marginTop:8,lineHeight:1.5}}>Diese Regeln greifen technisch: externe Mails gehen nur über freigegebene Vorlagen, kein Freitext.</div>
         </div>
-        {/* Charakter (System-Prompt), im Register hinterlegt und für Management änderbar */}
-        {(persona||isMgmt)&&<div style={{marginTop:22}}>
-          <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10}}>
-            <div style={{...secLbl,margin:0}}>Charakter (System-Prompt)</div>
-            {isMgmt&&!edit&&<button onClick={()=>setEdit(true)} style={{marginLeft:'auto',border:'1px solid '+acc+'44',background:acc+'0f',color:acc,borderRadius:8,padding:'4px 11px',fontSize:11.5,fontWeight:700,cursor:'pointer'}}>Bearbeiten</button>}
+        {/* Ehrlichkeitsregeln, fest und technisch verankert (Datenbindung, Sicherheits-Label, „weiß nicht"). */}
+        <div style={{marginTop:22}}>
+          <div style={secLbl}>Ehrlichkeitsregeln</div>
+          <div style={{padding:'12px 15px',borderRadius:12,background:'var(--surface-2)',border:'1px solid var(--border)'}}>
+            <ul style={{margin:0,paddingLeft:16,fontSize:13,lineHeight:1.6,color:'var(--text)'}}>
+              <li>Nichts erfinden, nur belegte Zahlen aus den eigenen Daten.</li>
+              <li>Sicherheit benennen: exakt gemessen oder Vermutung, das steht dabei.</li>
+              <li>Bei fehlenden Daten schweigen statt raten.</li>
+            </ul>
           </div>
+          <div style={{fontSize:11,color:'var(--dim)',marginTop:8,lineHeight:1.5}}>Fest, nicht änderbar: greift technisch (Antworten aus echten Abfragen, Kennzeichnung exakt/Vermutung, „weiß nicht" bei Lücken), nicht nur im Text.</div>
+        </div>
+        {/* Verhalten, anpassbar: drei getrennte Bereiche. Ansehen darf jeder mit Zugang, ändern nur Management. */}
+        <div style={{marginTop:22}}>
+          <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:4}}>
+            <div style={{...secLbl,margin:0}}>Verhalten, anpassbar</div>
+            {isMgmt&&!edit&&<button onClick={()=>setEdit(true)} style={{marginLeft:'auto',border:'1px solid '+acc+'44',background:acc+'0f',color:acc,borderRadius:8,padding:'4px 11px',fontSize:11.5,fontWeight:700,cursor:'pointer'}}>Bearbeiten</button>}
+            {edit&&<div style={{marginLeft:'auto',display:'flex',gap:8}}>
+              <button onClick={saveBehavior} disabled={saving} style={{border:'none',background:acc,color:'#fff',borderRadius:9,padding:'6px 14px',fontSize:12,fontWeight:700,cursor:saving?'default':'pointer',opacity:saving?.6:1}}>{saving?'Speichert…':'Speichern'}</button>
+              <button onClick={()=>{ setCharText(ag.char_text||ag.persona||''); setFocusText(ag.focus_text||''); setLangText(ag.language_text||''); setEdit(false); setSaveErr(''); setPv(null); }} style={{border:'1px solid var(--border)',background:'var(--card)',color:'var(--text)',borderRadius:9,padding:'6px 14px',fontSize:12,fontWeight:600,cursor:'pointer'}}>Abbrechen</button>
+            </div>}
+          </div>
+          <div style={{fontSize:11,color:'var(--dim)',marginBottom:12,lineHeight:1.5}}>Ansehen darf jeder mit Zugang zu den Kollegen. {isMgmt?'Ändern darfst du (Management).':'Ändern darf nur das Management.'}</div>
           {saveErr&&<div style={{marginBottom:8,padding:'8px 10px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:8,color:'#b91c1c',fontSize:12}}>{saveErr}</div>}
-          {edit
-            ? <div>
-                <textarea value={persona} onChange={e=>setPersona(e.target.value)} style={{width:'100%',minHeight:130,padding:'12px 14px',border:'1px solid var(--border)',borderRadius:12,fontSize:13,lineHeight:1.55,fontFamily:'inherit',resize:'vertical'}}/>
-                <div style={{display:'flex',gap:8,marginTop:8}}>
-                  <button onClick={savePersona} disabled={saving} style={{border:'none',background:acc,color:'#fff',borderRadius:9,padding:'8px 16px',fontSize:12.5,fontWeight:700,cursor:saving?'default':'pointer',opacity:saving?.6:1}}>{saving?'Speichert…':'Speichern'}</button>
-                  <button onClick={()=>{ setPersona(ag.persona||''); setEdit(false); setSaveErr(''); }} style={{border:'1px solid var(--border)',background:'var(--card)',color:'var(--text)',borderRadius:9,padding:'8px 16px',fontSize:12.5,fontWeight:600,cursor:'pointer'}}>Abbrechen</button>
-                </div>
+          {[
+            {t:'Charakter', s:'Ton, Direktheit, Wortwahl', v:charText, set:setCharText, ph:'Wie klingt er? Zugewandt oder nüchtern, direkt oder vorsichtig…', big:true},
+            {t:'Fachliche Ausrichtung', s:'worauf er achtet, was er meldet, ab welcher Schwelle', v:focusText, set:setFocusText, ph:'Worauf schaut er, was meldet er, ab welcher Abweichung wird es ein Hinweis…'},
+            {t:'Sprachregeln', s:'wie formuliert wird', v:langText, set:setLangText, ph:'z. B. kurze Sätze, kein Konjunktiv, Deutsch als Zweitsprache, duzen…'},
+          ].map((f,i)=><div key={i} style={{marginBottom:12}}>
+            <div style={{fontSize:12.5,fontWeight:700,color:'var(--text)'}}>{f.t} <span style={{fontWeight:500,color:'var(--muted)',fontSize:11.5}}>· {f.s}</span></div>
+            {edit
+              ? <textarea value={f.v} onChange={e=>f.set(e.target.value)} placeholder={f.ph} style={{width:'100%',minHeight:f.big?90:60,marginTop:5,padding:'10px 12px',border:'1px solid var(--border)',borderRadius:10,fontSize:12.5,lineHeight:1.5,fontFamily:'inherit',resize:'vertical'}}/>
+              : <div style={{fontSize:12.5,lineHeight:1.55,color:f.v?'var(--text)':'var(--dim)',whiteSpace:'pre-wrap',background:'var(--surface-2)',borderRadius:10,padding:'9px 12px',marginTop:5}}>{f.v||'—'}</div>}
+          </div>)}
+          {/* Charakter-Vorschau: wie klingt er mit dieser Einstellung, an einem echten Befund. */}
+          {isMgmt&&<div style={{marginTop:6,paddingTop:12,borderTop:'1px dashed var(--border)'}}>
+            <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:8,flexWrap:'wrap'}}>
+              <div style={{fontSize:12,fontWeight:700,color:'var(--text)'}}>Vorschau an einem echten Befund</div>
+              <button onClick={runPreview} disabled={pvBusy} style={{marginLeft:'auto',border:'1px solid '+acc+'44',background:acc+'0f',color:acc,borderRadius:8,padding:'5px 12px',fontSize:11.5,fontWeight:700,cursor:pvBusy?'default':'pointer',opacity:pvBusy?.6:1}}>{pvBusy?'…':'Vorschau erzeugen'}</button>
+            </div>
+            {pvErr&&<div style={{marginBottom:8,padding:'8px 10px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:8,color:'#b91c1c',fontSize:12}}>{pvErr}</div>}
+            {pv&&<div>
+              {pv.before&&<div style={{marginBottom:8}}>
+                <div style={{fontSize:10,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',marginBottom:3}}>Jetzt</div>
+                <div style={{fontSize:12.5,lineHeight:1.5,background:'var(--surface-2)',borderRadius:10,padding:'9px 12px'}}>{pv.before}</div>
+              </div>}
+              <div>
+                <div style={{fontSize:10,fontWeight:800,color:acc,textTransform:'uppercase',letterSpacing:'.05em',marginBottom:3}}>Mit dieser Einstellung</div>
+                <div style={{fontSize:12.5,lineHeight:1.5,background:acc+'12',border:'1px solid '+acc+'2e',borderRadius:10,padding:'9px 12px'}}>{pv.after}</div>
               </div>
-            : <div style={{fontSize:13,lineHeight:1.6,color:'var(--text)',whiteSpace:'pre-wrap',background:'var(--surface-2)',borderRadius:12,padding:'12px 14px'}}>{persona||'—'}</div>}
-        </div>}
+              <div style={{fontSize:10.5,color:'var(--dim)',marginTop:7,lineHeight:1.5}}>Grundlage: echte Zahlen{pv.had_real?'':' (Beispiel, noch kein Befund vorhanden)'}. Nur eine Vorschau, gespeichert wird erst mit „Speichern".</div>
+            </div>}
+          </div>}
+        </div>
       </div>
     </div>
   </div>;
