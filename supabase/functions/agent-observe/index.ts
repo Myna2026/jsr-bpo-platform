@@ -186,10 +186,12 @@ Deno.serve(async (req)=>{
     for(const f of c.findings){
       let title=""; try{ title=await colleagueLine(NAMES[key], persona, {facts:f.facts, confidence:f.confidence, missing:f.missing}); }catch(_e){}
       if(!title) title = f.facts.map((x:any)=>`${x.label}: ${x.current}`).join("; ");
-      const { data:obsRow } = await sb.from("agent_observations").upsert({ day:date, okey:f.okey, agent_key:key, severity:f.severity, title, metrics:f.metrics||null, confidence:f.confidence||null },{onConflict:"day,okey"}).select("id").maybeSingle();
+      const { data:obsRow } = await sb.from("agent_observations").upsert({ day:date, okey:f.okey, agent_key:key, severity:f.severity, title, metrics:f.metrics||null, confidence:f.confidence||null, facts:f.facts||null },{onConflict:"day,okey"}).select("id").maybeSingle();
       const tgts=targetsFor(key); const ctx=AGENT_CONTEXT[key]||null;
       if(tgts.length){
-        const rows = tgts.map((uid:string)=>({ agent_key:key, user_id:uid, observation_id:(obsRow&&obsRow.id)||null, okey:f.okey, day:date, title, severity:f.severity, context:ctx }));
+        // facts + confidence denormalisiert mit auf die Einblendung -> der „Warum"-Knopf zeigt die Werte, ohne
+        // dass die Zielperson die admin-geschützte agent_observations-Zeile lesen muss.
+        const rows = tgts.map((uid:string)=>({ agent_key:key, user_id:uid, observation_id:(obsRow&&obsRow.id)||null, okey:f.okey, day:date, title, severity:f.severity, context:ctx, facts:f.facts||null, confidence:f.confidence||null }));
         const { error } = await sb.from("agent_insights").upsert(rows, {onConflict:"user_id,day,okey", ignoreDuplicates:true});
         if(!error) insCount += rows.length;
       }
