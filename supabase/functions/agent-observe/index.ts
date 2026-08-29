@@ -172,11 +172,40 @@ Deno.serve(async (req)=>{
     checks.lena.snapshot = byCat;
   }catch(_e){}
 
+  // Vorhaben 3, Schnitt 3: Paul meldet sichere Personal-Lücken (nur wo vorhersagbar), Max meldet fehlende
+  // Vorschau-Daten je Projekt — mit der Folge „ohne diese Daten keine Vorausschau" (macht Druck, sie zu schließen).
+  try{
+    const { data:projRows } = await sb.from("employees").select("project_id").in("status",["active","training"]);
+    const projIds = [...new Set((projRows||[]).map((r:any)=>r.project_id).filter(Boolean))];
+    for(const pid of projIds){
+      const { data:sf } = await sb.rpc("staffing_forecast_core",{ p_project: pid });
+      if(!sf) continue;
+      const pname = sf.project_name || pid; const weeks = sf.weeks || [];
+      const gaps = weeks.filter((w:any)=>w.status==="ok" && Number(w.gap_people)>=2).sort((a:any,b:any)=>(a.year*100+a.kw)-(b.year*100+b.kw));
+      if(gaps.length){ const g=gaps[0];
+        checks.paul.findings.push({okey:"paul_staffing_gap_"+pid, severity:"high", confidence:"exakt",
+          facts:[{label:"fehlende Leute in KW "+g.kw+" ("+pname+", "+g.skill+")", current:g.gap_people}], metrics:{kw:g.kw, skill:g.skill, gap:g.gap_people, project:pid}});
+      }
+      const hasForecast = sf.has_forecast===true;
+      const anyPlanned = weeks.some((w:any)=>w.planned_h!=null);
+      const anyComplete = weeks.some((w:any)=>w.status==="ok" || w.status==="skala_unklar");
+      const missing:string[]=[];
+      if(!hasForecast) missing.push("der Forecast");
+      if(!anyPlanned)  missing.push("der Schichtplan für die kommenden Wochen");
+      if(missing.length && !anyComplete){
+        checks.max.findings.push({okey:"max_forecast_data_"+pid, severity:"warn", confidence:"exakt", missing:true,
+          facts:[{label:"fehlt bei "+pname+" für die Personal-Vorschau", current: missing.join(" und ")},
+                 {label:"Folge", current:"ohne diese Daten keine Vorausschau für dieses Projekt"}],
+          metrics:{project:pid, missing}});
+      }
+    }
+  }catch(_e){}
+
   // Schreiben: Befunde als Beobachtungen (Kollegen-Satz) + Einblendungen je Zielnutzer + Heartbeat je Agent.
   const NAMES:Record<string,string> = { clara:"Clara", max:"Max", anna:"Anna", paul:"Paul", maya:"Maya", lena:"Lena" };
   // Wer bekommt welchen Kollegen zu sehen (Rollen); Kontext = wo die Einblendung passt (am richtigen Ort).
   const ROLE_TARGETS:Record<string,string[]> = { clara:["management","hr"], max:["management","hr"], anna:["management","hr"], paul:["management"], maya:["management"], lena:["management","hr"] };
-  const AGENT_CONTEXT:Record<string,string[]> = { clara:["kanban","funnel","cvs","dubletten","bewerberlinks"], max:["daily_tasks","uploads"], anna:["nlquery","wissen_system","knowledge"], paul:["auswertung","praesentation","meetingnotes"], maya:["useractivity"], lena:["datacheck","absences","urlaubantraege","employees"] };
+  const AGENT_CONTEXT:Record<string,string[]> = { clara:["kanban","funnel","cvs","dubletten","bewerberlinks"], max:["daily_tasks","uploads","dataimport","vorschau"], anna:["nlquery","wissen_system","knowledge"], paul:["auswertung","praesentation","meetingnotes","vorschau","fcist"], maya:["useractivity"], lena:["datacheck","absences","urlaubantraege","employees"] };
   const { data:usersRaw } = await sb.from("app_users").select("user_id,role_keys,active");
   const users = (usersRaw||[]).filter((u:any)=>u.active!==false && u.user_id);
   const targetsFor=(k:string)=>{ const roles=ROLE_TARGETS[k]||["management"]; return users.filter((u:any)=>(u.role_keys||[]).some((r:string)=>roles.includes(r))).map((u:any)=>u.user_id); };
