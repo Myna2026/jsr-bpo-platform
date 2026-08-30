@@ -7768,13 +7768,35 @@ function menuRoleDefault(user, key){
   return true;
 }
 // Effektive Desktop-Sichtbarkeit: Zuhause immer → Freigabe → Sperre → Rollen-Default.
+// Rechte Schnitt 3: Menü-Key → Rechte-Bereich (permission_areas). NUR die 12 sauberen Bereiche.
+// 'system' bewusst NICHT dabei: er bündelt zu viel (Admin-Tabs + Protokoll) und behält daher die alte
+// Rollenlogik samt hartem Management-Gate (kein Leak von App-User/„Wer sieht was" an HR). Nicht gemappte
+// Keys (start, cockpit, vorschau, termin, nlquery, agents, rechte, System-Keys) → alte Rollenlogik.
+const PERM_AREA_OF_KEY = (()=>{ const m={}; const A={
+    emp:['employees','orgchart','skillmatrix','onboarding'],
+    bewerber:['cvs','kanban','funnel','bewerberlinks','dubletten','cvsync','showcase'],
+    kpi:['performance','auswertung','fcist','forecast','callqa'],
+    shift:['shiftplan','checkin','workforce','timetracking'],
+    absence:['absences','urlaubantraege'],
+    lohn:['payroll','profitability','productivity'],
+    praesent:['praesentation'], feedback:['feedback'], meeting:['meetingnotes'], kalender:['calendar'],
+    datenpflege:['dataimport','uploads','uploadplan','datacheck','recmkt'],
+    schulung:['training_plans','timeline','elearning','knowledge','test_editor','test_preview','wissen_system'],
+  };
+  Object.keys(A).forEach(area=>A[area].forEach(k=>{ m[k]=area; })); return m; })();
+// Schnitt 3 ist gebaut, aber noch NICHT scharf: erst wenn die Rollen-Parität (hr/projektleiter/teamlead)
+// sauber gegen echte Logins geprüft ist, auf true stellen. Bis dahin gilt die alte Rollenlogik (verhaltensgleich).
+const PERM_MODEL_MENU_ON = false;
 function menuDeskVisible(user, key){
   if(!allMenuKeys().has(key)) return true;
   const rk=(user&&user.role_keys)||[];
   if(key==='daily_tasks' && hasDailyTasks({role_keys:rk})) return true;   // Tagesaufgaben = Zuhause der Aufgaben-Rollen
   if(key==='start' && !hasDailyTasks({role_keys:rk})) return true;         // sonst ist die Startseite das Zuhause
-  if(Array.isArray(user&&user.granted) && user.granted.includes(key)) return true;
-  if(Array.isArray(user&&user.locked) && user.locked.includes(key)) return false;
+  if(Array.isArray(user&&user.granted) && user.granted.includes(key)) return true;   // Feinschicht: per-Key-Freigabe bleibt
+  if(Array.isArray(user&&user.locked) && user.locked.includes(key)) return false;    // Feinschicht: per-Key-Sperre bleibt
+  // Modell-Baseline: die 12 sauberen Bereiche lesen perm().visible; System + Rest behalten die Rollenlogik.
+  if(PERM_MODEL_MENU_ON){ const area=PERM_AREA_OF_KEY[key];
+    if(area && user && user.perms && user.perms[area]) return !!user.perms[area].visible; }
   return menuRoleDefault(user, key);
 }
 // Mobil-Startwert je Nutzer: „Mobil vollständig" → alles; sonst per-Nutzer-Liste (jsr_mobile_keys_v1) bzw. Kern-Liste.
@@ -38072,6 +38094,69 @@ function AgentDetail({agent, team, onNavigate, onClose}){
     return ()=>{a=false;}; },[ag.key]);
   const agoTxt=ts=>{ if(!ts) return ''; const m=Math.floor((Date.now()-new Date(ts).getTime())/60000); if(m<60) return 'vor '+Math.max(1,m)+' Min'; const h=Math.floor(m/60); if(h<24) return 'vor '+h+' Std'; return 'vor '+Math.floor(h/24)+' Tagen'; };
   const fmtN=n=> n===undefined?'…' : n===null?'—' : n.toLocaleString('de-DE');
+  // MOBIL: eigene Fassung, nicht die verkleinerte Desktop-Karte. Vollflächig, scrollbar, klares Zurück,
+  // Chat oben erreichbar, Datenbaum und Ablaufkette UNTEREINANDER. Zurück bringt an dieselbe Stelle.
+  if(typeof window!=='undefined' && window.innerWidth<768){
+    const canObs=((team&&team.role_keys)||[]).some(r=>r==='management'||r==='hr');
+    return <div style={{position:'fixed',inset:0,zIndex:1400,background:'var(--bg,#f2f5f6)',display:'flex',flexDirection:'column'}}>
+      <div style={{position:'sticky',top:0,zIndex:2,background:'linear-gradient(160deg,'+acc+'26,'+acc+'0c)',borderBottom:'1px solid '+acc+'26',padding:'10px 12px',display:'flex',alignItems:'center',gap:10}}>
+        <button onClick={onClose} style={{border:'1px solid '+acc+'55',background:'var(--card)',color:acc,borderRadius:10,padding:'8px 13px',fontSize:13.5,fontWeight:800,cursor:'pointer',flexShrink:0}}>← Zurück</button>
+        <span style={{flexShrink:0}}><AgentAvatar agentKey={ag.key} size={40} color={acc} live={true}/></span>
+        <div style={{minWidth:0,flex:1}}>
+          <div style={{fontSize:17,fontWeight:800,lineHeight:1.15}}>{ag.name}</div>
+          <div style={{fontSize:11.5,color:'var(--muted)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{ag.tagline}</div>
+        </div>
+      </div>
+      <div style={{flex:1,overflowY:'auto',WebkitOverflowScrolling:'touch',padding:'12px 12px 40px'}}>
+        {/* Sofort: was er gerade hat */}
+        <div style={{background:'var(--card)',border:'1px solid '+acc+'33',borderRadius:12,padding:'11px 13px',marginBottom:12,display:'flex',gap:9,alignItems:'flex-start'}}>
+          <span style={{flexShrink:0,marginTop:1}}><AgentGlyph agentKey={ag.key} size={16} color={acc} live={true}/></span>
+          <div style={{fontSize:13,lineHeight:1.5}}><b style={{color:acc}}>Gerade: </b>{activity===undefined?'lädt…':(activity||'bereit, wartet auf neue Vorgänge.')}</div>
+        </div>
+        {/* Chat gut erreichbar, oben (ColleagueChat bringt eigenen „Frag …"-Titel mit) */}
+        <div style={{background:'var(--card)',border:'1px solid var(--border)',borderRadius:12,padding:'11px 13px 4px',marginBottom:16}}>
+          <ColleagueChat agentKey={ag.key} name={ag.name} accent={acc}/>
+        </div>
+        {canObs&&<div style={{marginBottom:16}}>
+          <div style={secLbl}>Was mir aufgefallen ist</div>
+          {obs===null?<div style={{fontSize:12.5,color:'var(--muted)'}}>Lädt…</div>
+           : obs.length===0?<div style={{padding:'11px 13px',borderRadius:12,background:'#f0fdf4',border:'1px solid #bbf7d0',fontSize:13,color:'#166534'}}>✓ Geprüft, nichts Auffälliges{chk&&chk.last_checked_at?' ('+agoTxt(chk.last_checked_at)+')':''}.</div>
+           : <div style={{display:'flex',flexDirection:'column',gap:8}}>{obs.map(o=>{ const sv=o.severity==='high'?{c:'#b91c1c',b:'#fef2f2',bd:'#fecaca',l:'wichtig'}:o.severity==='warn'?{c:'#b45309',b:'#fffbeb',bd:'#fde68a',l:'Hinweis'}:{c:acc,b:acc+'0d',bd:acc+'2e',l:'Notiz'};
+             return <div key={o.id} style={{padding:'10px 13px',borderRadius:12,background:sv.b,border:'1px solid '+sv.bd,fontSize:13,lineHeight:1.5}}>
+               <span style={{fontSize:9.5,fontWeight:800,textTransform:'uppercase',letterSpacing:'.05em',color:sv.c,marginRight:7}}>{sv.l}</span>{o.title}</div>; })}</div>}
+        </div>}
+        {/* Datenbaum + Ablauf UNTEREINANDER */}
+        <div style={{marginBottom:16}}>
+          <div style={secLbl}>Was ich sehe</div>
+          {tree.length===0?<div style={{fontSize:13,color:'var(--muted)'}}>Kein Datenzugriff hinterlegt.</div>
+           : <div style={{display:'flex',flexDirection:'column',gap:6}}>{tree.map((n,i)=>{ const isW=n.mode==='write';
+               return <div key={i} style={{display:'flex',alignItems:'center',gap:9,padding:'8px 11px',background:'var(--card)',border:'1px solid var(--border)',borderRadius:10}}>
+                 <span style={{fontSize:9.5,fontWeight:800,textTransform:'uppercase',letterSpacing:'.04em',color:isW?acc:'var(--muted)',flexShrink:0}}>{isW?'schreibt':'liest'}</span>
+                 <span style={{fontSize:13.5,fontWeight:600,flex:1}}>{n.label}</span>
+                 <span style={{fontSize:14,fontWeight:800,color:isW?acc:'var(--text)'}}>{fmtN(counts[i])}</span>
+               </div>; })}</div>}
+        </div>
+        <div style={{marginBottom:16}}>
+          <div style={secLbl}>Wie ich arbeite</div>
+          <div style={{display:'flex',flexDirection:'column',gap:8}}>{flow.map((s,i)=>
+            <div key={i} style={{display:'flex',gap:10,alignItems:'flex-start'}}>
+              <span style={{width:20,height:20,borderRadius:10,background:acc+'1c',color:acc,fontSize:11,fontWeight:800,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,marginTop:1}}>{i+1}</span>
+              <div style={{fontSize:13.5,fontWeight:600,lineHeight:1.4}}>{s}</div>
+            </div>)}</div>
+        </div>
+        <div style={{marginBottom:16}}>
+          <div style={secLbl}>Was ich kann</div>
+          <ul style={{margin:0,paddingLeft:18,fontSize:13.5,lineHeight:1.6}}>{(ag.capabilities||[]).map((c,i)=><li key={i}>{c}</li>)}</ul>
+        </div>
+        <div>
+          <div style={secLbl}>Wo ich aufhöre</div>
+          <div style={{padding:'11px 13px',borderRadius:12,background:'#fef2f2',border:'1px solid #fecaca'}}>
+            <ul style={{margin:0,paddingLeft:16,fontSize:13,lineHeight:1.6,color:'#991b1b'}}>{(da.darf_nicht||[]).map((x,i)=><li key={i}>{x}</li>)}{(!da.darf_nicht||!da.darf_nicht.length)&&<li style={{listStyle:'none',marginLeft:-16,color:'var(--dim)'}}>—</li>}</ul>
+          </div>
+        </div>
+      </div>
+    </div>;
+  }
   return <div className="agc-open" onClick={onClose}>
     <div className="agc-detail" onClick={e=>e.stopPropagation()}>
       {/* Hero */}
@@ -42153,6 +42238,7 @@ function AgentOrbit({team, isMobileW, onNavigate}){
   const [active,setActive]=useState({});
   const [open,setOpen]=useState(false);
   const [hover,setHover]=useState(null);
+  const [mobDetail,setMobDetail]=useState(null);   // Mobil: Kollege als Overlay an Ort und Stelle (kein View-Sprung)
   useEffect(()=>{ let a=true; (async()=>{ const p=await loadMyAgentPrefs(); if(a) setPrefs(p||{}); })(); return ()=>{a=false;}; },[]);
   const load=React.useCallback(async()=>{ try{
     const cut=isoLocal(new Date(Date.now()-21*864e5));
@@ -42168,7 +42254,10 @@ function AgentOrbit({team, isMobileW, onNavigate}){
   const total=Object.values(active).reduce((a,b)=>a+(b||0),0);
   const nm=((team&&team.name)||'').trim();
   const initials=nm?nm.split(/\s+/).filter(Boolean).map(w=>w[0]).slice(0,2).join('').toUpperCase().slice(0,2):'ICH';
-  const go=(k)=>{ setOpen(false); if(onNavigate) onNavigate({kind:'view',view:'agents',openAgent:k}); };
+  // Mobil: Tipp öffnet den Kollegen direkt als Overlay (volle Zeile holen), Zurück bringt an dieselbe Stelle.
+  // Desktop: wie gehabt in die AI-Kollegen-Ansicht mit geöffnetem Kollegen.
+  const openMobile=async(k)=>{ try{ const {data}=await sb.from('ai_agents').select('*').eq('key',k).maybeSingle(); if(data) setMobDetail(data); }catch(e){} };
+  const go=(k)=>{ if(isMobileW){ openMobile(k); return; } setOpen(false); if(onNavigate) onNavigate({kind:'view',view:'agents',openAgent:k}); };
   const kf=<style>{"@keyframes orbGlow{0%{transform:scale(1);opacity:.55}100%{transform:scale(1.55);opacity:0}}@keyframes orbIn{from{opacity:0;transform:scale(.62)}to{opacity:1;transform:scale(1)}}"}</style>;
   const face=(k,size)=>{ const a=AI_AGENTS[k]||{}; const acc=a.accent||'#0F5661'; const has=(active[k]||0)>0;
     return <div onMouseEnter={()=>setHover(k)} onMouseLeave={()=>setHover(h=>h===k?null:h)} onClick={(e)=>{e.stopPropagation();go(k);}}
@@ -42185,6 +42274,7 @@ function AgentOrbit({team, isMobileW, onNavigate}){
         <div style={{width:36,height:36,borderRadius:18,background:'#0F5661',color:'#fff',fontSize:12,fontWeight:800,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>{initials}</div>
         {agents.map(k=><div key={k}>{face(k,34)}</div>)}
       </div>
+      {mobDetail && <AgentDetail agent={mobDetail} team={team} onNavigate={onNavigate} onClose={()=>setMobDetail(null)}/>}
     </React.Fragment>;
   }
   // DESKTOP: Kranz.
@@ -42292,6 +42382,8 @@ function App(){
       let mobileKeysCfg={}; try{ const mk=await loadConfigFromDB('jsr_mobile_keys_v1'); if(mk&&typeof mk==='object'&&!Array.isArray(mk)) mobileKeysCfg=mk; }catch(e){}
       let menuGrantsCfg={}; try{ const mg=await loadConfigFromDB('jsr_menu_grants_v1'); if(mg&&typeof mg==='object'&&!Array.isArray(mg)) menuGrantsCfg=mg; }catch(e){}
       let maImportCfg={}; try{ const mi=await loadConfigFromDB('jsr_ma_import_v1'); if(mi&&typeof mi==='object'&&!Array.isArray(mi)) maImportCfg=mi; }catch(e){}
+      // Rechte Schnitt 3: aufgelöste Bereichs-Rechte aus dem Modell (Menü liest daraus die 12 sauberen Bereiche).
+      let permsCfg={}; try{ const {data}=await sb.rpc('my_permissions'); if(data&&typeof data==='object'&&!Array.isArray(data)) permsCfg=data; }catch(e){}
       const loginPayload = {
         name: au.full_name || session.user.email,
         icon: '⬡',
@@ -42308,6 +42400,7 @@ function App(){
         mobile_full: !!mobileFullCfg[session.user.id],   // voller mobiler Zugriff (sonst reduziert)
         mobile_keys: Array.isArray(mobileKeysCfg[session.user.id]) ? mobileKeysCfg[session.user.id] : null,   // per-Key-Mobil-Auswahl (sonst Kern-Liste)
         granted: Array.isArray(menuGrantsCfg[session.user.id]) ? menuGrantsCfg[session.user.id] : [],   // explizite Freigaben (überstimmen Rolle)
+        perms: permsCfg,   // Modell-Rechte je Bereich {area:{visible,mode,...}} — Menü der 12 sauberen Bereiche liest daraus
         ma_import: !!maImportCfg[session.user.id],        // MA-Import/Vorlage sichtbar (Standard aus)
         employee_id: await matchEmployeeToUserSb(session.user.email, au.staff_number),  // 25a: Auto-Match über Supabase
         email: session.user.email
