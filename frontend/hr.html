@@ -36339,29 +36339,9 @@ function ForecastImport({projId, skill, initYear, onSaved}){
   </div>;
 }
 
-// KI-Datenzugriff je Nutzer (Management-only): einstellen, was die KI (Datenabfrage UND Anna) einem Zugang
-// preisgibt. Quelle der Wahrheit ist die DB (ai_access_overview -> Rollen-Standard/Override/feste Voll-Zugriffe);
-// Speichern schreibt ai_access_prefs. Der Riegel greift technisch ueber die ai_scoped-Views, nicht nur hier.
-function aiNormalizePrefs(d){
-  const o={ projects:d.projects||'own', direction:d.direction||'down', salaries:d.salaries||'none', overhead_mgmt:!!d.overhead_mgmt };
-  o.project_ids = (o.projects==='list') ? (Array.isArray(d.project_ids)?d.project_ids:[]) : [];
-  return o;
-}
-// Echter Override nur, wenn die gespeicherte Einstellung vom Rollen-Standard ABWEICHT (ein Save identisch
-// zum Standard ist keiner). Verhindert irrefuehrendes „Angepasst".
-function aiHasRealOverride(stored, def){
-  return !!stored && JSON.stringify(aiNormalizePrefs(stored)) !== JSON.stringify(aiNormalizePrefs(def||{}));
-}
-function aiEffectText(s, projMap){
-  const parts=[];
-  if(s.projects==='all') parts.push('alle Projekte');
-  else if(s.projects==='list'){ const ns=(s.project_ids||[]).map(id=>projMap[id]||id); parts.push(ns.length?('Projekte: '+ns.join(', ')):'keine Projekte gewählt'); }
-  else parts.push('nur das eigene Projekt');
-  parts.push(s.direction==='side'?'auch die eigene Ebene':'nur darunterliegende Ebenen');
-  parts.push(s.salaries==='all'?'alle Gehälter':(s.salaries==='own'?'Gehälter nur im eigenen Projekt':'keine Gehälter'));
-  parts.push(s.overhead_mgmt?'inkl. Management & Overhead':'ohne Management & Overhead');
-  return parts.join(' · ');
-}
+// Der KI-Datenzugriff wird seit dem Rechte-Umbau nicht mehr separat eingestellt, sondern in der Rechte-Ansicht
+// (perm/user_permissions); die ai_scoped-Views setzen ihn in der DB durch. AiAccessView zeigt nur noch den
+// Ist-Stand und leitet dorthin.
 // Rechte-Vorhaben Schnitt 2: Admin-Oberfläche. Je Rolle (Standard) und je Person (Override) je Bereich
 // sichtbar / lesen-bearbeiten / Ausschnitt. Schreibt role_permissions / user_permissions (Reset = Zeile löschen).
 // NOCH NICHT SCHARF — keine Policy liest das; die Durchsetzung kommt in einem späteren Schnitt.
@@ -36480,176 +36460,53 @@ function RechteView({team}){
     </div>}
   </div>;
 }
-function AiAccessView({team, employees}){
-  const [rows,setRows]=React.useState(null);
-  const [projects,setProjects]=React.useState([]);
-  const [sel,setSel]=React.useState(null);
-  const [draft,setDraft]=React.useState(null);
-  const [q,setQ]=React.useState('');
-  const [saving,setSaving]=React.useState(false);
-  const [msg,setMsg]=React.useState('');
-  const load=async()=>{
-    try{
-      const [ov,pj]=await Promise.all([ sb.rpc('ai_access_overview'), sb.from('projects').select('id,name') ]);
-      const list=(ov.data||[]).slice().sort((a,b)=>String(a.full_name||a.email||'').localeCompare(String(b.full_name||b.email||'')));
-      setRows(list); setProjects(pj.data||[]);
-    }catch(e){ setRows([]); }
-  };
-  React.useEffect(()=>{ load(); },[]);
-  const projMap=React.useMemo(()=>{ const m={}; (projects||[]).forEach(p=>m[p.id]=p.name); return m; },[projects]);
-  const current = (rows&&sel)? rows.find(r=>r.user_id===sel) : null;
-  React.useEffect(()=>{
-    if(!current){ setDraft(null); return; }
-    const base = current.stored || current.default_prefs || {};
-    setDraft({ projects:base.projects||'own', project_ids:Array.isArray(base.project_ids)?base.project_ids:[],
-      direction:base.direction||'down', salaries:base.salaries||'none', overhead_mgmt:!!base.overhead_mgmt });
-    setMsg('');
-  },[sel, rows]);
-  const empOf=(r)=> r&&r.employee_id ? (employees||[]).find(e=>e.id===r.employee_id) : null;
-  const ctxLine=(r)=>{ const e=empOf(r); if(!e) return (r.role_keys||[]).join(', ')||'—'; const pj=e.project_id?(projMap[e.project_id]||e.project_id):null; return [e.position, pj].filter(Boolean).join(' · ')||((r.role_keys||[]).join(', ')||'—'); };
-  const hasOverride = current && aiHasRealOverride(current.stored, current.default_prefs);
-  const dirty = current && draft && !current.is_full &&
-    JSON.stringify(aiNormalizePrefs(draft)) !== JSON.stringify(aiNormalizePrefs(current.stored||current.default_prefs||{}));
-  const save=async()=>{
-    if(!current||!draft) return; setSaving(true); setMsg('');
-    const norm=aiNormalizePrefs(draft);
-    const isDef = JSON.stringify(norm)===JSON.stringify(aiNormalizePrefs(current.default_prefs||{}));
-    // Standardwerte speichern = kein Override: bestehende Zeile entfernen, damit „Standard" ehrlich bleibt.
-    const {error}= isDef
-      ? await sb.from('ai_access_prefs').delete().eq('user_id',current.user_id)
-      : await sb.from('ai_access_prefs').upsert({user_id:current.user_id, settings:norm, updated_at:new Date().toISOString()});
-    setSaving(false);
-    if(error){ setMsg('Fehler: '+error.message); return; }
-    setMsg(isDef?'Entspricht dem Rollen-Standard, kein Override gespeichert.':'Gespeichert.'); await load();
-  };
-  const resetDefault=async()=>{
-    if(!current) return; setSaving(true); setMsg('');
-    const {error}=await sb.from('ai_access_prefs').delete().eq('user_id',current.user_id);
-    setSaving(false);
-    if(error){ setMsg('Fehler: '+error.message); return; }
-    setMsg('Auf Rollen-Standard zurückgesetzt.'); await load();
-  };
-  const Seg=({value,onChange,options})=> (
-    <div style={{display:'inline-flex',gap:2,background:'var(--surface-2)',borderRadius:'var(--r)',padding:2,flexWrap:'wrap'}}>
-      {options.map(o=> (
-        <button key={o.v} onClick={()=>onChange(o.v)} style={{padding:'6px 12px',border:'none',borderRadius:'calc(var(--r) - 2px)',
-          cursor:'pointer',fontSize:13,fontWeight:600,background:value===o.v?'var(--blue)':'transparent',color:value===o.v?'#fff':'var(--text)'}}>{o.label}</button>
-      ))}
-    </div>
-  );
-  const Field=({label, hint, children})=> (
-    <div style={{marginBottom:18}}>
-      <div style={{fontSize:13,fontWeight:700,color:'var(--text)',marginBottom:2}}>{label}</div>
-      {hint&&<div style={{fontSize:12,color:'var(--muted)',marginBottom:8}}>{hint}</div>}
-      {children}
-    </div>
-  );
-  const filtered = (rows||[]).filter(r=>{ if(!q.trim()) return true; const s=(r.full_name||'')+' '+(r.email||'')+' '+(r.role_keys||[]).join(' '); return s.toLowerCase().includes(q.trim().toLowerCase()); });
+// KI-Datenzugriff (Management-only). Was die KI (Datenabfrage + Anna) einem Zugang zeigt, ergibt sich jetzt aus
+// DENSELBEN Rechten wie die App (perm()/user_permissions, je Bereich). Eingestellt wird es in der Rechte-Ansicht,
+// dort greift es für App UND KI gemeinsam. Diese Ansicht liest den Ist-Stand aus user_permissions (read-only) und
+// leitet zum Editor. KEIN zweiter Regler mehr (früher schrieb sie ai_access_prefs, das die KI nicht mehr liest).
+function AiAccessView({team, onOpenView}){
   const isMgmt = team&&(team.role_keys||[]).some(x=>x==='management');
+  const [rows,setRows]=React.useState(null);
+  React.useEffect(()=>{ if(!isMgmt){ setRows([]); return; } let a=true;
+    (async()=>{ try{
+      const DATA=['emp','bewerber','kpi','shift','absence','datenpflege','lohn'];   // Datenbereiche, die die KI berührt
+      const [up,au]=await Promise.all([
+        sb.from('user_permissions').select('user_id,area_key').in('area_key',DATA),
+        sb.from('app_users').select('user_id,full_name,role_keys').eq('active',true) ]);
+      const byU={}; (up.data||[]).forEach(r=>{ (byU[r.user_id]=byU[r.user_id]||[]).push(r.area_key); });
+      const meta={}; (au.data||[]).forEach(u=>{ meta[u.user_id]={name:u.full_name||u.user_id, roles:(u.role_keys||[]).join(', ')}; });
+      const list=Object.keys(byU).map(uid=>({uid, name:(meta[uid]||{}).name||uid, roles:(meta[uid]||{}).roles||'', areas:byU[uid].slice().sort()}))
+        .sort((x,y)=>String(x.name).localeCompare(String(y.name)));
+      if(a) setRows(list);
+    }catch(e){ if(a) setRows([]); } })();
+    return ()=>{a=false;}; },[isMgmt]);
+  const secLbl={fontSize:11,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',marginBottom:10};
   if(!isMgmt) return <div style={{padding:24,color:'var(--muted)'}}>Dieser Bereich ist dem Management vorbehalten.</div>;
-  return (
-    <div style={{padding:'4px 2px'}}>
-      <div style={{marginBottom:14}}>
-        <div style={{fontSize:20,fontWeight:800,color:'var(--text)'}}>KI-Datenzugriff</div>
-        <div style={{fontSize:13,color:'var(--muted)',marginTop:3,maxWidth:760}}>
-          Lege je Zugang fest, was die KI ihm zeigen darf, in der Datenabfrage und bei Anna. Der Standard ergibt sich
-          aus Rolle und Projekt, du kannst ihn pro Person anpassen. Die Einschränkung greift in der Datenbank, nicht nur in der Anzeige.
-        </div>
-      </div>
-      {rows===null ? <div style={{padding:24,color:'var(--muted)'}}>Lädt…</div> : (
-      <div style={{display:'flex',gap:16,alignItems:'flex-start',flexWrap:'wrap'}}>
-        {/* Liste */}
-        <div style={{flex:'1 1 300px',minWidth:280,maxWidth:420}}>
-          <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Suchen…" style={{width:'100%',padding:'9px 12px',
-            border:'1px solid var(--border)',borderRadius:'var(--r)',background:'var(--surface)',color:'var(--text)',fontSize:14,marginBottom:10,boxSizing:'border-box'}}/>
-          <div style={{display:'flex',flexDirection:'column',gap:6,maxHeight:'62vh',overflowY:'auto'}}>
-            {filtered.map(r=>{
-              const active=r.user_id===sel;
-              const chip = r.is_full ? {t:'Sieht alles',c:'var(--teal)'} : (aiHasRealOverride(r.stored,r.default_prefs) ? {t:'Angepasst',c:'var(--amber)'} : {t:'Standard',c:'var(--muted)'});
-              return (
-                <button key={r.user_id} onClick={()=>setSel(r.user_id)} style={{textAlign:'left',padding:'10px 12px',border:'1px solid '+(active?'var(--blue)':'var(--border)'),
-                  borderRadius:'var(--r)',background:active?'var(--blue-bg)':'var(--card)',cursor:'pointer',display:'flex',flexDirection:'column',gap:2}}>
-                  <div style={{display:'flex',alignItems:'center',gap:8}}>
-                    <span style={{fontSize:14,fontWeight:700,color:'var(--text)',flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r.full_name||r.email||'—'}</span>
-                    <span style={{fontSize:10,fontWeight:700,color:chip.c,border:'1px solid '+chip.c,borderRadius:20,padding:'1px 8px',whiteSpace:'nowrap'}}>{chip.t}</span>
-                  </div>
-                  <div style={{fontSize:12,color:'var(--muted)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{ctxLine(r)}</div>
-                </button>
-              );
-            })}
-            {filtered.length===0 && <div style={{padding:16,color:'var(--muted)',fontSize:13}}>Keine Treffer.</div>}
-          </div>
-        </div>
-        {/* Editor */}
-        <div style={{flex:'2 1 420px',minWidth:320}}>
-          {!current ? (
-            <div style={{padding:'40px 20px',textAlign:'center',color:'var(--muted)',border:'1px dashed var(--border)',borderRadius:'var(--r)'}}>
-              Wähle links einen Zugang, um seinen KI-Datenzugriff einzustellen.
-            </div>
-          ) : current.is_full ? (
-            <div style={{border:'1px solid var(--teal)',borderRadius:'var(--r)',padding:20,background:'var(--card)'}}>
-              <div style={{fontSize:16,fontWeight:800,color:'var(--text)'}}>{current.full_name||current.email}</div>
-              <div style={{fontSize:13,color:'var(--muted)',marginTop:2}}>{ctxLine(current)}</div>
-              <div style={{marginTop:16,padding:'14px 16px',background:'var(--surface-2)',borderRadius:'var(--r)',color:'var(--text)',fontSize:14}}>
-                <b>Sieht immer alles.</b> Dieser Zugang ist fest hinterlegt und nicht einstellbar (uneingeschränkter KI-Datenzugriff).
-              </div>
-            </div>
-          ) : draft ? (
-            <div style={{border:'1px solid var(--border)',borderRadius:'var(--r)',padding:20,background:'var(--card)'}}>
-              <div style={{display:'flex',alignItems:'flex-start',gap:10,marginBottom:6}}>
-                <div style={{flex:1}}>
-                  <div style={{fontSize:16,fontWeight:800,color:'var(--text)'}}>{current.full_name||current.email}</div>
-                  <div style={{fontSize:13,color:'var(--muted)',marginTop:2}}>{ctxLine(current)}</div>
-                </div>
-                <span style={{fontSize:11,fontWeight:700,color:hasOverride?'var(--amber)':'var(--muted)',border:'1px solid '+(hasOverride?'var(--amber)':'var(--border)'),borderRadius:20,padding:'2px 10px',whiteSpace:'nowrap'}}>{hasOverride?'Angepasst':'Rollen-Standard'}</span>
-              </div>
-              <div style={{fontSize:13,color:'var(--muted)',background:'var(--surface-2)',borderRadius:'var(--r)',padding:'10px 12px',margin:'8px 0 18px'}}>
-                Sieht aktuell: <span style={{color:'var(--text)',fontWeight:600}}>{aiEffectText(aiNormalizePrefs(draft), projMap)}</span>
-              </div>
-
-              <Field label="Welche Projekte" hint="Auf welche Projekte darf sich die KI beziehen.">
-                <Seg value={draft.projects} onChange={v=>setDraft({...draft,projects:v})}
-                  options={[{v:'own',label:'Eigenes'},{v:'list',label:'Ausgewählte'},{v:'all',label:'Alle'}]}/>
-                {draft.projects==='list' && (
-                  <div style={{display:'flex',flexWrap:'wrap',gap:8,marginTop:10}}>
-                    {(projects||[]).map(p=>{ const on=(draft.project_ids||[]).includes(p.id);
-                      return <button key={p.id} onClick={()=>{ const s=new Set(draft.project_ids||[]); on?s.delete(p.id):s.add(p.id); setDraft({...draft,project_ids:[...s]}); }}
-                        style={{padding:'6px 12px',border:'1px solid '+(on?'var(--blue)':'var(--border)'),borderRadius:20,cursor:'pointer',fontSize:13,fontWeight:600,
-                          background:on?'var(--blue-bg)':'var(--surface)',color:on?'var(--blue)':'var(--text)'}}>{p.name}</button>; })}
-                    {(projects||[]).length===0 && <span style={{fontSize:12,color:'var(--muted)'}}>Keine Projekte vorhanden.</span>}
-                  </div>
-                )}
-              </Field>
-
-              <Field label="Hierarchie" hint="Ob die KI nur Personen unterhalb zeigt oder auch die eigene Ebene. Nach oben sieht niemand.">
-                <Seg value={draft.direction} onChange={v=>setDraft({...draft,direction:v})}
-                  options={[{v:'down',label:'Nur absteigend'},{v:'side',label:'Auch gleiche Ebene'}]}/>
-              </Field>
-
-              <Field label="Gehälter" hint="Ob die KI Gehalts- und Bankdaten preisgeben darf.">
-                <Seg value={draft.salaries} onChange={v=>setDraft({...draft,salaries:v})}
-                  options={[{v:'none',label:'Keine'},{v:'own',label:'Eigenes Projekt'},{v:'all',label:'Alle'}]}/>
-              </Field>
-
-              <Field label="Management & Overhead" hint="Ob übergeordnete Personen (Management, Teamleitung, Trainer, QM) überhaupt auftauchen.">
-                <Seg value={draft.overhead_mgmt?'yes':'no'} onChange={v=>setDraft({...draft,overhead_mgmt:v==='yes'})}
-                  options={[{v:'no',label:'Ausblenden'},{v:'yes',label:'Sichtbar'}]}/>
-              </Field>
-
-              <div style={{display:'flex',alignItems:'center',gap:12,marginTop:22,flexWrap:'wrap'}}>
-                <button onClick={save} disabled={saving||!dirty} style={{padding:'10px 20px',border:'none',borderRadius:'var(--r)',cursor:(saving||!dirty)?'default':'pointer',
-                  fontSize:14,fontWeight:700,background:(saving||!dirty)?'var(--surface-2)':'var(--blue)',color:(saving||!dirty)?'var(--muted)':'#fff'}}>{saving?'Speichert…':'Speichern'}</button>
-                {hasOverride && <button onClick={resetDefault} disabled={saving} style={{padding:'10px 16px',border:'1px solid var(--border)',borderRadius:'var(--r)',cursor:'pointer',
-                  fontSize:13,fontWeight:600,background:'var(--surface)',color:'var(--text)'}}>Auf Rollen-Standard zurücksetzen</button>}
-                {msg && <span style={{fontSize:13,color:msg.startsWith('Fehler')?'var(--red)':'var(--green)',fontWeight:600}}>{msg}</span>}
-              </div>
-            </div>
-          ) : null}
-        </div>
-      </div>
-      )}
+  return <div style={{padding:'4px 2px',maxWidth:820}}>
+    <div style={{fontSize:20,fontWeight:800,color:'var(--text)'}}>KI-Datenzugriff</div>
+    <div style={{fontSize:13,color:'var(--muted)',marginTop:3,lineHeight:1.55,maxWidth:760}}>
+      Was die KI in der Datenabfrage und bei Anna zeigt, ergibt sich jetzt aus denselben Rechten wie die App, je Bereich.
+      Eingestellt wird das in der <b>Rechte-Ansicht</b>, dort greift es für App und KI gemeinsam. Eine Stelle, kein zweiter Regler.
     </div>
-  );
+    <button onClick={()=>onOpenView&&onOpenView('rechte')}
+      style={{marginTop:14,padding:'10px 18px',border:'none',borderRadius:'var(--r)',cursor:'pointer',fontSize:14,fontWeight:700,background:'var(--blue)',color:'#fff'}}>
+      In der Rechte-Ansicht einstellen →</button>
+    <div style={{marginTop:26}}>
+      <div style={secLbl}>Zugänge mit angepasstem Datenzugriff</div>
+      {rows===null ? <div style={{fontSize:13,color:'var(--muted)'}}>Lädt…</div>
+       : rows.length===0 ? <div style={{padding:'11px 14px',borderRadius:12,background:'var(--surface-2)',border:'1px solid var(--border)',fontSize:13,color:'var(--muted)'}}>Keiner. Alle Zugänge folgen dem Rollen-Standard.</div>
+       : <div style={{display:'flex',flexDirection:'column',gap:8}}>{rows.map(r=>
+           <div key={r.uid} style={{display:'flex',alignItems:'center',gap:12,padding:'10px 13px',border:'1px solid var(--border)',borderRadius:12,background:'var(--card)'}}>
+             <div style={{minWidth:0,flex:1}}>
+               <div style={{fontSize:13.5,fontWeight:700}}>{r.name}</div>
+               <div style={{fontSize:11.5,color:'var(--muted)'}}>{r.roles}</div>
+             </div>
+             <div style={{display:'flex',gap:5,flexWrap:'wrap',justifyContent:'flex-end'}}>{r.areas.map(a=>
+               <span key={a} style={{fontSize:11,fontWeight:700,padding:'2px 8px',borderRadius:20,background:'var(--blue-bg)',color:'var(--blue)'}}>{a}</span>)}</div>
+           </div>)}</div>}
+      <div style={{fontSize:11.5,color:'var(--dim)',marginTop:9,lineHeight:1.5}}>Angepasst heißt: für diesen Zugang ist in mindestens einem Datenbereich ein eigener Wert hinterlegt (statt Rollen-Standard). Ändern in der Rechte-Ansicht.</div>
+    </div>
+  </div>;
 }
 
 // „Wer sieht was" (Management-only): eine Ansicht, die je Nutzer Menuepunkte (Desktop+Mobil), KI-Datenrechte
@@ -36698,14 +36555,16 @@ function AiWhoSeesView({team, employees, onOpenView}){
         sb.from('app_users').select('user_id,full_name,role_keys,active,employee_id'),
         loadConfigFromDB('jsr_hr_tab_locks_v1'), loadConfigFromDB('jsr_menu_grants_v1'),
         loadConfigFromDB('jsr_mobile_full_v1'), loadConfigFromDB('jsr_mobile_keys_v1'),
-        sb.rpc('ai_access_overview'), sb.from('projects').select('id,name'),
+        sb.rpc('ai_scope_overview'), sb.from('projects').select('id,name'),
         loadTaskCatalog(), sb.from('task_assignments').select('*')
       ]);
       // Nur echte Back-Office-Zugaenge: mindestens eine Rolle, keine Kundenzugaenge (eigenes Portal).
       const us=(uRes.data||[]).filter(u=>u.active!==false && Array.isArray(u.role_keys) && u.role_keys.length>0 && !u.role_keys.includes('kunde'))
         .sort((a,b)=>String(a.full_name||'').localeCompare(String(b.full_name||'')));
       setUsers(us); setLocks(lk||{}); setGrants(gr||{}); setMobileFull(mb||{}); setMobileKeys(mk||{});
-      const am={}; (ai.data||[]).forEach(r=>am[r.user_id]=r); setAiMap(am);
+      // ai_scope_overview liefert flach; in die vom Baum erwartete {is_full, effective:{…}}-Form bringen.
+      const am={}; (ai.data||[]).forEach(r=>am[r.user_id]={ email:r.email, is_full:r.is_full,
+        effective:{ projects:r.projects, project_ids:r.project_ids||[], direction:r.direction, salaries:r.salary, overhead_mgmt:r.overhead } }); setAiMap(am);
       const pm={}; (pj.data||[]).forEach(p=>pm[p.id]=p.name); setProjMap(pm);
       setCatalog(cat||[]); setAssign(asg.data||[]);
       if(!selUid && us.length) setSelUid(us[0].user_id);
@@ -43308,7 +43167,7 @@ function App(){
           {view==='recmkt'&&<RecruitingMarketingView employees={employees}/>}
           {view==='nlquery'&&<NlQueryView team={team}/>}
           {view==='rechte'&&<RechteView team={team}/>}
-          {view==='aiaccess'&&<AiAccessView team={team} employees={employees}/>}
+          {view==='aiaccess'&&<AiAccessView team={team} onOpenView={setView}/>}
           {view==='whosees'&&<AiWhoSeesView team={team} employees={employees} onOpenView={setView}/>}
           {view==='useractivity'&&<LoginActivityView team={team}/>}
           {view==='reminders'&&<RemindersView team={team}/>}
