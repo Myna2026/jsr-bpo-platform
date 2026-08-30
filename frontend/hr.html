@@ -7914,7 +7914,7 @@ function TaskAdminView({team, projects, catalog}){
 }
 // Sperrbildschirm (Schnitt 4): beim Oeffnen offene, faellige Tagesaufgaben zeigen — erledigen oder verschieben,
 // bevor es weitergeht. Nur 08-18 Uhr, nur wenn etwas offen ist. Drei feste Ausnahmen; Admin sieht 1x Vorschau.
-const TASKLOCK_EXEMPT = ['939dfd7c-f4ba-4a9e-aa2f-b3048544bffc','14a5001c-9efb-4f76-b8f8-145e24b4be5f','b7cbd0b3-961d-41e2-b358-cc13806b3fe3']; // Admin, Rajner, Thorsten
+const TASKLOCK_EXEMPT = ['939dfd7c-f4ba-4a9e-aa2f-b3048544bffc','14a5001c-9efb-4f76-b8f8-145e24b4be5f','b7cbd0b3-961d-41e2-b358-cc13806b3fe3','b6dcce0e-582f-4fa3-a70b-27af6c815512']; // Admin, Rajner, Thorsten, Claude-Smoke-Test
 const TASKLOCK_PREVIEW_UID = '939dfd7c-f4ba-4a9e-aa2f-b3048544bffc'; // Admin: einmalige Vorschau
 function TaskLockScreen({team, uid, projects, preview, onClose, catalog}){
   const _iso=d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
@@ -37949,6 +37949,7 @@ function AgentInsights({view, onNavigate, isMobileW}){
     const t=setInterval(load, 5*60000); return ()=>clearInterval(t); },[load]);
   const typeOf=okey=>String(okey||'').replace(/_[0-9a-f-]{8,}$/,'');
   useEffect(()=>{ if(cur||muted===null||prefs===null) return;
+    if(prefs.orbit!==false) return;   // Kranz an → keine aufpoppenden Einblendungen, das Aufleuchten ersetzt sie
     const w=prefs.work||{start:8,end:18}; const now=new Date(), wd=now.getDay(), h=now.getHours();
     if(!(wd>=1&&wd<=5 && h>=(w.start??8) && h<(w.end??18))) return;   // Zeitfenster aus den Einstellungen
     const today=isoLocal(new Date());
@@ -38271,6 +38272,13 @@ function AgentPrefsModal({onClose}){
       </div>
       <div style={{padding:'18px 20px',display:'flex',flexDirection:'column',gap:22,maxHeight:'70vh',overflow:'auto'}}>
         <div>
+          <div style={secLbl}>Anzeige</div>
+          <label style={{display:'flex',alignItems:'flex-start',gap:10,cursor:'pointer'}}>
+            <input type="checkbox" checked={p.orbit!==false} onChange={e=>set('orbit',e.target.checked)} style={{width:20,height:20,marginTop:1,flexShrink:0}}/>
+            <span style={{fontSize:13.5,fontWeight:600,lineHeight:1.5}}>Kranz-Widget zeigen<br/><span style={{fontWeight:400,color:'var(--muted)',fontSize:12}}>Die Kollegen leuchten auf, wenn sie etwas haben, statt aufpoppender Einblendungen.</span></span>
+          </label>
+        </div>
+        <div>
           <div style={secLbl}>Wer darf sich bei mir melden</div>
           <div style={{display:'flex',flexDirection:'column',gap:8}}>{AGENT_ORDER.map(k=>{ const a=AI_AGENTS[k]; if(!a) return null;
             return <label key={k} style={{display:'flex',alignItems:'center',gap:10,cursor:'pointer'}}>
@@ -38356,6 +38364,8 @@ function AgentsView({team, onNavigate}){
   const [agents,setAgents]=useState(null); const [err,setErr]=useState(''); const [open,setOpen]=useState(null); const [prefsOpen,setPrefsOpen]=useState(false);
   useEffect(()=>{ let a=true; (async()=>{ try{ const {data,error}=await sb.from('ai_agents').select('*').eq('active',true).order('seq');
     if(!a) return; if(error) setErr(error.message||'Laden fehlgeschlagen'); setAgents(error?[]:(data||[])); }catch(e){ if(a){ setErr((e&&e.message)||'Fehler'); setAgents([]); } } })(); return ()=>{a=false;}; },[]);
+  // Kranz-Klick: ?openAgent → diesen Kollegen direkt aufklappen.
+  useEffect(()=>{ if(!agents) return; try{ const k=window.__orbitOpenAgent; if(k){ window.__orbitOpenAgent=null; const ag=agents.find(x=>x.key===k); if(ag) setOpen(ag); } }catch(e){} },[agents]);
   const lbl=k=>((MENU_BADGE_MAIN_ITEMS.find(m=>m&&m.key===k)||{}).label)||k;
   return <div style={{maxWidth:1120}}>
     <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:2}}>
@@ -42134,6 +42144,74 @@ function VersionWatcher(){
     </div>
   </div>;
 }
+// Kranz-Widget (Entwurf A): ich in der Mitte, die sechs Kollegen ringsum in ihrer Farbe. Ein Kollege leuchtet,
+// wenn er etwas hat (offene Einblendung: agent_insights ohne dismissed/acted). Ersetzt die aufpoppenden
+// Einblendungen: man sieht, dass da etwas ist, und geht selbst hin. Klein im Ruhezustand, Klick klappt auf.
+// Ein-/ausschaltbar (agent_prefs.orbit). Mobil: schmale Leiste unten, gleiche Logik. Reines SVG/CSS.
+function AgentOrbit({team, isMobileW, onNavigate}){
+  const [prefs,setPrefs]=useState(undefined);
+  const [active,setActive]=useState({});
+  const [open,setOpen]=useState(false);
+  const [hover,setHover]=useState(null);
+  useEffect(()=>{ let a=true; (async()=>{ const p=await loadMyAgentPrefs(); if(a) setPrefs(p||{}); })(); return ()=>{a=false;}; },[]);
+  const load=React.useCallback(async()=>{ try{
+    const cut=isoLocal(new Date(Date.now()-21*864e5));
+    const {data}=await sb.from('agent_insights').select('agent_key,dismissed_at,acted_at,created_at').gte('created_at',cut);
+    const m={}; (data||[]).forEach(i=>{ if(i&&i.agent_key&&!i.dismissed_at&&!i.acted_at) m[i.agent_key]=(m[i.agent_key]||0)+1; });
+    setActive(m);
+  }catch(e){} },[]);
+  useEffect(()=>{ load(); const t=setInterval(load,5*60000); return ()=>clearInterval(t); },[load]);
+  if(prefs===undefined) return null;
+  if(prefs && prefs.orbit===false) return null;                     // ausgeschaltet: „wer es nicht will, hat es nicht"
+  const agents=(typeof AGENT_ORDER!=='undefined'?AGENT_ORDER:Object.keys(AI_AGENTS)).filter(k=>AI_AGENTS[k]);
+  if(!agents.length) return null;                                   // RLS blendet Maya für Nicht-Management aus
+  const total=Object.values(active).reduce((a,b)=>a+(b||0),0);
+  const nm=((team&&team.name)||'').trim();
+  const initials=nm?nm.split(/\s+/).filter(Boolean).map(w=>w[0]).slice(0,2).join('').toUpperCase().slice(0,2):'ICH';
+  const go=(k)=>{ setOpen(false); if(onNavigate) onNavigate({kind:'view',view:'agents',openAgent:k}); };
+  const kf=<style>{"@keyframes orbGlow{0%{transform:scale(1);opacity:.55}100%{transform:scale(1.55);opacity:0}}@keyframes orbIn{from{opacity:0;transform:scale(.62)}to{opacity:1;transform:scale(1)}}"}</style>;
+  const face=(k,size)=>{ const a=AI_AGENTS[k]||{}; const acc=a.accent||'#0F5661'; const has=(active[k]||0)>0;
+    return <div onMouseEnter={()=>setHover(k)} onMouseLeave={()=>setHover(h=>h===k?null:h)} onClick={(e)=>{e.stopPropagation();go(k);}}
+      style={{position:'relative',width:size,height:size,cursor:'pointer',transition:'transform .15s',transform:hover===k?'scale(1.12)':'scale(1)'}}>
+      {has&&<span style={{position:'absolute',inset:-5,borderRadius:'50%',border:'2px solid '+acc,animation:'orbGlow 1.8s ease-out infinite',pointerEvents:'none'}}/>}
+      <AgentAvatar agentKey={k} size={size} color={acc} live={false}/>
+      {has&&<span style={{position:'absolute',top:-3,right:-3,minWidth:15,height:15,borderRadius:8,background:'#dc2626',color:'#fff',fontSize:9.5,fontWeight:800,display:'flex',alignItems:'center',justifyContent:'center',border:'1.5px solid #fff',padding:'0 3px'}}>{active[k]}</span>}
+    </div>;
+  };
+  // MOBIL: schmale Leiste am unteren Rand, gleiche Logik.
+  if(isMobileW){
+    return <React.Fragment>{kf}
+      <div style={{position:'fixed',left:8,right:8,bottom:8,zIndex:1150,background:'rgba(11,20,24,.96)',borderRadius:16,padding:'7px 10px',display:'flex',alignItems:'center',gap:6,justifyContent:'space-between',boxShadow:'0 8px 26px rgba(2,10,16,.4)'}}>
+        <div style={{width:36,height:36,borderRadius:18,background:'#0F5661',color:'#fff',fontSize:12,fontWeight:800,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>{initials}</div>
+        {agents.map(k=><div key={k}>{face(k,34)}</div>)}
+      </div>
+    </React.Fragment>;
+  }
+  // DESKTOP: Kranz.
+  const R=96, C=150, F=46;
+  return <React.Fragment>{kf}
+    {open && <div onClick={()=>setOpen(false)} style={{position:'fixed',inset:0,zIndex:1190}}/>}
+    <div style={{position:'fixed',right:22,bottom:22,zIndex:1200}}>
+      {!open
+        ? <div onClick={()=>setOpen(true)} title="AI Kollegen" style={{position:'relative',width:58,height:58,borderRadius:29,background:'#0F5661',color:'#fff',fontSize:14,fontWeight:800,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',boxShadow:'0 10px 26px rgba(2,10,16,.32)',border:'2.5px solid #fff'}}>
+            {initials}
+            {total>0 && <span style={{position:'absolute',top:-4,right:-4,minWidth:19,height:19,borderRadius:10,background:'#dc2626',color:'#fff',fontSize:11,fontWeight:800,display:'flex',alignItems:'center',justifyContent:'center',border:'2px solid #fff',padding:'0 4px'}}>{total}</span>}
+          </div>
+        : <div style={{position:'relative',width:2*C,height:2*C,animation:'orbIn .18s ease-out'}}>
+            <svg width={2*C} height={2*C} style={{position:'absolute',inset:0,pointerEvents:'none'}}>
+              {agents.map((k,i)=>{ const th=(-90+i*60)*Math.PI/180; const x=C+R*Math.cos(th), y=C+R*Math.sin(th);
+                return <line key={k} x1={C} y1={C} x2={x} y2={y} stroke="#cbd5e1" strokeWidth="1.2" opacity=".6"/>; })}
+            </svg>
+            {agents.map((k,i)=>{ const th=(-90+i*60)*Math.PI/180; const x=C+R*Math.cos(th)-F/2, y=C+R*Math.sin(th)-F/2;
+              return <div key={k} style={{position:'absolute',left:x,top:y}}>
+                {face(k,F)}
+                {hover===k && <div style={{position:'absolute',left:'50%',top:-25,transform:'translateX(-50%)',background:'#0f172a',color:'#fff',fontSize:11,fontWeight:700,padding:'3px 8px',borderRadius:7,whiteSpace:'nowrap',boxShadow:'0 4px 12px rgba(2,10,16,.3)',pointerEvents:'none'}}>{(AI_AGENTS[k]||{}).name||k}{(active[k]||0)>0?' · '+active[k]:''}</div>}
+              </div>; })}
+            <div onClick={()=>setOpen(false)} title="Schließen" style={{position:'absolute',left:C-30,top:C-30,width:60,height:60,borderRadius:30,background:'#0F5661',color:'#fff',fontSize:14,fontWeight:800,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',boxShadow:'0 6px 18px rgba(2,10,16,.28)',border:'2.5px solid #fff'}}>{initials}</div>
+          </div>}
+    </div>
+  </React.Fragment>;
+}
 function App(){
   migrateProjectData();
   const [loggedIn, setLoggedIn] = useState(false);
@@ -42885,6 +42963,7 @@ function App(){
     if(!nav) return;
     if(nav.kind==='emp'){ const e=employees.find(x=>x.id===nav.id); if(e){ setModalTab(nav.tab||'hr'); setModal(e); } }
     else if(nav.kind==='view'){ setView(nav.view); if(nav.sysSection){ try{ window.__sysJump=nav.sysSection; }catch(e){} }   // System-Section-Deeplink (z.B. Wechselkurse)
+      if(nav.openAgent){ try{ window.__orbitOpenAgent=nav.openAgent; }catch(e){} }   // Kranz-Klick → diesen Kollegen öffnen
       if(nav.view==='employees'&&nav.query) setEmpSeed(nav.query);
       setNavFilter(nav.navFilter?{...nav.navFilter, view:nav.view}:null);   // Sprung-Filter für die Zielansicht (oder aufheben)
       if(nav.view==='profitability') setProfitProj(nav.projSel||null);      // Projektkarte → Wirtschaftlichkeit mit vorgewähltem Projekt
@@ -42949,6 +43028,7 @@ function App(){
   return(
     <div className="layout">
       <VersionWatcher/>
+      <AgentOrbit team={team} isMobileW={isMobileW} onNavigate={dqNavigate}/>
       <WelcomePopup firstName={firstName}/>
       {showLock && <TaskLockScreen team={team} uid={_lockUid} projects={projects} preview={_lockPreview} onClose={()=>setLockCleared(true)} catalog={taskCatalog}/>}
       {empLoadError && (
