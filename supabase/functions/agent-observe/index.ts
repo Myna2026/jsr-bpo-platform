@@ -181,7 +181,8 @@ Deno.serve(async (req)=>{
     const prev = (chk&&chk.metrics)||{};
     if((byCat.bank_fehlt||0)>0)
       checks.lena.findings.push({okey:"lena_bank_fehlt", severity:"high", confidence:"exakt",
-        facts:[{label:"Mitarbeiter ohne Bankdaten, das blockiert die Lohnzahlung", current:byCat.bank_fehlt, prior:(prev.bank_fehlt!==undefined?prev.bank_fehlt:null)}], metrics:{bank_fehlt:byCat.bank_fehlt}});
+        facts:[{label:"Mitarbeiter ohne Bankdaten, das blockiert die Lohnzahlung", current:byCat.bank_fehlt, prior:(prev.bank_fehlt!==undefined?prev.bank_fehlt:null)}], metrics:{bank_fehlt:byCat.bank_fehlt},
+        action:{key:"remind_missing_bank", label:"Alle ohne Bankdaten auffordern, sie nachzutragen"}});
     if((byCat.ausweis_fehlt||0)>0)
       checks.lena.findings.push({okey:"lena_ausweis_fehlt", severity:"warn", confidence:"exakt",
         facts:[{label:"Mitarbeiter ohne Ausweis-Nummer", current:byCat.ausweis_fehlt, prior:(prev.ausweis_fehlt!==undefined?prev.ausweis_fehlt:null)}], metrics:{ausweis_fehlt:byCat.ausweis_fehlt}});
@@ -251,7 +252,7 @@ Deno.serve(async (req)=>{
       if(tgts.length){
         // facts + confidence denormalisiert mit auf die Einblendung -> der „Warum"-Knopf zeigt die Werte, ohne
         // dass die Zielperson die admin-geschützte agent_observations-Zeile lesen muss.
-        const rows = tgts.map((uid:string)=>({ agent_key:key, user_id:uid, observation_id:(obsRow&&obsRow.id)||null, okey:f.okey, day:date, title, severity:f.severity, context:ctx, facts:f.facts||null, confidence:f.confidence||null }));
+        const rows = tgts.map((uid:string)=>({ agent_key:key, user_id:uid, observation_id:(obsRow&&obsRow.id)||null, okey:f.okey, day:date, title, severity:f.severity, context:ctx, facts:f.facts||null, confidence:f.confidence||null, action:f.action||null }));
         const { error } = await sb.from("agent_insights").upsert(rows, {onConflict:"user_id,day,okey", ignoreDuplicates:true});
         if(!error) insCount += rows.length;
       }
