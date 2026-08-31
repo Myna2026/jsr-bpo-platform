@@ -89,6 +89,7 @@ Deno.serve(async (req) => {
     '<div style="white-space:pre-wrap">' + esc(bodyText) + '</div>' +
     '<div style="margin-top:18px">Beste Grüße<br>Moritz Eckstein<br><span style="color:#555">VP Business Development · 25HRS</span></div>' +
     '<div style="margin-top:22px;padding-top:10px;border-top:1px solid #e5e7eb;font-size:11px;color:#8a8a8a">' + esc(impressumLine).replace(esc(unsubLink), '<a href="' + unsubLink + '" style="color:#8a8a8a">Abmelden</a>') + '</div>' +
+    '<img src="' + SB_URL + '/functions/v1/sales-track?t=' + lead.unsub_token + '" width="1" height="1" alt="" style="display:none">' +
     '</div>';
 
   const res = await smtpSend(pass, lead.contact_email, subject, html);

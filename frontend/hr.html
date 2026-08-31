@@ -41574,9 +41574,16 @@ function AkquiseView({team}){
   const [tpls,setTpls]=React.useState([]);
   const [tf,setTf]=React.useState(null);     // Vorlagen-Formular (neu/bearbeiten)
   const [sendTpl,setSendTpl]=React.useState('');
+  const [evts,setEvts]=React.useState([]);
+  const [flt,setFlt]=React.useState(null);   // Pipeline-Filter: Status-Key oder 'due'
   const load=async()=>{ try{ const {data}=await sb.from('sales_leads').select('*').order('created_at',{ascending:false}); setLeads(data||[]); }catch(e){ setLeads([]); } };
   const loadTpls=async()=>{ try{ const {data}=await sb.from('sales_templates').select('*').order('created_at',{ascending:false}); setTpls(data||[]); }catch(e){ setTpls([]); } };
   React.useEffect(()=>{ if(team&&team.isSales){ load(); loadTpls(); } },[]);
+  React.useEffect(()=>{ if(!sel){ setEvts([]); return; } let a=true; (async()=>{ try{ const {data}=await sb.from('sales_events').select('*').eq('lead_id',sel.id).order('occurred_at',{ascending:false}); if(a) setEvts(data||[]); }catch(e){ if(a) setEvts([]); } })(); return ()=>{a=false;}; },[sel&&sel.id]);
+  const setStatus=async(st)=>{ if(!sel) return; setBusy(true); setMsg('');
+    const {error}=await sb.from('sales_leads').update({status:st, updated_at:new Date().toISOString()}).eq('id',sel.id); setBusy(false);
+    if(error){ setMsg('Fehler: '+error.message); return; } setSel(s=>({...s,status:st})); setMsg('Status: '+st); await load(); };
+  const due=(l)=> l && l.next_followup_at && ['contacted','opened'].includes(l.status) && new Date(l.next_followup_at)<=new Date();
   const callFn=async(fn,body)=>{ let tok=null; try{ const s=await sb.auth.getSession(); tok=s&&s.data&&s.data.session&&s.data.session.access_token; }catch(_e){}
     const r=await fetch(SB_URL+'/functions/v1/'+fn,{method:'POST',headers:{'Authorization':'Bearer '+tok,'apikey':SB_KEY,'content-type':'application/json'},body:JSON.stringify(body)}); return r.json(); };
   const norm=(s)=>String(s||'').toLowerCase().replace(/[^a-z]/g,'');
@@ -41624,16 +41631,26 @@ function AkquiseView({team}){
     {msg&&<div style={{marginBottom:12,fontSize:13,fontWeight:600,color:msg.startsWith('Fehler')||msg.startsWith('Datei')?'var(--red)':'var(--green)'}}>{msg}</div>}
     {tab==='leads' && (leads===null? <div style={{color:'var(--muted)'}}>Lädt…</div>
       : leads.length===0? <div style={{padding:'14px 16px',borderRadius:12,background:'var(--surface-2)',border:'1px solid var(--border)',fontSize:13,color:'var(--muted)'}}>Noch keine Leads. Speise welche über „Einspeisen" ein.</div>
-      : <div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
-          <thead><tr style={{textAlign:'left',color:'var(--muted)',fontSize:11.5,textTransform:'uppercase',letterSpacing:'.04em'}}>
-            <th style={{padding:'6px 8px'}}>Firma</th><th style={{padding:'6px 8px'}}>Kontakt</th><th style={{padding:'6px 8px'}}>E-Mail</th><th style={{padding:'6px 8px'}}>Quelle</th><th style={{padding:'6px 8px'}}>Status</th></tr></thead>
-          <tbody>{leads.map(l=><tr key={l.id} onClick={()=>{setSel(l);setMsg('');}} style={{borderTop:'1px solid var(--border)',cursor:'pointer'}}>
-            <td style={{padding:'7px 8px'}}><div style={{fontWeight:700}}>{l.company||'—'}</div><div style={{fontSize:11.5,color:'var(--muted)'}}>{l.industry||''}</div></td>
-            <td style={{padding:'7px 8px'}}>{l.contact_name||'—'}<div style={{fontSize:11.5,color:'var(--muted)'}}>{l.contact_role||''}</div></td>
-            <td style={{padding:'7px 8px',fontFamily:'var(--mono)',fontSize:12}}>{l.contact_email||'—'}</td>
-            <td style={{padding:'7px 8px',color:'var(--muted)'}}>{l.source}</td>
-            <td style={{padding:'7px 8px'}}><span style={{fontSize:11,fontWeight:700,padding:'2px 8px',borderRadius:20,background:(STAT[l.status]||'#64748b')+'22',color:STAT[l.status]||'#64748b'}}>{l.status}</span></td>
-          </tr>)}</tbody></table></div>)}
+      : (()=>{ const counts=leads.reduce((a,l)=>{a[l.status]=(a[l.status]||0)+1;return a;},{}); const dueN=leads.filter(due).length;
+        const chip=(k,lbl,c,n)=>{ const on=flt===k; return <button key={k} onClick={()=>setFlt(on?null:k)} style={{border:'1px solid '+(on?c:'var(--border)'),background:on?c+'22':'var(--card)',color:on?c:'var(--text)',borderRadius:20,padding:'3px 11px',fontSize:12,fontWeight:700,cursor:'pointer'}}>{lbl} {n}</button>; };
+        const order=['new','researched','contacted','opened','replied','handover','won','lost','dead'];
+        const fl = flt==='due'? leads.filter(due) : flt? leads.filter(l=>l.status===flt) : leads;
+        return <div>
+          <div style={{display:'flex',gap:6,flexWrap:'wrap',marginBottom:12}}>
+            {dueN>0 && chip('due','⏰ Fällig','#f59e0b',dueN)}
+            {order.filter(s=>counts[s]).map(s=>chip(s,s,STAT[s]||'#64748b',counts[s]))}
+          </div>
+          <div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
+            <thead><tr style={{textAlign:'left',color:'var(--muted)',fontSize:11.5,textTransform:'uppercase',letterSpacing:'.04em'}}>
+              <th style={{padding:'6px 8px'}}>Firma</th><th style={{padding:'6px 8px'}}>Kontakt</th><th style={{padding:'6px 8px'}}>E-Mail</th><th style={{padding:'6px 8px'}}>Quelle</th><th style={{padding:'6px 8px'}}>Status</th></tr></thead>
+            <tbody>{fl.map(l=><tr key={l.id} onClick={()=>{setSel(l);setMsg('');}} style={{borderTop:'1px solid var(--border)',cursor:'pointer'}}>
+              <td style={{padding:'7px 8px'}}><div style={{fontWeight:700}}>{l.company||'—'}</div><div style={{fontSize:11.5,color:'var(--muted)'}}>{l.industry||''}</div></td>
+              <td style={{padding:'7px 8px'}}>{l.contact_name||'—'}<div style={{fontSize:11.5,color:'var(--muted)'}}>{l.contact_role||''}</div></td>
+              <td style={{padding:'7px 8px',fontFamily:'var(--mono)',fontSize:12}}>{l.contact_email||'—'}</td>
+              <td style={{padding:'7px 8px',color:'var(--muted)'}}>{l.source}</td>
+              <td style={{padding:'7px 8px'}}><span style={{fontSize:11,fontWeight:700,padding:'2px 8px',borderRadius:20,background:(STAT[l.status]||'#64748b')+'22',color:STAT[l.status]||'#64748b'}}>{l.status}</span>{due(l)&&<span style={{marginLeft:6,fontSize:10,fontWeight:800,color:'#f59e0b'}}>⏰ fällig</span>}</td>
+            </tr>)}</tbody></table></div>
+        </div>; })())}
     {tab==='einspeisen' && <div style={{display:'flex',flexDirection:'column',gap:18,maxWidth:640}}>
       <div style={{border:'1px solid var(--border)',borderRadius:12,padding:14}}>
         <div style={{fontWeight:800,fontSize:14,marginBottom:4}}>📄 Liste hochladen</div>
@@ -41717,6 +41734,22 @@ function AkquiseView({team}){
             <button onClick={sendLead} disabled={busy||!sel.contact_email} style={{padding:'8px 16px',border:'none',borderRadius:8,cursor:(busy||!sel.contact_email)?'default':'pointer',fontSize:13,fontWeight:700,background:(busy||!sel.contact_email)?'var(--surface-2)':'var(--green)',color:(busy||!sel.contact_email)?'var(--muted)':'#fff'}}>Senden</button>
           </div>
           <div style={{fontSize:11.5,color:'var(--muted)',marginTop:6}}>Compliance greift automatisch: Unterdrückungsprüfung, Abmeldelink und Impressum. Ohne die drei geht nichts raus.{!sel.contact_email?' Dieser Lead hat keine E-Mail.':''}</div>
+        </div>
+        <div style={{marginTop:16,paddingTop:14,borderTop:'1px solid var(--border)'}}>
+          <div style={{fontSize:11,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.04em',marginBottom:6}}>Status setzen</div>
+          <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+            {[['won','Gewonnen','#16a34a'],['lost','Verloren','#dc2626'],['dead','Tot','#94a3b8'],['handover','Übergabe','#f59e0b'],['contacted','Zurücksetzen','#64748b']].map(([st,lbl,c])=>
+              <button key={st} onClick={()=>setStatus(st)} disabled={busy||sel.status===st} style={{border:'1px solid '+c,background:sel.status===st?c+'22':'var(--card)',color:c,borderRadius:8,padding:'5px 11px',fontSize:12,fontWeight:700,cursor:(busy||sel.status===st)?'default':'pointer'}}>{lbl}</button>)}
+          </div>
+        </div>
+        <div style={{marginTop:16,paddingTop:14,borderTop:'1px solid var(--border)'}}>
+          <div style={{fontSize:11,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.04em',marginBottom:8}}>Verlauf</div>
+          {evts.length===0? <div style={{fontSize:12.5,color:'var(--muted)'}}>Noch nichts passiert.</div>
+           : <div style={{display:'flex',flexDirection:'column',gap:7}}>{evts.map(ev=>{ const K={sent:'📤 Gesendet',opened:'👁 Geöffnet',replied:'📥 Antwort',research:'🔎 Recherche',followup:'🔁 Nachgefasst',unsubscribe:'🚫 Abgemeldet',bounce:'⚠️ Bounce',handover:'🤝 Übergabe',note:'📝 Notiz'};
+              return <div key={ev.id} style={{display:'flex',gap:10,fontSize:12.5,alignItems:'baseline'}}>
+                <span style={{color:'var(--muted)',minWidth:112,flexShrink:0}}>{(ev.occurred_at||'').slice(0,16).replace('T',' ')}</span>
+                <span>{K[ev.kind]||ev.kind}{ev.detail&&ev.detail.subject?(' · '+ev.detail.subject):''}{ev.detail&&ev.detail.auto?(' · '+ev.detail.auto):''}</span>
+              </div>; })}</div>}
         </div>
       </div>
     </div>}
