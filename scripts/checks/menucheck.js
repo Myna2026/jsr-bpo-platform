@@ -61,7 +61,7 @@ if (!navBlock || !catBlock){
 
 const menuKeys = Array.from(new Set(keysOf(navBlock)));
 const catalog  = new Set(keysOf(catBlock));
-const ALLOW = new Set(['activity_log', 'hrtablocks']);   // bewusst ohne Katalog-Eintrag (s. Kopf)
+const ALLOW = new Set(['activity_log', 'akquise']);   // ohne Katalog-Eintrag: activity_log (eigener Rollenfilter); akquise (Sales-Freigabeliste, nicht über die Tab-Matrix sperrbar)
 
 const missing = menuKeys.filter(k => !catalog.has(k) && !ALLOW.has(k));
 // Zusatzhinweis (kein Blocker): Katalog-Keys, die es im Menue nicht (mehr) gibt.
