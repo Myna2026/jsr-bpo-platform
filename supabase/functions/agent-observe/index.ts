@@ -222,11 +222,24 @@ Deno.serve(async (req)=>{
   // Schreiben: Befunde als Beobachtungen (Kollegen-Satz) + Einblendungen je Zielnutzer + Heartbeat je Agent.
   const NAMES:Record<string,string> = { clara:"Clara", max:"Max", anna:"Anna", paul:"Paul", maya:"Maya", lena:"Lena" };
   // Wer bekommt welchen Kollegen zu sehen (Rollen); Kontext = wo die Einblendung passt (am richtigen Ort).
-  const ROLE_TARGETS:Record<string,string[]> = { clara:["management","hr"], max:["management","hr"], anna:["management","hr"], paul:["management"], maya:["management"], lena:["management","hr"] };
+  // Ziel-ROLLEN je Agent (Eignung). Leads bei team-relevanten Agenten dazu (lena Personal/Abwesenheit, anna KPIs,
+  // paul Besetzung=nur Projektleiter wie paul_whatif). clara/max Recruiting + maya System bleiben mgmt/hr.
+  const ROLE_TARGETS:Record<string,string[]> = {
+    clara:["management","hr"], max:["management","hr"],
+    anna:["management","hr","projektleiter","teamlead"],
+    paul:["management","projektleiter"],
+    maya:["management"],
+    lena:["management","hr","projektleiter","teamlead"],
+  };
+  // Perm-Bereich je Agent: entscheidet, gegen welche Projekt-Rechte gescopet wird (perm_proj_ok).
+  const AGENT_AREA:Record<string,string> = { clara:"bewerber", max:"bewerber", anna:"kpi", paul:"shift", maya:"emp", lena:"emp" };
   const AGENT_CONTEXT:Record<string,string[]> = { clara:["kanban","funnel","cvs","dubletten","bewerberlinks"], max:["daily_tasks","uploads","dataimport","vorschau"], anna:["nlquery","wissen_system","knowledge"], paul:["auswertung","praesentation","meetingnotes","vorschau","fcist"], maya:["useractivity"], lena:["datacheck","absences","urlaubantraege","employees"] };
-  const { data:usersRaw } = await sb.from("app_users").select("user_id,role_keys,active");
-  const users = (usersRaw||[]).filter((u:any)=>u.active!==false && u.user_id);
-  const targetsFor=(k:string)=>{ const roles=ROLE_TARGETS[k]||["management"]; return users.filter((u:any)=>(u.role_keys||[]).some((r:string)=>roles.includes(r))).map((u:any)=>u.user_id); };
+  // Empfänger JE BEOBACHTUNG über perm_proj_ok (agent_recipients-RPC): mgmt/hr alles, Leads nur eigenes Projekt,
+  // globale Beobachtung (project null) nur all-project-Nutzer. Ersetzt die ungescopte Rollen-Verteilung.
+  const recipientsFor = async (k:string, projectId:string|null):Promise<string[]> => {
+    const { data } = await sb.rpc("agent_recipients", { p_project: projectId||null, p_area: AGENT_AREA[k]||"emp", p_roles: ROLE_TARGETS[k]||["management"] });
+    return (data||[]).map((r:any)=> typeof r==="string" ? r : r.agent_recipients).filter(Boolean);
+  };
   let totalFound=0, insCount=0;
   for(const key of Object.keys(checks)){
     const c=checks[key]; const persona=await personaOf(key);
@@ -234,7 +247,7 @@ Deno.serve(async (req)=>{
       let title=""; try{ title=await colleagueLine(NAMES[key], persona, {facts:f.facts, confidence:f.confidence, missing:f.missing}); }catch(_e){}
       if(!title) title = f.facts.map((x:any)=>`${x.label}: ${x.current}`).join("; ");
       const { data:obsRow } = await sb.from("agent_observations").upsert({ day:date, okey:f.okey, agent_key:key, severity:f.severity, title, metrics:f.metrics||null, confidence:f.confidence||null, facts:f.facts||null, project_id:f.project_id||null, skill:f.skill||null },{onConflict:"day,okey"}).select("id").maybeSingle();
-      const tgts=targetsFor(key); const ctx=AGENT_CONTEXT[key]||null;
+      const tgts=await recipientsFor(key, f.project_id||null); const ctx=AGENT_CONTEXT[key]||null;
       if(tgts.length){
         // facts + confidence denormalisiert mit auf die Einblendung -> der „Warum"-Knopf zeigt die Werte, ohne
         // dass die Zielperson die admin-geschützte agent_observations-Zeile lesen muss.
