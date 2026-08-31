@@ -95,26 +95,28 @@ function b64utf8(s: string): string {
 function encWord(s: string): string {
   return /[^\x00-\x7F]/.test(s) ? "=?UTF-8?B?" + b64utf8(s) + "?=" : s;
 }
-function buildMessage(sender: any, to: string, subject: string, html: string): string {
+function buildMessage(sender: any, to: string, subject: string, html: string, messageId: string): string {
   const from = `${encWord(sender.fromName)} <${sender.email}>`;
   const b64 = b64utf8(html).replace(/(.{76})/g, "$1\r\n");   // 76-Zeichen-Zeilen (Vielfaches von 4 -> saubere Base64-Zeilen)
   const headers = [
     "From: " + from,
     "To: " + to,
+    "Reply-To: recruiting@25hrs.net",                        // Antworten ins Sammelpostfach (Eingang-Poll, Schnitt 2)
     "Subject: " + encWord(subject),
     "MIME-Version: 1.0",
     'Content-Type: text/html; charset=utf-8',
     "Content-Transfer-Encoding: base64",
     "Date: " + new Date().toUTCString(),
-    "Message-ID: <" + crypto.randomUUID() + "@25hrs.net>",
+    "Message-ID: <" + messageId + ">",
   ].join("\r\n");
   return headers + "\r\n\r\n" + b64 + "\r\n.\r\n";
 }
 
-// Versand über Zoho SMTP aus dem Postfach des Agenten, direkt gesprochen. Gibt {ok, error?} zurück (wirft nicht).
-async function smtpSend(sender: any, to: string, subject: string, html: string): Promise<{ ok: boolean; error?: string }> {
+// Versand über Zoho SMTP aus dem Postfach des Agenten, direkt gesprochen. Gibt {ok, error?, messageId} zurück (wirft nicht).
+async function smtpSend(sender: any, to: string, subject: string, html: string): Promise<{ ok: boolean; error?: string; messageId: string }> {
+  const messageId = crypto.randomUUID() + "@25hrs.net";
   const pass = smtpPass(sender.key);
-  if (!pass) return { ok: false, error: "Passwort-Secret ZOHO_SMTP_PASS_" + sender.key.toUpperCase() + " fehlt" };
+  if (!pass) return { ok: false, error: "Passwort-Secret ZOHO_SMTP_PASS_" + sender.key.toUpperCase() + " fehlt", messageId };
   const enc = new TextEncoder(); const dec = new TextDecoder();
   let conn: Deno.TlsConn | null = null;
   try {
@@ -144,13 +146,13 @@ async function smtpSend(sender: any, to: string, subject: string, html: string):
     await cmd("MAIL FROM:<" + sender.email + ">", "250", "MAIL FROM");
     await cmd("RCPT TO:<" + to + ">", "250", "RCPT TO");
     await cmd("DATA", "354", "DATA");
-    await conn.write(enc.encode(buildMessage(sender, to, subject, html)));
+    await conn.write(enc.encode(buildMessage(sender, to, subject, html, messageId)));
     const done = await read();
     if (!done.trimStart().startsWith("250")) throw new Error("nach DATA: " + done.trim().slice(0, 200));
     try { await conn.write(enc.encode("QUIT\r\n")); } catch (_e) { /* egal */ }
-    return { ok: true };
+    return { ok: true, messageId };
   } catch (e) {
-    return { ok: false, error: "SMTP: " + ((e as Error).message || String(e)) };
+    return { ok: false, error: "SMTP: " + ((e as Error).message || String(e)), messageId };
   } finally {
     if (conn) { try { conn.close(); } catch (_e) { /* ignore */ } }
   }
@@ -179,6 +181,12 @@ async function sendOne(cv: any, cfg: any, sender: any, origin: string, createdBy
     sender_key: sender.key, to_address: cv.email, invite_token: token, form_id: cfg.form_id || null,
     status: res.ok ? "sent" : "failed", error: res.ok ? null : res.error, provider_id: null,
     created_by: createdBy, sent_at: res.ok ? new Date().toISOString() : null,
+  });
+  // Mail-Kontext-Verlauf (Schnitt 3): Ausgang mit Inhalt + Message-ID in den Bewerber-Thread schreiben.
+  await sb.from("mail_messages").insert({
+    direction: "out", mailbox: "recruiting", cv_id: cv.id,
+    from_address: sender.email, to_address: cv.email, subject, body_html: html,
+    message_id: res.messageId, status: res.ok ? "sent" : "failed", error: res.ok ? null : res.error,
   });
   return res;
 }

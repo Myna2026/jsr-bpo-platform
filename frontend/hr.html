@@ -18931,6 +18931,66 @@ function ContractSection({cv, onContractSaved, onPromote}){
 
 // Hörprobe eines CVs — abwärtskompatibel: neu = audios[0].url (Array, wie MA-Profil), alt = audio_url (String in extra).
 function cvAudioUrl(cv){ return (cv && cv.audios && cv.audios[0] && cv.audios[0].url) || (cv && cv.audio_url) || ''; }
+// Mail-Verlauf im Bewerber-Kontext (Schnitt 3): liest mail_messages (cv_id), zeigt ein/aus, antwortet aus dem
+// Sammelpostfach recruiting@ über die mail-send Edge Function (threadet auf die letzte eingehende Mail).
+function MailThread({cvId, toEmail}){
+  const [msgs,setMsgs]=React.useState(null);
+  const [subject,setSubject]=React.useState('');
+  const [bodyText,setBodyText]=React.useState('');
+  const [sending,setSending]=React.useState(false);
+  const [msg,setMsg]=React.useState('');
+  const stripHtml=(h)=>(h||'').replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim();
+  const load=async()=>{ try{
+    const {data}=await sb.from('mail_messages').select('*').eq('cv_id',cvId).order('occurred_at',{ascending:true});
+    setMsgs(data||[]);
+    const last=(data||[]).slice().reverse().find(m=>m.subject);
+    setSubject(prev=> prev || (last? (/^re:/i.test(last.subject)?last.subject:('Re: '+last.subject)) : ''));
+  }catch(e){ setMsgs([]); } };
+  React.useEffect(()=>{ if(cvId) load(); },[cvId]);
+  const lastIn=(msgs||[]).slice().reverse().find(m=>m.direction==='in');
+  const send=async()=>{
+    if(!toEmail){ setMsg('Bewerber hat keine E-Mail-Adresse.'); return; }
+    if(!subject.trim()||!bodyText.trim()){ setMsg('Betreff und Text nötig.'); return; }
+    setSending(true); setMsg('');
+    let tok=null; try{ const s=await sb.auth.getSession(); tok=s&&s.data&&s.data.session&&s.data.session.access_token; }catch(_e){}
+    try{
+      const r=await fetch(SB_URL+'/functions/v1/mail-send',{method:'POST',headers:{'Authorization':'Bearer '+tok,'apikey':SB_KEY,'content-type':'application/json'},
+        body:JSON.stringify({cv_id:cvId,to:toEmail,mailbox:'recruiting',subject:subject.trim(),body_text:bodyText.trim(),in_reply_to:lastIn?lastIn.message_id:null})});
+      const j=await r.json();
+      if(j.ok){ setBodyText(''); setMsg('Gesendet.'); await load(); } else setMsg('Fehler: '+(j.error||'unbekannt'));
+    }catch(e){ setMsg('Fehler: '+((e&&e.message)||e)); }
+    setSending(false);
+  };
+  if(!cvId) return <div style={{padding:16,color:'var(--muted)',fontSize:13}}>Erst speichern, dann steht der Mail-Verlauf zur Verfügung.</div>;
+  return <div style={{padding:'4px 2px'}}>
+    <div style={{fontSize:12,color:'var(--muted)',marginBottom:10}}>Schriftwechsel mit {toEmail||'(keine Adresse)'}. Antworten laufen über recruiting@25hrs.net; eingehende Mails erscheinen hier, sobald der Postfach-Abruf läuft.</div>
+    <div style={{display:'flex',flexDirection:'column',gap:8,maxHeight:'40vh',overflowY:'auto',marginBottom:12}}>
+      {msgs===null? <div style={{color:'var(--muted)',fontSize:13}}>Lädt…</div>
+       : msgs.length===0? <div style={{padding:'12px 14px',borderRadius:10,background:'var(--surface-2)',border:'1px solid var(--border)',fontSize:13,color:'var(--muted)'}}>Noch keine Mails.</div>
+       : msgs.map(m=>{ const out=m.direction==='out';
+          return <div key={m.id} style={{alignSelf:out?'flex-end':'flex-start',maxWidth:'85%',border:'1px solid var(--border)',
+            borderRadius:12,padding:'8px 11px',background:out?'var(--blue-bg)':'var(--card)'}}>
+            <div style={{display:'flex',gap:8,alignItems:'baseline',marginBottom:3}}>
+              <span style={{fontSize:11,fontWeight:800,color:out?'var(--blue)':'var(--text)'}}>{out?'Ausgang':'Eingang'}</span>
+              <span style={{fontSize:10.5,color:'var(--muted)'}}>{(m.occurred_at||'').slice(0,16).replace('T',' ')}</span>
+              {m.status==='failed'&&<span style={{fontSize:10,color:'var(--red)',fontWeight:700}}>fehlgeschlagen</span>}
+            </div>
+            {m.subject&&<div style={{fontSize:12.5,fontWeight:700,marginBottom:2}}>{m.subject}</div>}
+            <div style={{fontSize:12.5,color:'var(--text)',whiteSpace:'pre-wrap'}}>{m.body_text||stripHtml(m.body_html)}</div>
+          </div>; })}
+    </div>
+    <div style={{borderTop:'1px solid var(--border)',paddingTop:10}}>
+      <input value={subject} onChange={e=>setSubject(e.target.value)} placeholder="Betreff"
+        style={{width:'100%',padding:'8px 11px',border:'1px solid var(--border)',borderRadius:8,background:'var(--surface)',color:'var(--text)',fontSize:13,marginBottom:6,boxSizing:'border-box'}}/>
+      <textarea value={bodyText} onChange={e=>setBodyText(e.target.value)} placeholder="Antwort schreiben…" rows={4}
+        style={{width:'100%',padding:'8px 11px',border:'1px solid var(--border)',borderRadius:8,background:'var(--surface)',color:'var(--text)',fontSize:13,resize:'vertical',boxSizing:'border-box'}}/>
+      <div style={{display:'flex',alignItems:'center',gap:12,marginTop:8}}>
+        <button onClick={send} disabled={sending} style={{padding:'8px 18px',border:'none',borderRadius:8,cursor:sending?'default':'pointer',fontSize:13,fontWeight:700,background:sending?'var(--surface-2)':'var(--blue)',color:sending?'var(--muted)':'#fff'}}>{sending?'Sendet…':'Senden'}</button>
+        {msg&&<span style={{fontSize:12.5,fontWeight:600,color:msg.startsWith('Fehler')?'var(--red)':'var(--green)'}}>{msg}</span>}
+      </div>
+    </div>
+  </div>;
+}
 function CVModal({cv, projects, team, onSave, onClose, initialTab}){
   // Role helpers
   // C4b: role_keys statt des alten Rollen-Felds. Admin-Sicht = is_admin (management|hr).
@@ -19046,6 +19106,7 @@ function CVModal({cv, projects, team, onSave, onClose, initialTab}){
     {id:'phase',    label:'Phase',    icon:'📊', always:true},
     {id:'termin',   label:'Gespräch', icon:'📅', show: !!cv && isHR},
     {id:'vertrag',  label:'Vertrag',  icon:'📝', show: atLeast('selection2') && isHR},
+    {id:'mail',     label:'Mail',     icon:'✉️', show: !!cv && isHR},
   ].filter(t=>t.always||t.show);
 
   const fromLP = cv && cv.source==='LP'; // came from landing page
@@ -19811,6 +19872,9 @@ function CVModal({cv, projects, team, onSave, onClose, initialTab}){
             </div>;
           })()}
           {schedOpen && <InterviewScheduleModal cv={form} onClose={()=>{ setSchedOpen(false); loadInv(); }}/>}
+
+          {/* ── MAIL-VERLAUF (Kontext) ── */}
+          {tab==='mail'&&<MailThread cvId={cv&&cv.id} toEmail={form.email}/>}
 
           {/* ── VERTRAG (ab selection2) ── */}
           {tab==='vertrag'&&(
