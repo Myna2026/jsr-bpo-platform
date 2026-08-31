@@ -37238,6 +37238,12 @@ function AgentInsights({view, onNavigate, isMobileW}){
           }} style={{border:'none',background:sv,color:'#fff',borderRadius:9,padding:'7px 14px',fontSize:12.5,fontWeight:700,cursor:'pointer'}}>{cur.action.label}</button>}
           {cur.context&&cur.context.length>0&&<button onClick={jump} style={{border:'none',background:acc,color:'#fff',borderRadius:9,padding:'7px 14px',fontSize:12.5,fontWeight:700,cursor:'pointer'}}>Ansehen</button>}
           <button onClick={()=>close('dismissed')} style={{border:'1px solid var(--border)',background:'var(--card)',color:'var(--muted)',borderRadius:9,padding:'7px 14px',fontSize:12.5,fontWeight:600,cursor:'pointer'}}>Weg</button>
+          <button onClick={async()=>{
+            const r=await uiPrompt({title:'Das stimmt nicht', text:'Kurz, warum? Das fließt in die Wirkungsmessung, damit der Kollege dazulernt.', fields:[{key:'why',label:'Was stimmt nicht?'}], confirmLabel:'Absenden'});
+            if(!r) return;
+            try{ await sb.rpc('insight_dispute',{p_id:cur.id, p_reason:(r.why||'')}); }catch(_e){}
+            setList(l=>l.map(x=>x.id===cur.id?{...x,disputed_at:new Date().toISOString()}:x)); setCur(null);
+          }} style={{border:'1px solid var(--border)',background:'var(--card)',color:'var(--muted)',borderRadius:9,padding:'7px 14px',fontSize:12.5,fontWeight:600,cursor:'pointer'}}>Das stimmt nicht</button>
           {cur.facts&&cur.facts.length>0 && <WhyButton make={()=>insightWhy(cur)} size={22}/>}
         </div>
       </div>
@@ -41465,7 +41471,7 @@ function VersionWatcher(){
 // wenn er etwas hat (offene Einblendung: agent_insights ohne dismissed/acted). Ersetzt die aufpoppenden
 // Einblendungen: man sieht, dass da etwas ist, und geht selbst hin. Klein im Ruhezustand, Klick klappt auf.
 // Ein-/ausschaltbar (agent_prefs.orbit). Mobil: schmale Leiste unten, gleiche Logik. Reines SVG/CSS.
-function AgentOrbit({team, isMobileW, onNavigate}){
+function AgentOrbit({team, isMobileW, onNavigate, here}){
   const [prefs,setPrefs]=useState(undefined);
   const [active,setActive]=useState({});
   const [open,setOpen]=useState(false);
@@ -41484,6 +41490,11 @@ function AgentOrbit({team, isMobileW, onNavigate}){
   const agents=(typeof AGENT_ORDER!=='undefined'?AGENT_ORDER:Object.keys(AI_AGENTS)).filter(k=>AI_AGENTS[k]);
   if(!agents.length) return null;                                   // RLS blendet Maya für Nicht-Management aus
   const total=Object.values(active).reduce((a,b)=>a+(b||0),0);
+  // Welcher Kollege gehört zum aktuellen Bereich (für die Hervorhebung)? Spiegelt AGENT_CONTEXT aus agent-observe.
+  const AGENT_VIEWS={ clara:['kanban','funnel','cvs','dubletten','bewerberlinks'], max:['daily_tasks','uploads','dataimport','vorschau'], anna:['nlquery','wissen_system','knowledge'], paul:['auswertung','praesentation','meetingnotes','vorschau','fcist'], maya:['useractivity'], lena:['datacheck','absences','urlaubantraege','employees'] };
+  const hereAgent = agents.find(k=>(AGENT_VIEWS[k]||[]).includes(here))||null;
+  const glowing = agents.filter(k=>(active[k]||0)>0);
+  const onlyOne = glowing.length===1 ? glowing[0] : null;   // nur einer → Klick führt direkt zu ihm
   const nm=((team&&team.name)||'').trim();
   const initials=nm?nm.split(/\s+/).filter(Boolean).map(w=>w[0]).slice(0,2).join('').toUpperCase().slice(0,2):'ICH';
   // Mobil: Tipp öffnet den Kollegen direkt als Overlay (volle Zeile holen), Zurück bringt an dieselbe Stelle.
@@ -41495,6 +41506,7 @@ function AgentOrbit({team, isMobileW, onNavigate}){
     return <div onMouseEnter={()=>setHover(k)} onMouseLeave={()=>setHover(h=>h===k?null:h)} onClick={(e)=>{e.stopPropagation();go(k);}}
       style={{position:'relative',width:size,height:size,cursor:'pointer',transition:'transform .15s',transform:hover===k?'scale(1.12)':'scale(1)'}}>
       {has&&<span style={{position:'absolute',inset:-5,borderRadius:'50%',border:'2px solid '+acc,animation:'orbGlow 1.8s ease-out infinite',pointerEvents:'none'}}/>}
+      {k===hereAgent&&<span title="gehört zu diesem Bereich" style={{position:'absolute',inset:-6,borderRadius:'50%',border:'2px dashed '+acc,pointerEvents:'none'}}/>}
       <AgentAvatar agentKey={k} size={size} color={acc} live={false}/>
       {has&&<span style={{position:'absolute',top:-3,right:-3,minWidth:15,height:15,borderRadius:8,background:'#dc2626',color:'#fff',fontSize:9.5,fontWeight:800,display:'flex',alignItems:'center',justifyContent:'center',border:'1.5px solid #fff',padding:'0 3px'}}>{active[k]}</span>}
     </div>;
@@ -41513,11 +41525,24 @@ function AgentOrbit({team, isMobileW, onNavigate}){
   const R=96, C=150, F=46;
   return <React.Fragment>{kf}
     {open && <div onClick={()=>setOpen(false)} style={{position:'fixed',inset:0,zIndex:1190}}/>}
-    <div style={{position:'fixed',right:22,bottom:22,zIndex:1200}}>
+    <div onMouseLeave={()=>setOpen(false)} style={{position:'fixed',right:22,bottom:22,zIndex:1200}}>
       {!open
-        ? <div onClick={()=>setOpen(true)} title="AI Kollegen" style={{position:'relative',width:58,height:58,borderRadius:29,background:'#0F5661',color:'#fff',fontSize:14,fontWeight:800,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',boxShadow:'0 10px 26px rgba(2,10,16,.32)',border:'2.5px solid #fff'}}>
-            {initials}
-            {total>0 && <span style={{position:'absolute',top:-4,right:-4,minWidth:19,height:19,borderRadius:10,background:'#dc2626',color:'#fff',fontSize:11,fontWeight:800,display:'flex',alignItems:'center',justifyContent:'center',border:'2px solid #fff',padding:'0 4px'}}>{total}</span>}
+        ? <div onMouseEnter={()=>{ if(!onlyOne) setOpen(true); }} onClick={()=>{ if(onlyOne) go(onlyOne); else setOpen(true); }}
+            title={onlyOne?('Direkt zu '+((AI_AGENTS[onlyOne]||{}).name||onlyOne)):'AI Kollegen'}
+            style={{display:'flex',alignItems:'center',gap:8,cursor:'pointer'}}>
+            {glowing.length>0 && <div style={{display:'flex',alignItems:'center'}}>
+              {glowing.map((k,idx)=>{ const acc=(AI_AGENTS[k]||{}).accent||'#0F5661';
+                return <div key={k} style={{position:'relative',marginLeft:idx?-10:0,zIndex:glowing.length-idx}}>
+                  <span style={{position:'absolute',inset:-3,borderRadius:'50%',border:'2px solid '+acc,animation:'orbGlow 1.8s ease-out infinite',pointerEvents:'none'}}/>
+                  {k===hereAgent&&<span style={{position:'absolute',inset:-6,borderRadius:'50%',border:'2px dashed '+acc,pointerEvents:'none'}}/>}
+                  <AgentAvatar agentKey={k} size={36} color={acc} live={false}/>
+                  <span style={{position:'absolute',top:-3,right:-3,minWidth:15,height:15,borderRadius:8,background:'#dc2626',color:'#fff',fontSize:9.5,fontWeight:800,display:'flex',alignItems:'center',justifyContent:'center',border:'1.5px solid #fff',padding:'0 3px'}}>{active[k]}</span>
+                </div>; })}
+            </div>}
+            <div style={{position:'relative',width:58,height:58,borderRadius:29,background:'#0F5661',color:'#fff',fontSize:14,fontWeight:800,display:'flex',alignItems:'center',justifyContent:'center',boxShadow:'0 10px 26px rgba(2,10,16,.32)',border:'2.5px solid #fff'}}>
+              {initials}
+              {total>0 && glowing.length===0 && <span style={{position:'absolute',top:-4,right:-4,minWidth:19,height:19,borderRadius:10,background:'#dc2626',color:'#fff',fontSize:11,fontWeight:800,display:'flex',alignItems:'center',justifyContent:'center',border:'2px solid #fff',padding:'0 4px'}}>{total}</span>}
+            </div>
           </div>
         : <div style={{position:'relative',width:2*C,height:2*C,animation:'orbIn .18s ease-out'}}>
             <svg width={2*C} height={2*C} style={{position:'absolute',inset:0,pointerEvents:'none'}}>
@@ -42352,7 +42377,7 @@ function App(){
   return(
     <div className="layout">
       <VersionWatcher/>
-      <AgentOrbit team={team} isMobileW={isMobileW} onNavigate={dqNavigate}/>
+      <AgentOrbit team={team} isMobileW={isMobileW} onNavigate={dqNavigate} here={view}/>
       <WelcomePopup firstName={firstName}/>
       {showLock && <TaskLockScreen team={team} uid={_lockUid} projects={projects} preview={_lockPreview} onClose={()=>setLockCleared(true)} catalog={taskCatalog}/>}
       {empLoadError && (
