@@ -41571,8 +41571,12 @@ function AkquiseView({team}){
   const [paste,setPaste]=React.useState('');
   const [ap,setAp]=React.useState({titles:'',locations:'',industries:'',keywords:'',per_page:25});
   const [sel,setSel]=React.useState(null);   // ausgewählter Lead (Detail)
+  const [tpls,setTpls]=React.useState([]);
+  const [tf,setTf]=React.useState(null);     // Vorlagen-Formular (neu/bearbeiten)
+  const [sendTpl,setSendTpl]=React.useState('');
   const load=async()=>{ try{ const {data}=await sb.from('sales_leads').select('*').order('created_at',{ascending:false}); setLeads(data||[]); }catch(e){ setLeads([]); } };
-  React.useEffect(()=>{ if(team&&team.isSales) load(); },[]);
+  const loadTpls=async()=>{ try{ const {data}=await sb.from('sales_templates').select('*').order('created_at',{ascending:false}); setTpls(data||[]); }catch(e){ setTpls([]); } };
+  React.useEffect(()=>{ if(team&&team.isSales){ load(); loadTpls(); } },[]);
   const callFn=async(fn,body)=>{ let tok=null; try{ const s=await sb.auth.getSession(); tok=s&&s.data&&s.data.session&&s.data.session.access_token; }catch(_e){}
     const r=await fetch(SB_URL+'/functions/v1/'+fn,{method:'POST',headers:{'Authorization':'Bearer '+tok,'apikey':SB_KEY,'content-type':'application/json'},body:JSON.stringify(body)}); return r.json(); };
   const norm=(s)=>String(s||'').toLowerCase().replace(/[^a-z]/g,'');
@@ -41600,6 +41604,13 @@ function AkquiseView({team}){
     const j=await callFn('sales-research',{lead_id:sel.id}); setBusy(false);
     if(j.ok){ try{ const {data}=await sb.from('sales_leads').select('*').eq('id',sel.id).maybeSingle(); if(data) setSel(data); }catch(_e){} await load(); }
     else setMsg('Fehler: '+(j.error||'unbekannt')); };
+  const saveTpl=async()=>{ if(!tf) return; if(!tf.key||!tf.subject||!tf.body){ setMsg('Key, Betreff und Text nötig.'); return; } setBusy(true); setMsg('');
+    const {error}=await sb.from('sales_templates').upsert({key:tf.key,name:tf.name||null,subject:tf.subject,body:tf.body,ai_enrich:!!tf.ai_enrich,active:tf.active!==false,updated_at:new Date().toISOString()},{onConflict:'key'}); setBusy(false);
+    if(error){ setMsg('Fehler: '+error.message); return; } setTf(null); setMsg('Vorlage gespeichert.'); await loadTpls(); };
+  const sendLead=async()=>{ if(!sel||!sendTpl){ setMsg('Bitte eine Vorlage wählen.'); return; } setBusy(true); setMsg('');
+    const j=await callFn('sales-send',{lead_id:sel.id, template_key:sendTpl}); setBusy(false);
+    if(j.ok){ setMsg('Gesendet.'); try{ const {data}=await sb.from('sales_leads').select('*').eq('id',sel.id).maybeSingle(); if(data) setSel(data); }catch(_e){} await load(); }
+    else setMsg('Fehler: '+(j.error||'unbekannt')); };
   const inp={width:'100%',padding:'8px 11px',border:'1px solid var(--border)',borderRadius:8,background:'var(--surface)',color:'var(--text)',fontSize:13,boxSizing:'border-box'};
   const STAT={new:'#64748b',researched:'#0ea5e9',contacted:'#6366f1',opened:'#8b5cf6',replied:'#16a34a',handover:'#f59e0b',won:'#16a34a',lost:'#dc2626',dead:'#94a3b8',suppressed:'#dc2626'};
   if(!(team&&team.isSales)) return <div style={{padding:24,color:'var(--muted)'}}>Dieser Bereich ist der Akquise-Freigabeliste vorbehalten.</div>;
@@ -41607,7 +41618,7 @@ function AkquiseView({team}){
     <div style={{fontSize:20,fontWeight:800}}>Akquise</div>
     <div style={{fontSize:13,color:'var(--muted)',marginTop:3,marginBottom:14}}>Neukontakt im DACH-Raum, Absender Moritz Eckstein. Compliance greift beim Versand (Unterdrückung, Abmeldelink, Impressum).</div>
     <div style={{display:'inline-flex',gap:2,background:'var(--surface-2)',borderRadius:'var(--r)',padding:2,marginBottom:14}}>
-      {[['leads','Leads'+(leads?' ('+leads.length+')':'')],['einspeisen','Einspeisen']].map(([t,l])=>
+      {[['leads','Leads'+(leads?' ('+leads.length+')':'')],['einspeisen','Einspeisen'],['vorlagen','Vorlagen'+(tpls.length?' ('+tpls.length+')':'')]].map(([t,l])=>
         <button key={t} onClick={()=>{setTab(t);setMsg('');}} style={{padding:'7px 14px',border:'none',borderRadius:'calc(var(--r) - 2px)',cursor:'pointer',fontSize:13,fontWeight:700,background:tab===t?'var(--blue)':'transparent',color:tab===t?'#fff':'var(--text)'}}>{l}</button>)}
     </div>
     {msg&&<div style={{marginBottom:12,fontSize:13,fontWeight:600,color:msg.startsWith('Fehler')||msg.startsWith('Datei')?'var(--red)':'var(--green)'}}>{msg}</div>}
@@ -41647,6 +41658,34 @@ function AkquiseView({team}){
         <button onClick={runApollo} disabled={busy} style={{padding:'8px 16px',border:'none',borderRadius:8,cursor:busy?'default':'pointer',fontSize:13,fontWeight:700,background:busy?'var(--surface-2)':'var(--blue)',color:busy?'var(--muted)':'#fff'}}>Suchen & importieren</button>
       </div>
     </div>}
+    {tab==='vorlagen' && <div style={{maxWidth:640}}>
+      <button onClick={()=>{setTf({key:'',name:'',subject:'',body:'',ai_enrich:false,active:true});setMsg('');}} style={{padding:'8px 16px',border:'none',borderRadius:8,cursor:'pointer',fontSize:13,fontWeight:700,background:'var(--blue)',color:'#fff',marginBottom:12}}>+ Neue Vorlage</button>
+      {tf && <div style={{border:'1px solid var(--border)',borderRadius:12,padding:14,marginBottom:14}}>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:8}}>
+          <input value={tf.key} onChange={e=>setTf(f=>({...f,key:e.target.value}))} placeholder="Key (z. B. erstkontakt)" style={inp}/>
+          <input value={tf.name||''} onChange={e=>setTf(f=>({...f,name:e.target.value}))} placeholder="Name" style={inp}/>
+        </div>
+        <input value={tf.subject||''} onChange={e=>setTf(f=>({...f,subject:e.target.value}))} placeholder="Betreff — Platzhalter {company} {name}" style={{...inp,marginBottom:8}}/>
+        <textarea value={tf.body||''} onChange={e=>setTf(f=>({...f,body:e.target.value}))} rows={6} placeholder="Standardtext. Platzhalter: {company} {name} {hook} {industry}" style={{...inp,resize:'vertical',marginBottom:8}}/>
+        <label style={{display:'flex',alignItems:'center',gap:8,fontSize:13,marginBottom:10,cursor:'pointer'}}>
+          <input type="checkbox" checked={!!tf.ai_enrich} onChange={e=>setTf(f=>({...f,ai_enrich:e.target.checked}))}/> KI reichert an (personalisiert je Firma; aus = nur Standardtext)
+        </label>
+        <div style={{display:'flex',gap:8}}>
+          <button onClick={saveTpl} disabled={busy} style={{padding:'8px 16px',border:'none',borderRadius:8,cursor:'pointer',fontSize:13,fontWeight:700,background:'var(--blue)',color:'#fff'}}>Speichern</button>
+          <button onClick={()=>setTf(null)} style={{padding:'8px 16px',border:'1px solid var(--border)',borderRadius:8,cursor:'pointer',fontSize:13,fontWeight:600,background:'var(--card)',color:'var(--text)'}}>Abbrechen</button>
+        </div>
+      </div>}
+      <div style={{display:'flex',flexDirection:'column',gap:8}}>
+        {tpls.map(t=><div key={t.id} onClick={()=>{setTf({...t});setMsg('');}} style={{border:'1px solid var(--border)',borderRadius:10,padding:'10px 12px',cursor:'pointer'}}>
+          <div style={{display:'flex',justifyContent:'space-between',gap:8}}>
+            <div style={{fontWeight:700,fontSize:13.5}}>{t.name||t.key}</div>
+            <div style={{display:'flex',gap:6}}>{t.ai_enrich&&<span style={{fontSize:10,fontWeight:700,padding:'1px 7px',borderRadius:20,background:'var(--blue-bg)',color:'var(--blue)'}}>KI</span>}<span style={{fontSize:10,fontWeight:700,padding:'1px 7px',borderRadius:20,background:t.active?'var(--green-bg)':'var(--surface-2)',color:t.active?'var(--green)':'var(--muted)'}}>{t.active?'aktiv':'aus'}</span></div>
+          </div>
+          <div style={{fontSize:12,color:'var(--muted)',marginTop:2}}>{t.subject}</div>
+        </div>)}
+        {tpls.length===0&&<div style={{fontSize:13,color:'var(--muted)'}}>Noch keine Vorlagen. Von euch formulierte Standardtexte; die KI reichert nur an, wenn ihr es je Vorlage einschaltet.</div>}
+      </div>
+    </div>}
     {sel && <div onClick={()=>setSel(null)} style={{position:'fixed',inset:0,zIndex:1000,background:'rgba(2,10,16,.5)',display:'flex',alignItems:'flex-start',justifyContent:'center',padding:'40px 16px',overflowY:'auto'}}>
       <div onClick={e=>e.stopPropagation()} style={{background:'var(--card)',border:'1px solid var(--border)',borderRadius:16,width:560,maxWidth:'100%',padding:20}}>
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:12}}>
@@ -41668,6 +41707,17 @@ function AkquiseView({team}){
         <button onClick={research} disabled={busy} style={{padding:'8px 16px',border:'none',borderRadius:8,cursor:busy?'default':'pointer',fontSize:13,fontWeight:700,background:busy?'var(--surface-2)':'var(--blue)',color:busy?'var(--muted)':'#fff'}}>{busy?'Recherchiert…':(sel.hook?'Neu recherchieren':'Recherchieren')}</button>
         {!sel.website && <span style={{marginLeft:10,fontSize:12,color:'var(--muted)'}}>Ohne Website bleibt der Aufhänger allgemein.</span>}
         {msg&&<span style={{marginLeft:10,fontSize:12.5,fontWeight:600,color:msg.startsWith('Fehler')?'var(--red)':'var(--green)'}}>{msg}</span>}
+        <div style={{marginTop:16,paddingTop:14,borderTop:'1px solid var(--border)'}}>
+          <div style={{fontSize:11,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.04em',marginBottom:6}}>Senden als Moritz</div>
+          <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
+            <select value={sendTpl} onChange={e=>setSendTpl(e.target.value)} style={{...inp,width:'auto',minWidth:200}}>
+              <option value="">Vorlage wählen…</option>
+              {tpls.filter(t=>t.active).map(t=><option key={t.id} value={t.key}>{t.name||t.key}{t.ai_enrich?' (KI)':''}</option>)}
+            </select>
+            <button onClick={sendLead} disabled={busy||!sel.contact_email} style={{padding:'8px 16px',border:'none',borderRadius:8,cursor:(busy||!sel.contact_email)?'default':'pointer',fontSize:13,fontWeight:700,background:(busy||!sel.contact_email)?'var(--surface-2)':'var(--green)',color:(busy||!sel.contact_email)?'var(--muted)':'#fff'}}>Senden</button>
+          </div>
+          <div style={{fontSize:11.5,color:'var(--muted)',marginTop:6}}>Compliance greift automatisch: Unterdrückungsprüfung, Abmeldelink und Impressum. Ohne die drei geht nichts raus.{!sel.contact_email?' Dieser Lead hat keine E-Mail.':''}</div>
+        </div>
       </div>
     </div>}
   </div>;
