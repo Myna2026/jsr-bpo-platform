@@ -8916,7 +8916,30 @@ function CockpitProjectKpis({projects, team, mobile, selY, selM0, selKw, selKwYe
   const [cmp,setCmp]=useState(wkey(_defP));
   const [showAll,setShowAll]=useState(false);   // Primär-KPIs stehen groß; „weitere" klappen auf (wie Langzeitforecast)
   // Monats-/KW-Wechsel oben → KW-Auswahl folgt (zusammen bewegen). Manuelle KW-Wahl gilt bis zum nächsten Wechsel.
-  useEffect(()=>{ setSel(wkey(_defW)); setCmp(wkey(_defP)); },[selY, selM0, selKw, selKwYear]);   // Wechsel setzt KW-Auswahl neu
+  // Daten-bewusst: fällt die Wunsch-Woche des Monats leer aus (z. B. laufender Monat, dessen KW noch keine Werte
+  // hat), springt die Auswahl auf die letzte Woche MIT Daten in/bis zu diesem Monat, statt auf einer leeren KW zu
+  // stehen. Im KW-Modus des Zeitraum-Wählers bleibt die gewählte Woche exakt (auch leer, ehrlich). Die Neuwahl
+  // erfolgt genau einmal je Zeitraum (Signatur), damit eine spätere manuelle Dropdown-Wahl erhalten bleibt.
+  const _psig=useRef('');
+  useEffect(()=>{
+    const sig=[selY,selM0,selKw,selKwYear].join('|');
+    const dataWks=new Set();
+    Object.values(emap).forEach(rec=>Object.keys(rec).forEach(k=>dataWks.add(k)));
+    Object.values(pent).forEach(byW=>Object.keys(byW).forEach(k=>dataWks.add(k)));
+    const want=wkey(_defW);
+    if(!dataWks.size){ if(_psig.current!==sig){ setSel(want); setCmp(wkey(_defP)); } return; }   // Daten noch nicht da → vorläufig
+    if(_psig.current===sig+'#done') return;   // für diesen Zeitraum bereits mit Daten festgelegt → manuelle Wahl bleibt
+    _psig.current=sig+'#done';
+    let target=want, prevW=_defP;
+    if(!(selKw&&selKwYear) && !dataWks.has(want)){
+      const monEnd=new Date(_defDate.getFullYear(),_defDate.getMonth(),_defDate.getDate());
+      const cand=[...dataWks].map(k=>{ const p=String(k).split('-').map(Number); return {k,year:p[0],kw:p[1]}; })
+        .filter(w=>Number.isFinite(w.year)&&Number.isFinite(w.kw)&&isoWeekMonday(w.year,w.kw)<=monEnd)
+        .sort((a,b)=> b.year-a.year || b.kw-a.kw);
+      if(cand.length){ target=cand[0].k; const tm=isoWeekMonday(cand[0].year,cand[0].kw); prevW=getISOWeek(new Date(tm.getFullYear(),tm.getMonth(),tm.getDate()-7)); }
+    }
+    setSel(target); setCmp(wkey(prevW));
+  },[selY, selM0, selKw, selKwYear, emap, pent]);   // Wechsel/Daten setzt KW-Auswahl neu (einmal je Zeitraum)
   useEffect(()=>{ if(!isMgmt){ setCfg([]); return; } let alive=true;
     const load=async()=>{
       try{
@@ -8956,7 +8979,8 @@ function CockpitProjectKpis({projects, team, mobile, selY, selM0, selKw, selKwYe
   const wkSet=new Set([wkey(cwNow), wkey(_defW)]);
   Object.values(emap).forEach(rec=>Object.keys(rec).forEach(k=>wkSet.add(k)));
   Object.values(pent).forEach(byW=>Object.keys(byW).forEach(k=>wkSet.add(k)));
-  const availWeeks=[...wkSet].map(parseW).sort((a,b)=> b.year-a.year || b.kw-a.kw);
+  // Nur echte Kalenderwochen ins Dropdown (kein „KW NaN" aus Monats-/Leerzeilen mit fehlender kw).
+  const availWeeks=[...wkSet].map(parseW).filter(w=>Number.isFinite(w.year)&&Number.isFinite(w.kw)&&w.kw>=1&&w.kw<=53).sort((a,b)=> b.year-a.year || b.kw-a.kw);
   const selW=parseW(sel); const cmpW=cmp?parseW(cmp):null;
   const wLabel=w=>'KW '+w.kw+(w.year!==cwNow.year?('/'+String(w.year).slice(2)):'');
   const _selStyle={padding:'3px 7px',border:'1px solid var(--border)',borderRadius:7,fontSize:11.5,fontWeight:700,background:'var(--card)',color:'var(--text)'};
@@ -9130,7 +9154,8 @@ function AuswertungView({projects, team}){
   const wkSet=new Set([cwNow.year+'-'+cwNow.kw]);
   Object.values(emap).forEach(rec=>Object.keys(rec).forEach(k=>wkSet.add(k)));
   Object.values(pent).forEach(byW=>Object.keys(byW).forEach(k=>wkSet.add(k)));
-  const availWeeks=[...wkSet].map(parseW).sort((a,b)=> b.year-a.year || b.kw-a.kw);
+  // Nur echte Kalenderwochen ins Dropdown (kein „KW NaN" aus Monats-/Leerzeilen mit fehlender kw).
+  const availWeeks=[...wkSet].map(parseW).filter(w=>Number.isFinite(w.year)&&Number.isFinite(w.kw)&&w.kw>=1&&w.kw<=53).sort((a,b)=> b.year-a.year || b.kw-a.kw);
   const selW=parseW(sel); const cmpW=cmp?parseW(cmp):null;
   const wLabel=w=>'KW '+w.kw+(w.year!==cwNow.year?('/'+String(w.year).slice(2)):'');
   const combos=[]; const seenC={};
@@ -9265,19 +9290,29 @@ function CockpitForecastIst({projects, team, mobile, selY, selM0}){
   const [data,setData]=useState(null);
   const now=new Date();
   const mondayOf=d=>{ const x=new Date(d.getFullYear(),d.getMonth(),d.getDate()); x.setDate(x.getDate()-((x.getDay()+6)%7)); return x; };
-  // Folgt dem Zeitraum-Wähler: laufender Monat → aktuelle Woche als Referenz; sonst die letzte Woche des gewählten Monats.
+  // Folgt dem Zeitraum-Wähler und bleibt IM gewählten Monat: die Wochen, deren Montag in diesen Monat fällt.
+  // Laufender Monat → nur die bereits abgeschlossenen Wochen (Ist vollständig); die laufende Woche nur als Hinweis.
+  // Kein rollierendes Fenster mehr (das ließ August und September identisch aussehen, weil die letzte
+  // abgeschlossene Woche Anfang September noch im August lag).
   const _isCur = selY==null || (selY===now.getFullYear() && selM0===now.getMonth());
-  const _ref = _isCur ? now : new Date(selY, selM0+1, 0);
-  const thisMon=mondayOf(_ref); const lastMon=new Date(thisMon); lastMon.setDate(thisMon.getDate()-7);
-  // 8 VOLLSTÄNDIGE Wochen bis zur letzten abgeschlossenen Woche (Hauptwert). Die laufende Woche ist
-  // unvollständig (Ist noch nicht komplett) -> nur als Hinweis, nie als Hauptwert (wie Krank-/Urlaubsquote).
-  const weeks=(()=>{ const a=[]; for(let i=7;i>=0;i--){ const d=new Date(lastMon); d.setDate(lastMon.getDate()-i*7); a.push(getISOWeek(d)); } return a; })();
-  const runWeek=getISOWeek(thisMon);
+  const _fy = selY!=null?selY:now.getFullYear(), _fm = selM0!=null?selM0:now.getMonth();
+  const _todayF = new Date(now.getFullYear(),now.getMonth(),now.getDate());
+  // Monatszuordnung nach ISO-Donnerstag (wie die Jahreszuordnung der KW): die Grenzwoche Mo 31.8.–So 6.9. zählt
+  // zum September (Do 3.9.), nicht zum August. Immer nur ABGESCHLOSSENE Wochen (So < heute) als Hauptwert.
+  const _monWeeks=(()=>{ const map={}; let d=new Date(_fy,_fm,1); const end=new Date(_fy,_fm+1,0);
+    while(d<=end){ const mon=mondayOf(d); const thu=new Date(mon.getFullYear(),mon.getMonth(),mon.getDate()+3);
+      if(thu.getFullYear()===_fy&&thu.getMonth()===_fm){ const w=getISOWeek(mon); const sun=new Date(mon.getFullYear(),mon.getMonth(),mon.getDate()+6); map[w.year+'-'+w.kw]={w,mon,sun}; }
+      d=new Date(d.getFullYear(),d.getMonth(),d.getDate()+1); }
+    return Object.values(map).sort((a,b)=>a.mon-b.mon); })();
+  const weeks = _monWeeks.filter(x=>x.sun<_todayF).map(x=>x.w);
+  const _runObj = _isCur ? (_monWeeks.find(x=>x.mon<=_todayF && x.sun>=_todayF)||null) : null;
+  const runWeek = _runObj ? _runObj.w : (_isCur ? getISOWeek(mondayOf(now)) : null);
   const wkey=w=>w.year+'-'+w.kw;
   useEffect(()=>{ if(!isMgmt){ setData({combos:[],noFc:[]}); return; } let alive=true;
     const load=async()=>{
       try{
-        const orC=weeks.concat([runWeek]).map(w=>`and(year.eq.${w.year},kw.eq.${w.kw})`).join(',');
+        const _qw=runWeek?weeks.concat([runWeek]):weeks; if(!_qw.length){ if(alive) setData({combos:[],noFc:[]}); return; }
+        const orC=_qw.map(w=>`and(year.eq.${w.year},kw.eq.${w.kw})`).join(',');
         const fcR=await sb.from('report_forecast').select('project_id,skill,kw,year,fc_hours').or(orC);
         const whR=await sb.from('weekly_hours').select('project_id,skill,kw,year,hours').or(orC);
         if(!alive) return;
@@ -9288,8 +9323,8 @@ function CockpitForecastIst({projects, team, mobile, selY, selM0}){
         const combos=Object.keys(comboSet).map(key=>{ const pid=key.split('|')[0], skill=key.split('|')[1];
           const series=weeks.map(w=>{ const kk=key+'|'+wkey(w); const f=fc[kk]; const s=ist[kk]; const both=(f!=null&&f>0&&s!=null);
             return {kw:w.kw, fc:(f==null?null:Math.round(f*10)/10), ist:(s==null?null:Math.round(s*10)/10), gap: both?Math.round((f-s)/f*1000)/10:null, both}; });
-          const rk=key+'|'+wkey(runWeek); const rf=fc[rk], rs=ist[rk];
-          const running=(rf!=null||rs!=null)?{fc:(rf==null?null:Math.round(rf*10)/10), ist:(rs==null?null:Math.round(rs*10)/10)}:null;
+          const rk=runWeek?key+'|'+wkey(runWeek):null; const rf=rk?fc[rk]:null, rs=rk?ist[rk]:null;   // laufende Woche nur im aktuellen Monat
+          const running=(runWeek&&(rf!=null||rs!=null))?{fc:(rf==null?null:Math.round(rf*10)/10), ist:(rs==null?null:Math.round(rs*10)/10)}:null;
           return {pid, skill, series, running};
         });
         const fcPids=new Set(Object.keys(comboSet).map(k=>k.split('|')[0]));
@@ -9329,14 +9364,14 @@ function CockpitForecastIst({projects, team, mobile, selY, selM0}){
         </div>
         {both.length>=2&&<div style={{marginTop:7}}><HoverChart data={both.map(x=>x.gap)} labels={both.map(x=>'KW '+x.kw)} color={s.c} kind="area" h={38} fmt={v=>fmtNum(v,1)+' %'} tips={both.map(x=>'KW '+x.kw+' · FC '+fmtNum(x.fc)+' / Ist '+fmtNum(x.ist)+' · '+gapTxt(x.gap))}/></div>}
       </React.Fragment> : <div style={{fontSize:11.5,color:'var(--muted)',padding:'4px 0'}}>Forecast vorhanden, noch keine Ist-Stunden im Fenster.{c.series.some(x=>x.fc!=null)&&<span> Zuletzt erwartet: <b style={{color:'var(--text)',fontFamily:'var(--mono)'}}>{fmtNum(([...c.series].reverse().find(x=>x.fc!=null)||{}).fc)}</b> h.</span>}</div>}
-      {c.running && c.running.ist!=null && <div style={{fontSize:10.5,color:'var(--muted)',marginTop:6,borderTop:'1px dashed var(--border)',paddingTop:5}}>Laufende KW {runWeek.kw}: <b style={{fontFamily:'var(--mono)',color:'var(--text)'}}>{fmtNum(c.running.ist)}</b>{c.running.fc!=null?<span> von {fmtNum(c.running.fc)}</span>:null} h · Woche läuft noch</div>}
+      {runWeek && c.running && c.running.ist!=null && <div style={{fontSize:10.5,color:'var(--muted)',marginTop:6,borderTop:'1px dashed var(--border)',paddingTop:5}}>Laufende KW {runWeek.kw}: <b style={{fontFamily:'var(--mono)',color:'var(--text)'}}>{fmtNum(c.running.ist)}</b>{c.running.fc!=null?<span> von {fmtNum(c.running.fc)}</span>:null} h · Woche läuft noch</div>}
     </div>;
   };
   const grid=(
     <div style={{padding:mobile?'2px 0 4px':14}}>
       <div style={mobile?{display:'flex',flexDirection:'column',gap:10}:{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(300px,1fr))',gap:12}}>{combos.map(c=>card(c))}</div>
       <div style={{fontSize:10,color:'var(--muted)',marginTop:mobile?8:10,lineHeight:1.5}}>
-        Ist (weekly_hours) gegen Auftraggeber-Forecast (report_forecast), letzte 8 Wochen. Lücke = (FC − Ist) ÷ FC. Farbe nach Größe der Abweichung, Werte beim Darüberfahren.
+        Ist (weekly_hours) gegen Auftraggeber-Forecast (report_forecast), Wochen des gewählten Monats. Lücke = (FC − Ist) ÷ FC. Farbe nach Größe der Abweichung, Werte beim Darüberfahren.
         {(data.noFc||[]).length>0 && <span> Ohne Forecast (nur Ist, hier nicht verglichen): <b>{data.noFc.map(projName).join(', ')}</b>.</span>}
       </div>
     </div>
@@ -10218,7 +10253,13 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
     const DEF_ORDER = (COCKPIT_ORDER[_role]||COCKPIT_ORDER.default).filter(k=>blockNodes[k]!==undefined);
     const _ck=mgmtCk||{order:null,hidden:[]};
     const _ord=(Array.isArray(_ck.order)?_ck.order:DEF_ORDER).filter(k=>DEF_ORDER.includes(k));
-    const order=_ord.concat(DEF_ORDER.filter(k=>!_ord.includes(k)));   // neue Blöcke ans Ende
+    // Neue Standard-Blöcke an ihrer natürlichen Position einfügen (nach dem nächsten vorhandenen Vorgänger aus
+    // DEF_ORDER), nicht stumpf ans Ende — sonst landet z. B. der Stundenabgleich hinter allen anderen und wirkt „weg".
+    const order=(()=>{ const out=_ord.slice();
+      DEF_ORDER.forEach((k,i)=>{ if(out.includes(k)) return; let pos=out.length;
+        for(let j=i-1;j>=0;j--){ const at=out.indexOf(DEF_ORDER[j]); if(at>=0){ pos=at+1; break; } }
+        out.splice(pos,0,k); });
+      return out; })();
     // 4c: hat der Nutzer noch nichts konfiguriert, gilt die Rollen-Standard-Ausblendung (HR/Leads ohne Kosten).
     const _hasCfg = (Array.isArray(_ck.order)&&_ck.order.length) || (Array.isArray(_ck.hidden)&&_ck.hidden.length);
     const hiddenSet=new Set(_hasCfg ? (_ck.hidden||[]) : (COCKPIT_HIDE[_role]||[]));
