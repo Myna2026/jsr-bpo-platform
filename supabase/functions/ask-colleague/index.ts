@@ -84,6 +84,7 @@ Deno.serve(async (req)=>{
   const answer = (tool&&tool.input&&tool.input.answer) || "Das weiß ich so nicht.";
   const who = list.find((a:any)=>a.key===outAgent) || {key:outAgent, name:outAgent};
 
-  try{ await sb.from("agent_conversations").insert({ user_id:me.user.id, agent_key:outAgent, question, answer }); }catch(_e){}
+  const sessionId = (typeof body.session_id==="string" && /^[0-9a-f-]{36}$/i.test(body.session_id)) ? body.session_id : crypto.randomUUID();
+  try{ await sb.from("agent_conversations").insert({ user_id:me.user.id, agent_key:outAgent, question, answer, session_id:sessionId }); }catch(_e){}
   return json({ ok:true, agent:outAgent, name:who.name, answer });
 });

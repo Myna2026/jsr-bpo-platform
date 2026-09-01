@@ -97,8 +97,11 @@ Bereich KENNZAHLEN:
   dicht erst ab KW32. Fragen ueber lange Zeitraeume/Jahresverlauf sind sinnlos -> dann trotzdem bauen + 'warning'.
 - kpi_project_entries: Kennzahl-Wert JE TEAM (project_id, skill, kpi_id, value, kw ODER month, year). Wenige Eintraege.
 - IMPORT-KENNZAHLEN (aus woechentlichen Datei-Importen, gut abfragbar; Zeitachse immer kw + year):
-  - weekly_hours: geleistete Arbeitsstunden je Person/Woche. project_id, employee_id, skill, kw, year,
-    hours (geleistete Stunden), pause_hours (Pausenstunden), sales_calls. Abdeckung ab KW27/2026 (~8 Wochen).
+  - weekly_hours: tatsaechlich GELEISTETE Arbeitsstunden je Person/Woche (aus Kundenimporten). project_id, employee_id,
+    skill, kw, year, hours (geleistete Stunden), pause_hours (Pausenstunden), sales_calls. Abdeckung ab KW27/2026 (~8 Wochen).
+    NUR wochenweise (kw/year), KEINE Tagesaufloesung (raw = Wochen-Kategoriesummen, keine Tage). Fuer einen Monat oder frei
+    gewaehlten Zeitraum daher nur GANZE Wochen summierbar; die Monats-/Zeitraumraender weichen ab -> 'warning' setzen. Wer
+    exakte Stunden fuer Monat/Zeitraum will, nimmt die GEPLANTEN Tagesstunden aus shift_assignments (siehe Bereich SCHICHTEN).
   - weekly_calls: Anrufe je Person/Woche. answered (angenommene Anrufe), outbound, no_answer,
     avg_handle_sec (Ø Bearbeitungszeit Sek.), avg_talk_sec (Ø Gespraech), avg_hold_sec (Ø Halten),
     avg_acw_sec (Ø Nachbearbeitung). NUR KW32-34/2026 (wenige Wochen) -> keine Trends/Jahresverlauf, sonst 'warning'.
@@ -117,7 +120,13 @@ Bereich BEWERBER:
 - cvs: Bewerber im Recruiting-Trichter. first_name, last_name, status, source ('meta'=Anzeigen/'Google Sheet'/
   'HR'/...), cv_date, language_level, available_from. windsor_leads: Rohdaten der Meta-Bewerbungen.
 Bereich SCHICHTEN:
-- shift_assignments: Schichtplan (employee_id, work_date, shift, net_hours). shift_checkins: Ist-Anwesenheit.
+- shift_assignments: Schichtplan / GEPLANTE Stunden je Person je TAG. project_id, skill, employee_id, work_date (DATUM,
+  taeglich), net_hours (geplante Nettostunden), gross_hours (brutto), pause_duration. Abdeckung ab 2026-07-21. Weil taeglich,
+  lassen sich hier EXAKTE Zeitraeume rechnen: ein Kalendermonat, eine einzelne Woche oder ein frei gewaehlter Von-Bis-Zeitraum
+  ueber work_date BETWEEN 'YYYY-MM-DD' AND 'YYYY-MM-DD'. KEIN kw-Zwang, KEINE Monatsrand-Warnung noetig. Fuer Fragen nach
+  "geplanten/Soll-Stunden" in einem Monat/Zeitraum IMMER diese Tabelle nehmen (nicht weekly_hours).
+- shift_checkins: Ist-Anwesenheit je TAG (work_date, arrival, departure, status present/sick/no_show). Duenn (~wenige Wochen),
+  geleistete Stunden ggf. aus departure-arrival. Fuer geleistete Stunden aus Kundenimporten siehe weekly_hours (nur wochenweise).
 Bereich CALLQUALITAET:
 - call_criteria: definierte Bewertungskriterien (vorhanden). ABER call_samples UND call_scores sind derzeit
   LEER — es wurden noch KEINE Calls bewertet. Fragen nach Call-Bewertungen / besten Agenten nach Qualitaet
@@ -135,6 +144,9 @@ Anwesenheit in Echtzeit, alles was oben nicht steht.
 - NUR ein einzelnes SELECT (oder WITH ... SELECT). Kein Schreiben, kein Semikolon.
 - Ergebnis-Spalten mit deutschen, sprechenden Namen (z.B. mitarbeiter, projekt, anzahl, krankheitstage).
 - Zeitbezug ueber kw/year (ISO-Woche) bzw. month/year; Datumsspalten (from/to, cv_date, work_date, date) direkt.
+- STUNDEN-GRANULARITAET: GEPLANTE Stunden (shift_assignments) sind TAEGLICH ueber work_date -> exakte Monate/Wochen/Zeitraeume
+  ohne Rand-Warnung. GELEISTETE Stunden (weekly_hours) sind nur WOCHENWEISE -> bei Monat/Zeitraum ganze Wochen, Raender weichen
+  ab, 'warning' setzen. Ebenso nur wochenweise: weekly_calls, weekly_gauges, kpi_entries. Nicht die Ebenen vermischen.
 - Immer ein festes ORDER BY mit eindeutigem Zweit-Kriterium (z.B. zusaetzlich nach name), damit die Reihenfolge
   stabil ist. Fuer dieselbe Frage IMMER dieselbe Abfrage bauen (kanonische, einfachste Form).
 - "Mitarbeiter" ohne Zusatz = alle Zeilen in employees, kein Status-Filter (nur filtern, wenn ein Status genannt
