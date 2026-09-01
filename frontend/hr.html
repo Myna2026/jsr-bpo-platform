@@ -1289,7 +1289,7 @@ const HR_DEFAULT_LOCKED_TABS = ['workforce'];
 // Führungs-Set: reine Leads (projektleiter/teamlead, NICHT auch management/hr/finance) sehen NUR diese Tabs
 // (harte Obergrenze in hasAccess — auch die „always"-Admin-Tabs superadmin/appusers/hraccess/tabperms bleiben aus).
 // Recruiting = kanban+cvs+funnel (der Workflow braucht alle drei). Management kann darunter weiter einzeln sperren.
-const LEAD_ALLOWED_TABS = ['start','cockpit','shiftplan','checkin','absences','urlaubantraege','employees','performance','calendar','callqa','feedback','praesentation','dataimport','kanban','cvs','funnel'];
+const LEAD_ALLOWED_TABS = ['start','cockpit','shiftplan','checkin','absences','urlaubantraege','employees','performance','calendar','callqa','feedback','praesentation','dataimport','kanban','cvs','funnel','training_plans'];
 const isLeadOnlyRoles = rk => { const r=rk||[]; return (r.includes('projektleiter')||r.includes('teamlead')) && !r.some(x=>x==='management'||x==='hr'||x==='finance'); };
 // Sperrbarer Katalog = alle Menue-Tabs ausser always-Tabs. workforce ist normal sperrbar.
 const HR_LOCKABLE_TABS = [...MENU_BADGE_MAIN_ITEMS.filter(t=>HR_ALWAYS_TABS.indexOf(t.key)<0)];
@@ -9192,6 +9192,67 @@ function AuswertungView({projects, team}){
 // ── Forecast vs. Ist je Projekt·Skill (Management-only, Cockpit) ──
 // Gelieferte Stunden (weekly_hours) gegen Auftraggeber-Forecast (report_forecast), letzte 8 Wochen.
 // Aussage = die Abweichung (Lücke%); Farbe nach Größe, Werte per Hover. Ohne Forecast: raus + Vermerk.
+// Stundenabgleich: Forecast (report_forecast, wochenweise) gegen tatsächlich GELIEFERTE (weekly_hours) und gegen
+// GEPLANTE Stunden (shift_assignments, auf die Wochen summiert). Monat bis heute = abgeschlossene KWs des Monats
+// (Zwischenstand gegen Zwischenstand). Nur HolidayCheck Sales+Support (dort liegt der Forecast vor). Tagesgenau
+// erst, wenn der Detail-Forecast (forecast_demand) gefüllt ist. Größenordnungs-Hinweis fest dabei.
+function CockpitStundenabgleich({projects, team, mobile}){
+  const isMgmt=((team&&team.role_keys)||[]).some(r=>r==='management');
+  const [data,setData]=useState(null);
+  const now=new Date();
+  const hcProj=(projects||[]).find(p=>p&&/holiday/i.test(p.name||''));
+  const mondayOf=d=>{ const x=new Date(d.getFullYear(),d.getMonth(),d.getDate()); x.setDate(x.getDate()-((x.getDay()+6)%7)); return x; };
+  // Abgeschlossene KWs, deren Montag im laufenden Monat liegt und deren Sonntag <= heute.
+  const monthWeeks=(()=>{ const out=[]; const first=new Date(now.getFullYear(),now.getMonth(),1); let m=mondayOf(first);
+    if(m.getMonth()!==now.getMonth()) m=new Date(m.getFullYear(),m.getMonth(),m.getDate()+7);
+    const today=new Date(now.getFullYear(),now.getMonth(),now.getDate());
+    for(let i=0;i<6;i++){ const mon=new Date(m.getFullYear(),m.getMonth(),m.getDate()+i*7); if(mon.getMonth()!==now.getMonth()) break;
+      const sun=new Date(mon.getFullYear(),mon.getMonth(),mon.getDate()+6); if(sun>today) break; out.push({mon,sun,w:getISOWeek(mon)}); }
+    return out; })();
+  useEffect(()=>{ if(!isMgmt||!hcProj||!monthWeeks.length){ setData({skills:[]}); return; } let alive=true;
+    (async()=>{ try{
+      const kws=monthWeeks.map(x=>x.w); const orC=kws.map(w=>'and(year.eq.'+w.year+',kw.eq.'+w.kw+')').join(',');
+      const dFrom=isoLocal(monthWeeks[0].mon), dTo=isoLocal(monthWeeks[monthWeeks.length-1].sun);
+      const [fcR,whR,saR]=await Promise.all([
+        sb.from('report_forecast').select('skill,kw,year,fc_hours').eq('project_id',hcProj.id).or(orC),
+        sb.from('weekly_hours').select('skill,kw,year,hours').eq('project_id',hcProj.id).or(orC),
+        sb.from('shift_assignments').select('skill,work_date,net_hours').eq('project_id',hcProj.id).gte('work_date',dFrom).lte('work_date',dTo),
+      ]);
+      if(!alive) return;
+      const norm=s=>String(s||'').toLowerCase(); const agg={}; const ens=s=>agg[s]||(agg[s]={fc:0,delivered:0,planned:0});
+      (fcR.data||[]).forEach(r=>{ ens(norm(r.skill)).fc+=Number(r.fc_hours||0); });
+      (whR.data||[]).forEach(r=>{ ens(norm(r.skill)).delivered+=Number(r.hours||0); });
+      (saR.data||[]).forEach(r=>{ ens(norm(r.skill)).planned+=Number(r.net_hours||0); });
+      const skills=['sales','support'].filter(s=>agg[s]).map(s=>({skill:s,...agg[s]}));
+      setData({skills});
+    }catch(e){ if(alive) setData({skills:[]}); } })();
+    return ()=>{alive=false;}; },[isMgmt, hcProj&&hcProj.id, monthWeeks.length]);
+  if(!isMgmt) return null;
+  const card=b=> <div className="card" style={{marginBottom:14,overflow:'hidden'}}>
+    <div style={{padding:'10px 14px',borderBottom:'1px solid var(--border)',fontSize:12,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em'}}>Stundenabgleich · HolidayCheck</div>
+    <div style={{padding:14}}>{b}</div></div>;
+  if(!hcProj) return card(<div style={{fontSize:12.5,color:'var(--muted)'}}>Kein HolidayCheck-Projekt gefunden.</div>);
+  if(!monthWeeks.length) return card(<div style={{fontSize:12.5,color:'var(--muted)'}}>Noch keine abgeschlossene Woche in diesem Monat.</div>);
+  if(data===null) return card(<div style={{fontSize:12.5,color:'var(--muted)'}}>Lädt…</div>);
+  const lastKw=monthWeeks[monthWeeks.length-1].w; const fmt=n=>Math.round(n).toLocaleString('de-DE');
+  const dev=(a,b)=> b>0?Math.round((a-b)/b*100):null; const sLbl=s=>s==='sales'?'Sales':s==='support'?'Support':s;
+  const cell=(lbl,val,delta,ref)=> <div style={{flex:1,textAlign:'center',padding:'8px 6px',background:'var(--surface-2)',borderRadius:10,border:'1px solid var(--border)'}}>
+    <div style={{fontSize:10.5,color:'var(--muted)',fontWeight:600}}>{lbl}</div>
+    <div style={{fontSize:20,fontWeight:800,fontFamily:'var(--mono)',lineHeight:1.1,marginTop:3}}>{fmt(val)}<span style={{fontSize:11,color:'var(--muted)'}}> h</span></div>
+    {delta!=null&&<div style={{fontSize:11,fontWeight:700,marginTop:2,color:Math.abs(delta)<=5?'var(--muted)':(delta<0?'var(--red)':'var(--green)')}}>{delta>0?'+':''}{delta}% {ref}</div>}
+  </div>;
+  return card(<div>
+    <div style={{fontSize:11,color:'var(--muted)',marginBottom:10}}>Laufender Monat bis KW {lastKw.kw} (Zwischenstand, abgeschlossene Wochen). Wochenweise, weil der Forecast wochenweise vorliegt, nicht je Tag.</div>
+    {data.skills.length===0? <div style={{fontSize:12.5,color:'var(--muted)'}}>Kein Forecast/Ist für Sales oder Support in diesem Zeitraum.</div>
+     : <div style={{display:'grid',gridTemplateColumns:mobile?'1fr':'1fr 1fr',gap:12}}>
+        {data.skills.map(s=><div key={s.skill} style={{border:'1px solid var(--border)',borderRadius:12,padding:'11px 13px',background:'var(--card)'}}>
+          <div style={{fontWeight:700,fontSize:13,marginBottom:9}}>{sLbl(s.skill)}</div>
+          <div style={{display:'flex',gap:8}}>{cell('Forecast',s.fc,null,'')}{cell('Geliefert',s.delivered,dev(s.delivered,s.fc),'vs FC')}{cell('Geplant (Schicht)',s.planned,dev(s.planned,s.fc),'vs FC')}</div>
+        </div>)}
+      </div>}
+    <div style={{marginTop:10,padding:'9px 11px',borderRadius:9,background:'#fffbeb',border:'1px solid #fde68a',fontSize:11.5,color:'#92400e',lineHeight:1.5}}>⚠ Größenordnung noch offen: unklar, ob der HolidayCheck-Forecast nur die Telefonzeit oder die gesamte Arbeitszeit abdeckt. Die Prozente sind erst belastbar, wenn das geklärt ist.</div>
+  </div>);
+}
 function CockpitForecastIst({projects, team, mobile}){
   const isMgmt=((team&&team.role_keys)||[]).some(r=>r==='management');
   const [data,setData]=useState(null);
@@ -9916,7 +9977,7 @@ function FilterBanner({label, onClear}){
 // Rollen-Standard (User-Vorgabe). GEPINNT ganz oben bei ALLEN (nicht in dieser Liste): eigene offene Aufgaben
 // (tasks) + Upload-Ampel (upload). Kalender oben (morgens zuerst gebraucht). Danach je Rolle:
 const COCKPIT_ORDER = {
-  management: ['kalender','tiles','projekte','kpis','forecast_ist','longterm','quote','ma','recruiting','vertraege','training','fabletics','presentations'],
+  management: ['kalender','tiles','projekte','kpis','forecast_ist','stundenabgleich','longterm','quote','ma','recruiting','vertraege','training','fabletics','presentations'],
   hr:         ['kalender','recruiting','tiles','quote','vertraege','training','ma','fabletics','presentations'],
   lead:       ['kalender','shiftplan','quote','kpis','tiles','recruiting','training'],
   default:    ['kalender','tiles','recruiting','quote','vertraege','training'],
@@ -10137,11 +10198,12 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
       fabletics: <LazyBlock minHeight={140}><Widget_DailyReports employees={employees} projects={projects} team={team}/></LazyBlock>,
       kpis: <LazyBlock minHeight={240}><CockpitProjectKpis projects={projects} team={team} mobile={false} selY={_selY} selM0={_selM0} selKw={_selKw} selKwYear={_selKwYear}/></LazyBlock>,
       forecast_ist: <LazyBlock minHeight={200}>{_ownRef('Eigene KW-Sicht, folgt dem Zeitraum nicht.')}<CockpitForecastIst projects={projects} team={team} mobile={false}/></LazyBlock>,
+      stundenabgleich: <LazyBlock minHeight={160}><CockpitStundenabgleich projects={projects} team={team} mobile={false}/></LazyBlock>,
       longterm: <LazyBlock minHeight={200}><CockpitLongterm projects={projects} team={team} mobile={false}/></LazyBlock>,
       shiftplan: <React.Fragment>{_ownRef('Diese Woche, folgt dem Zeitraum nicht.')}<Widget_Schichtplan employees={employees} projects={projects} onNavigate={onNavigate}/></React.Fragment>,
       presentations: <LazyBlock minHeight={120}><CockpitPresentationComments projects={projects} team={team} mobile={false}/></LazyBlock>,
     };
-    const BLOCK_LABELS={kalender:'Kalender · 4 Wochen',tiles:'Kennzahlen-Kacheln',recruiting:'Bewerbungen (Eingang + Werbung)',projekte:'Projekte',quote:'Abwesenheiten (heute + Quote)',ma:'MA je Projekt·Skill',vertraege:'Vertrags-Auslauf',training:'Schulungen',fabletics:'Fabletics-Berichte',kpis:'KPIs je Projekt·Skill',forecast_ist:'Forecast vs. Ist',longterm:'Kapazitätsplan · 12 Monate',shiftplan:'Schichtplan',presentations:'Präsentationen'};
+    const BLOCK_LABELS={kalender:'Kalender · 4 Wochen',tiles:'Kennzahlen-Kacheln',recruiting:'Bewerbungen (Eingang + Werbung)',projekte:'Projekte',quote:'Abwesenheiten (heute + Quote)',ma:'MA je Projekt·Skill',vertraege:'Vertrags-Auslauf',training:'Schulungen',fabletics:'Fabletics-Berichte',kpis:'KPIs je Projekt·Skill',forecast_ist:'Forecast vs. Ist',stundenabgleich:'Stundenabgleich',longterm:'Kapazitätsplan · 12 Monate',shiftplan:'Schichtplan',presentations:'Präsentationen'};
     // Rollenabhängige Standard-Reihenfolge; nur tatsächlich vorhandene Blöcke.
     const DEF_ORDER = (COCKPIT_ORDER[_role]||COCKPIT_ORDER.default).filter(k=>blockNodes[k]!==undefined);
     const _ck=mgmtCk||{order:null,hidden:[]};
@@ -41723,12 +41785,23 @@ function AkquiseView({team, tab}){
   const norm=(s)=>String(s||'').toLowerCase().replace(/[^a-z]/g,'');
   const pick=(row,cands)=>{ for(const k of Object.keys(row)){ const nk=norm(k); if(cands.some(c=>nk.includes(c))) { const v=row[k]; if(v!=null&&String(v).trim()!=='') return String(v).trim(); } } return null; };
   const onFile=async(e)=>{ const f=e.target.files&&e.target.files[0]; if(!f) return; setBusy(true); setMsg(''); setUpSum(null);
-    try{ const buf=await f.arrayBuffer(); const wb=XLSX.read(buf,{type:'array'}); const rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:''});
-      const recs=rows.map(r=>({ company:pick(r,['company','firma','unternehmen','account']), website:pick(r,['website','url','domain','web']),
-        industry:pick(r,['industry','branche','sector']), contact_name:pick(r,['name','contact','kontakt','ansprech']),
-        contact_email:pick(r,['email','mail']), contact_role:pick(r,['role','position','title','titel','funktion']), source:'list', created_by:team.user_id }))
-        .filter(x=>x.company||x.contact_email);
-      if(!recs.length){ setMsg('Keine verwertbaren Zeilen gefunden (Spalten Firma/E-Mail).'); setBusy(false); e.target.value=''; return; }
+    try{ const buf=await f.arrayBuffer(); const wb=XLSX.read(buf,{type:'array'});
+      // Robust: ALLE Blätter durchgehen, Kopfzeile automatisch finden (nicht zwingend Zeile 1; Deckblatt/Titelzeilen egal).
+      const HINTS=['company','firma','unternehmen','account','email','mail','name','kontakt','ansprech','website','url','domain','branche','industry','position','titel','funktion'];
+      const nk=s=>String(s||'').toLowerCase().replace(/[^a-z]/g,'');
+      const recs=[];
+      for(const sn of (wb.SheetNames||[])){
+        const aoa=XLSX.utils.sheet_to_json(wb.Sheets[sn],{header:1,defval:''}); if(!aoa.length) continue;
+        let hi=-1; for(let i=0;i<Math.min(aoa.length,20);i++){ const cs=(aoa[i]||[]).map(nk); if(cs.some(c=>c&&HINTS.some(h=>c.includes(h)))){ hi=i; break; } }
+        if(hi<0) continue;
+        const headers=(aoa[hi]||[]).map(x=>String(x||'').trim());
+        for(let ri=hi+1;ri<aoa.length;ri++){ const row=aoa[ri]||[]; const obj={}; headers.forEach((h,c)=>{ if(h) obj[h]=row[c]; });
+          const rec={ company:pick(obj,['company','firma','unternehmen','account']), website:pick(obj,['website','url','domain','web']),
+            industry:pick(obj,['industry','branche','sector']), contact_name:pick(obj,['name','contact','kontakt','ansprech']),
+            contact_email:pick(obj,['email','mail']), contact_role:pick(obj,['role','position','title','titel','funktion']), source:'list', created_by:team.user_id };
+          if(rec.company||rec.contact_email) recs.push(rec); }
+      }
+      if(!recs.length){ setMsg('Keine verwertbaren Zeilen gefunden. Erwartet: irgendwo eine Kopfzeile mit Spalten wie Firma/E-Mail (auf beliebigem Blatt).'); setBusy(false); e.target.value=''; return; }
       // Wie eine Datenbank: Bestand ergänzen, Dubletten erkennen (Mail, ersatzweise Firma+Website), Unterdrückte überspringen.
       const nrm=s=>String(s||'').trim().toLowerCase();
       const [er,sr]=await Promise.all([
