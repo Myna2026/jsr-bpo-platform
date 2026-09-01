@@ -7121,7 +7121,7 @@ function Widget_TrainingStatus({plans}){
 // So bleibt der Urlaub sichtbar (Urlauber stehen nicht im Plan → über Kapazität), und je gepflegter der
 // Plan, desto mehr wandert der Nenner Richtung Plan-Stunden — ohne dass jemand etwas umstellt.
 // VERLÄSSLICHKEIT je Zeile über den Plan-Anteil am Nenner: >=80% „Plan", <20% „Kapazität", sonst „gemischt".
-function Widget_KrankUrlaubQuote({employees, projects, mobile, selY, selM0}){
+function Widget_KrankUrlaubQuote({employees, projects, mobile, selY, selM0, selKw, selKwYear}){
   const isoD=isoLocal;
   const addDays=(d,n)=>{ const x=new Date(d.getFullYear(),d.getMonth(),d.getDate()); x.setDate(x.getDate()+n); return x; };
   const mondayOf=d=>{ const x=new Date(d.getFullYear(),d.getMonth(),d.getDate()); x.setDate(x.getDate()-((x.getDay()+6)%7)); return x; };
@@ -7133,9 +7133,10 @@ function Widget_KrankUrlaubQuote({employees, projects, mobile, selY, selM0}){
   const _defBase = _isCur ? today : new Date(selY, selM0+1, 0);
   const _defMon = mondayOf(_defBase);
   const _useDate = (addDays(_defMon,6) <= today) ? _defBase : addDays(_defMon,-7);   // unvollständige Woche -> Vorwoche
-  const _defW = getISOWeek(_useDate);
+  // Zeitraum-Wähler im KW-Modus gibt die Woche direkt vor; sonst die abgeleitete Woche des Monats.
+  const _defW = (selKw&&selKwYear) ? {year:selKwYear,kw:selKw} : getISOWeek(_useDate);
   const [sel,setSel]=useState(wkey(_defW));
-  React.useEffect(()=>{ setSel(wkey(_defW)); },[selY,selM0]);   // Monatswechsel -> Woche folgt
+  React.useEffect(()=>{ setSel(wkey(_defW)); },[selY,selM0,selKw,selKwYear]);   // Monats-/KW-Wechsel -> Woche folgt
   const availWeeks=(()=>{ const a=[]; const base=mondayOf(_useDate); for(let i=0;i<12;i++){ const d=addDays(base,-7*i); a.push(getISOWeek(d)); } return a; })();
   const wLabel=w=>'KW '+w.kw+(w.year!==today.getFullYear()?('/'+String(w.year).slice(2)):'');
   const [_sy,_sk]=sel.split('-').map(Number);
@@ -8878,7 +8879,7 @@ function kpiTeamAgg(cfg, emap, pent, wgt){
   const fmtCell=(kpi,v)=>kpiFmt(roundForKpi(kpi,v),kpi.unit);
   return {comboKpis, comboKpisView, aggType, computeTeam, cellVal, roundForKpi, fmtCell, wkey};
 }
-function CockpitProjectKpis({projects, team, mobile, selY, selM0}){
+function CockpitProjectKpis({projects, team, mobile, selY, selM0, selKw, selKwYear}){
   const roles=(team&&team.role_keys)||[];
   // NUR Management (keine Admin-Rolle im System; is_management, NICHT is_admin). KPIs sind
   // Steuerungsgrößen, keine Personalarbeit → HR sieht den Block NICHT.
@@ -8894,13 +8895,15 @@ function CockpitProjectKpis({projects, team, mobile, selY, selM0}){
   // Auftrag: KW wählbar, KW-vs-KW). selY/selM0 kommen vom Monatswähler; fehlen sie, gilt der laufende Monat.
   const _isCur = selY==null || (selY===now.getFullYear() && selM0===now.getMonth());
   const _defDate = _isCur ? now : new Date(selY, selM0+1, 0);   // letzter Tag des gewählten Monats
-  const _defW = getISOWeek(_defDate);
-  const _defP = getISOWeek(new Date(_defDate.getFullYear(), _defDate.getMonth(), _defDate.getDate()-7));
+  // KW-Modus des Zeitraum-Wählers gibt die Woche direkt vor; sonst letzte KW des Monats.
+  const _defW = (selKw&&selKwYear) ? {year:selKwYear,kw:selKw} : getISOWeek(_defDate);
+  const _pDate = (selKw&&selKwYear) ? (()=>{ const m=isoWeekMonday(selKwYear,selKw); return new Date(m.getFullYear(),m.getMonth(),m.getDate()-7); })() : new Date(_defDate.getFullYear(), _defDate.getMonth(), _defDate.getDate()-7);
+  const _defP = getISOWeek(_pDate);
   const [sel,setSel]=useState(wkey(_defW));
   const [cmp,setCmp]=useState(wkey(_defP));
   const [showAll,setShowAll]=useState(false);   // Primär-KPIs stehen groß; „weitere" klappen auf (wie Langzeitforecast)
-  // Monatswechsel oben → KW-Auswahl folgt (zusammen bewegen). Manuelle KW-Wahl gilt bis zum nächsten Monatswechsel.
-  useEffect(()=>{ setSel(wkey(_defW)); setCmp(wkey(_defP)); },[selY, selM0]);   // Monatswechsel setzt KW-Auswahl neu
+  // Monats-/KW-Wechsel oben → KW-Auswahl folgt (zusammen bewegen). Manuelle KW-Wahl gilt bis zum nächsten Wechsel.
+  useEffect(()=>{ setSel(wkey(_defW)); setCmp(wkey(_defP)); },[selY, selM0, selKw, selKwYear]);   // Wechsel setzt KW-Auswahl neu
   useEffect(()=>{ if(!isMgmt){ setCfg([]); return; } let alive=true;
     const load=async()=>{
       try{
@@ -9939,7 +9942,8 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
   },[]);
   const [selfEdit,setSelfEdit]=useState(false);   // eigenes Cockpit anpassen (jsr_user_cockpits_v1[user_id])
   const [cockpitVer,setCockpitVer]=useState(0);   // Re-Render nach Reset auf Rollen-Vorlage
-  const [ckMonthOff,setCkMonthOff]=useState(0);   // 4b: globaler Zeitraum (Monats-Offset, 0 = laufender Monat) für die monatsbasierten Zahlen
+  const [ckMonthOff,setCkMonthOff]=useState(0);   // 4b: Monats-Offset (0 = laufender Monat) — nur noch fürs Mobile-Cockpit
+  const [ckP,setCkP]=useState({mode:'aktuell'});   // Desktop-Zeitraum: aktuell | monat(ym) | kw(kw,kwYear) | range(from,to)
   // S1b: per-User Reihenfolge + Ausblenden der Management-Cockpit-Blöcke (jsr_mgmt_cockpit_v1[user_id]={order,hidden}).
   const [mgmtCk,setMgmtCk]=useState(null); const [mgmtEdit,setMgmtEdit]=useState(false); const [mgmtDrag,setMgmtDrag]=useState(null);
   // Persönliche Cockpit-Anordnung: eigener per-User-Store (user_prefs, Zeilen-RLS user_id=auth.uid()). Jeder darf sein
@@ -9975,17 +9979,38 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
   // Ersetzt die alte Pauschale n × rate_active × 160 × 0,85 (letzte doppelte Wahrheit in der Kalkulation).
   // 4b: gewählter Monat (Offset ggü. laufendem) treibt die monatsbasierten Zahlen (Marge/Kosten via _cockpitYm,
   // Krank-/Urlaubstage via cockpitMonthMetrics). „Heute"-Blöcke, laufende Woche und die 30-Tage-CV-Kurve bleiben aktuell.
-  const _selD = new Date(year, todayM+ckMonthOff, 1); const _selY=_selD.getFullYear(); const _selM0=_selD.getMonth();
-  const _selMonLabel = _selD.toLocaleDateString('de-DE',{month:'long',year:'numeric'});
+  // ── Zeitraum-Wähler: aktuell / Monat / KW / freier Zeitraum. EIN Zeitraum fürs ganze Cockpit. ──
+  // Monatsbasierte Blöcke lesen _selY/_selM0, wochenbasierte (Quote, KPIs) zusätzlich _selKw/_selKwYear.
+  const _pmNow=new Date(); const _fmtD=s=>{ const p=String(s||'').split('-'); return p.length===3?(Number(p[2])+'.'+Number(p[1])+'.'):s; };
+  let _selY, _selM0, _selKw=null, _selKwYear=null, _pLabel='', _isCur=false, _rangeNote=null;
+  if(ckP.mode==='kw'){ _selKw=ckP.kw; _selKwYear=ckP.kwYear; const mon=isoWeekMonday(ckP.kwYear,ckP.kw); _selY=mon.getFullYear(); _selM0=mon.getMonth();
+    _pLabel='KW '+ckP.kw+'/'+String(ckP.kwYear).slice(2); const cur=getISOWeek(_pmNow); _isCur=(ckP.kw===cur.kw&&ckP.kwYear===cur.year); }
+  else if(ckP.mode==='range'){ const df=new Date(ckP.from+'T00:00:00'); _selY=df.getFullYear(); _selM0=df.getMonth();
+    _pLabel=_fmtD(ckP.from)+' – '+_fmtD(ckP.to); const spansM=(ckP.from||'').slice(0,7)!==(ckP.to||'').slice(0,7);
+    _rangeNote='Marge/Kosten beziehen sich auf '+df.toLocaleDateString('de-DE',{month:'long',year:'numeric'})+(spansM?' (der Zeitraum umfasst mehrere Monate)':'')+', KPIs je ganze Woche.'; }
+  else if(ckP.mode==='monat'){ const [y,m]=ckP.ym.split('-').map(Number); _selY=y; _selM0=m-1;
+    _pLabel=new Date(y,m-1,1).toLocaleDateString('de-DE',{month:'long',year:'numeric'}); _isCur=(y===_pmNow.getFullYear()&&m-1===_pmNow.getMonth()); }
+  else { _selY=_pmNow.getFullYear(); _selM0=_pmNow.getMonth(); _isCur=true; }   // 'aktuell'
   const _cockpitYm = _selY+'-'+String(_selM0+1).padStart(2,'0');
+  const _ownRef=(txt)=> _isCur?null:<div style={{fontSize:11,color:'var(--muted)',fontStyle:'italic',marginBottom:6}}>{txt||'Bezieht sich auf heute, folgt dem Zeitraum nicht.'}</div>;
+  const _shiftMonth=(d)=>{ const b=ckP.mode==='monat'?(()=>{const[y,m]=ckP.ym.split('-').map(Number);return new Date(y,m-1+d,1);})():new Date(_selY,_selM0+d,1); setCkP({mode:'monat',ym:b.getFullYear()+'-'+String(b.getMonth()+1).padStart(2,'0')}); };
+  const _shiftKw=(d)=>{ const w=(ckP.mode==='kw')?{kw:ckP.kw,year:ckP.kwYear}:getISOWeek(_pmNow); const mon=isoWeekMonday(w.year,w.kw); const nw=getISOWeek(new Date(mon.getFullYear(),mon.getMonth(),mon.getDate()+7*d)); setCkP({mode:'kw',kw:nw.kw,kwYear:nw.year}); };
+  const _modeBtn=(m,lbl)=>{ const on=ckP.mode===m; return <button key={m} className="btn btn-sm" style={on?{background:'var(--blue)',color:'#fff',borderColor:'var(--blue)'}:undefined} onClick={()=>{
+    if(m==='aktuell') setCkP({mode:'aktuell'});
+    else if(m==='monat') setCkP({mode:'monat',ym:_cockpitYm});
+    else if(m==='kw'){ const w=getISOWeek(_pmNow); setCkP({mode:'kw',kw:(_selKw||w.kw),kwYear:(_selKwYear||w.year)}); }
+    else { const t=isoLocal(_pmNow); const f=isoLocal(new Date(_pmNow.getFullYear(),_pmNow.getMonth(),_pmNow.getDate()-13)); setCkP({mode:'range',from:(ckP.from||f),to:(ckP.to||t)}); }
+  }}>{lbl}</button>; };
+  const _dIn={fontSize:12,padding:'4px 7px',border:'1px solid var(--border)',borderRadius:7,background:'var(--card)',color:'var(--text)'};
   const periodBar = (
     <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap',marginBottom:14,padding:'8px 12px',border:'1px solid var(--border)',borderRadius:10,background:'var(--surface-2)'}}>
       <span style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.05em',color:'var(--muted)'}}>Zeitraum</span>
-      <button className="btn btn-sm" onClick={()=>setCkMonthOff(o=>o-1)} title="Monat zurück">◀</button>
-      <span style={{fontSize:13,fontWeight:800,minWidth:132,textAlign:'center'}}>{_selMonLabel}</span>
-      <button className="btn btn-sm" disabled={ckMonthOff>=0} onClick={()=>setCkMonthOff(o=>Math.min(0,o+1))} title="Monat vor">▶</button>
-      {ckMonthOff!==0 && <button className="btn btn-sm" onClick={()=>setCkMonthOff(0)}>heute</button>}
-      {ckMonthOff!==0 && <span style={{fontSize:11,color:'var(--muted)'}}>Marge, Kosten, Krank-/Urlaubstage und die KPI-Woche folgen dem Monat (KW im KPI-Block fein wählbar) · „Heute"-Blöcke bleiben aktuell.</span>}
+      <div style={{display:'flex',gap:4}}>{_modeBtn('aktuell','Aktuell')}{_modeBtn('monat','Monat')}{_modeBtn('kw','KW')}{_modeBtn('range','Zeitraum')}</div>
+      {ckP.mode==='aktuell' && <span style={{fontSize:13,fontWeight:800}}>{_pmNow.toLocaleDateString('de-DE',{month:'long',year:'numeric'})} · KW {getISOWeek(_pmNow).kw}</span>}
+      {ckP.mode==='monat' && <React.Fragment><button className="btn btn-sm" onClick={()=>_shiftMonth(-1)} title="Monat zurück">◀</button><span style={{fontSize:13,fontWeight:800,minWidth:120,textAlign:'center'}}>{_pLabel}</span><button className="btn btn-sm" onClick={()=>_shiftMonth(1)} title="Monat vor">▶</button></React.Fragment>}
+      {ckP.mode==='kw' && <React.Fragment><button className="btn btn-sm" onClick={()=>_shiftKw(-1)} title="Woche zurück">◀</button><span style={{fontSize:13,fontWeight:800,minWidth:86,textAlign:'center'}}>{_pLabel}</span><button className="btn btn-sm" onClick={()=>_shiftKw(1)} title="Woche vor">▶</button></React.Fragment>}
+      {ckP.mode==='range' && <React.Fragment><input type="date" value={ckP.from} max={ckP.to} onChange={e=>setCkP(p=>({...p,from:e.target.value}))} style={_dIn}/><span style={{color:'var(--muted)',fontSize:12}}>bis</span><input type="date" value={ckP.to} min={ckP.from} onChange={e=>setCkP(p=>({...p,to:e.target.value}))} style={_dIn}/></React.Fragment>}
+      <span style={{fontSize:11,color:'var(--muted)',marginLeft:2,flex:'1 1 240px',minWidth:180}}>{_rangeNote || (_isCur ? 'Alles läuft aktuell. „Heute"-Blöcke bleiben aktuell.' : 'Marge, Kosten, Krank-/Urlaub und die KPI-Woche folgen der Wahl. Momentaufnahmen (heute abwesend, Schichtplan, MA je Projekt) behalten ihren eigenen Bezug und sagen das.')}</span>
     </div>
   );
   const _planRevMap = planRevenueByProject(employees, projects, _cockpitYm);   // für Projekte-Karte (Marge)
@@ -10003,12 +10028,12 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
     const M=cockpitMonthMetrics(employees, cvsDb, _selY, _selM0);
     // Gepinnt: eigene offene Tagesaufgaben (Katalog) — der Grund, morgens hinzuschauen.
     const tasksNode = <CockpitTasksBlock team={team} projects={projects} onNavigate={onNavigate}/>;
-    const wblock=(key,node)=>{ const _wag=WIDGET_AGENT[key]; return <div className="card" style={{marginBottom:14,overflow:'hidden'}}>
+    const wblock=(key,node,note)=>{ const _wag=WIDGET_AGENT[key]; return <div className="card" style={{marginBottom:14,overflow:'hidden'}}>
       <div style={{padding:'10px 14px',borderBottom:'1px solid var(--border)',display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}>
         <span style={{fontSize:12,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em'}}>{(WIDGETS[key]||{}).label||key}</span>
         {_wag&&<AgentTag agentKey={_wag}/>}
       </div>
-      <div style={{padding:14}}>{node}</div>
+      <div style={{padding:14}}>{note}{node}</div>
     </div>; };
     const cvEingang = cvsDb.length ? (<div onClick={()=>onNavigate&&onNavigate({kind:'view',view:'cvs',navFilter:{type:'cv_inbox',label:'Bewerbungen'}})} style={{background:'var(--surface)',border:'1px solid var(--border)',borderLeft:'4px solid #6366f1',borderRadius:16,padding:'16px 18px',boxShadow:'var(--shadow-xs)',cursor:'pointer',height:'100%',display:'flex',flexDirection:'column'}}>
       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8,marginBottom:12}}><span style={{fontSize:13,fontWeight:800,color:'#4f46e5'}}>📥 CV-Eingang <span style={{color:'#6366f1'}}>→</span></span><AgentTag agentKey="clara"/></div>
@@ -10055,7 +10080,7 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
         {todayAbsent.map(e=>(<div key={e.id} style={{fontSize:12,display:'flex',gap:8,padding:'3px 0'}}><span style={{color:'#ef4444'}}>●</span><span>{e.first_name} {e.last_name}</span><span style={{marginLeft:'auto',color:'var(--muted)',fontSize:11}}>Krank</span></div>))}
         {todayVac.map(e=>(<div key={e.id} style={{fontSize:12,display:'flex',gap:8,padding:'3px 0'}}><span style={{color:'#d97706'}}>●</span><span>{e.first_name} {e.last_name}</span><span style={{marginLeft:'auto',color:'var(--muted)',fontSize:11}}>Urlaub</span></div>))}
       </div> : null}
-      <div style={{padding:14}}><Widget_KrankUrlaubQuote employees={employees} projects={projects} selY={_selY} selM0={_selM0}/></div>
+      <div style={{padding:14}}><Widget_KrankUrlaubQuote employees={employees} projects={projects} selY={_selY} selM0={_selM0} selKw={_selKw} selKwYear={_selKwYear}/></div>
     </div>);
     const _cMonths=parseInt(localStorage.getItem('jsr_contract_reminder_months')||'1'); const _tdy=new Date(); const _cut=new Date(_tdy); _cut.setMonth(_cut.getMonth()+_cMonths);
     const _expiring=employees.filter(e=>{const ce=e.contract?.end||e.contract_end; if(!ce||e.status==='terminated'||e.status==='inactive') return false; const end=new Date(ce); return end>=_tdy&&end<=_cut;}).sort((a,b)=>new Date(a.contract?.end||a.contract_end)-new Date(b.contract?.end||b.contract_end));
@@ -10086,14 +10111,14 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
       recruiting: recruitingBlock,
       projekte: projekteBlock,
       quote: quoteAbsBlock,
-      ma: wblock('ma_per_project', <Widget_MaPerProject employees={employees} projects={projects}/>),
+      ma: wblock('ma_per_project', <Widget_MaPerProject employees={employees} projects={projects}/>, _ownRef('Momentaufnahme (aktueller Bestand), folgt dem Zeitraum nicht.')),
       vertraege: vertraegeBlock,
-      training: hasTraining ? wblock('training_status', <Widget_TrainingStatus plans={plans}/>) : null,
+      training: hasTraining ? wblock('training_status', <Widget_TrainingStatus plans={plans}/>, _ownRef('Momentaufnahme (aktueller Stand), folgt dem Zeitraum nicht.')) : null,
       fabletics: <LazyBlock minHeight={140}><Widget_DailyReports employees={employees} projects={projects} team={team}/></LazyBlock>,
-      kpis: <LazyBlock minHeight={240}><CockpitProjectKpis projects={projects} team={team} mobile={false} selY={_selY} selM0={_selM0}/></LazyBlock>,
-      forecast_ist: <LazyBlock minHeight={200}><CockpitForecastIst projects={projects} team={team} mobile={false}/></LazyBlock>,
+      kpis: <LazyBlock minHeight={240}><CockpitProjectKpis projects={projects} team={team} mobile={false} selY={_selY} selM0={_selM0} selKw={_selKw} selKwYear={_selKwYear}/></LazyBlock>,
+      forecast_ist: <LazyBlock minHeight={200}>{_ownRef('Eigene KW-Sicht, folgt dem Zeitraum nicht.')}<CockpitForecastIst projects={projects} team={team} mobile={false}/></LazyBlock>,
       longterm: <LazyBlock minHeight={200}><CockpitLongterm projects={projects} team={team} mobile={false}/></LazyBlock>,
-      shiftplan: <Widget_Schichtplan employees={employees} projects={projects} onNavigate={onNavigate}/>,
+      shiftplan: <React.Fragment>{_ownRef('Diese Woche, folgt dem Zeitraum nicht.')}<Widget_Schichtplan employees={employees} projects={projects} onNavigate={onNavigate}/></React.Fragment>,
       presentations: <LazyBlock minHeight={120}><CockpitPresentationComments projects={projects} team={team} mobile={false}/></LazyBlock>,
     };
     const BLOCK_LABELS={kalender:'Kalender · 4 Wochen',tiles:'Kennzahlen-Kacheln',recruiting:'Bewerbungen (Eingang + Werbung)',projekte:'Projekte',quote:'Abwesenheiten (heute + Quote)',ma:'MA je Projekt·Skill',vertraege:'Vertrags-Auslauf',training:'Schulungen',fabletics:'Fabletics-Berichte',kpis:'KPIs je Projekt·Skill',forecast_ist:'Forecast vs. Ist',longterm:'Kapazitätsplan · 12 Monate',shiftplan:'Schichtplan',presentations:'Präsentationen'};
