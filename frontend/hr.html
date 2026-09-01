@@ -7559,7 +7559,8 @@ function buildNavSections(f){
       ...(_isMgmtLead ? [{key:'termin',label:'Termin vorbereiten',icon:'🎯'}] : []),   // Management + Projektleiter (Paul)
     ]},
     {sec:'Akquise', items:[   // Neukontakt-SUCHE — getrennt von „Kunden" (Bestandspartner). Nur für die Freigabeliste
-      {key:'akquise_leads',label:'Leads',icon:'📣'},          // sichtbar (menuDeskVisible: isSales); leere Sektion wird ausgeblendet
+      {key:'akquise_cockpit',label:'Cockpit',icon:'📊'},      // sichtbar (menuDeskVisible: isSales); leere Sektion wird ausgeblendet
+      {key:'akquise_leads',label:'Leads',icon:'📣'},
       {key:'akquise_einspeisen',label:'Einspeisen',icon:'📥'},
       {key:'akquise_vorlagen',label:'Vorlagen',icon:'✉️'},
     ]},
@@ -41580,14 +41581,42 @@ function AkquiseView({team, tab}){
   const [sendTpl,setSendTpl]=React.useState('');
   const [evts,setEvts]=React.useState([]);
   const [flt,setFlt]=React.useState(null);   // Pipeline-Filter: Status-Key oder 'due'
-  const load=async()=>{ try{ const {data}=await sb.from('sales_leads').select('*').order('created_at',{ascending:false}); setLeads(data||[]); }catch(e){ setLeads([]); } };
+  const [fit,setFit]=React.useState(null);   // Fit-Modell (jsr_sales_fit_v1), in der Oberfläche anpassbar
+  const [cockEvts,setCockEvts]=React.useState(null);   // Ereignisse fürs Cockpit (Aggregat)
+  const [agentLast,setAgentLast]=React.useState(null); // letzte Orchestrator-Zusammenfassung (Moritz heute)
+  React.useEffect(()=>{ if(curTab!=='cockpit'||!(team&&team.isSales)) return; let a=true;
+    (async()=>{ try{ const {data}=await sb.from('sales_events').select('lead_id,kind,occurred_at,detail').order('occurred_at',{ascending:false}).limit(400); if(a) setCockEvts(data||[]); }catch(e){ if(a) setCockEvts([]); }
+      try{ const {data}=await sb.from('app_config').select('value').eq('key','jsr_sales_agent_last_v1').maybeSingle(); if(a) setAgentLast((data&&data.value)||{}); }catch(e){ if(a) setAgentLast({}); } })();
+    return ()=>{a=false;}; },[curTab]);
+  const runAgent=async()=>{ setBusy(true); setMsg('Moritz arbeitet…'); const j=await callFn('sales-agent-run',{}); setBusy(false);
+    if(j&&j.ok){ setMsg('Moritz: '+j.researched+' recherchiert, '+j.contacted+' angeschrieben.'); await load(); try{ const {data}=await sb.from('app_config').select('value').eq('key','jsr_sales_agent_last_v1').maybeSingle(); setAgentLast((data&&data.value)||{}); }catch(_e){} try{ const {data}=await sb.from('sales_events').select('lead_id,kind,occurred_at,detail').order('occurred_at',{ascending:false}).limit(400); setCockEvts(data||[]); }catch(_e){} }
+    else setMsg('Fehler: '+((j&&j.error)||'unbekannt')); };
+  const [autonomy,setAutonomy]=React.useState(null);   // jsr_sales_autonomy_v1
+  const loadAutonomy=async()=>{ try{ const {data}=await sb.from('app_config').select('value').eq('key','jsr_sales_autonomy_v1').maybeSingle(); setAutonomy((data&&data.value)||{enabled:false,auto_first_contact:true,daily_cap:15,auto_research:true,research_cap:10}); }catch(e){ setAutonomy({enabled:false,daily_cap:15}); } };
+  const saveAutonomy=async()=>{ setBusy(true); setMsg(''); try{ const {error}=await sb.from('app_config').upsert({key:'jsr_sales_autonomy_v1',value:{...autonomy,daily_cap:Number(autonomy.daily_cap)||15,research_cap:Number(autonomy.research_cap)||10}},{onConflict:'key'}); if(error) throw error; setMsg('Autonomie gespeichert.'); }catch(e){ setMsg('Fehler: '+((e&&e.message)||e)); } setBusy(false); };
+  const load=async()=>{ try{ const {data}=await sb.from('sales_leads').select('*').order('score',{ascending:false,nullsFirst:false}); setLeads(data||[]); }catch(e){ setLeads([]); } };
   const loadTpls=async()=>{ try{ const {data}=await sb.from('sales_templates').select('*').order('created_at',{ascending:false}); setTpls(data||[]); }catch(e){ setTpls([]); } };
-  React.useEffect(()=>{ if(team&&team.isSales){ load(); loadTpls(); } },[]);
+  const loadFit=async()=>{ try{ const {data}=await sb.from('app_config').select('value').eq('key','jsr_sales_fit_v1').maybeSingle(); setFit(data&&data.value?data.value:{industries:[],size:{},growth_bonus:0}); }catch(e){ setFit({industries:[],size:{},growth_bonus:0}); } };
+  const [fu,setFu]=React.useState(null);   // Nachfass-Rhythmus (jsr_sales_followup_v1.cadence)
+  const loadFu=async()=>{ try{ const {data}=await sb.from('app_config').select('value').eq('key','jsr_sales_followup_v1').maybeSingle(); const v=(data&&data.value)||{}; setFu({opened_days:(v.cadence&&v.cadence.opened_days)||3,cold_days:(v.cadence&&v.cadence.cold_days)||7,chain:v.chain||null}); }catch(e){ setFu({opened_days:3,cold_days:7}); } };
+  const saveFu=async()=>{ setBusy(true); setMsg(''); try{ const {data}=await sb.from('app_config').select('value').eq('key','jsr_sales_followup_v1').maybeSingle(); const cur=(data&&data.value)||{};
+      const val={...cur,cadence:{opened_days:Number(fu.opened_days)||3,cold_days:Number(fu.cold_days)||7}};
+      const {error}=await sb.from('app_config').upsert({key:'jsr_sales_followup_v1',value:val},{onConflict:'key'}); if(error) throw error; setMsg('Nachfass-Rhythmus gespeichert.'); }catch(e){ setMsg('Fehler: '+((e&&e.message)||e)); } setBusy(false); };
+  const recompute=async()=>{ setBusy(true); setMsg(''); try{ await sb.rpc('sales_recompute_scores'); await load(); setMsg('Priorität neu berechnet.'); }catch(e){ setMsg('Fehler: '+((e&&e.message)||e)); } setBusy(false); };
+  const saveFit=async()=>{ setBusy(true); setMsg(''); try{ const clean={...fit,industries:(fit.industries||[]).filter(i=>i&&(i.name||'').trim()).map(i=>({name:i.name.trim(),weight:Number(i.weight)||0}))};
+      const {error}=await sb.from('app_config').upsert({key:'jsr_sales_fit_v1',value:clean},{onConflict:'key'}); if(error) throw error;
+      setMsg('Fit-Modell gespeichert. Berechne Priorität neu…'); await sb.rpc('sales_recompute_scores'); await load(); setMsg('Fit-Modell gespeichert, Priorität aktualisiert.'); }catch(e){ setMsg('Fehler: '+((e&&e.message)||e)); } setBusy(false); };
+  React.useEffect(()=>{ if(team&&team.isSales){ load(); loadTpls(); loadFit(); loadFu(); loadAutonomy(); } },[]);
   React.useEffect(()=>{ if(!sel){ setEvts([]); return; } let a=true; (async()=>{ try{ const {data}=await sb.from('sales_events').select('*').eq('lead_id',sel.id).order('occurred_at',{ascending:false}); if(a) setEvts(data||[]); }catch(e){ if(a) setEvts([]); } })(); return ()=>{a=false;}; },[sel&&sel.id]);
   const setStatus=async(st)=>{ if(!sel) return; setBusy(true); setMsg('');
     const {error}=await sb.from('sales_leads').update({status:st, updated_at:new Date().toISOString()}).eq('id',sel.id); setBusy(false);
     if(error){ setMsg('Fehler: '+error.message); return; } setSel(s=>({...s,status:st})); setMsg('Status: '+st); await load(); };
   const due=(l)=> l && l.next_followup_at && ['contacted','opened'].includes(l.status) && new Date(l.next_followup_at)<=new Date();
+  const DEAD_ST=['won','lost','dead','suppressed'];
+  // Rangfolge-Eimer: wen heute anrufen / wer wartet / wer ist raus.
+  const bucket=(l)=>{ if(!l) return 'warten'; if(DEAD_ST.includes(l.status)) return 'tot';
+    if(l.status==='replied'||due(l)||(Number(l.score)||0)>=18) return 'heute'; return 'warten'; };
+  const BUCKET={heute:{lbl:'Heute anrufen',c:'#16a34a'},warten:{lbl:'Kann warten',c:'#64748b'},tot:{lbl:'Raus',c:'#94a3b8'}};
   const callFn=async(fn,body)=>{ let tok=null; try{ const s=await sb.auth.getSession(); tok=s&&s.data&&s.data.session&&s.data.session.access_token; }catch(_e){}
     const r=await fetch(SB_URL+'/functions/v1/'+fn,{method:'POST',headers:{'Authorization':'Bearer '+tok,'apikey':SB_KEY,'content-type':'application/json'},body:JSON.stringify(body)}); return r.json(); };
   const norm=(s)=>String(s||'').toLowerCase().replace(/[^a-z]/g,'');
@@ -41616,7 +41645,7 @@ function AkquiseView({team, tab}){
     if(j.ok){ try{ const {data}=await sb.from('sales_leads').select('*').eq('id',sel.id).maybeSingle(); if(data) setSel(data); }catch(_e){} await load(); }
     else setMsg('Fehler: '+(j.error||'unbekannt')); };
   const saveTpl=async()=>{ if(!tf) return; if(!tf.key||!tf.subject||!tf.body){ setMsg('Key, Betreff und Text nötig.'); return; } setBusy(true); setMsg('');
-    const {error}=await sb.from('sales_templates').upsert({key:tf.key,name:tf.name||null,subject:tf.subject,body:tf.body,ai_enrich:!!tf.ai_enrich,active:tf.active!==false,updated_at:new Date().toISOString()},{onConflict:'key'}); setBusy(false);
+    const {error}=await sb.from('sales_templates').upsert({key:tf.key,name:tf.name||null,subject:tf.subject,body:tf.body,stage:tf.stage||'erstansprache',variant:Number(tf.variant)||1,ai_enrich:!!tf.ai_enrich,active:tf.active!==false,updated_at:new Date().toISOString()},{onConflict:'key'}); setBusy(false);
     if(error){ setMsg('Fehler: '+error.message); return; } setTf(null); setMsg('Vorlage gespeichert.'); await loadTpls(); };
   const sendLead=async()=>{ if(!sel||!sendTpl){ setMsg('Bitte eine Vorlage wählen.'); return; } setBusy(true); setMsg('');
     const j=await callFn('sales-send',{lead_id:sel.id, template_key:sendTpl}); setBusy(false);
@@ -41624,32 +41653,153 @@ function AkquiseView({team, tab}){
     else setMsg('Fehler: '+(j.error||'unbekannt')); };
   const inp={width:'100%',padding:'8px 11px',border:'1px solid var(--border)',borderRadius:8,background:'var(--surface)',color:'var(--text)',fontSize:13,boxSizing:'border-box'};
   const STAT={new:'#64748b',researched:'#0ea5e9',contacted:'#6366f1',opened:'#8b5cf6',replied:'#16a34a',handover:'#f59e0b',won:'#16a34a',lost:'#dc2626',dead:'#94a3b8',suppressed:'#dc2626'};
+  const SALES_STAGES=[
+    {k:'erstansprache',label:'Erstansprache',tone:'Erster Kontakt, freundlich, mit dem Aufhänger. Ziel: ein kurzes Telefonat.'},
+    {k:'nachfass1',label:'1. Nachfassen',tone:'Höfliche Erinnerung, ein neuer Blickwinkel, kein Druck.'},
+    {k:'nachfass2',label:'2. Nachfassen',tone:'Kürzer und direkter, ein konkreter Nutzen, klare Frage. Keine Wiederholung.'},
+    {k:'letzter',label:'Letzter Versuch',tone:'Knapp und respektvoll, Tür offen lassen, letzte Meldung.'},
+    {k:'reaktivierung',label:'Reaktivierung',tone:'Nach Monaten, mit neuem Anlass, wie ein frischer Start.'}
+  ];
+  const stageLabel=k=>{ const s=SALES_STAGES.find(x=>x.k===k); return s?s.label:(k||'Erstansprache'); };
   if(!(team&&team.isSales)) return <div style={{padding:24,color:'var(--muted)'}}>Dieser Bereich ist der Akquise-Freigabeliste vorbehalten.</div>;
-  return <div style={{padding:'4px 2px',maxWidth:1000}}>
-    <div style={{fontSize:20,fontWeight:800}}>Akquise · {curTab==='einspeisen'?'Einspeisen':curTab==='vorlagen'?'Vorlagen':'Leads'}</div>
+  return <div style={{padding:'4px 2px',maxWidth:curTab==='cockpit'?1200:1000}}>
+    <div style={{fontSize:20,fontWeight:800}}>Akquise · {curTab==='cockpit'?'Cockpit':curTab==='einspeisen'?'Einspeisen':curTab==='vorlagen'?'Vorlagen':'Leads'}</div>
     <div style={{fontSize:13,color:'var(--muted)',marginTop:3,marginBottom:14}}>Neukontakt im DACH-Raum, Absender Moritz Eckstein. Compliance greift beim Versand (Unterdrückung, Abmeldelink, Impressum).</div>
     {msg&&<div style={{marginBottom:12,fontSize:13,fontWeight:600,color:msg.startsWith('Fehler')||msg.startsWith('Datei')?'var(--red)':'var(--green)'}}>{msg}</div>}
+    {curTab==='cockpit' && (leads===null? <div style={{color:'var(--muted)'}}>Lädt…</div>
+      : (()=>{
+        const byId={}; leads.forEach(l=>byId[l.id]=l);
+        const rank={new:0,researched:1,contacted:2,opened:3,replied:4,handover:5,won:6,lost:2,dead:2,suppressed:2};
+        const rk=l=>rank[l.status]!=null?rank[l.status]:0;
+        const total=leads.length;
+        const startToday=new Date(); startToday.setHours(0,0,0,0);
+        const evs=cockEvts||[];
+        const sentToday=evs.filter(e=>e.kind==='sent'&&new Date(e.occurred_at)>=startToday).length;
+        const heuteList=leads.filter(l=>bucket(l)==='heute').sort((a,b)=>(Number(b.score)||0)-(Number(a.score)||0));
+        const dueList=leads.filter(due).sort((a,b)=>new Date(a.next_followup_at)-new Date(b.next_followup_at));
+        const pending=leads.filter(l=>['contacted','opened'].includes(l.status)).sort((a,b)=>new Date(a.last_activity_at||a.updated_at||0)-new Date(b.last_activity_at||b.updated_at||0));
+        const reactions=evs.filter(e=>e.kind==='opened'||e.kind==='replied').slice(0,10);
+        const daysSince=d=>{ if(!d) return null; return Math.floor((Date.now()-new Date(d).getTime())/864e5); };
+        const seit=d=>{ const n=daysSince(d); return n==null?'':(n<=0?'heute':n===1?'seit 1 Tag':'seit '+n+' Tagen'); };
+        const fun=[
+          {lbl:'Eingespeist',n:total,c:'#64748b'},
+          {lbl:'Angeschrieben',n:leads.filter(l=>rk(l)>=2).length,c:'#6366f1'},
+          {lbl:'Geöffnet',n:leads.filter(l=>rk(l)>=3).length,c:'#8b5cf6'},
+          {lbl:'Geantwortet',n:leads.filter(l=>rk(l)>=4).length,c:'#0ea5e9'},
+          {lbl:'Termin / Übergabe',n:leads.filter(l=>rk(l)>=5).length,c:'#f59e0b'},
+          {lbl:'Gewonnen',n:leads.filter(l=>l.status==='won').length,c:'#16a34a'},
+        ];
+        const maxN=Math.max(1,total);
+        const card=(lbl,val,c,sub)=><div style={{flex:'1 1 140px',minWidth:140,background:'var(--card)',border:'1px solid var(--border)',borderRadius:14,padding:'14px 16px'}}>
+          <div style={{fontSize:11,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.04em'}}>{lbl}</div>
+          <div style={{fontSize:30,fontWeight:800,color:c,marginTop:4,fontVariantNumeric:'tabular-nums',lineHeight:1.1}}>{val}</div>
+          {sub&&<div style={{fontSize:11.5,color:'var(--muted)',marginTop:2}}>{sub}</div>}
+        </div>;
+        const openLead=async(l)=>{ setSel(l); setMsg(''); };
+        const nameOf=id=>{ const l=byId[id]; return l?(l.company||l.contact_email||'Lead'):'Lead'; };
+        const al=agentLast||{};
+        return <div style={{display:'flex',flexDirection:'column',gap:18}}>
+          {total===0 && <div style={{padding:'14px 16px',borderRadius:12,background:'var(--surface-2)',border:'1px solid var(--border)',fontSize:13,color:'var(--muted)'}}>Noch keine Leads. Sobald welche eingespeist sind, füllt sich das Cockpit.</div>}
+          {/* Moritz heute */}
+          <div style={{background:'linear-gradient(180deg,var(--surface-2),var(--card))',border:'1px solid var(--border)',borderRadius:14,padding:'14px 16px',display:'flex',gap:14,alignItems:'flex-start',flexWrap:'wrap'}}>
+            <div style={{width:42,height:42,borderRadius:12,background:'#6366f1',color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',fontSize:19,fontWeight:800,flexShrink:0}}>M</div>
+            <div style={{flex:1,minWidth:220}}>
+              <div style={{fontWeight:800,fontSize:14}}>Moritz betreibt die Akquise</div>
+              {al.at
+                ? <div style={{fontSize:12.5,color:'var(--muted)',marginTop:2}}>Zuletzt {(''+al.at).slice(0,16).replace('T',' ')}: {al.researched||0} recherchiert, {al.contacted||0} angeschrieben. {al.autonomy?'Autonomer Erstkontakt läuft.':'Erstkontakt nur auf Freigabe.'}</div>
+                : <div style={{fontSize:12.5,color:'var(--muted)',marginTop:2}}>Recherchiert, priorisiert und fasst nach. Noch kein Lauf.</div>}
+              <div style={{fontSize:11.5,color:'var(--muted)',marginTop:4}}>Auf eingehende Antworten reagiert Moritz, sobald das Postfach angebunden ist. Bis dahin gehen Antworten an dich.</div>
+            </div>
+            <button onClick={runAgent} disabled={busy} style={{padding:'8px 14px',border:'none',borderRadius:8,cursor:busy?'default':'pointer',fontSize:12.5,fontWeight:700,background:busy?'var(--surface-2)':'#6366f1',color:busy?'var(--muted)':'#fff',flexShrink:0}}>{busy?'…':'Jetzt laufen lassen'}</button>
+          </div>
+          {/* Kennzahlen */}
+          <div style={{display:'flex',gap:12,flexWrap:'wrap'}}>
+            {card('Leads gesamt',total,'var(--text)')}
+            {card('Heute anrufen',heuteList.length,'#16a34a',heuteList.length?'nach Priorität sortiert':'nichts Dringendes')}
+            {card('Heute gesendet',sentToday,'#6366f1',cockEvts===null?'lädt…':null)}
+            {card('Fällig zum Nachfassen',dueList.length,'#f59e0b',dueList.length?'Frist erreicht':'nichts fällig')}
+            {card('Rückmeldung offen',pending.length,'#8b5cf6',pending.length?'wartet auf Reaktion':'alles beantwortet')}
+          </div>
+          {/* Trichter */}
+          <div style={{background:'var(--card)',border:'1px solid var(--border)',borderRadius:14,padding:'16px 18px'}}>
+            <div style={{fontWeight:800,fontSize:14,marginBottom:12}}>Trichter · von angeschrieben bis Termin</div>
+            <div style={{display:'flex',flexDirection:'column',gap:9}}>
+              {fun.map((f,i)=>{ const w=Math.max(f.n>0?6:0,Math.round(f.n/maxN*100)); const prev=i>0?fun[i-1].n:null; const conv=prev&&prev>0?Math.round(f.n/prev*100):null;
+                return <div key={f.lbl} style={{display:'flex',alignItems:'center',gap:12}}>
+                  <div style={{width:150,flexShrink:0,fontSize:12.5,color:'var(--muted)',textAlign:'right'}}>{f.lbl}</div>
+                  <div style={{flex:1,background:'var(--surface-2)',borderRadius:8,height:30,position:'relative',overflow:'hidden'}}>
+                    <div style={{width:w+'%',height:'100%',background:f.c,borderRadius:8,transition:'width .3s',minWidth:f.n>0?28:0}}></div>
+                    <div style={{position:'absolute',left:10,top:0,height:30,display:'flex',alignItems:'center',fontSize:13,fontWeight:800,color:'#fff',mixBlendMode:'difference'}}>{f.n}</div>
+                  </div>
+                  <div style={{width:54,flexShrink:0,fontSize:11.5,color:'var(--muted)',fontVariantNumeric:'tabular-nums'}}>{conv!=null?conv+'%':''}</div>
+                </div>; })}
+            </div>
+          </div>
+          {/* Zwei Tafeln: heute anrufen + Rückmeldung offen */}
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16}}>
+            <div style={{background:'var(--card)',border:'1px solid var(--border)',borderRadius:14,padding:'14px 16px'}}>
+              <div style={{fontWeight:800,fontSize:14,marginBottom:2}}>Heute anrufen</div>
+              <div style={{fontSize:11.5,color:'var(--muted)',marginBottom:10}}>Höchste Priorität zuerst. Fällige und Antworten stehen oben.</div>
+              {heuteList.length===0? <div style={{fontSize:12.5,color:'var(--muted)'}}>Nichts Dringendes.</div>
+                : <div style={{display:'flex',flexDirection:'column',gap:7}}>{heuteList.slice(0,8).map(l=><div key={l.id} onClick={()=>openLead(l)} style={{display:'flex',alignItems:'center',gap:10,cursor:'pointer'}}>
+                    <span style={{width:34,textAlign:'center',fontWeight:800,fontSize:13,color:'#16a34a',fontVariantNumeric:'tabular-nums'}}>{l.score!=null?Math.round(l.score):'–'}</span>
+                    <div style={{flex:1,minWidth:0}}><div style={{fontWeight:700,fontSize:13,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{l.company||l.contact_email||'—'}</div>
+                      <div style={{fontSize:11,color:'var(--muted)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{[l.contact_name,l.industry].filter(Boolean).join(' · ')}</div></div>
+                    <span style={{fontSize:10.5,fontWeight:700,padding:'2px 7px',borderRadius:20,background:(STAT[l.status]||'#64748b')+'22',color:STAT[l.status]||'#64748b',flexShrink:0}}>{due(l)?'fällig':l.status}</span>
+                  </div>)}</div>}
+            </div>
+            <div style={{background:'var(--card)',border:'1px solid var(--border)',borderRadius:14,padding:'14px 16px'}}>
+              <div style={{fontWeight:800,fontSize:14,marginBottom:2}}>Rückmeldung offen</div>
+              <div style={{fontSize:11.5,color:'var(--muted)',marginBottom:10}}>Angeschrieben, noch keine Antwort. Ältestes zuerst.</div>
+              {pending.length===0? <div style={{fontSize:12.5,color:'var(--muted)'}}>Alles beantwortet.</div>
+                : <div style={{display:'flex',flexDirection:'column',gap:7}}>{pending.slice(0,8).map(l=>{ const n=daysSince(l.last_activity_at||l.updated_at); const warn=n!=null&&n>=7;
+                    return <div key={l.id} onClick={()=>openLead(l)} style={{display:'flex',alignItems:'center',gap:10,cursor:'pointer'}}>
+                    <div style={{flex:1,minWidth:0}}><div style={{fontWeight:700,fontSize:13,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{l.company||l.contact_email||'—'}</div>
+                      <div style={{fontSize:11,color:'var(--muted)'}}>{stageLabel(l.stage)}</div></div>
+                    <span style={{fontSize:11,fontWeight:700,color:warn?'#f59e0b':'var(--muted)',flexShrink:0}}>{seit(l.last_activity_at||l.updated_at)}</span>
+                  </div>; })}</div>}
+            </div>
+          </div>
+          {/* Letzte Reaktionen */}
+          <div style={{background:'var(--card)',border:'1px solid var(--border)',borderRadius:14,padding:'14px 16px'}}>
+            <div style={{fontWeight:800,fontSize:14,marginBottom:2}}>Letzte Reaktionen</div>
+            <div style={{fontSize:11.5,color:'var(--muted)',marginBottom:10}}>Wer zuletzt geöffnet oder geantwortet hat.</div>
+            {cockEvts===null? <div style={{fontSize:12.5,color:'var(--muted)'}}>Lädt…</div>
+              : reactions.length===0? <div style={{fontSize:12.5,color:'var(--muted)'}}>Noch keine Reaktionen.</div>
+              : <div style={{display:'flex',flexDirection:'column',gap:7}}>{reactions.map((e,i)=><div key={i} onClick={()=>byId[e.lead_id]&&openLead(byId[e.lead_id])} style={{display:'flex',alignItems:'baseline',gap:10,fontSize:12.5,cursor:byId[e.lead_id]?'pointer':'default'}}>
+                  <span style={{color:'var(--muted)',minWidth:104,flexShrink:0,fontVariantNumeric:'tabular-nums'}}>{(e.occurred_at||'').slice(0,16).replace('T',' ')}</span>
+                  <span style={{fontWeight:700,color:e.kind==='replied'?'#16a34a':'#8b5cf6',flexShrink:0}}>{e.kind==='replied'?'📥 Antwort':'👁 Geöffnet'}</span>
+                  <span style={{fontWeight:600,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{nameOf(e.lead_id)}</span>
+                </div>)}</div>}
+          </div>
+        </div>; })())}
     {curTab==='leads' && (leads===null? <div style={{color:'var(--muted)'}}>Lädt…</div>
       : leads.length===0? <div style={{padding:'14px 16px',borderRadius:12,background:'var(--surface-2)',border:'1px solid var(--border)',fontSize:13,color:'var(--muted)'}}>Noch keine Leads. Speise welche über „Einspeisen" ein.</div>
       : (()=>{ const counts=leads.reduce((a,l)=>{a[l.status]=(a[l.status]||0)+1;return a;},{}); const dueN=leads.filter(due).length;
+        const bcounts=leads.reduce((a,l)=>{const b=bucket(l);a[b]=(a[b]||0)+1;return a;},{});
         const chip=(k,lbl,c,n)=>{ const on=flt===k; return <button key={k} onClick={()=>setFlt(on?null:k)} style={{border:'1px solid '+(on?c:'var(--border)'),background:on?c+'22':'var(--card)',color:on?c:'var(--text)',borderRadius:20,padding:'3px 11px',fontSize:12,fontWeight:700,cursor:'pointer'}}>{lbl} {n}</button>; };
         const order=['new','researched','contacted','opened','replied','handover','won','lost','dead'];
-        const fl = flt==='due'? leads.filter(due) : flt? leads.filter(l=>l.status===flt) : leads;
+        const fl = flt==='due'? leads.filter(due) : (flt&&BUCKET[flt])? leads.filter(l=>bucket(l)===flt) : flt? leads.filter(l=>l.status===flt) : leads;
         return <div>
+          <div style={{display:'flex',gap:6,flexWrap:'wrap',marginBottom:8,alignItems:'center'}}>
+            {['heute','warten','tot'].filter(b=>bcounts[b]).map(b=>chip(b,BUCKET[b].lbl,BUCKET[b].c,bcounts[b]))}
+            <button onClick={recompute} disabled={busy} style={{marginLeft:'auto',border:'1px solid var(--border)',background:'var(--card)',color:'var(--text)',borderRadius:8,padding:'4px 11px',fontSize:12,fontWeight:600,cursor:busy?'default':'pointer'}}>↻ Priorität neu berechnen</button>
+          </div>
           <div style={{display:'flex',gap:6,flexWrap:'wrap',marginBottom:12}}>
             {dueN>0 && chip('due','⏰ Fällig','#f59e0b',dueN)}
             {order.filter(s=>counts[s]).map(s=>chip(s,s,STAT[s]||'#64748b',counts[s]))}
           </div>
           <div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
             <thead><tr style={{textAlign:'left',color:'var(--muted)',fontSize:11.5,textTransform:'uppercase',letterSpacing:'.04em'}}>
-              <th style={{padding:'6px 8px'}}>Firma</th><th style={{padding:'6px 8px'}}>Kontakt</th><th style={{padding:'6px 8px'}}>E-Mail</th><th style={{padding:'6px 8px'}}>Quelle</th><th style={{padding:'6px 8px'}}>Status</th></tr></thead>
-            <tbody>{fl.map(l=><tr key={l.id} onClick={()=>{setSel(l);setMsg('');}} style={{borderTop:'1px solid var(--border)',cursor:'pointer'}}>
-              <td style={{padding:'7px 8px'}}><div style={{fontWeight:700}}>{l.company||'—'}</div><div style={{fontSize:11.5,color:'var(--muted)'}}>{l.industry||''}</div></td>
+              <th style={{padding:'6px 8px'}}>Prio</th><th style={{padding:'6px 8px'}}>Firma</th><th style={{padding:'6px 8px'}}>Kontakt</th><th style={{padding:'6px 8px'}}>E-Mail</th><th style={{padding:'6px 8px'}}>Quelle</th><th style={{padding:'6px 8px'}}>Status</th></tr></thead>
+            <tbody>{fl.map(l=>{ const bk=bucket(l); return <tr key={l.id} onClick={()=>{setSel(l);setMsg('');}} style={{borderTop:'1px solid var(--border)',cursor:'pointer'}}>
+              <td style={{padding:'7px 8px',whiteSpace:'nowrap'}}><span title={BUCKET[bk].lbl} style={{display:'inline-block',width:8,height:8,borderRadius:8,background:BUCKET[bk].c,marginRight:6,verticalAlign:'middle'}}></span><span style={{fontWeight:800,fontVariantNumeric:'tabular-nums'}}>{l.score!=null?Math.round(l.score):'–'}</span></td>
+              <td style={{padding:'7px 8px'}}><div style={{fontWeight:700}}>{l.company||'—'}</div><div style={{fontSize:11.5,color:'var(--muted)'}}>{[l.industry,l.company_size?l.company_size+' MA':'',l.growth?'wächst':''].filter(Boolean).join(' · ')}</div></td>
               <td style={{padding:'7px 8px'}}>{l.contact_name||'—'}<div style={{fontSize:11.5,color:'var(--muted)'}}>{l.contact_role||''}</div></td>
               <td style={{padding:'7px 8px',fontFamily:'var(--mono)',fontSize:12}}>{l.contact_email||'—'}</td>
               <td style={{padding:'7px 8px',color:'var(--muted)'}}>{l.source}</td>
               <td style={{padding:'7px 8px'}}><span style={{fontSize:11,fontWeight:700,padding:'2px 8px',borderRadius:20,background:(STAT[l.status]||'#64748b')+'22',color:STAT[l.status]||'#64748b'}}>{l.status}</span>{due(l)&&<span style={{marginLeft:6,fontSize:10,fontWeight:800,color:'#f59e0b'}}>⏰ fällig</span>}</td>
-            </tr>)}</tbody></table></div>
+            </tr>; })}</tbody></table></div>
         </div>; })())}
     {curTab==='einspeisen' && <div style={{display:'flex',flexDirection:'column',gap:18,maxWidth:640}}>
       <div style={{border:'1px solid var(--border)',borderRadius:12,padding:14}}>
@@ -41676,12 +41826,19 @@ function AkquiseView({team, tab}){
       </div>
     </div>}
     {curTab==='vorlagen' && <div style={{maxWidth:640}}>
-      <button onClick={()=>{setTf({key:'',name:'',subject:'',body:'',ai_enrich:false,active:true});setMsg('');}} style={{padding:'8px 16px',border:'none',borderRadius:8,cursor:'pointer',fontSize:13,fontWeight:700,background:'var(--blue)',color:'#fff',marginBottom:12}}>+ Neue Vorlage</button>
+      <button onClick={()=>{setTf({key:'',name:'',subject:'',body:'',stage:'erstansprache',variant:1,ai_enrich:false,active:true});setMsg('');}} style={{padding:'8px 16px',border:'none',borderRadius:8,cursor:'pointer',fontSize:13,fontWeight:700,background:'var(--blue)',color:'#fff',marginBottom:12}}>+ Neue Vorlage</button>
       {tf && <div style={{border:'1px solid var(--border)',borderRadius:12,padding:14,marginBottom:14}}>
         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:8}}>
-          <input value={tf.key} onChange={e=>setTf(f=>({...f,key:e.target.value}))} placeholder="Key (z. B. erstkontakt)" style={inp}/>
+          <input value={tf.key} onChange={e=>setTf(f=>({...f,key:e.target.value}))} placeholder="Key (z. B. erstkontakt_a)" style={inp}/>
           <input value={tf.name||''} onChange={e=>setTf(f=>({...f,name:e.target.value}))} placeholder="Name" style={inp}/>
         </div>
+        <div style={{display:'grid',gridTemplateColumns:'2fr 1fr',gap:8,marginBottom:4}}>
+          <select value={tf.stage||'erstansprache'} onChange={e=>setTf(f=>({...f,stage:e.target.value}))} style={inp}>
+            {SALES_STAGES.map(s=><option key={s.k} value={s.k}>{s.label}</option>)}
+          </select>
+          <input type="number" min="1" value={tf.variant||1} onChange={e=>setTf(f=>({...f,variant:e.target.value}))} placeholder="Variante" style={inp} title="Mehrere Varianten je Stufe verteilen die Ansprache"/>
+        </div>
+        {(()=>{ const st=SALES_STAGES.find(s=>s.k===(tf.stage||'erstansprache')); return st? <div style={{fontSize:12,color:'var(--muted)',marginBottom:8}}>Ton dieser Stufe: {st.tone}</div>:null; })()}
         <input value={tf.subject||''} onChange={e=>setTf(f=>({...f,subject:e.target.value}))} placeholder="Betreff — Platzhalter {company} {name}" style={{...inp,marginBottom:8}}/>
         <textarea value={tf.body||''} onChange={e=>setTf(f=>({...f,body:e.target.value}))} rows={6} placeholder="Standardtext. Platzhalter: {company} {name} {hook} {industry}" style={{...inp,resize:'vertical',marginBottom:8}}/>
         <label style={{display:'flex',alignItems:'center',gap:8,fontSize:13,marginBottom:10,cursor:'pointer'}}>
@@ -41692,16 +41849,65 @@ function AkquiseView({team, tab}){
           <button onClick={()=>setTf(null)} style={{padding:'8px 16px',border:'1px solid var(--border)',borderRadius:8,cursor:'pointer',fontSize:13,fontWeight:600,background:'var(--card)',color:'var(--text)'}}>Abbrechen</button>
         </div>
       </div>}
-      <div style={{display:'flex',flexDirection:'column',gap:8}}>
-        {tpls.map(t=><div key={t.id} onClick={()=>{setTf({...t});setMsg('');}} style={{border:'1px solid var(--border)',borderRadius:10,padding:'10px 12px',cursor:'pointer'}}>
-          <div style={{display:'flex',justifyContent:'space-between',gap:8}}>
-            <div style={{fontWeight:700,fontSize:13.5}}>{t.name||t.key}</div>
-            <div style={{display:'flex',gap:6}}>{t.ai_enrich&&<span style={{fontSize:10,fontWeight:700,padding:'1px 7px',borderRadius:20,background:'var(--blue-bg)',color:'var(--blue)'}}>KI</span>}<span style={{fontSize:10,fontWeight:700,padding:'1px 7px',borderRadius:20,background:t.active?'var(--green-bg)':'var(--surface-2)',color:t.active?'var(--green)':'var(--muted)'}}>{t.active?'aktiv':'aus'}</span></div>
-          </div>
-          <div style={{fontSize:12,color:'var(--muted)',marginTop:2}}>{t.subject}</div>
-        </div>)}
-        {tpls.length===0&&<div style={{fontSize:13,color:'var(--muted)'}}>Noch keine Vorlagen. Von euch formulierte Standardtexte; die KI reichert nur an, wenn ihr es je Vorlage einschaltet.</div>}
+      <div style={{display:'flex',flexDirection:'column',gap:16}}>
+        {SALES_STAGES.map(st=>{ const items=tpls.filter(t=>(t.stage||'erstansprache')===st.k); if(!items.length) return null;
+          return <div key={st.k}>
+            <div style={{fontSize:11,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.04em',marginBottom:6}}>{st.label} <span style={{fontWeight:600,textTransform:'none',letterSpacing:0}}>· {items.length} Variante{items.length>1?'n':''}</span></div>
+            <div style={{display:'flex',flexDirection:'column',gap:8}}>
+              {items.map(t=><div key={t.id} onClick={()=>{setTf({...t});setMsg('');}} style={{border:'1px solid var(--border)',borderRadius:10,padding:'10px 12px',cursor:'pointer'}}>
+                <div style={{display:'flex',justifyContent:'space-between',gap:8}}>
+                  <div style={{fontWeight:700,fontSize:13.5}}>{t.name||t.key} <span style={{fontSize:11,color:'var(--muted)',fontWeight:600}}>· V{t.variant||1}</span></div>
+                  <div style={{display:'flex',gap:6}}>{t.ai_enrich&&<span style={{fontSize:10,fontWeight:700,padding:'1px 7px',borderRadius:20,background:'var(--blue-bg)',color:'var(--blue)'}}>KI</span>}<span style={{fontSize:10,fontWeight:700,padding:'1px 7px',borderRadius:20,background:t.active?'var(--green-bg)':'var(--surface-2)',color:t.active?'var(--green)':'var(--muted)'}}>{t.active?'aktiv':'aus'}</span></div>
+                </div>
+                <div style={{fontSize:12,color:'var(--muted)',marginTop:2}}>{t.subject}</div>
+              </div>)}
+            </div>
+          </div>; })}
+        {tpls.length===0&&<div style={{fontSize:13,color:'var(--muted)'}}>Noch keine Vorlagen. Von euch formulierte Standardtexte je Stufe; mehrere Varianten je Stufe verteilen die Ansprache. Die KI reichert nur an, wenn ihr es je Vorlage einschaltet.</div>}
       </div>
+      {autonomy && <div style={{marginTop:26,paddingTop:18,borderTop:'1px solid var(--border)'}}>
+        <div style={{fontWeight:800,fontSize:15,marginBottom:2}}>Autonomie</div>
+        <div style={{fontSize:12.5,color:'var(--muted)',marginBottom:14}}>Moritz recherchiert und priorisiert immer selbst. Ob er den Erstkontakt auch selbst verschickt, entscheidest du hier. Die Compliance greift auch dann, jeder Versand prüft Unterdrückung, Abmeldelink und Impressum.</div>
+        <label style={{display:'flex',alignItems:'center',gap:8,fontSize:13,marginBottom:10,cursor:'pointer'}}>
+          <input type="checkbox" checked={!!autonomy.enabled} onChange={e=>setAutonomy(a=>({...a,enabled:e.target.checked}))}/> Moritz verschickt den Erstkontakt selbst (sonst nur auf deine Freigabe)
+        </label>
+        <div style={{maxWidth:260}}><div style={{fontSize:12,color:'var(--muted)',marginBottom:3}}>Höchstens … Erstkontakte pro Tag</div>
+          <input type="number" min="1" value={autonomy.daily_cap!=null?autonomy.daily_cap:15} onChange={e=>setAutonomy(a=>({...a,daily_cap:e.target.value}))} style={inp}/></div>
+        <div><button onClick={saveAutonomy} disabled={busy} style={{marginTop:14,padding:'8px 16px',border:'none',borderRadius:8,cursor:busy?'default':'pointer',fontSize:13,fontWeight:700,background:busy?'var(--surface-2)':'var(--blue)',color:busy?'var(--muted)':'#fff'}}>Autonomie speichern</button></div>
+      </div>}
+      {fu && <div style={{marginTop:26,paddingTop:18,borderTop:'1px solid var(--border)'}}>
+        <div style={{fontWeight:800,fontSize:15,marginBottom:2}}>Nachfass-Rhythmus</div>
+        <div style={{fontSize:12.5,color:'var(--muted)',marginBottom:14}}>Wann Moritz automatisch die nächste Stufe schickt. Wer schon einmal geöffnet hat, wird früher wieder angesprochen, wer nie reagiert, später. Nach dem letzten Versuch endet die Strecke von selbst.</div>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,maxWidth:420}}>
+          <div><div style={{fontSize:12,color:'var(--muted)',marginBottom:3}}>Hat geöffnet: nach … Tagen</div><input type="number" min="1" value={fu.opened_days} onChange={e=>setFu(f=>({...f,opened_days:e.target.value}))} style={inp}/></div>
+          <div><div style={{fontSize:12,color:'var(--muted)',marginBottom:3}}>Keine Reaktion: nach … Tagen</div><input type="number" min="1" value={fu.cold_days} onChange={e=>setFu(f=>({...f,cold_days:e.target.value}))} style={inp}/></div>
+        </div>
+        <div><button onClick={saveFu} disabled={busy} style={{marginTop:14,padding:'8px 16px',border:'none',borderRadius:8,cursor:busy?'default':'pointer',fontSize:13,fontWeight:700,background:busy?'var(--surface-2)':'var(--blue)',color:busy?'var(--muted)':'#fff'}}>Rhythmus speichern</button></div>
+      </div>}
+      {fit && <div style={{marginTop:26,paddingTop:18,borderTop:'1px solid var(--border)'}}>
+        <div style={{fontWeight:800,fontSize:15,marginBottom:2}}>Fit-Modell</div>
+        <div style={{fontSize:12.5,color:'var(--muted)',marginBottom:14}}>Wonach Moritz einschätzt, wie gut eine Firma passt. Branchen mit hohem Kundenkontaktvolumen zählen hoch, die Größe soll ins Mittelstands-Fenster fallen, Wachstum oder saisonale Spitzen geben einen Bonus. Änderungen wirken sofort auf die Priorität.</div>
+        <div style={{fontSize:11,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.04em',marginBottom:6}}>Branchen (Gewicht 0 bis 10)</div>
+        <div style={{display:'flex',flexDirection:'column',gap:6,marginBottom:8}}>
+          {(fit.industries||[]).map((ind,i)=><div key={i} style={{display:'flex',gap:8,alignItems:'center'}}>
+            <input value={ind.name||''} onChange={e=>setFit(f=>{const a=[...(f.industries||[])];a[i]={...a[i],name:e.target.value};return {...f,industries:a};})} placeholder="Branche" style={{...inp,flex:1}}/>
+            <input type="number" min="0" max="10" value={ind.weight!=null?ind.weight:''} onChange={e=>setFit(f=>{const a=[...(f.industries||[])];a[i]={...a[i],weight:e.target.value};return {...f,industries:a};})} style={{...inp,width:80}}/>
+            <button onClick={()=>setFit(f=>({...f,industries:(f.industries||[]).filter((_,j)=>j!==i)}))} title="Entfernen" style={{border:'none',background:'transparent',color:'var(--muted)',fontSize:18,cursor:'pointer',lineHeight:1}}>×</button>
+          </div>)}
+        </div>
+        <button onClick={()=>setFit(f=>({...f,industries:[...(f.industries||[]),{name:'',weight:8}]}))} style={{border:'1px dashed var(--border)',background:'transparent',color:'var(--text)',borderRadius:8,padding:'5px 11px',fontSize:12,fontWeight:600,cursor:'pointer',marginBottom:16}}>+ Branche</button>
+        <div style={{fontSize:11,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.04em',marginBottom:6}}>Firmengröße (Mitarbeiterzahl)</div>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:4}}>
+          <div><div style={{fontSize:12,color:'var(--muted)',marginBottom:3}}>Passt ab</div><input type="number" value={(fit.size&&fit.size.min)!=null?fit.size.min:''} onChange={e=>setFit(f=>({...f,size:{...(f.size||{}),min:Number(e.target.value)||0}}))} style={inp}/></div>
+          <div><div style={{fontSize:12,color:'var(--muted)',marginBottom:3}}>bis</div><input type="number" value={(fit.size&&fit.size.max)!=null?fit.size.max:''} onChange={e=>setFit(f=>({...f,size:{...(f.size||{}),max:Number(e.target.value)||0}}))} style={inp}/></div>
+          <div><div style={{fontSize:12,color:'var(--muted)',marginBottom:3}}>Idealfenster ab</div><input type="number" value={(fit.size&&fit.size.sweet_min)!=null?fit.size.sweet_min:''} onChange={e=>setFit(f=>({...f,size:{...(f.size||{}),sweet_min:Number(e.target.value)||0}}))} style={inp}/></div>
+          <div><div style={{fontSize:12,color:'var(--muted)',marginBottom:3}}>bis</div><input type="number" value={(fit.size&&fit.size.sweet_max)!=null?fit.size.sweet_max:''} onChange={e=>setFit(f=>({...f,size:{...(f.size||{}),sweet_max:Number(e.target.value)||0}}))} style={inp}/></div>
+        </div>
+        <div style={{fontSize:11.5,color:'var(--muted)',marginBottom:16}}>Konzerne sind zu groß, Kleinstfirmen zu klein. Das Idealfenster gibt die volle Punktzahl.</div>
+        <div style={{fontSize:11,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.04em',marginBottom:6}}>Bonus für Wachstum oder saisonale Spitze</div>
+        <input type="number" value={fit.growth_bonus!=null?fit.growth_bonus:''} onChange={e=>setFit(f=>({...f,growth_bonus:Number(e.target.value)||0}))} style={{...inp,maxWidth:120}}/>
+        <div><button onClick={saveFit} disabled={busy} style={{marginTop:16,padding:'8px 16px',border:'none',borderRadius:8,cursor:busy?'default':'pointer',fontSize:13,fontWeight:700,background:busy?'var(--surface-2)':'var(--blue)',color:busy?'var(--muted)':'#fff'}}>Fit-Modell speichern</button></div>
+      </div>}
     </div>}
     {sel && <div onClick={()=>setSel(null)} style={{position:'fixed',inset:0,zIndex:1000,background:'rgba(2,10,16,.5)',display:'flex',alignItems:'flex-start',justifyContent:'center',padding:'40px 16px',overflowY:'auto'}}>
       <div onClick={e=>e.stopPropagation()} style={{background:'var(--card)',border:'1px solid var(--border)',borderRadius:16,width:560,maxWidth:'100%',padding:20}}>
@@ -41729,7 +41935,8 @@ function AkquiseView({team, tab}){
           <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
             <select value={sendTpl} onChange={e=>setSendTpl(e.target.value)} style={{...inp,width:'auto',minWidth:200}}>
               <option value="">Vorlage wählen…</option>
-              {tpls.filter(t=>t.active).map(t=><option key={t.id} value={t.key}>{t.name||t.key}{t.ai_enrich?' (KI)':''}</option>)}
+              {SALES_STAGES.map(st=>{ const items=tpls.filter(t=>t.active&&(t.stage||'erstansprache')===st.k); if(!items.length) return null;
+                return <optgroup key={st.k} label={st.label}>{items.map(t=><option key={t.id} value={t.key}>{t.name||t.key}{t.variant>1?(' · V'+t.variant):''}{t.ai_enrich?' (KI)':''}</option>)}</optgroup>; })}
             </select>
             <button onClick={sendLead} disabled={busy||!sel.contact_email} style={{padding:'8px 16px',border:'none',borderRadius:8,cursor:(busy||!sel.contact_email)?'default':'pointer',fontSize:13,fontWeight:700,background:(busy||!sel.contact_email)?'var(--surface-2)':'var(--green)',color:(busy||!sel.contact_email)?'var(--muted)':'#fff'}}>Senden</button>
           </div>
@@ -42469,6 +42676,7 @@ function App(){
       'praesentation':'<path fill-rule="evenodd" d="M2.25 2.25a.75.75 0 0 0 0 1.5H3v10.5a3 3 0 0 0 3 3h1.21l-1.172 3.513a.75.75 0 0 0 1.424.474l.329-.987h8.418l.33.987a.75.75 0 0 0 1.422-.474l-1.17-3.513H18a3 3 0 0 0 3-3V3.75h.75a.75.75 0 0 0 0-1.5H2.25Zm6.54 15h6.42l.5 1.5H8.29l.5-1.5Zm8.085-8.995a.75.75 0 1 0-.75-1.299 12.81 12.81 0 0 0-3.558 3.05L11.03 8.47a.75.75 0 0 0-1.06 0l-2.25 2.25a.75.75 0 1 0 1.06 1.06l1.72-1.72 1.774 1.775a.75.75 0 0 0 1.174-.144 11.31 11.31 0 0 1 3.477-3.146Z" clip-rule="evenodd"/>',
       'termin':'<path fill-rule="evenodd" d="M12 2.25c-5.385 0-9.75 4.365-9.75 9.75s4.365 9.75 9.75 9.75 9.75-4.365 9.75-9.75S17.385 2.25 12 2.25Zm4.28 7.28a.75.75 0 0 0-1.06-1.06l-4.72 4.72-1.72-1.72a.75.75 0 0 0-1.06 1.06l2.25 2.25a.75.75 0 0 0 1.06 0l5.25-5.25Z" clip-rule="evenodd"/>',
       'akquise':'<path d="M16.881 4.346A23.112 23.112 0 0 1 8.25 6H7.5a5.25 5.25 0 0 0-.88 10.427 21.593 21.593 0 0 0 1.378 3.94c.464 1.004 1.674 1.32 2.582.796l.657-.379c.88-.508 1.165-1.593.772-2.468a17.116 17.116 0 0 1-.628-1.607c1.918.258 3.76.75 5.5 1.446A21.727 21.727 0 0 0 18 11.25c0-2.413-.393-4.735-1.119-6.904ZM18.26 3.74a23.22 23.22 0 0 1 1.24 7.51 23.22 23.22 0 0 1-1.24 7.51c-.055.161-.111.322-.17.482a.75.75 0 1 0 1.409.516 24.555 24.555 0 0 0 1.415-6.43 2.992 2.992 0 0 0 .836-2.078c0-.807-.319-1.54-.836-2.078a24.65 24.65 0 0 0-1.415-6.43.75.75 0 1 0-1.409.516c.059.16.115.321.17.483Z"/>',
+      'akquise_cockpit':'<path fill-rule="evenodd" d="M2.25 13.5a8.25 8.25 0 0 1 8.25-8.25.75.75 0 0 1 .75.75v6.75H18a.75.75 0 0 1 .75.75 8.25 8.25 0 0 1-16.5 0Z" clip-rule="evenodd"/><path fill-rule="evenodd" d="M12.75 3a.75.75 0 0 1 .75-.75 8.25 8.25 0 0 1 8.25 8.25.75.75 0 0 1-.75.75h-7.5a.75.75 0 0 1-.75-.75V3Z" clip-rule="evenodd"/>',
       'akquise_leads':'<path d="M16.881 4.346A23.112 23.112 0 0 1 8.25 6H7.5a5.25 5.25 0 0 0-.88 10.427 21.593 21.593 0 0 0 1.378 3.94c.464 1.004 1.674 1.32 2.582.796l.657-.379c.88-.508 1.165-1.593.772-2.468a17.116 17.116 0 0 1-.628-1.607c1.918.258 3.76.75 5.5 1.446A21.727 21.727 0 0 0 18 11.25c0-2.413-.393-4.735-1.119-6.904ZM18.26 3.74a23.22 23.22 0 0 1 1.24 7.51 23.22 23.22 0 0 1-1.24 7.51c-.055.161-.111.322-.17.482a.75.75 0 1 0 1.409.516 24.555 24.555 0 0 0 1.415-6.43 2.992 2.992 0 0 0 .836-2.078c0-.807-.319-1.54-.836-2.078a24.65 24.65 0 0 0-1.415-6.43.75.75 0 1 0-1.409.516c.059.16.115.321.17.483Z"/>',
       'akquise_einspeisen':'<path fill-rule="evenodd" d="M12 2.25a.75.75 0 0 1 .75.75v11.69l3.22-3.22a.75.75 0 1 1 1.06 1.06l-4.5 4.5a.75.75 0 0 1-1.06 0l-4.5-4.5a.75.75 0 1 1 1.06-1.06l3.22 3.22V3a.75.75 0 0 1 .75-.75Zm-9 13.5a.75.75 0 0 1 .75.75v2.25a1.5 1.5 0 0 0 1.5 1.5h13.5a1.5 1.5 0 0 0 1.5-1.5V16.5a.75.75 0 0 1 1.5 0v2.25a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3V16.5a.75.75 0 0 1 .75-.75Z" clip-rule="evenodd"/>',
       'akquise_vorlagen':'<path d="M1.5 8.67v8.58a3 3 0 0 0 3 3h15a3 3 0 0 0 3-3V8.67l-8.928 5.493a3 3 0 0 1-3.144 0L1.5 8.67Z"/><path d="M22.5 6.908V6.75a3 3 0 0 0-3-3h-15a3 3 0 0 0-3 3v.158l9.714 5.978a1.5 1.5 0 0 0 1.572 0L22.5 6.908Z"/>',
