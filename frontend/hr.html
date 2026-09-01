@@ -41750,6 +41750,7 @@ function AkquiseView({team, tab}){
   const [flt,setFlt]=React.useState(null);   // Pipeline-Filter: Status-Key oder 'due'
   const [srcFlt,setSrcFlt]=React.useState(null);   // Quellen-Filter (unabhängig)
   const [upSum,setUpSum]=React.useState(null);   // Zusammenfassung nach Listen-Upload (neu/Dubletten/unterdrückt)
+  const [mapState,setMapState]=React.useState(null);   // Spalten-Zuordnung nach Upload (columns/rows/mapping/signature)
   const [fit,setFit]=React.useState(null);   // Fit-Modell (jsr_sales_fit_v1), in der Oberfläche anpassbar
   const [cockEvts,setCockEvts]=React.useState(null);   // Ereignisse fürs Cockpit (Aggregat)
   const [agentLast,setAgentLast]=React.useState(null); // letzte Orchestrator-Zusammenfassung (Moritz heute)
@@ -41794,44 +41795,57 @@ function AkquiseView({team, tab}){
     const r=await fetch(SB_URL+'/functions/v1/'+fn,{method:'POST',headers:{'Authorization':'Bearer '+tok,'apikey':SB_KEY,'content-type':'application/json'},body:JSON.stringify(body)}); return r.json(); };
   const norm=(s)=>String(s||'').toLowerCase().replace(/[^a-z]/g,'');
   const pick=(row,cands)=>{ for(const k of Object.keys(row)){ const nk=norm(k); if(cands.some(c=>nk.includes(c))) { const v=row[k]; if(v!=null&&String(v).trim()!=='') return String(v).trim(); } } return null; };
-  const onFile=async(e)=>{ const f=e.target.files&&e.target.files[0]; if(!f) return; setBusy(true); setMsg(''); setUpSum(null);
+  // Upload Schritt 1: parsen (bestes Blatt + Kopfzeile automatisch), Zuordnungs-Modal öffnen. Keine Rate-Automatik mehr,
+  // du ordnest die Spalten zu (Vorschlag automatisch, Rest von dir), mit Vorschau. Zuordnung wird je Dateiart gemerkt.
+  const onFile=async(e)=>{ const f=e.target.files&&e.target.files[0]; if(!f) return; setBusy(true); setMsg(''); setUpSum(null); setMapState(null);
     try{ const buf=await f.arrayBuffer(); const wb=XLSX.read(buf,{type:'array'});
-      // Robust: ALLE Blätter durchgehen, Kopfzeile automatisch finden (nicht zwingend Zeile 1; Deckblatt/Titelzeilen egal).
-      const HINTS=['company','firma','unternehmen','account','email','mail','name','kontakt','ansprech','website','url','domain','branche','industry','position','titel','funktion'];
-      const nk=s=>String(s||'').toLowerCase().replace(/[^a-z]/g,'');
-      const recs=[];
+      const nk=s=>String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+      let best=null;
       for(const sn of (wb.SheetNames||[])){
         const aoa=XLSX.utils.sheet_to_json(wb.Sheets[sn],{header:1,defval:''}); if(!aoa.length) continue;
-        let hi=-1; for(let i=0;i<Math.min(aoa.length,20);i++){ const cs=(aoa[i]||[]).map(nk); if(cs.some(c=>c&&HINTS.some(h=>c.includes(h)))){ hi=i; break; } }
-        if(hi<0) continue;
-        const headers=(aoa[hi]||[]).map(x=>String(x||'').trim());
-        for(let ri=hi+1;ri<aoa.length;ri++){ const row=aoa[ri]||[]; const obj={}; headers.forEach((h,c)=>{ if(h) obj[h]=row[c]; });
-          const rec={ company:pick(obj,['company','firma','unternehmen','account']), website:pick(obj,['website','url','domain','web']),
-            industry:pick(obj,['industry','branche','sector']), contact_name:pick(obj,['name','contact','kontakt','ansprech']),
-            contact_email:pick(obj,['email','mail']), contact_role:pick(obj,['role','position','title','titel','funktion']), source:'list', created_by:team.user_id };
-          if(rec.company||rec.contact_email) recs.push(rec); }
+        let hi=0, hbest=-1; for(let i=0;i<Math.min(aoa.length,20);i++){ const filled=(aoa[i]||[]).filter(c=>String(c||'').trim()).length; if(filled>hbest){ hbest=filled; hi=i; } }
+        const headers=(aoa[hi]||[]).map((x,idx)=>String(x||'').trim()||('Spalte '+(idx+1)));
+        const rows=[]; for(let ri=hi+1;ri<aoa.length;ri++){ const row=aoa[ri]||[]; if(!row.some(c=>String(c||'').trim())) continue; const obj={}; headers.forEach((h,c)=>{ obj[h]=row[c]; }); rows.push(obj); }
+        if(!best || rows.length>best.rows.length) best={columns:headers, rows};
       }
-      if(!recs.length){ setMsg('Keine verwertbaren Zeilen gefunden. Erwartet: irgendwo eine Kopfzeile mit Spalten wie Firma/E-Mail (auf beliebigem Blatt).'); setBusy(false); e.target.value=''; return; }
-      // Wie eine Datenbank: Bestand ergänzen, Dubletten erkennen (Mail, ersatzweise Firma+Website), Unterdrückte überspringen.
-      const nrm=s=>String(s||'').trim().toLowerCase();
-      const [er,sr]=await Promise.all([
-        sb.from('sales_leads').select('id,contact_email,company,website,industry,contact_name,contact_role,source'),
-        sb.from('sales_suppression').select('email')]);
-      const suppSet=new Set((sr.data||[]).map(x=>nrm(x.email)));
-      const byEmail={}, byCW={};
-      const reg=(l)=>{ const em=nrm(l.contact_email); if(em) byEmail[em]=l; if(l.company||l.website) byCW[nrm(l.company)+'|'+nrm(l.website)]=l; };
-      (er.data||[]).forEach(reg);
-      const toInsert=[], dups=[]; let suppressed=0;
-      recs.forEach(r=>{ const em=nrm(r.contact_email);
-        if(em && suppSet.has(em)){ suppressed++; return; }
-        let match=null;
-        if(em && byEmail[em]) match=byEmail[em];
-        else if(!em && (r.company||r.website)) match=byCW[nrm(r.company)+'|'+nrm(r.website)]||null;
-        if(match){ dups.push({rec:r,existing:match}); } else { toInsert.push(r); reg(r); } });
-      let inserted=0;
-      if(toInsert.length){ const {error}=await sb.from('sales_leads').insert(toInsert); if(error){ setMsg('Fehler beim Einfügen: '+error.message); setBusy(false); e.target.value=''; return; } inserted=toInsert.length; }
-      setUpSum({neu:inserted,dubletten:dups.length,unterdrueckt:suppressed,dups}); await load();
-    }catch(err){ setMsg('Datei-Fehler: '+((err&&err.message)||err)); } setBusy(false); e.target.value='';
+      if(!best || !best.columns.length){ setMsg('Keine Tabelle mit Spalten gefunden.'); setBusy(false); e.target.value=''; return; }
+      const sig=best.columns.map(nk).filter(Boolean).sort().join('|');
+      // Keine Doppelbelegung: eine Spalte wird nur einem Feld vorgeschlagen. Firma vor Name, damit „Firmenname" zur Firma geht.
+      const used=new Set(); const guess=cands=>{ for(const col of best.columns){ if(used.has(col)) continue; const c=nk(col); if(c&&cands.some(x=>c.includes(x))){ used.add(col); return col; } } return ''; };
+      let mapping={ company:guess(['company','firma','firmen','unternehmen','account']), contact_email:guess(['email','mail']), website:guess(['website','webseite','url','domain','web']), industry:guess(['industry','branche','sektor','sector']), contact_name:guess(['ansprech','kontakt','contact','vorname','nachname','name']), contact_role:guess(['position','titel','funktion','rolle','roll','role','title']) };
+      let remembered=false;
+      try{ const {data}=await sb.from('sales_upload_maps').select('mapping').eq('signature',sig).maybeSingle(); if(data&&data.mapping&&typeof data.mapping==='object'){ mapping={...mapping,...data.mapping}; remembered=true; } }catch(_e){}
+      setBusy(false); setMapState({columns:best.columns, rows:best.rows, signature:sig, mapping, remembered});
+    }catch(err){ setMsg('Datei-Fehler: '+((err&&err.message)||err)); setBusy(false); } e.target.value='';
+  };
+  // Schritt 2: aus der bestätigten Zuordnung Datensätze bauen, Zuordnung je Dateiart merken, dann ingest.
+  const doImport=async()=>{ if(!mapState) return; setBusy(true); setMsg(''); const m=mapState.mapping;
+    const val=(row,col)=>{ if(!col) return null; const v=row[col]; return (v==null||String(v).trim()==='')?null:String(v).trim(); };
+    const recs=mapState.rows.map(row=>({ company:val(row,m.company), website:val(row,m.website), industry:val(row,m.industry), contact_name:val(row,m.contact_name), contact_email:val(row,m.contact_email), contact_role:val(row,m.contact_role), source:'list', created_by:team.user_id })).filter(x=>x.company||x.contact_email);
+    if(!recs.length){ setMsg('Nach der Zuordnung keine Zeilen mit Firma oder E-Mail. Bitte mindestens eine der beiden Spalten zuordnen.'); setBusy(false); return; }
+    try{ await sb.from('sales_upload_maps').upsert({signature:mapState.signature, mapping:m, sample_headers:mapState.columns.join(', '), updated_at:new Date().toISOString()},{onConflict:'signature'}); }catch(_e){}
+    setMapState(null); await ingestRecs(recs); setBusy(false);
+  };
+  // Wie eine Datenbank: Bestand ergänzen, Dubletten erkennen (Mail, ersatzweise Firma+Website), Unterdrückte überspringen.
+  const ingestRecs=async(recs)=>{
+    const nrm=s=>String(s||'').trim().toLowerCase();
+    const [er,sr]=await Promise.all([
+      sb.from('sales_leads').select('id,contact_email,company,website,industry,contact_name,contact_role,source'),
+      sb.from('sales_suppression').select('email')]);
+    const suppSet=new Set((sr.data||[]).map(x=>nrm(x.email)));
+    const byEmail={}, byCW={};
+    const reg=(l)=>{ const em=nrm(l.contact_email); if(em) byEmail[em]=l; if(l.company||l.website) byCW[nrm(l.company)+'|'+nrm(l.website)]=l; };
+    (er.data||[]).forEach(reg);
+    const toInsert=[], dups=[]; let suppressed=0;
+    recs.forEach(r=>{ const em=nrm(r.contact_email);
+      if(em && suppSet.has(em)){ suppressed++; return; }
+      let match=null;
+      if(em && byEmail[em]) match=byEmail[em];
+      else if(!em && (r.company||r.website)) match=byCW[nrm(r.company)+'|'+nrm(r.website)]||null;
+      if(match){ dups.push({rec:r,existing:match}); } else { toInsert.push(r); reg(r); } });
+    let inserted=0;
+    if(toInsert.length){ const {error}=await sb.from('sales_leads').insert(toInsert); if(error){ setMsg('Fehler beim Einfügen: '+error.message); return; } inserted=toInsert.length; }
+    setUpSum({neu:inserted,dubletten:dups.length,unterdrueckt:suppressed,dups}); await load();
   };
   const dupPatch=(d)=>{ const ex=d.existing,r=d.rec,p={}; ['company','website','industry','contact_name','contact_email','contact_role'].forEach(k=>{ if((!ex[k]||String(ex[k]).trim()==='')&&r[k]) p[k]=r[k]; }); return p; };
   const enrichDup=async(i)=>{ if(!upSum) return; const d=upSum.dups[i]; const p=dupPatch(d);
@@ -42068,7 +42082,7 @@ function AkquiseView({team, tab}){
       </div>}
       <div style={{border:'1px solid var(--border)',borderRadius:12,padding:14}}>
         <div style={{fontWeight:800,fontSize:14,marginBottom:4}}>📄 Liste hochladen</div>
-        <div style={{fontSize:12,color:'var(--muted)',marginBottom:8}}>CSV oder Excel. Erkannt werden Spalten wie Firma, Name, E-Mail, Position, Website, Branche. Der Bestand wird ergänzt, Dubletten (über die Mailadresse, ersatzweise Firma und Website) werden erkannt und angezeigt statt doppelt angelegt.</div>
+        <div style={{fontSize:12,color:'var(--muted)',marginBottom:8}}>CSV oder Excel, beliebige Spaltennamen. Nach dem Hochladen ordnest du die Spalten den Feldern zu (mit Vorschau), das wird je Dateiart gemerkt. Der Bestand wird ergänzt, Dubletten (über die Mailadresse, ersatzweise Firma und Website) werden erkannt statt doppelt angelegt.</div>
         <input type="file" accept=".csv,.xlsx,.xls" disabled={busy} onChange={onFile}/>
       </div>
       <div style={{border:'1px solid var(--border)',borderRadius:12,padding:14}}>
@@ -42206,6 +42220,35 @@ function AkquiseView({team, tab}){
         <input type="number" value={fit.growth_bonus!=null?fit.growth_bonus:''} onChange={e=>setFit(f=>({...f,growth_bonus:Number(e.target.value)||0}))} style={{...inp,maxWidth:120}}/>
         <div><button onClick={saveFit} disabled={busy} style={{marginTop:16,padding:'8px 16px',border:'none',borderRadius:8,cursor:busy?'default':'pointer',fontSize:13,fontWeight:700,background:busy?'var(--surface-2)':'var(--blue)',color:busy?'var(--muted)':'#fff'}}>Fit-Modell speichern</button></div>
       </div>}
+    </div>}
+    {mapState && <div onClick={()=>{ if(!busy){ setMapState(null); setMsg(''); } }} style={{position:'fixed',inset:0,zIndex:1100,background:'rgba(2,10,16,.5)',display:'flex',alignItems:'flex-start',justifyContent:'center',padding:'40px 16px',overflowY:'auto'}}>
+      <div onClick={e=>e.stopPropagation()} style={{background:'var(--card)',border:'1px solid var(--border)',borderRadius:16,width:740,maxWidth:'100%',padding:20}}>
+        <div style={{fontSize:17,fontWeight:800,marginBottom:2}}>Spalten zuordnen</div>
+        <div style={{fontSize:12.5,color:'var(--muted)',marginBottom:14}}>{mapState.rows.length} Zeile{mapState.rows.length===1?'':'n'} gefunden. Ordne die Spalten deiner Datei den Feldern zu. {mapState.remembered?'Gemerkte Zuordnung dieser Dateiart wurde angewendet, du kannst sie anpassen.':'Was erkannt wurde, ist vorgeschlagen, ergänz den Rest.'}</div>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px 14px',marginBottom:16}}>
+          {[['company','Firma'],['contact_email','E-Mail'],['website','Website'],['industry','Branche'],['contact_name','Ansprechpartner'],['contact_role','Position']].map(([key,lbl])=>
+            <div key={key}>
+              <div style={{fontSize:12,color:'var(--muted)',marginBottom:3}}>{lbl}{(key==='company'||key==='contact_email')?' *':''}</div>
+              <select value={mapState.mapping[key]||''} onChange={ev=>{ const v=ev.target.value; setMapState(s=>({...s,mapping:{...s.mapping,[key]:v}})); }} style={{...inp,width:'100%'}}>
+                <option value="">— keine —</option>
+                {mapState.columns.map((c,i)=><option key={i} value={c}>{c}</option>)}
+              </select>
+            </div>)}
+        </div>
+        <div style={{fontSize:11,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.04em',marginBottom:6}}>Vorschau (erste 5 Zeilen)</div>
+        <div style={{overflowX:'auto',border:'1px solid var(--border)',borderRadius:10,marginBottom:16}}>
+          <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+            <thead><tr>{mapState.columns.map((c,i)=>{ const tgt=Object.keys(mapState.mapping).find(k=>mapState.mapping[k]===c); const tl={company:'Firma',contact_email:'E-Mail',website:'Website',industry:'Branche',contact_name:'Name',contact_role:'Position'}[tgt];
+              return <th key={i} style={{padding:'6px 8px',textAlign:'left',borderBottom:'1px solid var(--border)',whiteSpace:'nowrap',background:tgt?'var(--blue-bg)':'var(--surface-2)'}}><div style={{fontWeight:700}}>{c}</div>{tl&&<div style={{fontSize:10,color:'var(--blue)',fontWeight:700}}>→ {tl}</div>}</th>; })}</tr></thead>
+            <tbody>{mapState.rows.slice(0,5).map((row,ri)=><tr key={ri} style={{borderTop:'1px solid var(--border)'}}>{mapState.columns.map((c,ci)=><td key={ci} style={{padding:'5px 8px',whiteSpace:'nowrap',maxWidth:180,overflow:'hidden',textOverflow:'ellipsis'}}>{String(row[c]==null?'':row[c])}</td>)}</tr>)}</tbody>
+          </table>
+        </div>
+        {msg&&<div style={{marginBottom:10,fontSize:12.5,fontWeight:600,color:'var(--red)'}}>{msg}</div>}
+        <div style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
+          <button onClick={()=>{ setMapState(null); setMsg(''); }} disabled={busy} style={{border:'1px solid var(--border)',background:'var(--card)',color:'var(--text)',borderRadius:8,padding:'8px 16px',fontSize:13,fontWeight:600,cursor:busy?'default':'pointer'}}>Abbrechen</button>
+          <button onClick={doImport} disabled={busy||(!mapState.mapping.company&&!mapState.mapping.contact_email)} style={{border:'none',borderRadius:8,padding:'8px 16px',fontSize:13,fontWeight:700,cursor:(busy||(!mapState.mapping.company&&!mapState.mapping.contact_email))?'default':'pointer',background:(busy||(!mapState.mapping.company&&!mapState.mapping.contact_email))?'var(--surface-2)':'var(--blue)',color:(busy||(!mapState.mapping.company&&!mapState.mapping.contact_email))?'var(--muted)':'#fff'}}>{busy?'Importiert…':'Importieren'}</button>
+        </div>
+      </div>
     </div>}
     {sel && <div onClick={()=>setSel(null)} style={{position:'fixed',inset:0,zIndex:1000,background:'rgba(2,10,16,.5)',display:'flex',alignItems:'flex-start',justifyContent:'center',padding:'40px 16px',overflowY:'auto'}}>
       <div onClick={e=>e.stopPropagation()} style={{background:'var(--card)',border:'1px solid var(--border)',borderRadius:16,width:560,maxWidth:'100%',padding:20}}>
