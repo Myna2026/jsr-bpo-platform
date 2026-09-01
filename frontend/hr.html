@@ -7121,7 +7121,7 @@ function Widget_TrainingStatus({plans}){
 // So bleibt der Urlaub sichtbar (Urlauber stehen nicht im Plan → über Kapazität), und je gepflegter der
 // Plan, desto mehr wandert der Nenner Richtung Plan-Stunden — ohne dass jemand etwas umstellt.
 // VERLÄSSLICHKEIT je Zeile über den Plan-Anteil am Nenner: >=80% „Plan", <20% „Kapazität", sonst „gemischt".
-function Widget_KrankUrlaubQuote({employees, projects, mobile, selY, selM0, selKw, selKwYear}){
+function Widget_KrankUrlaubQuote({employees, projects, mobile, selY, selM0, selKw, selKwYear, range}){
   const isoD=isoLocal;
   const addDays=(d,n)=>{ const x=new Date(d.getFullYear(),d.getMonth(),d.getDate()); x.setDate(x.getDate()+n); return x; };
   const mondayOf=d=>{ const x=new Date(d.getFullYear(),d.getMonth(),d.getDate()); x.setDate(x.getDate()-((x.getDay()+6)%7)); return x; };
@@ -7139,13 +7139,23 @@ function Widget_KrankUrlaubQuote({employees, projects, mobile, selY, selM0, selK
   React.useEffect(()=>{ setSel(wkey(_defW)); },[selY,selM0,selKw,selKwYear]);   // Monats-/KW-Wechsel -> Woche folgt
   const availWeeks=(()=>{ const a=[]; const base=mondayOf(_useDate); for(let i=0;i<12;i++){ const d=addDays(base,-7*i); a.push(getISOWeek(d)); } return a; })();
   const wLabel=w=>'KW '+w.kw+(w.year!==today.getFullYear()?('/'+String(w.year).slice(2)):'');
-  const [_sy,_sk]=sel.split('-').map(Number);
-  const selMon=mondayOf(isoWeekMonday(_sy,_sk)); const prevMon=addDays(selMon,-7); const selEnd=addDays(selMon,6);
-  const selWLabel=wLabel(getISOWeek(selMon));
-  const rangeStart=isoD(prevMon), rangeEnd=isoD(selEnd);
   const daysBetween=(a,b)=>{ const out=[]; let d=new Date(a.getFullYear(),a.getMonth(),a.getDate()); const e=new Date(b.getFullYear(),b.getMonth(),b.getDate()); while(d<=e){ out.push({ds:isoD(d),dow:d.getDay()}); d=addDays(d,1); } return out; };
-  const prevDays=daysBetween(prevMon, addDays(selMon,-1));   // Vergleichswoche (davor), Mo–So
-  const curDays=daysBetween(selMon, selEnd);                 // gewählte Woche, Mo–So
+  const _fmtDR=s=>{ const p=String(s||'').split('-'); return p.length===3?(Number(p[2])+'.'+Number(p[1])+'.'):s; };
+  // Freier Zeitraum (Datum bis Datum) rechnet tagesgenau über genau diese Tage; Vergleich = gleich langer Zeitraum davor.
+  // Sonst: gewählte Woche (KW-Dropdown) vs. Vorwoche. tally() aggregiert beliebige Tagesmengen — echte Zahlen für 12.–24.
+  const _useRange=!!(range&&range.from&&range.to);
+  let selWLabel, rangeStart, rangeEnd, prevDays, curDays;
+  if(_useRange){ const rF=new Date(range.from+'T00:00:00'), rT=new Date(range.to+'T00:00:00');
+    const d0=new Date(rF.getFullYear(),rF.getMonth(),rF.getDate()), d1=new Date(rT.getFullYear(),rT.getMonth(),rT.getDate());
+    const len=Math.max(1,Math.round((d1-d0)/864e5)+1); const pT=addDays(rF,-1), pF=addDays(rF,-len);
+    selWLabel=_fmtDR(range.from)+'–'+_fmtDR(range.to); rangeStart=isoD(pF); rangeEnd=isoD(rT);
+    prevDays=daysBetween(pF,pT); curDays=daysBetween(rF,rT);
+  } else {
+    const [_sy,_sk]=sel.split('-').map(Number);
+    const selMon=mondayOf(isoWeekMonday(_sy,_sk)); const selEnd=addDays(selMon,6); const prevMon=addDays(selMon,-7);
+    selWLabel=wLabel(getISOWeek(selMon)); rangeStart=isoD(prevMon); rangeEnd=isoD(selEnd);
+    prevDays=daysBetween(prevMon, addDays(selMon,-1)); curDays=daysBetween(selMon, selEnd);
+  }
 
   // Geplante Netto-Stunden je (MA, Tag) aus shift_assignments — Ableitung wie im Weg-A-Code (cell.net
   // bzw. shiftHours(value).net), keine zweite Logik.
@@ -7218,7 +7228,7 @@ function Widget_KrankUrlaubQuote({employees, projects, mobile, selY, selM0, selK
     const main=rate(feat.w,kind), hi=maxV>0 && main>=maxV-EPS;
     let arrow=null, acol='var(--muted)', atitle='';
     if(feat.other){ const o=rate(feat.other,kind); const d=o-main; arrow=d>TREND?'↑':d<-TREND?'↓':'→';
-      acol=arrow==='↑'?'var(--amber)':arrow==='↓'?'var(--green)':'var(--muted)'; atitle=' · Vorwoche '+pct(o)+'%'; }
+      acol=arrow==='↑'?'var(--amber)':arrow==='↓'?'var(--green)':'var(--muted)'; atitle=' · zuvor '+pct(o)+'%'; }
     return (
       <div style={{flex:1,textAlign:'center',padding:'8px 6px',borderRadius:10,background:hi?'var(--amber-bg)':'var(--surface-2)',border:'1px solid '+(hi?'var(--amber)':'var(--border)')}} title={feat.tag+' '+pct(main)+'%'+atitle}>
         <div style={{fontSize:10.5,color:'var(--muted)',fontWeight:600}}>{icon} {label}</div>
@@ -7228,9 +7238,11 @@ function Widget_KrankUrlaubQuote({employees, projects, mobile, selY, selM0, selK
   }
 
   return <div>
-    <div style={{display:'flex',justifyContent:'flex-end',marginBottom:10}}>
-      <label style={{display:'inline-flex',alignItems:'center',gap:6,fontSize:11,color:'var(--muted)',fontWeight:700}}>KW <select value={sel} onChange={e=>setSel(e.target.value)} style={{padding:'3px 7px',border:'1px solid var(--border)',borderRadius:7,fontSize:11.5,fontWeight:700,background:'var(--card)',color:'var(--text)'}}>{availWeeks.map(w=><option key={wkey(w)} value={wkey(w)}>{wLabel(w)}</option>)}</select></label>
-    </div>
+    {_useRange
+      ? <div style={{display:'flex',justifyContent:'flex-end',marginBottom:10,fontSize:11,color:'var(--muted)',fontWeight:700}}>Zeitraum {selWLabel}</div>
+      : <div style={{display:'flex',justifyContent:'flex-end',marginBottom:10}}>
+          <label style={{display:'inline-flex',alignItems:'center',gap:6,fontSize:11,color:'var(--muted)',fontWeight:700}}>KW <select value={sel} onChange={e=>setSel(e.target.value)} style={{padding:'3px 7px',border:'1px solid var(--border)',borderRadius:7,fontSize:11.5,fontWeight:700,background:'var(--card)',color:'var(--text)'}}>{availWeeks.map(w=><option key={wkey(w)} value={wkey(w)}>{wLabel(w)}</option>)}</select></label>
+        </div>}
     <div style={{display:'grid',gridTemplateColumns:mobile?'1fr':'repeat(3,1fr)',gap:12}}>
       {rows.map((r,i)=>{ const rel=relTag(r.feat.w); return (
         <div key={i} style={{border:'1px solid var(--border)',borderRadius:12,padding:'11px 13px',background:'var(--card)',minWidth:0}}>
@@ -7247,7 +7259,7 @@ function Widget_KrankUrlaubQuote({employees, projects, mobile, selY, selM0, selK
         </div>
       ); })}
     </div>
-    <div style={{fontSize:10,color:'var(--muted)',marginTop:10,lineHeight:1.5}}>Ausfallzeit / Arbeitszeit; je Tag geplante Stunden, sonst Kapazität. Chip zeigt die Grundlage (Plan/gemischt/Kapazität). Wert der gewählten Woche; ↑↓ = Veränderung zur Vorwoche. Woche folgt dem Monat oben, hier fein wählbar. Höchste Werte hervorgehoben.</div>
+    <div style={{fontSize:10,color:'var(--muted)',marginTop:10,lineHeight:1.5}}>Ausfallzeit / Arbeitszeit; je Tag geplante Stunden, sonst Kapazität. Chip zeigt die Grundlage (Plan/gemischt/Kapazität). {_useRange?'Wert tagesgenau über den gewählten Zeitraum; ↑↓ = Veränderung zum gleich langen Zeitraum davor.':'Wert der gewählten Woche; ↑↓ = Veränderung zur Vorwoche. Woche folgt dem Monat oben, hier fein wählbar.'} Höchste Werte hervorgehoben.</div>
   </div>;
 }
 // Widget_Personalkosten entfernt (2026-07-27, Personalkosten komplett raus lt. Cockpit-Überarbeitung).
@@ -9511,14 +9523,18 @@ function Widget_DailyReports({employees, projects, team}){
 }
 // Monatsmetriken + Tagesverläufe fürs Cockpit (Desktop wie Mobile identisch). Krank/Urlaub = laufender Monat
 // (Werktags-Personentage je Tag), Kündigungen = termination_date im Monat, Bewerbungen = cv_date/cv_received_at (30 Tage).
-function cockpitMonthMetrics(employees, cvsDb, selYear, selM0){
+function cockpitMonthMetrics(employees, cvsDb, selYear, selM0, range){
   const MON=['Jan','Feb','Mär','Apr','Mai','Jun','Jul','Aug','Sep','Okt','Nov','Dez'];
-  // Monatsarrays (Krank/Urlaub/Kündigung) folgen dem gewählten Monat; die 30-Tage-CV-Kurve bleibt rollierend (now).
+  // Krank/Urlaub/Kündigung + Tageskurve folgen dem Fenster: freier Zeitraum (tagesgenau) ODER der gewählte Monat.
+  // Die 30-Tage-CV-Kurve bleibt rollierend (now), das ist ein eigener Bezug.
   const now=new Date(); const year=(selYear!=null)?selYear:now.getFullYear(); const todayM=(selM0!=null)?selM0:now.getMonth();
   const covers=(a,d)=>{ if(!a||!a.from) return false; const f=new Date(a.from+'T00:00:00'), t=new Date((a.to||a.from)+'T00:00:00'); return d>=f&&d<=t; };
   const sameDay=(x,d)=>x.getFullYear()===d.getFullYear()&&x.getMonth()===d.getMonth()&&x.getDate()===d.getDate();
   const cvDates=[].concat((cvsDb||[]).map(c=>c.cv_date),(employees||[]).filter(e=>e&&e.source==='cv').map(e=>e.cv_received_at)).map(x=>x?new Date(x):null).filter(d=>d&&!isNaN(d));
-  const lastDom=new Date(year,todayM+1,0).getDate(); const monDays=[]; for(let dd=1;dd<=lastDom;dd++) monDays.push(new Date(year,todayM,dd));
+  const _useRange=!!(range&&range.from&&range.to);
+  const winStart=_useRange?new Date(range.from+'T00:00:00'):new Date(year,todayM,1);
+  const winEnd=_useRange?new Date(range.to+'T00:00:00'):new Date(year,todayM+1,0);
+  const monDays=[]; { let d=new Date(winStart.getFullYear(),winStart.getMonth(),winStart.getDate()); const e=new Date(winEnd.getFullYear(),winEnd.getMonth(),winEnd.getDate()); let g=0; while(d<=e&&g<400){ monDays.push(new Date(d)); d.setDate(d.getDate()+1); g++; } }
   const monLabels=monDays.map(d=>d.getDate()+'. '+MON[d.getMonth()]);
   const dSick=monDays.map(d=>(employees||[]).filter(e=>empWorksDay(e,d)&&(e.absences||[]).some(a=>a&&a.type==='sick'&&covers(a,d))).length);
   const dVac=monDays.map(d=>(employees||[]).filter(e=>empWorksDay(e,d)&&(e.absences||[]).some(a=>a&&a.type==='vacation'&&covers(a,d))).length);
@@ -9526,9 +9542,10 @@ function cockpitMonthMetrics(employees, cvsDb, selYear, selM0){
   const days30=[]; { const b=new Date(); b.setHours(0,0,0,0); for(let i=29;i>=0;i--){ const d=new Date(b); d.setDate(b.getDate()-i); days30.push(d); } }
   const labels30=days30.map(d=>d.getDate()+'. '+MON[d.getMonth()]);
   const dCv=days30.map(d=>cvDates.filter(x=>sameDay(x,d)).length);
-  const absMon=(a,e)=>{ if(!a||!a.from) return 0; const from=new Date(a.from+'T00:00:00'), to=new Date((a.to||a.from)+'T00:00:00'); const ms=new Date(year,todayM,1), me=new Date(year,todayM+1,0); let s=from<ms?ms:from, ee=to>me?me:to; if(s>ee) return 0; let n=0,g=0,d=new Date(s.getFullYear(),s.getMonth(),s.getDate()); const end=new Date(ee.getFullYear(),ee.getMonth(),ee.getDate()); while(d<=end&&g<400){ if(empWorksDay(e,d))n++; d.setDate(d.getDate()+1); g++; } return n; };
+  const absMon=(a,e)=>{ if(!a||!a.from) return 0; const from=new Date(a.from+'T00:00:00'), to=new Date((a.to||a.from)+'T00:00:00'); let s=from<winStart?winStart:from, ee=to>winEnd?winEnd:to; if(s>ee) return 0; let n=0,g=0,d=new Date(s.getFullYear(),s.getMonth(),s.getDate()); const end=new Date(ee.getFullYear(),ee.getMonth(),ee.getDate()); while(d<=end&&g<400){ if(empWorksDay(e,d))n++; d.setDate(d.getDate()+1); g++; } return n; };
   let krankM=0,urlaubM=0; (employees||[]).forEach(e=>{ if(!e||String(e.status||'').startsWith('terminated')||e.status==='inactive') return; (e.absences||[]).forEach(a=>{ if(a&&a.type==='sick')krankM+=absMon(a,e); else if(a&&a.type==='vacation'&&a.approved!==false)urlaubM+=absMon(a,e); }); });
-  const kuendM=(employees||[]).filter(e=>{ const td=e&&e.termination_date; if(!td) return false; const d=new Date(td); return d.getFullYear()===year&&d.getMonth()===todayM; }).length;
+  const _we=new Date(winEnd.getFullYear(),winEnd.getMonth(),winEnd.getDate()); const _ws=new Date(winStart.getFullYear(),winStart.getMonth(),winStart.getDate());
+  const kuendM=(employees||[]).filter(e=>{ const td=e&&e.termination_date; if(!td) return false; const d=new Date(td); const dO=new Date(d.getFullYear(),d.getMonth(),d.getDate()); return dO>=_ws&&dO<=_we; }).length;
   return {monLabels,dSick,dVac,dKuend,labels30,dCv,krankM,urlaubM,kuendM};
 }
 function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence, cvsDb, payslipsDb, feedbackTodayDb, setEmployees, showToast, monthOff, setMonthOff}){
@@ -9987,11 +10004,13 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
     _pLabel='KW '+ckP.kw+'/'+String(ckP.kwYear).slice(2); const cur=getISOWeek(_pmNow); _isCur=(ckP.kw===cur.kw&&ckP.kwYear===cur.year); }
   else if(ckP.mode==='range'){ const df=new Date(ckP.from+'T00:00:00'); _selY=df.getFullYear(); _selM0=df.getMonth();
     _pLabel=_fmtD(ckP.from)+' – '+_fmtD(ckP.to); const spansM=(ckP.from||'').slice(0,7)!==(ckP.to||'').slice(0,7);
-    _rangeNote='Marge/Kosten beziehen sich auf '+df.toLocaleDateString('de-DE',{month:'long',year:'numeric'})+(spansM?' (der Zeitraum umfasst mehrere Monate)':'')+', KPIs je ganze Woche.'; }
+    _rangeNote='Krank-/Urlaubsquote und Soll-Stunden rechnen tagesgenau über den Zeitraum. Marge/Kosten monatsbezogen ('+df.toLocaleDateString('de-DE',{month:'long',year:'numeric'})+(spansM?', Zeitraum umfasst mehrere Monate':'')+'), KPIs je ganze Woche.'; }
   else if(ckP.mode==='monat'){ const [y,m]=ckP.ym.split('-').map(Number); _selY=y; _selM0=m-1;
     _pLabel=new Date(y,m-1,1).toLocaleDateString('de-DE',{month:'long',year:'numeric'}); _isCur=(y===_pmNow.getFullYear()&&m-1===_pmNow.getMonth()); }
   else { _selY=_pmNow.getFullYear(); _selM0=_pmNow.getMonth(); _isCur=true; }   // 'aktuell'
   const _cockpitYm = _selY+'-'+String(_selM0+1).padStart(2,'0');
+  const _selRange = (ckP.mode==='range' && ckP.from && ckP.to) ? {from:ckP.from,to:ckP.to} : null;   // tagesgenauer Zeitraum
+  const _subKrank = _isCur?'laufender Monat':(_selRange?_pLabel:new Date(_selY,_selM0,1).toLocaleDateString('de-DE',{month:'long',year:'numeric'}));   // Bezugs-Label für Krank/Urlaub-Kacheln
   const _ownRef=(txt)=> _isCur?null:<div style={{fontSize:11,color:'var(--muted)',fontStyle:'italic',marginBottom:6}}>{txt||'Bezieht sich auf heute, folgt dem Zeitraum nicht.'}</div>;
   const _shiftMonth=(d)=>{ const b=ckP.mode==='monat'?(()=>{const[y,m]=ckP.ym.split('-').map(Number);return new Date(y,m-1+d,1);})():new Date(_selY,_selM0+d,1); setCkP({mode:'monat',ym:b.getFullYear()+'-'+String(b.getMonth()+1).padStart(2,'0')}); };
   const _shiftKw=(d)=>{ const w=(ckP.mode==='kw')?{kw:ckP.kw,year:ckP.kwYear}:getISOWeek(_pmNow); const mon=isoWeekMonday(w.year,w.kw); const nw=getISOWeek(new Date(mon.getFullYear(),mon.getMonth(),mon.getDate()+7*d)); setCkP({mode:'kw',kw:nw.kw,kwYear:nw.year}); };
@@ -10025,7 +10044,7 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
   {
     const _role=cockpitRoleOf(team);   // rollenabhängige Standard-Reihenfolge/Ausblendung je Rolle
     // M (Monatsmetriken) MUSS vor cveingang/tiles6 stehen — beide nutzen M.dCv/M.krankM. Sonst TDZ (Cockpit-Crash).
-    const M=cockpitMonthMetrics(employees, cvsDb, _selY, _selM0);
+    const M=cockpitMonthMetrics(employees, cvsDb, _selY, _selM0, _selRange);
     // Gepinnt: eigene offene Tagesaufgaben (Katalog) — der Grund, morgens hinzuschauen.
     const tasksNode = <CockpitTasksBlock team={team} projects={projects} onNavigate={onNavigate}/>;
     const wblock=(key,node,note)=>{ const _wag=WIDGET_AGENT[key]; return <div className="card" style={{marginBottom:14,overflow:'hidden'}}>
@@ -10080,7 +10099,7 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
         {todayAbsent.map(e=>(<div key={e.id} style={{fontSize:12,display:'flex',gap:8,padding:'3px 0'}}><span style={{color:'#ef4444'}}>●</span><span>{e.first_name} {e.last_name}</span><span style={{marginLeft:'auto',color:'var(--muted)',fontSize:11}}>Krank</span></div>))}
         {todayVac.map(e=>(<div key={e.id} style={{fontSize:12,display:'flex',gap:8,padding:'3px 0'}}><span style={{color:'#d97706'}}>●</span><span>{e.first_name} {e.last_name}</span><span style={{marginLeft:'auto',color:'var(--muted)',fontSize:11}}>Urlaub</span></div>))}
       </div> : null}
-      <div style={{padding:14}}><Widget_KrankUrlaubQuote employees={employees} projects={projects} selY={_selY} selM0={_selM0} selKw={_selKw} selKwYear={_selKwYear}/></div>
+      <div style={{padding:14}}><Widget_KrankUrlaubQuote employees={employees} projects={projects} selY={_selY} selM0={_selM0} selKw={_selKw} selKwYear={_selKwYear} range={_selRange}/></div>
     </div>);
     const _cMonths=parseInt(localStorage.getItem('jsr_contract_reminder_months')||'1'); const _tdy=new Date(); const _cut=new Date(_tdy); _cut.setMonth(_cut.getMonth()+_cMonths);
     const _expiring=employees.filter(e=>{const ce=e.contract?.end||e.contract_end; if(!ce||e.status==='terminated'||e.status==='inactive') return false; const end=new Date(ce); return end>=_tdy&&end<=_cut;}).sort((a,b)=>new Date(a.contract?.end||a.contract_end)-new Date(b.contract?.end||b.contract_end));
@@ -10095,9 +10114,9 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
     const tiles6=[
       {val:active.length,label:'Aktiv',sub:'Mitarbeiter',color:'#0F5661'},
       {val:inTraining.length,label:'Schulung',sub:'Mitarbeiter',color:'#7c3aed'},
-      {val:M.krankM,label:'Krankheitstage',sub:'laufender Monat',color:'#dc2626',daily:M.dSick,labels:M.monLabels,fmt:_uPer},
-      {val:M.urlaubM,label:'Urlaubstage',sub:'laufender Monat',color:'#d97706',daily:M.dVac,labels:M.monLabels,fmt:_uPer},
-      {val:M.kuendM,label:'Kündigungen',sub:'laufender Monat',color:'#b91c1c',daily:M.dKuend,labels:M.monLabels,fmt:_uKu},
+      {val:M.krankM,label:'Krankheitstage',sub:_subKrank,color:'#dc2626',daily:M.dSick,labels:M.monLabels,fmt:_uPer},
+      {val:M.urlaubM,label:'Urlaubstage',sub:_subKrank,color:'#d97706',daily:M.dVac,labels:M.monLabels,fmt:_uPer},
+      {val:M.kuendM,label:'Kündigungen',sub:_subKrank,color:'#b91c1c',daily:M.dKuend,labels:M.monLabels,fmt:_uKu},
       {val:inbox.length,label:'Bewerbungen',sub:'ungesichtet',color:'#6366f1',nav:'kanban',daily:M.dCv,labels:M.labels30,fmt:_uCv},
     ];
     // S1b: Block-Registry — Reihenfolge + Aus-/Einblenden per User (Drag im Bearbeiten-Modus).
