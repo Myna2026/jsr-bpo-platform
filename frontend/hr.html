@@ -37696,9 +37696,14 @@ function BrunoHelpdesk({view, team, onNavigate}){
   const [input,setInput]=useState('');
   const [busy,setBusy]=useState(false);
   const [handoffDone,setHandoffDone]=useState(false);
+  const [orbitOn,setOrbitOn]=useState(null);   // Kranz an? Dann lebt Bruno dort; nur wenn AUS, eigener Knopf (Rückfall)
   const scrollRef=React.useRef(null);
   const acc=(typeof AI_AGENTS!=='undefined'&&AI_AGENTS&&AI_AGENTS.bruno&&AI_AGENTS.bruno.accent)||'#5f8168';
   useEffect(()=>{ if(open&&scrollRef.current) scrollRef.current.scrollTop=scrollRef.current.scrollHeight; },[msgs,open]);
+  useEffect(()=>{ let a=true; loadMyAgentPrefs().then(p=>{ if(a) setOrbitOn(!p||p.orbit!==false); }).catch(()=>{ if(a) setOrbitOn(false); }); return ()=>{a=false;}; },[]);
+  const openPanel=()=>{ setOpen(true); setMsgs(m=>m.length?m:[{role:'bruno',text:'Ich bin Bruno. Sag mir, wo es klemmt, oder was gerade nicht geht. Ich schau, woran es liegt.'}]); };
+  // Aus dem Kranz (siebter Kollege) angetippt → Hilfe am Ort öffnen.
+  useEffect(()=>{ const h=()=>openPanel(); window.addEventListener('bruno-open',h); return ()=>window.removeEventListener('bruno-open',h); },[]);
   const buildCtx=()=>{ try{
     const area=view; const cat=(MENU_BADGE_MAIN_ITEMS||[]).find(x=>x.key===area);
     const permArea=PERM_AREA_OF_KEY[area]||null;
@@ -37726,8 +37731,11 @@ function BrunoHelpdesk({view, team, onNavigate}){
       setMsgs(m=>[...m,{role:'bruno', text: ok?'Ich habe die Lage gesammelt und ans Management übergeben. Du bekommst Bescheid, wenn es behoben ist.':'Die Übergabe hat nicht geklappt. Versuch es später noch einmal.'}]);
     }catch(e){ setMsgs(m=>[...m,{role:'bruno',text:'Die Übergabe hat nicht geklappt.'}]); }
     setBusy(false); };
-  if(!open) return <button onClick={()=>{ setOpen(true); if(!msgs.length) setMsgs([{role:'bruno',text:'Ich bin Bruno. Sag mir, wo es klemmt, oder was gerade nicht geht. Ich schau, woran es liegt.'}]); }}
-    title="Bruno · Hilfe am Ort" style={{position:'fixed',left:18,bottom:18,zIndex:1200,width:52,height:52,borderRadius:'50%',border:'2px solid '+acc,background:'var(--card)',cursor:'pointer',boxShadow:'0 6px 20px rgba(0,0,0,.22)',display:'flex',alignItems:'center',justifyContent:'center'}}><AgentGlyph agentKey="bruno" size={30} color={acc} live={true}/></button>;
+  // Eigener Knopf NUR als Rückfall, wenn der Kranz aus ist. Ist der Kranz an, sitzt Bruno dort als siebter Kollege.
+  if(!open) return orbitOn===false
+    ? <button onClick={openPanel}
+        title="Bruno · Hilfe am Ort" style={{position:'fixed',left:18,bottom:18,zIndex:1200,width:52,height:52,borderRadius:'50%',border:'2px solid '+acc,background:'var(--card)',cursor:'pointer',boxShadow:'0 6px 20px rgba(0,0,0,.22)',display:'flex',alignItems:'center',justifyContent:'center'}}><AgentGlyph agentKey="bruno" size={30} color={acc} live={true}/></button>
+    : null;
   return <div style={{position:'fixed',left:18,bottom:18,zIndex:1200,width:'min(360px,calc(100vw - 36px))',maxHeight:'70vh',display:'flex',flexDirection:'column',background:'var(--card)',border:'1px solid var(--border)',borderRadius:16,boxShadow:'0 12px 40px rgba(0,0,0,.28)',overflow:'hidden'}}>
     <div style={{display:'flex',alignItems:'center',gap:10,padding:'11px 14px',background:acc,color:'#fff'}}>
       <span style={{width:32,height:32,borderRadius:'50%',border:'2px solid rgba(255,255,255,.65)',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}><AgentGlyph agentKey="bruno" size={19} color="#fff" live={true}/></span>
@@ -42093,7 +42101,13 @@ function AgentOrbit({team, isMobileW, onNavigate, here}){
   const [open,setOpen]=useState(false);
   const [hover,setHover]=useState(null);
   const [mobDetail,setMobDetail]=useState(null);   // Mobil: Kollege als Overlay an Ort und Stelle (kein View-Sprung)
+  const [brunoAlert,setBrunoAlert]=useState(false);   // Bruno leuchtet, wenn im aktuellen Bereich ein Fehler gefangen wurde
   useEffect(()=>{ let a=true; (async()=>{ const p=await loadMyAgentPrefs(); if(a) setPrefs(p||{}); })(); return ()=>{a=false;}; },[]);
+  useEffect(()=>{ const chk=()=>{ try{ const H=window.__HELP_CTX||{}; const now=Date.now();
+      const recentErr=(H.errors||[]).some(e=> (now-(e.at||0)<120000) && (!here || e.area===here));
+      const recentToast=H.toast && H.toastAt && (now-H.toastAt<120000);
+      setBrunoAlert(!!(recentErr||recentToast)); }catch(_e){} };
+    chk(); const t=setInterval(chk,8000); return ()=>clearInterval(t); },[here]);
   const load=React.useCallback(async()=>{ try{
     const cut=isoLocal(new Date(Date.now()-21*864e5));
     const {data}=await sb.from('agent_insights').select('agent_key,dismissed_at,acted_at,created_at').gte('created_at',cut);
@@ -42103,28 +42117,33 @@ function AgentOrbit({team, isMobileW, onNavigate, here}){
   useEffect(()=>{ load(); const t=setInterval(load,5*60000); return ()=>clearInterval(t); },[load]);
   if(prefs===undefined) return null;
   if(prefs && prefs.orbit===false) return null;                     // ausgeschaltet: „wer es nicht will, hat es nicht"
-  const agents=(typeof AGENT_ORDER!=='undefined'?AGENT_ORDER:Object.keys(AI_AGENTS)).filter(k=>AI_AGENTS[k]);
+  // Die sechs Kollegen + Bruno als siebter (Helfer am Ort). AGENT_ORDER bleibt unberührt (Galerie etc.).
+  const agents=[...((typeof AGENT_ORDER!=='undefined'?AGENT_ORDER:Object.keys(AI_AGENTS)).filter(k=>AI_AGENTS[k])), ...(AI_AGENTS.bruno?['bruno']:[])];
   if(!agents.length) return null;                                   // RLS blendet Maya für Nicht-Management aus
+  // „hat etwas": die sechs aus agent_insights, Bruno aus dem lokalen Fehler-Alarm.
+  const cnt=(k)=> k==='bruno' ? (brunoAlert?1:0) : (active[k]||0);
+  const glow=(k)=> cnt(k)>0;
   const total=Object.values(active).reduce((a,b)=>a+(b||0),0);
   // Welcher Kollege gehört zum aktuellen Bereich (für die Hervorhebung)? Spiegelt AGENT_CONTEXT aus agent-observe.
   const AGENT_VIEWS={ clara:['kanban','funnel','cvs','dubletten','bewerberlinks'], max:['daily_tasks','uploads','dataimport','vorschau'], anna:['nlquery','wissen_system','knowledge'], paul:['auswertung','praesentation','meetingnotes','vorschau','fcist'], maya:['useractivity'], lena:['datacheck','absences','urlaubantraege','employees'] };
   const hereAgent = agents.find(k=>(AGENT_VIEWS[k]||[]).includes(here))||null;
-  const glowing = agents.filter(k=>(active[k]||0)>0);
+  const glowing = agents.filter(glow);
   const onlyOne = glowing.length===1 ? glowing[0] : null;   // nur einer → Klick führt direkt zu ihm
   const nm=((team&&team.name)||'').trim();
   const initials=nm?nm.split(/\s+/).filter(Boolean).map(w=>w[0]).slice(0,2).join('').toUpperCase().slice(0,2):'ICH';
   // Mobil: Tipp öffnet den Kollegen direkt als Overlay (volle Zeile holen), Zurück bringt an dieselbe Stelle.
   // Desktop: wie gehabt in die AI-Kollegen-Ansicht mit geöffnetem Kollegen.
   const openMobile=async(k)=>{ try{ const {data}=await sb.from('ai_agents').select('*').eq('key',k).maybeSingle(); if(data) setMobDetail(data); }catch(e){} };
-  const go=(k)=>{ if(isMobileW){ openMobile(k); return; } setOpen(false); if(onNavigate) onNavigate({kind:'view',view:'agents',openAgent:k}); };
+  const go=(k)=>{ if(k==='bruno'){ setOpen(false); setMobDetail(null); try{ window.dispatchEvent(new CustomEvent('bruno-open')); }catch(_e){} return; }   // Bruno öffnet Hilfe am Ort, keine Profilseite
+    if(isMobileW){ openMobile(k); return; } setOpen(false); if(onNavigate) onNavigate({kind:'view',view:'agents',openAgent:k}); };
   const kf=<style>{"@keyframes orbGlow{0%{transform:scale(1);opacity:.55}100%{transform:scale(1.55);opacity:0}}@keyframes orbIn{from{opacity:0;transform:scale(.62)}to{opacity:1;transform:scale(1)}}"}</style>;
-  const face=(k,size)=>{ const a=AI_AGENTS[k]||{}; const acc=a.accent||'#0F5661'; const has=(active[k]||0)>0;
+  const face=(k,size)=>{ const a=AI_AGENTS[k]||{}; const acc=a.accent||'#0F5661'; const has=glow(k);
     return <div onMouseEnter={()=>setHover(k)} onMouseLeave={()=>setHover(h=>h===k?null:h)} onClick={(e)=>{e.stopPropagation();go(k);}}
       style={{position:'relative',width:size,height:size,cursor:'pointer',transition:'transform .15s',transform:hover===k?'scale(1.12)':'scale(1)'}}>
       {has&&<span style={{position:'absolute',inset:-5,borderRadius:'50%',border:'2px solid '+acc,animation:'orbGlow 1.8s ease-out infinite',pointerEvents:'none'}}/>}
       {k===hereAgent&&<span title="gehört zu diesem Bereich" style={{position:'absolute',inset:-6,borderRadius:'50%',border:'2px dashed '+acc,pointerEvents:'none'}}/>}
       <AgentAvatar agentKey={k} size={size} color={acc} live={false}/>
-      {has&&<span style={{position:'absolute',top:-3,right:-3,minWidth:15,height:15,borderRadius:8,background:'#dc2626',color:'#fff',fontSize:9.5,fontWeight:800,display:'flex',alignItems:'center',justifyContent:'center',border:'1.5px solid #fff',padding:'0 3px'}}>{active[k]}</span>}
+      {has&&<span style={{position:'absolute',top:-3,right:-3,minWidth:15,height:15,borderRadius:8,background:'#dc2626',color:'#fff',fontSize:9.5,fontWeight:800,display:'flex',alignItems:'center',justifyContent:'center',border:'1.5px solid #fff',padding:'0 3px'}}>{k==='bruno'?'!':cnt(k)}</span>}
     </div>;
   };
   // MOBIL: schmale Leiste am unteren Rand, gleiche Logik.
@@ -42138,7 +42157,7 @@ function AgentOrbit({team, isMobileW, onNavigate, here}){
     </React.Fragment>;
   }
   // DESKTOP: Kranz.
-  const R=96, C=150, F=46;
+  const R=96, C=150, F=46, STEP=360/agents.length;   // Winkelabstand dynamisch (jetzt sieben statt sechs)
   return <React.Fragment>{kf}
     {open && <div onClick={()=>setOpen(false)} style={{position:'fixed',inset:0,zIndex:1190}}/>}
     <div onMouseLeave={()=>setOpen(false)} style={{position:'fixed',right:22,bottom:22,zIndex:1200}}>
@@ -42152,7 +42171,7 @@ function AgentOrbit({team, isMobileW, onNavigate, here}){
                   <span style={{position:'absolute',inset:-3,borderRadius:'50%',border:'2px solid '+acc,animation:'orbGlow 1.8s ease-out infinite',pointerEvents:'none'}}/>
                   {k===hereAgent&&<span style={{position:'absolute',inset:-6,borderRadius:'50%',border:'2px dashed '+acc,pointerEvents:'none'}}/>}
                   <AgentAvatar agentKey={k} size={36} color={acc} live={false}/>
-                  <span style={{position:'absolute',top:-3,right:-3,minWidth:15,height:15,borderRadius:8,background:'#dc2626',color:'#fff',fontSize:9.5,fontWeight:800,display:'flex',alignItems:'center',justifyContent:'center',border:'1.5px solid #fff',padding:'0 3px'}}>{active[k]}</span>
+                  <span style={{position:'absolute',top:-3,right:-3,minWidth:15,height:15,borderRadius:8,background:'#dc2626',color:'#fff',fontSize:9.5,fontWeight:800,display:'flex',alignItems:'center',justifyContent:'center',border:'1.5px solid #fff',padding:'0 3px'}}>{k==='bruno'?'!':cnt(k)}</span>
                 </div>; })}
             </div>}
             <div style={{position:'relative',width:58,height:58,borderRadius:29,background:'#0F5661',color:'#fff',fontSize:14,fontWeight:800,display:'flex',alignItems:'center',justifyContent:'center',boxShadow:'0 10px 26px rgba(2,10,16,.32)',border:'2.5px solid #fff'}}>
@@ -42162,13 +42181,13 @@ function AgentOrbit({team, isMobileW, onNavigate, here}){
           </div>
         : <div style={{position:'relative',width:2*C,height:2*C,animation:'orbIn .18s ease-out'}}>
             <svg width={2*C} height={2*C} style={{position:'absolute',inset:0,pointerEvents:'none'}}>
-              {agents.map((k,i)=>{ const th=(-90+i*60)*Math.PI/180; const x=C+R*Math.cos(th), y=C+R*Math.sin(th);
+              {agents.map((k,i)=>{ const th=(-90+i*STEP)*Math.PI/180; const x=C+R*Math.cos(th), y=C+R*Math.sin(th);
                 return <line key={k} x1={C} y1={C} x2={x} y2={y} stroke="#cbd5e1" strokeWidth="1.2" opacity=".6"/>; })}
             </svg>
-            {agents.map((k,i)=>{ const th=(-90+i*60)*Math.PI/180; const x=C+R*Math.cos(th)-F/2, y=C+R*Math.sin(th)-F/2;
+            {agents.map((k,i)=>{ const th=(-90+i*STEP)*Math.PI/180; const x=C+R*Math.cos(th)-F/2, y=C+R*Math.sin(th)-F/2;
               return <div key={k} style={{position:'absolute',left:x,top:y}}>
                 {face(k,F)}
-                {hover===k && <div style={{position:'absolute',left:'50%',top:-25,transform:'translateX(-50%)',background:'#0f172a',color:'#fff',fontSize:11,fontWeight:700,padding:'3px 8px',borderRadius:7,whiteSpace:'nowrap',boxShadow:'0 4px 12px rgba(2,10,16,.3)',pointerEvents:'none'}}>{(AI_AGENTS[k]||{}).name||k}{(active[k]||0)>0?' · '+active[k]:''}</div>}
+                {hover===k && <div style={{position:'absolute',left:'50%',top:-25,transform:'translateX(-50%)',background:'#0f172a',color:'#fff',fontSize:11,fontWeight:700,padding:'3px 8px',borderRadius:7,whiteSpace:'nowrap',boxShadow:'0 4px 12px rgba(2,10,16,.3)',pointerEvents:'none'}}>{(AI_AGENTS[k]||{}).name||k}{cnt(k)>0?(k==='bruno'?' · Problem hier':' · '+cnt(k)):''}</div>}
               </div>; })}
             <div onClick={()=>setOpen(false)} title="Schließen" style={{position:'absolute',left:C-30,top:C-30,width:60,height:60,borderRadius:30,background:'#0F5661',color:'#fff',fontSize:14,fontWeight:800,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',boxShadow:'0 6px 18px rgba(2,10,16,.28)',border:'2.5px solid #fff'}}>{initials}</div>
           </div>}
