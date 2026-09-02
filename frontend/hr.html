@@ -1257,7 +1257,7 @@ const MENU_BADGE_MAIN_ITEMS = [
   {key:'cvs',label:'CVs & Bewerber'},{key:'bewerberlinks',label:'Bewerber-Links'},{key:'dubletten',label:'Dubletten'},{key:'showcase',label:'Showcases'},{key:'training_plans',label:'Schulungsplanung'},
   {key:'timeline',label:'Timeline'},{key:'projects',label:'Projekte'},{key:'forecast',label:'Forecast'},{key:'fcist',label:'Forecast vs. Ist'},{key:'vorschau',label:'Personal-Vorschau'},
   {key:'profitability',label:'Wirtschaftlichkeit'},{key:'praesentation',label:'Präsentationen'},{key:'termin',label:'Termin vorbereiten'},{key:'uploads',label:'Uploads'},{key:'dataimport',label:'Datenimport'},{key:'uploadplan',label:'Upload-Plan'},{key:'recmkt',label:'Recruiting Marketing'},{key:'nlquery',label:'Datenabfrage'},
-  {key:'useractivity',label:'Nutzung & Aktivität'},{key:'reminders',label:'Erinnerungen'},{key:'taskadmin',label:'Aufgaben-Verwaltung'},
+  {key:'useractivity',label:'Nutzung & Aktivität'},{key:'errorlog',label:'Fehler-Log'},{key:'reminders',label:'Erinnerungen'},{key:'taskadmin',label:'Aufgaben-Verwaltung'},
   {key:'superadmin',label:'System / Konfiguration'},{key:'tabperms',label:'Portal-Tabs'},
   {key:'aisettings',label:'KI-Einstellungen'},{key:'aiendpoint',label:'KI-Anbindung'},{key:'cvsync',label:'CV-Sync'},
   {key:'cockpits',label:'Cockpits'},{key:'hraccess',label:'HR-Zugriff'},{key:'appusers',label:'App-User'},{key:'rechte',label:'Rechte'},{key:'aiaccess',label:'KI-Datenzugriff'},{key:'whosees',label:'Wer sieht was'},
@@ -7618,6 +7618,7 @@ function buildNavSections(f){
       {key:'hraccess',label:'HR-Zugriff',icon:'🛡'},
       {key:'tabperms',label:'Portal-Tabs',icon:'🔒'},
       {key:'activity_log',label:'Protokoll',icon:'📋'},
+      ...(_isMgmt ? [{key:'errorlog',label:'Fehler-Log',icon:'🐞'}] : []),   // Management-only: automatisch gesammelte Frontend-Fehler
       ...(_isMgmtLead ? [{key:'useractivity',label:'Nutzung & Aktivität',icon:'📊'}] : []),   // Management + Projektleiter (Team)
       ...(_isMgmt ? [{key:'reminders',label:'Erinnerungen',icon:'🔔'}] : []),   // Management-only
       ...(_isMgmt ? [{key:'taskadmin',label:'Aufgaben-Verwaltung',icon:'🗂'}] : []),   // Management-only
@@ -29806,6 +29807,35 @@ const PORTAL_URLS   = {client:'https://client.tive360.de/', mitarbeiter:'https:/
 const ROLE_LABELS   = {management:'Management', hr:'HR', teamlead:'Teamlead', qm:'QM', trainer:'Trainer', asp:'ASP', projektleiter:'Projektleiter', finance:'Finance', mitarbeiter:'Mitarbeiter', kunde:'Kunde'};
 const sb = window.supabase.createClient(SB_URL, SB_KEY);
 
+// ─── Fehlerfänger (Bruno-Fundament, aber eigenständig): unbehandelte Fehler automatisch sammeln ───
+// Sammelt JEDEN uncaught error + unhandledrejection in die DB (Rollup je Signatur), auch ohne dass jemand Bruno
+// fragt → Management-Übersicht „was geht im Alltag schief". Zusätzlich ein kleiner Ringpuffer der letzten Fehler
+// als Kontext für Bruno. Streng defensiv: darf nie selbst etwas werfen, ist gedrosselt und gedeckelt.
+const HELP_CTX = { view:'', userName:null, authed:false, errors:[] };
+window.__HELP_CTX = HELP_CTX;
+const _errSigs = new Set(); let _errLogged = 0;
+function logClientError(kind, message, source, lineno, colno, stack){
+  try{
+    const area = HELP_CTX.view || '';
+    const msg  = String(message||'').slice(0,500);
+    HELP_CTX.errors.push({ kind, message:msg, area, at:Date.now() });
+    if(HELP_CTX.errors.length>12) HELP_CTX.errors.shift();
+    if(!HELP_CTX.authed) return;                 // nur angemeldet (RPC verlangt auth)
+    if(_errLogged>=60) return;                    // Sitzungs-Deckel gegen Flut
+    const norm = msg.replace(/[0-9a-fA-F]{8,}|[0-9]+/g,'#');
+    const sig = kind+'|'+area+'|'+norm+'|'+String(source||'')+':'+(lineno||'');
+    if(_errSigs.has(sig)) return;                 // je Signatur einmal pro Sitzung
+    _errSigs.add(sig); _errLogged++;
+    sb.rpc('log_client_error',{ p:{ kind, message:msg, source:String(source||'').slice(0,300),
+      lineno:(lineno!=null?String(lineno):null), colno:(colno!=null?String(colno):null), area,
+      stack:String(stack||'').slice(0,2000), url:String(location.href).slice(0,500),
+      user_agent:String(navigator.userAgent||'').slice(0,300), user_name:HELP_CTX.userName } })
+      .then(()=>{},()=>{});                        // Fehler beim Loggen selbst ignorieren
+  }catch(_e){ /* niemals die App stören */ }
+}
+window.addEventListener('error', function(e){ logClientError('error', e&&e.message, e&&e.filename, e&&e.lineno, e&&e.colno, e&&e.error&&e.error.stack); });
+window.addEventListener('unhandledrejection', function(e){ const r=e&&e.reason; logClientError('unhandledrejection', (r&&r.message)||String(r||'unbekannt'), '', null, null, r&&r.stack); });
+
 // ─── 25a: Employees CRUD on Supabase (Realtime + Deprecation) ────────
 // Return-Vertrag: Array (auch []) = erfolgreiche Abfrage, echte Datenlage.
 // null = echter Fehler (Netz/Rechte). Der Aufrufer unterscheidet damit "leer"
@@ -31563,6 +31593,8 @@ function useToast(){
   const [toast,setToast]=useState(null);
   const show=(msg,type='success')=>{
     setToast({msg,type});
+    // Fehler-Toasts als Kontext für Bruno merken (letzte sichtbare Fehlermeldung).
+    try{ if(type==='error' && window.__HELP_CTX){ window.__HELP_CTX.toast = String(msg||''); window.__HELP_CTX.toastAt = Date.now(); } }catch(_e){}
     setTimeout(()=>setToast(null),2500);
   };
   const el=toast?<div className={'toast toast-'+toast.type}>{toast.type==='success'?'✓':toast.type==='error'?'✕':'ℹ'} {toast.msg}</div>:null;
@@ -37082,6 +37114,61 @@ function RemindersView({team}){
     </div>}
   </div>;
 }
+// Fehler-Log (Management-only): automatisch gesammelte Frontend-Fehler, Rollup je Signatur. Zeigt, was im Alltag
+// tatsächlich schiefgeht, ohne dass jemand es melden muss. Offen zuerst, nach Häufigkeit/zuletzt sortiert.
+function ErrorLogView({team}){
+  const isMgmt=((team&&team.role_keys)||[]).some(r=>r==='management');
+  const [rows,setRows]=useState(null); const [err,setErr]=useState(''); const [showResolved,setShowResolved]=useState(false); const [open,setOpen]=useState(null);
+  const load=()=>{ setErr(''); sb.from('client_errors').select('*').order('resolved_at',{nullsFirst:true}).order('count',{ascending:false}).order('last_seen',{ascending:false}).limit(500)
+    .then(r=>{ if(r.error){ setErr(r.error.message||'Laden fehlgeschlagen'); setRows([]); } else setRows(r.data||[]); }); };
+  useEffect(()=>{ if(isMgmt) load(); },[isMgmt]);
+  if(!isMgmt) return <div style={{padding:20,color:'var(--muted)'}}>Nur für das Management.</div>;
+  const resolve=async(sig,val)=>{ await sb.from('client_errors').update({resolved_at: val?new Date().toISOString():null}).eq('sig',sig); load(); };
+  const del=async(sig)=>{ const ok=await uiConfirm('Diesen Fehler-Eintrag löschen? Taucht er wieder auf, wird er neu gesammelt.'); if(!ok) return; await sb.from('client_errors').delete().eq('sig',sig); load(); };
+  const list=(rows||[]).filter(r=>showResolved?true:!r.resolved_at);
+  const openCount=(rows||[]).filter(r=>!r.resolved_at).length;
+  const fmt=s=>s?String(s).slice(0,16).replace('T',' '):'';
+  const areaLbl=a=>a||'(unbekannt)';
+  return <div style={{maxWidth:1050}}>
+    <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:4,flexWrap:'wrap'}}>
+      <div style={{fontSize:20,fontWeight:700}}>🐞 Fehler-Log</div>
+      <span style={{fontSize:12,fontWeight:700,color:openCount?'#b45309':'#059669'}}>{openCount} offen</span>
+      <button className="btn btn-sm" onClick={load} style={{marginLeft:'auto'}}>Aktualisieren</button>
+      <label style={{fontSize:12,display:'inline-flex',alignItems:'center',gap:5}}><input type="checkbox" checked={showResolved} onChange={e=>setShowResolved(e.target.checked)}/> Erledigte zeigen</label>
+    </div>
+    <div style={{fontSize:13,color:'var(--muted)',marginBottom:14}}>Automatisch gesammelte Frontend-Fehler (unbehandelte Fehler und abgewiesene Zusagen), zusammengefasst je Fehler-Signatur. Niemand muss sie melden. Häufigste zuerst.</div>
+    {err && <div style={{padding:'8px 12px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:8,color:'#dc2626',fontSize:12,marginBottom:12}}>{err}</div>}
+    {rows===null ? <div style={{color:'var(--muted)'}}>Lädt…</div>
+     : list.length===0 ? <div style={{padding:'16px',color:'var(--muted)',fontSize:13,background:'var(--surface-2)',border:'1px solid var(--border)',borderRadius:10}}>{showResolved?'Keine Einträge.':'Kein offener Fehler. Gut.'}</div>
+     : <div style={{border:'1px solid var(--border)',borderRadius:12,overflow:'hidden'}}>
+        {list.map((r,i)=>{ const isOpen=open===r.sig; return <div key={r.sig} style={{borderTop:i?'1px solid var(--border)':'none',opacity:r.resolved_at?0.6:1}}>
+          <div style={{display:'flex',alignItems:'center',gap:12,padding:'10px 14px',cursor:'pointer',background:isOpen?'var(--surface-2)':'transparent'}} onClick={()=>setOpen(isOpen?null:r.sig)}>
+            <span style={{minWidth:34,textAlign:'center',fontWeight:800,fontFamily:'var(--mono)',fontSize:15,color:r.count>=10?'#dc2626':r.count>=3?'#b45309':'var(--muted)'}}>{r.count}×</span>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontSize:13,fontWeight:600,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{r.message||'(ohne Meldung)'}</div>
+              <div style={{fontSize:11,color:'var(--muted)'}}>{areaLbl(r.area)} · {r.kind==='unhandledrejection'?'abgewiesene Zusage':'Fehler'} · zuletzt {fmt(r.last_seen)}{r.last_user_name?(' · '+r.last_user_name):''}</div>
+            </div>
+            {r.resolved_at && <span style={{fontSize:10.5,fontWeight:700,color:'#059669'}}>erledigt</span>}
+            <span style={{color:'var(--muted)',fontSize:12}}>{isOpen?'▲':'▼'}</span>
+          </div>
+          {isOpen && <div style={{padding:'4px 14px 14px 60px',fontSize:12,color:'var(--text)'}}>
+            <div style={{display:'grid',gridTemplateColumns:'auto 1fr',gap:'3px 12px',marginBottom:10}}>
+              <span style={{color:'var(--muted)'}}>Quelle</span><span style={{fontFamily:'var(--mono)',wordBreak:'break-all'}}>{(r.source||'—')}{r.lineno?(':'+r.lineno+(r.colno?(':'+r.colno):'')):''}</span>
+              <span style={{color:'var(--muted)'}}>Seite</span><span style={{fontFamily:'var(--mono)',wordBreak:'break-all'}}>{r.sample_url||'—'}</span>
+              <span style={{color:'var(--muted)'}}>Browser</span><span style={{wordBreak:'break-all'}}>{r.user_agent||'—'}</span>
+              <span style={{color:'var(--muted)'}}>Erstmals</span><span>{fmt(r.first_seen)}</span>
+            </div>
+            {r.stack && <pre style={{fontSize:11,background:'var(--surface-2)',border:'1px solid var(--border)',borderRadius:8,padding:'8px 10px',overflow:'auto',maxHeight:180,whiteSpace:'pre-wrap',wordBreak:'break-word'}}>{r.stack}</pre>}
+            <div style={{display:'flex',gap:8,marginTop:10}}>
+              {r.resolved_at ? <button className="btn btn-sm" onClick={()=>resolve(r.sig,false)}>Wieder öffnen</button>
+                             : <button className="btn btn-sm" onClick={()=>resolve(r.sig,true)}>Als erledigt markieren</button>}
+              <button className="btn btn-sm" style={{color:'#dc2626'}} onClick={()=>del(r.sig)}>Löschen</button>
+            </div>
+          </div>}
+        </div>; })}
+      </div>}
+  </div>;
+}
 function LoginActivityView({team}){
   const isMgmt=((team&&team.role_keys)||[]).some(r=>r==='management');
   const [rows,setRows]=useState(null); const [err,setErr]=useState(''); const [sortK,setSortK]=useState('activity');
@@ -37431,6 +37518,71 @@ function insightWhy(ins){
 }
 // Einblendungen (Schnitt 5, gesteuert per Schnitt 12): eigene, ungesehene. Regeln aus den Nutzer-Einstellungen:
 // welche Kollegen, wie viele/Tag, Zeitfenster; am richtigen Ort (context), wichtige überall. Gedämpfte Typen 1×/Woche.
+// Bruno, der Haustechniker am Ort: schwebender Hilfe-Knopf in jeder Ansicht. Kennt seinen Bereich (view), die
+// letzten Browser-Fehler (HELP_CTX) und die Rechte des Nutzers (team.perms) und schickt das als Kontext an die
+// helpdesk-Function. Bei einem echten Fehler bietet er die Übergabe ans Management an (Meldung + Slack).
+function BrunoHelpdesk({view, team, onNavigate}){
+  const [open,setOpen]=useState(false);
+  const [msgs,setMsgs]=useState([]);
+  const [input,setInput]=useState('');
+  const [busy,setBusy]=useState(false);
+  const [handoffDone,setHandoffDone]=useState(false);
+  const scrollRef=React.useRef(null);
+  const acc=(typeof AI_AGENTS!=='undefined'&&AI_AGENTS&&AI_AGENTS.bruno&&AI_AGENTS.bruno.accent)||'#7a5c3e';
+  useEffect(()=>{ if(open&&scrollRef.current) scrollRef.current.scrollTop=scrollRef.current.scrollHeight; },[msgs,open]);
+  const buildCtx=()=>{ try{
+    const area=view; const cat=(MENU_BADGE_MAIN_ITEMS||[]).find(x=>x.key===area);
+    const permArea=PERM_AREA_OF_KEY[area]||null;
+    const pv=permArea&&team&&team.perms&&team.perms[permArea];
+    const perm=pv?{area:permArea, visible:!!pv.visible, mode:pv.mode||null, projects:pv.projects||null}:null;
+    const H=window.__HELP_CTX||{};
+    const toast=(H.toast&&H.toastAt&&(Date.now()-H.toastAt<120000))?H.toast:null;
+    return { area, area_label:(cat?cat.label:area), perm, role_keys:(team&&team.role_keys)||[],
+      recent_errors:(H.errors||[]).slice(-4), toast, url:location.href, user_agent:navigator.userAgent,
+      user_name:(team&&(team.full_name||team.email))||null };
+  }catch(e){ return {area:view}; } };
+  const call=async(payload)=>{ const { data:{ session } }=await sb.auth.getSession();
+    const r=await fetch(SB_URL+'/functions/v1/helpdesk',{ method:'POST', headers:{'Content-Type':'application/json', Authorization:'Bearer '+((session&&session.access_token)||'')}, body:JSON.stringify(payload) });
+    return { ok:r.ok, d:await r.json().catch(()=>({})) }; };
+  const ask=async(q)=>{ if(!q||busy) return; setInput(''); setHandoffDone(false); setMsgs(m=>[...m,{role:'user',text:q}]); setBusy(true);
+    try{ const {ok,d}=await call({ question:q, context:buildCtx() });
+      if(!ok) setMsgs(m=>[...m,{role:'bruno',text:d.error||'Das hat gerade nicht geklappt.'}]);
+      else setMsgs(m=>[...m,{role:'bruno', text:d.answer||'', steps:d.steps||[], jump:d.jump||null, missing_right:d.missing_right||null, handoff:!!d.handoff_suggested, kind:d.kind}]);
+    }catch(e){ setMsgs(m=>[...m,{role:'bruno',text:'Ich bin gerade nicht erreichbar.'}]); }
+    setBusy(false); };
+  const handoff=async()=>{ if(busy) return; setBusy(true);
+    try{ const summary=msgs.filter(m=>m.role==='user').map(m=>m.text).join(' | ');
+      const {ok,d}=await call({ action:'handoff', question:summary, context:buildCtx() });
+      setHandoffDone(true);
+      setMsgs(m=>[...m,{role:'bruno', text: ok?'Ich habe die Lage gesammelt und ans Management übergeben. Du bekommst Bescheid, wenn es behoben ist.':'Die Übergabe hat nicht geklappt. Versuch es später noch einmal.'}]);
+    }catch(e){ setMsgs(m=>[...m,{role:'bruno',text:'Die Übergabe hat nicht geklappt.'}]); }
+    setBusy(false); };
+  if(!open) return <button onClick={()=>{ setOpen(true); if(!msgs.length) setMsgs([{role:'bruno',text:'Ich bin Bruno. Sag mir, wo es klemmt, oder was gerade nicht geht. Ich schau, woran es liegt.'}]); }}
+    title="Bruno · Hilfe am Ort" style={{position:'fixed',left:18,bottom:18,zIndex:1200,width:52,height:52,borderRadius:'50%',border:'none',background:acc,color:'#fff',fontSize:24,cursor:'pointer',boxShadow:'0 6px 20px rgba(0,0,0,.25)'}}>🛠</button>;
+  return <div style={{position:'fixed',left:18,bottom:18,zIndex:1200,width:'min(360px,calc(100vw - 36px))',maxHeight:'70vh',display:'flex',flexDirection:'column',background:'var(--card)',border:'1px solid var(--border)',borderRadius:16,boxShadow:'0 12px 40px rgba(0,0,0,.28)',overflow:'hidden'}}>
+    <div style={{display:'flex',alignItems:'center',gap:10,padding:'11px 14px',background:acc,color:'#fff'}}>
+      <span style={{width:30,height:30,borderRadius:'50%',background:'rgba(255,255,255,.2)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:17}}>🛠</span>
+      <div style={{flex:1,minWidth:0}}><div style={{fontWeight:800,fontSize:14}}>Bruno</div><div style={{fontSize:11,opacity:.85}}>Hilfe am Ort · erklärt, leitet an, übergibt</div></div>
+      <button onClick={()=>setOpen(false)} style={{background:'transparent',border:'none',color:'#fff',fontSize:20,cursor:'pointer',lineHeight:1}}>×</button>
+    </div>
+    <div ref={scrollRef} style={{flex:1,overflowY:'auto',padding:'12px 14px',display:'flex',flexDirection:'column',gap:10}}>
+      {msgs.map((m,i)=> m.role==='user'
+        ? <div key={i} style={{alignSelf:'flex-end',maxWidth:'85%',background:acc,color:'#fff',padding:'7px 11px',borderRadius:'12px 12px 3px 12px',fontSize:12.5}}>{m.text}</div>
+        : <div key={i} style={{alignSelf:'flex-start',maxWidth:'92%',background:'var(--surface-2)',border:'1px solid var(--border)',padding:'8px 11px',borderRadius:'12px 12px 12px 3px',fontSize:12.5}}>
+            <div>{m.text}</div>
+            {Array.isArray(m.steps)&&m.steps.length>0&&<ol style={{margin:'7px 0 0',paddingLeft:18,fontSize:12.5,lineHeight:1.5}}>{m.steps.map((s,j)=><li key={j}>{s}</li>)}</ol>}
+            {m.missing_right&&<div style={{marginTop:7,padding:'6px 9px',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:8,fontSize:12,color:'#92400e'}}>Fehlt: {m.missing_right}</div>}
+            {m.jump&&<button className="btn btn-sm" style={{marginTop:8}} onClick={()=>{ onNavigate&&onNavigate({kind:'view',view:m.jump}); setOpen(false); }}>Dahin springen</button>}
+            {m.handoff&&!handoffDone&&<button className="btn btn-sm" style={{marginTop:8,background:acc,color:'#fff',borderColor:acc}} disabled={busy} onClick={handoff}>Ans Management übergeben</button>}
+          </div>)}
+      {busy&&<div style={{alignSelf:'flex-start',fontSize:12,color:'var(--muted)'}}>Bruno schaut nach…</div>}
+    </div>
+    <div style={{padding:'10px 12px',borderTop:'1px solid var(--border)',display:'flex',gap:8,alignItems:'flex-end'}}>
+      <textarea value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); ask(input.trim()); } }} rows={1} placeholder="Was geht gerade nicht?" style={{flex:1,resize:'none',border:'1px solid var(--border)',borderRadius:9,padding:'8px 10px',fontSize:12.5,fontFamily:'inherit',background:'var(--card)',color:'var(--text)',maxHeight:80}}/>
+      <button className="btn btn-sm" style={{background:acc,color:'#fff',borderColor:acc}} disabled={busy||!input.trim()} onClick={()=>ask(input.trim())}>Fragen</button>
+    </div>
+  </div>;
+}
 function AgentInsights({view, onNavigate, isMobileW}){
   const [list,setList]=useState([]); const [cur,setCur]=useState(null); const [muted,setMuted]=useState(null); const [prefs,setPrefs]=useState(null); const shownRef=React.useRef(new Set());
   const load=React.useCallback(async()=>{ try{ const cut=isoLocal(new Date(Date.now()-21*864e5));
@@ -42541,6 +42693,9 @@ function App(){
     return ()=>{ try{ sub.subscription.unsubscribe(); }catch(e){} };
   }, []);
   const [view, setView] = useState('start');
+  // Fehlerfänger-Kontext mitführen: welcher Bereich, angemeldet, wer. Der globale Handler (oben bei sb) liest HELP_CTX.
+  useEffect(()=>{ try{ HELP_CTX.view = view; }catch(_e){} }, [view]);
+  useEffect(()=>{ try{ HELP_CTX.authed = !!loggedIn; HELP_CTX.userName = (team&&(team.full_name||team.email))||null; }catch(_e){} }, [loggedIn, team&&team.user_id]);
   // ── Nutzungs-Erfassung (Fundament für die tägliche Zusammenfassung / Maya) ──
   const sessionIdRef = React.useRef(null);
   const viewRef = React.useRef('start');
@@ -43095,6 +43250,7 @@ function App(){
       'daily_tasks':'<path fill-rule="evenodd" d="M7.502 6h7.128A3.375 3.375 0 0 1 18 9.375v9.375a3 3 0 0 0 3-3V6.108c0-1.505-1.125-2.811-2.664-2.94a48.972 48.972 0 0 0-.673-.05A3 3 0 0 0 15 1.5h-1.5a3 3 0 0 0-2.663 1.618c-.225.015-.45.032-.673.05C8.662 3.295 7.554 4.542 7.502 6ZM13.5 3A1.5 1.5 0 0 0 12 4.5h4.5A1.5 1.5 0 0 0 15 3h-1.5Z" clip-rule="evenodd"/><path fill-rule="evenodd" d="M3 9.375C3 8.339 3.84 7.5 4.875 7.5h9.75c1.036 0 1.875.84 1.875 1.875v11.25c0 1.035-.84 1.875-1.875 1.875h-9.75A1.875 1.875 0 0 1 3 20.625V9.375Zm7.06 3.316a.75.75 0 1 0-1.12-.997l-2.095 2.35-.71-.71a.75.75 0 0 0-1.06 1.061l1.25 1.25a.75.75 0 0 0 1.09-.033l2.646-2.921Z" clip-rule="evenodd"/>',
       'activity_log':'<path fill-rule="evenodd" d="M2.625 6.75a1.125 1.125 0 1 1 2.25 0 1.125 1.125 0 0 1-2.25 0Zm4.875 0A.75.75 0 0 1 8.25 6h12a.75.75 0 0 1 0 1.5h-12a.75.75 0 0 1-.75-.75ZM2.625 12a1.125 1.125 0 1 1 2.25 0 1.125 1.125 0 0 1-2.25 0ZM7.5 12a.75.75 0 0 1 .75-.75h12a.75.75 0 0 1 0 1.5h-12A.75.75 0 0 1 7.5 12Zm-4.875 5.25a1.125 1.125 0 1 1 2.25 0 1.125 1.125 0 0 1-2.25 0Zm4.875 0a.75.75 0 0 1 .75-.75h12a.75.75 0 0 1 0 1.5h-12a.75.75 0 0 1-.75-.75Z" clip-rule="evenodd"/>',
       'useractivity':'<path d="M12 2.25c-5.385 0-9.75 4.365-9.75 9.75s4.365 9.75 9.75 9.75 9.75-4.365 9.75-9.75S17.385 2.25 12 2.25Zm4.28 7.28a.75.75 0 0 0-1.06-1.06l-3.72 3.72-1.72-1.72a.75.75 0 0 0-1.06 0l-2.5 2.5a.75.75 0 1 0 1.06 1.06l1.97-1.97 1.72 1.72a.75.75 0 0 0 1.06 0l4.25-4.25Z"/>',
+      'errorlog':'<path d="M12 2.25a.75.75 0 0 1 .75.75v.845a5.98 5.98 0 0 1 2.4 1.02l.598-.597a.75.75 0 1 1 1.06 1.06l-.597.598A5.97 5.97 0 0 1 17.16 8.25H18a.75.75 0 0 1 0 1.5h-.06a6.03 6.03 0 0 1 0 1.5H18a.75.75 0 0 1 0 1.5h-.84a5.97 5.97 0 0 1-.95 2.324l.597.598a.75.75 0 1 1-1.06 1.06l-.598-.597A5.98 5.98 0 0 1 12.75 18.9V21a.75.75 0 0 1-1.5 0v-2.1a5.98 5.98 0 0 1-2.4-1.02l-.598.597a.75.75 0 0 1-1.06-1.06l.597-.598a5.97 5.97 0 0 1-.95-2.324H3a.75.75 0 0 1 0-1.5h.06a6.03 6.03 0 0 1 0-1.5H3a.75.75 0 0 1 0-1.5h.84a5.97 5.97 0 0 1 .95-2.324l-.597-.598a.75.75 0 0 1 1.06-1.06l.598.597a5.98 5.98 0 0 1 2.4-1.02V3a.75.75 0 0 1 .75-.75Zm0 6a3.75 3.75 0 1 0 0 7.5 3.75 3.75 0 0 0 0-7.5Z"/>',
       'reminders':'<path fill-rule="evenodd" d="M5.25 9a6.75 6.75 0 0 1 13.5 0v.75c0 2.123.8 4.057 2.118 5.52a.75.75 0 0 1-.297 1.206c-1.544.57-3.16.99-4.831 1.243a3.75 3.75 0 1 1-7.48 0 24.585 24.585 0 0 1-4.831-1.244.75.75 0 0 1-.298-1.205A8.217 8.217 0 0 0 5.25 9.75V9Zm4.502 8.9a2.25 2.25 0 1 0 4.496 0 25.057 25.057 0 0 1-4.496 0Z" clip-rule="evenodd"/>',
       'taskadmin':'<path fill-rule="evenodd" d="M7.502 6h7.128A3.375 3.375 0 0 1 18 9.375v9.375a3 3 0 0 0 3-3V6.108c0-1.505-1.125-2.811-2.664-2.94a48.972 48.972 0 0 0-.673-.05A3 3 0 0 0 15 1.5h-1.5a3 3 0 0 0-2.663 1.618c-.225.015-.45.032-.673.05C8.662 3.295 7.554 4.542 7.502 6ZM13.5 3A1.5 1.5 0 0 0 12 4.5h4.5A1.5 1.5 0 0 0 15 3h-1.5Z" clip-rule="evenodd"/><path fill-rule="evenodd" d="M3 9.375C3 8.339 3.84 7.5 4.875 7.5h9.75c1.036 0 1.875.84 1.875 1.875v11.25c0 1.035-.84 1.875-1.875 1.875h-9.75A1.875 1.875 0 0 1 3 20.625V9.375Zm9.53 3.905a.75.75 0 0 0-1.06-1.06l-2.97 2.97-.97-.97a.75.75 0 0 0-1.06 1.06l1.5 1.5a.75.75 0 0 0 1.06 0l3.5-3.5Z" clip-rule="evenodd"/>',
       'datacheck':'<path fill-rule="evenodd" d="M7.502 6h7.128A3.375 3.375 0 0 1 18 9.375v9.375a3 3 0 0 0 3-3V6.108c0-1.505-1.125-2.811-2.664-2.94a48.972 48.972 0 0 0-.673-.05A3 3 0 0 0 15 1.5h-1.5a3 3 0 0 0-2.663 1.618c-.225.015-.45.032-.673.05C8.662 3.295 7.554 4.542 7.502 6ZM13.5 3A1.5 1.5 0 0 0 12 4.5h4.5A1.5 1.5 0 0 0 15 3h-1.5Z" clip-rule="evenodd"/><path fill-rule="evenodd" d="M3 9.375C3 8.339 3.84 7.5 4.875 7.5h9.75c1.036 0 1.875.84 1.875 1.875v11.25c0 1.035-.84 1.875-1.875 1.875h-9.75A1.875 1.875 0 0 1 3 20.625V9.375Zm9.586 4.594a.75.75 0 0 0-1.172-.938l-2.476 3.096-.908-.907a.75.75 0 0 0-1.06 1.06l1.5 1.5a.75.75 0 0 0 1.116-.062l3-3.75Z" clip-rule="evenodd"/>',
@@ -43334,6 +43490,7 @@ function App(){
         <div className="content">
           <DialogHost/>
           <AgentInsights view={view} onNavigate={dqNavigate} isMobileW={isMobileW}/>
+          <BrunoHelpdesk view={view} team={team} onNavigate={dqNavigate}/>
           {absenceModal&&<AbsenceModal emp={absenceModal} onSave={saveAbsences} onClose={()=>setAbsenceModal(null)}/>}
           {terminateModal&&<TerminateModal emp={terminateModal} onConfirm={confirmTerminate} onClose={()=>setTerminateModal(null)}/>}
           {bonusModal&&<BonusModal emp={bonusModal} onSave={saveBonus} onClose={()=>setBonusModal(null)}/>}
@@ -43432,6 +43589,7 @@ function App(){
           {view==='aiaccess'&&<AiAccessView team={team} onOpenView={setView}/>}
           {view==='whosees'&&<AiWhoSeesView team={team} employees={employees} onOpenView={setView}/>}
           {view==='useractivity'&&<LoginActivityView team={team}/>}
+          {view==='errorlog'&&<ErrorLogView team={team}/>}
           {view==='reminders'&&<RemindersView team={team}/>}
           {view==='taskadmin'&&<TaskAdminView team={team} projects={projects} catalog={taskCatalog}/>}
           {view==='fcist'&&<ForecastVsIstView projects={projects}/>}
