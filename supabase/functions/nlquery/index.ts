@@ -97,11 +97,15 @@ Bereich KENNZAHLEN:
   dicht erst ab KW32. Fragen ueber lange Zeitraeume/Jahresverlauf sind sinnlos -> dann trotzdem bauen + 'warning'.
 - kpi_project_entries: Kennzahl-Wert JE TEAM (project_id, skill, kpi_id, value, kw ODER month, year). Wenige Eintraege.
 - IMPORT-KENNZAHLEN (aus woechentlichen Datei-Importen, gut abfragbar; Zeitachse immer kw + year):
-  - weekly_hours: tatsaechlich GELEISTETE Arbeitsstunden je Person/Woche (aus Kundenimporten). project_id, employee_id,
-    skill, kw, year, hours (geleistete Stunden), pause_hours (Pausenstunden), sales_calls. Abdeckung ab KW27/2026 (~8 Wochen).
-    NUR wochenweise (kw/year), KEINE Tagesaufloesung (raw = Wochen-Kategoriesummen, keine Tage). Fuer einen Monat oder frei
-    gewaehlten Zeitraum daher nur GANZE Wochen summierbar; die Monats-/Zeitraumraender weichen ab -> 'warning' setzen. Wer
-    exakte Stunden fuer Monat/Zeitraum will, nimmt die GEPLANTEN Tagesstunden aus shift_assignments (siehe Bereich SCHICHTEN).
+  - daily_hours: tatsaechlich GELEISTETE Arbeitsstunden je Person je TAG (aus Kundenimporten, Rohdaten-Excel).
+    project_id, employee_id, skill, work_date (DATUM), hours (geleistete Stunden), pause_hours, sales_calls.
+    TAGESGENAU ueber work_date BETWEEN 'YYYY-MM-DD' AND 'YYYY-MM-DD' -> exakte Monate/Wochen/Zeitraeume OHNE Rand-Warnung.
+    Fuer GELEISTETE Stunden in einem Monat/Zeitraum IMMER diese Tabelle nehmen (analog shift_assignments fuer geplante).
+    Hinweis: nicht jede historische Woche hat Tagesdaten (Alt-Importe ohne Datei); wo daily fehlt, fehlt der Tag ganz ->
+    dann 'warning', dass einzelne Tage/Wochen keine Tagesebene haben.
+  - weekly_hours: dieselben GELEISTETEN Stunden je Person/WOCHE, aber eine VIEW (Aggregat) UEBER daily_hours: kw, year,
+    hours, pause_hours, sales_calls, from_daily (true = tagesgenau hinterlegt, false = Legacy-Woche ohne Tagesebene).
+    Nur nehmen, wenn wochenweise reicht; fuer Monat/Zeitraum TAGESGENAU immer daily_hours.
   - weekly_calls: Anrufe je Person/Woche. answered (angenommene Anrufe), outbound, no_answer,
     avg_handle_sec (Ø Bearbeitungszeit Sek.), avg_talk_sec (Ø Gespraech), avg_hold_sec (Ø Halten),
     avg_acw_sec (Ø Nachbearbeitung). NUR KW32-34/2026 (wenige Wochen) -> keine Trends/Jahresverlauf, sonst 'warning'.
@@ -144,9 +148,10 @@ Anwesenheit in Echtzeit, alles was oben nicht steht.
 - NUR ein einzelnes SELECT (oder WITH ... SELECT). Kein Schreiben, kein Semikolon.
 - Ergebnis-Spalten mit deutschen, sprechenden Namen (z.B. mitarbeiter, projekt, anzahl, krankheitstage).
 - Zeitbezug ueber kw/year (ISO-Woche) bzw. month/year; Datumsspalten (from/to, cv_date, work_date, date) direkt.
-- STUNDEN-GRANULARITAET: GEPLANTE Stunden (shift_assignments) sind TAEGLICH ueber work_date -> exakte Monate/Wochen/Zeitraeume
-  ohne Rand-Warnung. GELEISTETE Stunden (weekly_hours) sind nur WOCHENWEISE -> bei Monat/Zeitraum ganze Wochen, Raender weichen
-  ab, 'warning' setzen. Ebenso nur wochenweise: weekly_calls, weekly_gauges, kpi_entries. Nicht die Ebenen vermischen.
+- STUNDEN-GRANULARITAET: BEIDE Stundenarten sind TAEGLICH ueber work_date abfragbar -> exakte Monate/Wochen/Zeitraeume
+  ohne Rand-Warnung: GEPLANTE Stunden aus shift_assignments, GELEISTETE Stunden aus daily_hours (NICHT weekly_hours,
+  das ist nur die Wochen-View). Fuer "geleistete Stunden im August" also daily_hours mit work_date BETWEEN '2026-08-01'
+  AND '2026-08-31'. Nur wochenweise (Rand-Warnung noetig): weekly_calls, weekly_gauges, kpi_entries. Nicht die Ebenen vermischen.
 - Immer ein festes ORDER BY mit eindeutigem Zweit-Kriterium (z.B. zusaetzlich nach name), damit die Reihenfolge
   stabil ist. Fuer dieselbe Frage IMMER dieselbe Abfrage bauen (kanonische, einfachste Form).
 - "Mitarbeiter" ohne Zusatz = alle Zeilen in employees, kein Status-Filter (nur filtern, wenn ein Status genannt
