@@ -34506,17 +34506,20 @@ function RohdatenImport({projId, projName, employees, onSaved}){
     const emps=(employees||[]).filter(e=>e&&e.project_id===projId);
     const empById={}; const byName={}; emps.forEach(e=>{ empById[e.id]=e; byName[cqNormName((e.first_name||'')+' '+(e.last_name||''))]=e; });
     const resolve=nm=>{ const n=cqNormName(nm); if(aliasMap[n]) return empById[aliasMap[n]]||null; return byName[n]||null; };
-    const groups={}, unmatched={};
+    const groups={}, dgroups={}, unmatched={};
     (sheet.rows||[]).forEach(r=>{ const nm=String(r[map.name]==null?'':r[map.name]).trim(); if(!nm) return;
       if(ignoredSet[cqNormName(nm)]) return;
       const dt=cqDate(r[map.date]);
       if(!dt) return;
       const cw=getISOWeek(dt); const emp=resolve(nm);
       if(!emp){ (unmatched[nm]=unmatched[nm]||{name:nm,rows:0}).rows++; return; }
+      const _log=cqSec(r[map.logtimetelefon]), _bos=cqSec(map.back_office_sales>=0?r[map.back_office_sales]:0), _url=cqSec(map.urlaubsteam>=0?r[map.urlaubsteam]:0),
+            _mail=cqSec(map.mailer>=0?r[map.mailer]:0), _pause=cqSec(map.pause>=0?r[map.pause]:0), _mittag=cqSec(map.mittagspause>=0?r[map.mittagspause]:0), _sc=cqSec(map.sales_calls>=0?r[map.sales_calls]:0);
       const key=emp.id+'|'+cw.kw+'|'+cw.year; const g=groups[key]=groups[key]||{emp,kw:cw.kw,year:cw.year,log:0,bos:0,url:0,mail:0,pause:0,mittag:0,sc:0};
-      g.log+=cqSec(r[map.logtimetelefon]); g.bos+=cqSec(map.back_office_sales>=0?r[map.back_office_sales]:0); g.url+=cqSec(map.urlaubsteam>=0?r[map.urlaubsteam]:0);
-      g.mail+=cqSec(map.mailer>=0?r[map.mailer]:0); g.pause+=cqSec(map.pause>=0?r[map.pause]:0); g.mittag+=cqSec(map.mittagspause>=0?r[map.mittagspause]:0);
-      g.sc+=cqSec(map.sales_calls>=0?r[map.sales_calls]:0);
+      g.log+=_log; g.bos+=_bos; g.url+=_url; g.mail+=_mail; g.pause+=_pause; g.mittag+=_mittag; g.sc+=_sc;
+      // Punkt 1: dieselbe Summierung zusätzlich je TAG (feinste Ebene). Kann mehrere Quellzeilen pro Tag geben.
+      const ds=isoLocal(dt); const dk=emp.id+'|'+ds; const dg=dgroups[dk]=dgroups[dk]||{emp,ds,kw:cw.kw,year:cw.year,log:0,bos:0,url:0,mail:0,pause:0,mittag:0,sc:0};
+      dg.log+=_log; dg.bos+=_bos; dg.url+=_url; dg.mail+=_mail; dg.pause+=_pause; dg.mittag+=_mittag; dg.sc+=_sc;
     });
     const facts=Object.keys(groups).map(k=>{ const g=groups[k]; const sk=((g.emp.project_skill||g.emp.primary_skill||'')+'').toLowerCase();
       const hoursSec = sk==='sales' ? (g.log+g.bos+g.url) : sk==='support' ? (g.log+g.mail) : null;
@@ -34524,13 +34527,20 @@ function RohdatenImport({projId, projName, employees, onSaved}){
         hours: hoursSec==null?null:cqHours(hoursSec), pause_hours:cqHours(g.pause+g.mittag), sales_calls:Math.round(g.sc),
         raw:{logtimetelefon:g.log,back_office_sales:g.bos,urlaubsteam:g.url,mailer:g.mail,pause:g.pause,mittagspause:g.mittag,sales_calls:g.sc} }; })
       .sort((a,b)=> a.year-b.year || a.kw-b.kw || a.name.localeCompare(b.name,'de'));
+    // Tages-Fakten: dieselbe Skill-Formel je Tag statt je Woche. Aggregat (Woche) bilden wir später beim Lesen.
+    const dailyFacts=Object.keys(dgroups).map(k=>{ const g=dgroups[k]; const sk=((g.emp.project_skill||g.emp.primary_skill||'')+'').toLowerCase();
+      const hoursSec = sk==='sales' ? (g.log+g.bos+g.url) : sk==='support' ? (g.log+g.mail) : null;
+      return { employee_id:g.emp.id, work_date:g.ds, kw:g.kw, year:g.year, skill:sk||null,
+        hours: hoursSec==null?null:cqHours(hoursSec), pause_hours:cqHours(g.pause+g.mittag), sales_calls:Math.round(g.sc),
+        raw:{logtimetelefon:g.log,back_office_sales:g.bos,urlaubsteam:g.url,mailer:g.mail,pause:g.pause,mittagspause:g.mittag,sales_calls:g.sc} }; })
+      .sort((a,b)=> a.work_date.localeCompare(b.work_date));
     const unmatchedList=Object.values(unmatched).sort((a,b)=>b.rows-a.rows);
     const weeks=[...new Set(facts.map(f=>f.year+'-'+f.kw))].sort();
     const warnings=[];
     if(unmatchedList.length) warnings.push({type:'unmatched',message:unmatchedList.length+' nicht zuordenbare Namen (nicht importiert)',details:unmatchedList.map(u=>u.name+' ('+u.rows+')')});
     const noSkill=facts.filter(f=>f.skill!=='sales'&&f.skill!=='support');
     if(noSkill.length) warnings.push({type:'skill',message:noSkill.length+' MA ohne Sales/Support-Skill (nur Pausen, keine Stunden)',details:noSkill.map(f=>f.name)});
-    setResult({facts,unmatched:unmatchedList,weeks,warnings}); setBusy(false); setStep('preview');
+    setResult({facts,dailyFacts,unmatched:unmatchedList,weeks,warnings}); setBusy(false); setStep('preview');
   }
   async function assignAlias(nm, empId){ if(!empId) return; setBusy(true);
     await sb.from('import_aliases').insert({project_id:projId, alias_name:nm, employee_id:empId});
@@ -34553,8 +34563,16 @@ function RohdatenImport({projId, projName, employees, onSaved}){
     for(const wk of result.weeks){ const yy=Number(wk.split('-')[0]),kw=Number(wk.split('-')[1]); await sb.from('weekly_hours').delete().eq('project_id',projId).eq('kw',kw).eq('year',yy); }
     const rows=result.facts.map(f=>({ import_id:imp.id, project_id:projId, employee_id:f.employee_id, kw:f.kw, year:f.year, skill:f.skill, hours:f.hours, pause_hours:f.pause_hours, sales_calls:f.sales_calls, raw:f.raw }));
     const {error:fe}=await sb.from('weekly_hours').insert(rows);
+    if(fe){ setBusy(false); setErr('Fakten nicht gespeichert: '+(fe.message||'')); return; }
+    // Punkt 1 / Schnitt 2: Tagesebene parallel schreiben (Dual-Write). Wie bei weekly: je importierter
+    // Woche den ganzen Mo–So-Bereich des Projekts leeren und die Tage neu schreiben (Re-Import überschreibt sauber).
+    try{
+      for(const wk of result.weeks){ const yy=Number(wk.split('-')[0]),kw=Number(wk.split('-')[1]); const mon=isoWeekMonday(yy,kw); const sun=new Date(mon.getFullYear(),mon.getMonth(),mon.getDate()+6);
+        await sb.from('daily_hours').delete().eq('project_id',projId).gte('work_date',isoLocal(mon)).lte('work_date',isoLocal(sun)); }
+      const drows=(result.dailyFacts||[]).map(f=>({ import_id:imp.id, project_id:projId, employee_id:f.employee_id, work_date:f.work_date, skill:f.skill, hours:f.hours, pause_hours:f.pause_hours, sales_calls:f.sales_calls, raw:f.raw }));
+      if(drows.length){ const {error:de}=await sb.from('daily_hours').insert(drows); if(de) console.warn('daily_hours nicht gespeichert:', de.message); }
+    }catch(e){ console.warn('daily_hours Dual-Write fehlgeschlagen:', e&&e.message); }
     setBusy(false);
-    if(fe){ setErr('Fakten nicht gespeichert: '+(fe.message||'')); return; }
     setSaved(true); setStep('upload'); setSheets(null); setFile(null); setResult(null); onSaved&&onSaved();
   }
 
