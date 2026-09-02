@@ -9215,6 +9215,83 @@ function AuswertungView({projects, team}){
     <div style={{fontSize:11,color:'var(--muted)',marginTop:14,lineHeight:1.6}}>Schwellenfarbe wie in der Performance-Ansicht. <b>∑</b> = kein gepflegter Teamwert, aus den Personenwerten gerechnet (AHT/ACW gewichtet nach Anzahl, CSAT nach n, Mengen summiert). Pfeil = Veränderung gegenüber der Vergleichswoche (grün = besser: bei Zeiten niedriger, sonst höher).</div>
   </div>;
 }
+// ── Spur zur Quelle (Punkt 2): Herkunft einer Stunden-Zahl ──
+// Klick auf gelieferte Stunden → Wochen → Mitarbeiter → Datei. Dieselbe Idee wie der Warum-Knopf bei den Agenten,
+// nur für Zahlen. Nutzt die Kette aus Punkt 1: weekly_hours (View) trägt import_id + from_daily, data_imports hält
+// Dateiname/Hochlader/Zeit/Storage-Pfad. from_daily=false markiert Wochen ohne Tagesebene.
+function HoursTraceModal({projectId, skill, weeks, title, onClose}){
+  const [data,setData]=useState(null); const [err,setErr]=useState(''); const [openWeek,setOpenWeek]=useState(weeks&&weeks.length===1?(weeks[0].year+'-'+weeks[0].kw):null);
+  useEffect(()=>{ let alive=true; (async()=>{
+    try{
+      const ws=(weeks||[]); if(!ws.length){ if(alive) setData({rows:[],nameById:{},impById:{}}); return; }
+      const orC=ws.map(w=>`and(kw.eq.${w.kw},year.eq.${w.year})`).join(',');
+      let q=sb.from('weekly_hours').select('employee_id,kw,year,hours,import_id,from_daily').eq('project_id',projectId);
+      if(skill) q=q.eq('skill',skill);
+      const wh=await q.or(orC);
+      if(wh.error) throw wh.error;
+      const rows=wh.data||[];
+      const empIds=[...new Set(rows.map(r=>r.employee_id))];
+      const emps=empIds.length?((await sb.from('employees').select('id,first_name,last_name').in('id',empIds)).data||[]):[];
+      const nameById={}; emps.forEach(e=>{ nameById[e.id]=((e.first_name||'')+' '+(e.last_name||'')).trim()||e.id; });
+      const impIds=[...new Set(rows.map(r=>r.import_id).filter(Boolean))];
+      const imps=impIds.length?((await sb.from('data_imports').select('id,file_name,uploaded_by_name,created_at,storage_path').in('id',impIds)).data||[]):[];
+      const impById={}; imps.forEach(x=>{ impById[x.id]=x; });
+      if(alive) setData({rows,nameById,impById});
+    }catch(e){ if(alive) setErr(String((e&&e.message)||e)); }
+  })(); return ()=>{alive=false;}; },[projectId,skill,JSON.stringify(weeks)]);
+  const openFile=async(path)=>{ if(!path) return; try{ const {data:s}=await sb.storage.from('weekly-imports').createSignedUrl(path,60); if(s&&s.signedUrl) window.open(s.signedUrl,'_blank'); else alert('Datei nicht verfügbar.'); }catch(e){ alert('Datei nicht verfügbar.'); } };
+  const fmtH=n=>Math.round(n).toLocaleString('de-DE'); const fmtD=s=>s?String(s).slice(0,16).replace('T',' '):'';
+  const rows=(data&&data.rows)||[]; const total=rows.reduce((s,r)=>s+Number(r.hours||0),0);
+  const byWeek={}; rows.forEach(r=>{ const k=r.year+'-'+r.kw; (byWeek[k]=byWeek[k]||{kw:r.kw,year:r.year,rows:[],sum:0}); byWeek[k].rows.push(r); byWeek[k].sum+=Number(r.hours||0); });
+  const weekList=Object.values(byWeek).sort((a,b)=>a.year-b.year||a.kw-b.kw);
+  const multi=(weeks||[]).length>1;
+  const distinctImps=[...new Set(rows.map(r=>r.import_id).filter(Boolean))].map(id=>data.impById[id]).filter(Boolean);
+  const empBadge=fd=> fd? <span title="tagesgenau hinterlegt" style={{fontSize:9.5,color:'#059669'}}> 📅</span> : <span title="nur wochenweise, keine Tagesebene" style={{fontSize:9.5,color:'#b45309'}}> ⚠</span>;
+  return <div onClick={onClose} style={{position:'fixed',inset:0,zIndex:1400,background:'rgba(15,23,42,.55)',display:'flex',alignItems:'center',justifyContent:'center',padding:16}}>
+    <div onClick={e=>e.stopPropagation()} style={{background:'var(--card)',border:'1px solid var(--border)',borderRadius:16,maxWidth:520,width:'100%',maxHeight:'82vh',overflow:'hidden',display:'flex',flexDirection:'column',boxShadow:'0 20px 60px rgba(0,0,0,.35)'}}>
+      <div style={{padding:'13px 16px',borderBottom:'1px solid var(--border)',display:'flex',alignItems:'center',gap:10}}>
+        <span style={{fontSize:18}}>🔎</span>
+        <div style={{flex:1,minWidth:0}}><div style={{fontWeight:800,fontSize:14}}>Herkunft der Stunden</div><div style={{fontSize:11,color:'var(--muted)'}}>{title||''}</div></div>
+        <button onClick={onClose} style={{background:'transparent',border:'none',fontSize:20,cursor:'pointer',color:'var(--muted)',lineHeight:1}}>×</button>
+      </div>
+      <div style={{padding:'14px 16px',overflowY:'auto'}}>
+        {err && <div style={{padding:'8px 12px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:8,color:'#dc2626',fontSize:12}}>{err}</div>}
+        {data===null && !err ? <div style={{color:'var(--muted)',fontSize:13}}>Lädt…</div>
+         : rows.length===0 ? <div style={{color:'var(--muted)',fontSize:13}}>Keine hinterlegten Stunden für diesen Zeitraum.</div>
+         : <React.Fragment>
+            <div style={{fontSize:13,marginBottom:12}}>Summe <b style={{fontFamily:'var(--mono)',fontSize:16}}>{fmtH(total)} h</b> aus {rows.length} Mitarbeiter-{multi?'Wochen':'Zeilen'}{multi?(' über '+weekList.length+' Wochen'):(weekList[0]?(' · KW '+weekList[0].kw):'')}.</div>
+            {weekList.map(w=>{ const k=w.year+'-'+w.kw; const isOpen=openWeek===k||!multi;
+              return <div key={k} style={{border:'1px solid var(--border)',borderRadius:10,marginBottom:8,overflow:'hidden'}}>
+                {multi && <div onClick={()=>setOpenWeek(isOpen?null:k)} style={{display:'flex',alignItems:'center',gap:8,padding:'8px 11px',cursor:'pointer',background:isOpen?'var(--surface-2)':'transparent'}}>
+                  <span style={{fontWeight:700,fontSize:12.5}}>KW {w.kw}</span>
+                  <span style={{marginLeft:'auto',fontFamily:'var(--mono)',fontWeight:700}}>{fmtH(w.sum)} h</span>
+                  <span style={{color:'var(--muted)',fontSize:11}}>{isOpen?'▲':'▼'}</span>
+                </div>}
+                {isOpen && <div style={{padding:multi?'2px 11px 9px':'9px 11px'}}>
+                  {w.rows.slice().sort((a,b)=>Number(b.hours)-Number(a.hours)).map((r,i)=>(
+                    <div key={i} style={{display:'flex',justifyContent:'space-between',gap:8,fontSize:12.5,padding:'3px 0',borderTop:i?'1px solid var(--border)':'none'}}>
+                      <span>{data.nameById[r.employee_id]||r.employee_id}{empBadge(r.from_daily)}</span>
+                      <span style={{fontFamily:'var(--mono)'}}>{Number(r.hours||0).toLocaleString('de-DE',{maximumFractionDigits:1})} h</span>
+                    </div>))}
+                </div>}
+              </div>; })}
+            <div style={{marginTop:12,paddingTop:12,borderTop:'1px solid var(--border)'}}>
+              <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',marginBottom:6}}>Quelle</div>
+              {distinctImps.length===0 ? <div style={{fontSize:12,color:'var(--muted)'}}>Keine Datei hinterlegt (Woche ohne Tagesebene, aus Legacy-Bestand).</div>
+               : distinctImps.map(im=>(<div key={im.id} style={{display:'flex',alignItems:'center',gap:10,padding:'7px 0',borderTop:'1px solid var(--border)'}}>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:12.5,fontWeight:600,wordBreak:'break-all'}}>📄 {im.file_name||'(ohne Namen)'}</div>
+                    <div style={{fontSize:11,color:'var(--muted)'}}>{im.uploaded_by_name?('Hochgeladen von '+im.uploaded_by_name+' · '):''}{fmtD(im.created_at)}</div>
+                  </div>
+                  {im.storage_path && <button className="btn btn-sm" onClick={()=>openFile(im.storage_path)}>Datei öffnen</button>}
+                </div>))}
+              <div style={{fontSize:10.5,color:'var(--muted)',marginTop:8}}>📅 = tagesgenau hinterlegt · ⚠ = nur wochenweise (keine Tagesebene für diesen Wert).</div>
+            </div>
+          </React.Fragment>}
+      </div>
+    </div>
+  </div>;
+}
 // ── Forecast vs. Ist je Projekt·Skill (Management-only, Cockpit) ──
 // Gelieferte Stunden (weekly_hours) gegen Auftraggeber-Forecast (report_forecast), letzte 8 Wochen.
 // Aussage = die Abweichung (Lücke%); Farbe nach Größe, Werte per Hover. Ohne Forecast: raus + Vermerk.
@@ -9225,6 +9302,7 @@ function AuswertungView({projects, team}){
 function CockpitStundenabgleich({projects, team, mobile, selY, selM0}){
   const isMgmt=((team&&team.role_keys)||[]).some(r=>r==='management');
   const [data,setData]=useState(null);
+  const [trace,setTrace]=useState(null);   // Spur zur Quelle
   const now=new Date();
   const hcProj=(projects||[]).find(p=>p&&/holiday/i.test(p.name||''));
   // Folgt dem Zeitraum-Wähler. Tagesgenau bis heute (bzw. bis Monatsende bei vergangenem Monat): der WOCHEN-Forecast und
@@ -9277,9 +9355,11 @@ function CockpitStundenabgleich({projects, team, mobile, selY, selM0}){
   const fmt=n=>Math.round(n).toLocaleString('de-DE');
   const dev=(a,b)=> b>0?Math.round((a-b)/b*100):null; const sLbl=s=>s==='sales'?'Sales':s==='support'?'Support':s;
   const bisTxt = _isCur ? ('bis '+_to.getDate()+'.'+(_to.getMonth()+1)+'.') : 'ganzer Monat';
-  const cell=(lbl,val,delta,ref)=> <div style={{flex:1,textAlign:'center',padding:'8px 6px',background:'var(--surface-2)',borderRadius:10,border:'1px solid var(--border)'}}>
+  // Wochen des angezeigten Monats für die Spur zur Quelle (exakte weekly_hours, nicht die anteilige Anzeige).
+  const _traceWeeks=[...new Set(days.map(x=>x.w.year+'-'+x.w.kw))].map(k=>({year:Number(k.split('-')[0]),kw:Number(k.split('-')[1])}));
+  const cell=(lbl,val,delta,ref,onClick)=> <div style={{flex:1,textAlign:'center',padding:'8px 6px',background:'var(--surface-2)',borderRadius:10,border:'1px solid var(--border)'}}>
     <div style={{fontSize:10.5,color:'var(--muted)',fontWeight:600}}>{lbl}</div>
-    <div style={{fontSize:20,fontWeight:800,fontFamily:'var(--mono)',lineHeight:1.1,marginTop:3}}>{fmt(val)}<span style={{fontSize:11,color:'var(--muted)'}}> h</span></div>
+    <div onClick={onClick} title={onClick?'Herkunft anzeigen (Wochen, Mitarbeiter, Datei)':undefined} style={{fontSize:20,fontWeight:800,fontFamily:'var(--mono)',lineHeight:1.1,marginTop:3,cursor:onClick?'pointer':undefined,textDecoration:onClick?'underline dotted':undefined,textUnderlineOffset:3}}>{fmt(val)}<span style={{fontSize:11,color:'var(--muted)'}}> h</span></div>
     {delta!=null&&<div style={{fontSize:11,fontWeight:700,marginTop:2,color:Math.abs(delta)<=5?'var(--muted)':(delta<0?'var(--red)':'var(--green)')}}>{delta>0?'+':''}{delta}% {ref}</div>}
   </div>;
   return card(<div>
@@ -9288,15 +9368,17 @@ function CockpitStundenabgleich({projects, team, mobile, selY, selM0}){
      : <div style={{display:'grid',gridTemplateColumns:mobile?'1fr':'1fr 1fr',gap:12}}>
         {data.skills.map(s=><div key={s.skill} style={{border:'1px solid var(--border)',borderRadius:12,padding:'11px 13px',background:'var(--card)'}}>
           <div style={{fontWeight:700,fontSize:13,marginBottom:9}}>{sLbl(s.skill)}</div>
-          <div style={{display:'flex',gap:8}}>{cell('Forecast',s.fc,null,'')}{cell('Geliefert',s.delivered,dev(s.delivered,s.fc),'vs FC')}{cell('Geplant (Schicht)',s.planned,dev(s.planned,s.fc),'vs FC')}</div>
+          <div style={{display:'flex',gap:8}}>{cell('Forecast',s.fc,null,'')}{cell('Geliefert',s.delivered,dev(s.delivered,s.fc),'vs FC',()=>setTrace({projectId:hcProj.id, skill:s.skill, weeks:_traceWeeks, title:sLbl(s.skill)+' · '+new Date(_y,_m,1).toLocaleDateString('de-DE',{month:'long',year:'numeric'})}))}{cell('Geplant (Schicht)',s.planned,dev(s.planned,s.fc),'vs FC')}</div>
         </div>)}
       </div>}
-    <div style={{marginTop:10,padding:'9px 11px',borderRadius:9,background:'#fffbeb',border:'1px solid #fde68a',fontSize:11.5,color:'#92400e',lineHeight:1.5}}>⚠ Näherung: Forecast und Ist liegen nur wochenweise vor und sind anteilig auf Tage verteilt. Zusätzlich unklar, ob der Forecast nur die Telefonzeit oder die gesamte Arbeitszeit abdeckt, die Prozente sind erst belastbar, wenn das geklärt ist.</div>
+    <div style={{marginTop:10,padding:'9px 11px',borderRadius:9,background:'#fffbeb',border:'1px solid #fde68a',fontSize:11.5,color:'#92400e',lineHeight:1.5}}>⚠ Näherung: Forecast und Ist liegen nur wochenweise vor und sind anteilig auf Tage verteilt. Zusätzlich unklar, ob der Forecast nur die Telefonzeit oder die gesamte Arbeitszeit abdeckt, die Prozente sind erst belastbar, wenn das geklärt ist. Klick auf <b>Geliefert</b> zeigt die Herkunft (Wochen, Mitarbeiter, Datei).</div>
+    {trace && <HoursTraceModal projectId={trace.projectId} skill={trace.skill} weeks={trace.weeks} title={trace.title} onClose={()=>setTrace(null)}/>}
   </div>);
 }
 function CockpitForecastIst({projects, team, mobile, selY, selM0}){
   const isMgmt=((team&&team.role_keys)||[]).some(r=>r==='management');
   const [data,setData]=useState(null);
+  const [trace,setTrace]=useState(null);   // Spur zur Quelle: {projectId,skill,weeks,title}
   const now=new Date();
   const mondayOf=d=>{ const x=new Date(d.getFullYear(),d.getMonth(),d.getDate()); x.setDate(x.getDate()-((x.getDay()+6)%7)); return x; };
   // Folgt dem Zeitraum-Wähler und bleibt IM gewählten Monat: die Wochen, deren Montag in diesen Monat fällt.
@@ -9331,7 +9413,7 @@ function CockpitForecastIst({projects, team, mobile, selY, selM0}){
         const comboSet={}; (fcR.data||[]).forEach(r=>{ comboSet[r.project_id+'|'+String(r.skill||'').toLowerCase()]=true; });
         const combos=Object.keys(comboSet).map(key=>{ const pid=key.split('|')[0], skill=key.split('|')[1];
           const series=weeks.map(w=>{ const kk=key+'|'+wkey(w); const f=fc[kk]; const s=ist[kk]; const both=(f!=null&&f>0&&s!=null);
-            return {kw:w.kw, fc:(f==null?null:Math.round(f*10)/10), ist:(s==null?null:Math.round(s*10)/10), gap: both?Math.round((f-s)/f*1000)/10:null, both}; });
+            return {kw:w.kw, year:w.year, fc:(f==null?null:Math.round(f*10)/10), ist:(s==null?null:Math.round(s*10)/10), gap: both?Math.round((f-s)/f*1000)/10:null, both}; });
           const rk=runWeek?key+'|'+wkey(runWeek):null; const rf=rk?fc[rk]:null, rs=rk?ist[rk]:null;   // laufende Woche nur im aktuellen Monat
           const running=(runWeek&&(rf!=null||rs!=null))?{fc:(rf==null?null:Math.round(rf*10)/10), ist:(rs==null?null:Math.round(rs*10)/10)}:null;
           return {pid, skill, series, running};
@@ -9364,7 +9446,7 @@ function CockpitForecastIst({projects, team, mobile, selY, selM0}){
         <div style={{display:'flex',alignItems:'flex-end',gap:12,flexWrap:'wrap'}}>
           <div>
             <div style={{fontSize:8.5,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.04em'}}>KW {head.kw}</div>
-            <div style={{fontSize:12,color:'var(--muted)'}}>FC <b style={{color:'var(--text)',fontFamily:'var(--mono)'}}>{fmtNum(head.fc)}</b> · Ist <b style={{color:'var(--text)',fontFamily:'var(--mono)'}}>{fmtNum(head.ist)}</b> h</div>
+            <div style={{fontSize:12,color:'var(--muted)'}}>FC <b style={{color:'var(--text)',fontFamily:'var(--mono)'}}>{fmtNum(head.fc)}</b> · Ist <b onClick={()=>setTrace({projectId:c.pid, skill:c.skill, weeks:[{kw:head.kw,year:head.year}], title:projName(c.pid)+' · '+skLabel(c.skill)+' · KW '+head.kw})} title="Herkunft anzeigen (Mitarbeiter, Datei)" style={{color:'var(--text)',fontFamily:'var(--mono)',cursor:'pointer',textDecoration:'underline dotted',textUnderlineOffset:2}}>{fmtNum(head.ist)}</b> h</div>
           </div>
           <div style={{marginLeft:'auto',textAlign:'right'}}>
             <div style={{fontSize:19,fontWeight:800,fontFamily:'var(--mono)',lineHeight:1.05,color:s.c,padding:'1px 7px',borderRadius:6,background:s.bg,display:'inline-block'}}>{head.gap>0?'−':head.gap<0?'+':''}{fmtNum(Math.abs(head.ist-head.fc))} h</div>
@@ -9385,9 +9467,10 @@ function CockpitForecastIst({projects, team, mobile, selY, selM0}){
       </div>
     </div>
   );
+  const traceEl = trace ? <HoursTraceModal projectId={trace.projectId} skill={trace.skill} weeks={trace.weeks} title={trace.title} onClose={()=>setTrace(null)}/> : null;
   return mobile
-    ? <div className="ckm-card" style={{borderLeft:'4px solid '+ACC}}><div className="ckm-h" style={{color:ACC,display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}><span>🔮 Forecast vs. Ist</span><AgentTag agentKey="paul"/></div>{grid}</div>
-    : <div className="card" style={{marginBottom:12}}><div style={{padding:'12px 14px 0',display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}><span style={{fontSize:14,fontWeight:800}}>🔮 Forecast vs. Ist</span><AgentTag agentKey="paul"/></div>{grid}</div>;
+    ? <React.Fragment><div className="ckm-card" style={{borderLeft:'4px solid '+ACC}}><div className="ckm-h" style={{color:ACC,display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}><span>🔮 Forecast vs. Ist</span><AgentTag agentKey="paul"/></div>{grid}</div>{traceEl}</React.Fragment>
+    : <React.Fragment><div className="card" style={{marginBottom:12}}><div style={{padding:'12px 14px 0',display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}><span style={{fontSize:14,fontWeight:800}}>🔮 Forecast vs. Ist</span><AgentTag agentKey="paul"/></div>{grid}</div>{traceEl}</React.Fragment>;
 }
 // ── Langzeit-Kapazitätsmodell (report_longterm) je Projekt·Skill, volle Breite (Management-only, Desktop+mobil) ──
 // 12-Monats-Kapazitätsmodell aus dem Auftraggeber-Import. Zeilen = Kennzahlen; gerechnete Ergebnis-Zeilen (calc)
