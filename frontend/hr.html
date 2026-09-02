@@ -30045,6 +30045,101 @@ function logClientError(kind, message, source, lineno, colno, stack){
 window.addEventListener('error', function(e){ logClientError('error', e&&e.message, e&&e.filename, e&&e.lineno, e&&e.colno, e&&e.error&&e.error.stack); });
 window.addEventListener('unhandledrejection', function(e){ const r=e&&e.reason; logClientError('unhandledrejection', (r&&r.message)||String(r||'unbekannt'), '', null, null, r&&r.stack); });
 
+// ═══ Kennzahlen-Register + Rechner (Phase 1) ═══════════════════════════════════════════════════════════════
+// EINE Wahrheit je Kennzahl: welche Ebene (Tag/Woche/Monat), welche Quelle/Spalte, welche Aggregation. Der
+// Rechner liefert immer den Wert PLUS ein Genauigkeits-Etikett. EISERNE REGEL: nie Genauigkeit erfinden.
+// Wochenwerte bleiben wochengerundet (ganze ISO-Wochen, deren Donnerstag im Zeitraum liegt), Monatswerte
+// monatsgebunden. Prorata (÷5) NIEMALS als Kopfzahl — nur die separate metricProrataEstimate(), klar markiert.
+const METRIC_GRAIN_LABEL = { day:'tagesgenau', week:'auf ganze Wochen gerundet', month:'monatsgebunden' };
+const METRIC_REGISTRY = {
+  geleistete_stunden: { label:'Geleistete Stunden',     unit:'h',   grain:'day',   source:'daily_hours',      col:'hours',          agg:'sum',                    scope:{project:'project_id', skill:'skill'} },
+  pausen_stunden:     { label:'Pausen (Auftraggeber)',  unit:'h',   grain:'day',   source:'daily_hours',      col:'pause_hours',    agg:'sum',                    scope:{project:'project_id', skill:'skill'} },
+  sales_calls_roh:    { label:'Sales Calls (Rohdaten)', unit:'',    grain:'day',   source:'daily_hours',      col:'sales_calls',    agg:'sum',                    scope:{project:'project_id', skill:'skill'} },
+  geplante_stunden:   { label:'Geplante Stunden',       unit:'h',   grain:'day',   source:'shift_assignments',col:'net_hours',      agg:'sum',                    scope:{project:'project_id', skill:'skill'} },
+  angenommene_anrufe: { label:'Angenommene Anrufe',     unit:'',    grain:'week',  source:'weekly_calls',     col:'answered',       agg:'sum',                    scope:{project:'project_id'} },
+  aht:                { label:'AHT (Ø Bearbeitung)',    unit:'sek', grain:'week',  source:'weekly_calls',     col:'avg_handle_sec', agg:'wavg', weight:'answered',scope:{project:'project_id'} },
+  acw:                { label:'ACW (Ø Nachbearbeitung)',unit:'sek', grain:'week',  source:'weekly_calls',     col:'avg_acw_sec',    agg:'wavg', weight:'answered',scope:{project:'project_id'} },
+  csat:               { label:'CSAT',                   unit:'%',   grain:'week',  source:'weekly_gauges',    col:'csat',           agg:'wavg', weight:'anzahl',  scope:{project:'project_id'} },
+  forecast_stunden:   { label:'Forecast-Stunden',       unit:'h',   grain:'week',  source:'report_forecast',  col:'fc_hours',       agg:'sum',                    scope:{project:'project_id', skill:'skill'} },
+  umsatz_ist:         { label:'Ist-Umsatz',             unit:'€',   grain:'month', source:'forecast_actuals', col:'revenue',        agg:'sum',                    scope:{project:'project_id'} },
+  personalkosten_ist: { label:'Ist-Personalkosten',     unit:'€',   grain:'month', source:'forecast_actuals', col:'cost_personnel', agg:'sum',                    scope:{project:'project_id'} },
+};
+function _metricAgg(rows, m){
+  if(m.agg==='sum')  return (rows||[]).reduce((s,r)=>s+(Number(r[m.col])||0),0);
+  if(m.agg==='wavg'){ let num=0,den=0; (rows||[]).forEach(r=>{ const v=Number(r[m.col]); const w=Number(r[m.weight])||0; if(!isNaN(v)&&w>0){ num+=v*w; den+=w; } }); return den>0?num/den:null; }
+  if(m.agg==='avg'){ const v=(rows||[]).map(r=>Number(r[m.col])).filter(x=>!isNaN(x)); return v.length?v.reduce((a,b)=>a+b,0)/v.length:null; }
+  return null;
+}
+function _metricScope(q, m, scope){ scope=scope||{};
+  if(m.scope&&m.scope.project&&scope.project!=null) q=q.eq(m.scope.project, scope.project);
+  if(m.scope&&m.scope.skill&&scope.skill!=null)     q=q.eq(m.scope.skill, scope.skill);
+  return q; }
+// Ganze ISO-Wochen, deren DONNERSTAG im Zeitraum liegt (ISO-Standard-Zuordnung; kein Prorata, keine Randstückelung).
+function _metricWeeksIn(fromStr, toStr){ const f=new Date(fromStr+'T00:00:00'), t=new Date(toStr+'T00:00:00'); const map={};
+  let d=new Date(f.getFullYear(),f.getMonth(),f.getDate());
+  while(d<=t){ const mon=new Date(d.getFullYear(),d.getMonth(),d.getDate()); mon.setDate(mon.getDate()-((mon.getDay()+6)%7));
+    const thu=new Date(mon.getFullYear(),mon.getMonth(),mon.getDate()+3);
+    if(thu>=f&&thu<=t){ const w=getISOWeek(mon); map[w.year+'-'+w.kw]=w; }
+    d=new Date(d.getFullYear(),d.getMonth(),d.getDate()+1); }
+  return Object.values(map).sort((a,b)=>a.year-b.year||a.kw-b.kw); }
+function _metricMonthsIn(fromStr, toStr){ const f=new Date(fromStr+'T00:00:00'), t=new Date(toStr+'T00:00:00');
+  const out=[]; let y=f.getFullYear(), m=f.getMonth();
+  while(y<t.getFullYear()||(y===t.getFullYear()&&m<=t.getMonth())){ out.push(y+'-'+String(m+1).padStart(2,'0')); m++; if(m>11){m=0;y++;} }
+  return out; }
+function _metricResult(m, value, coverage, n){ return { key:null, label:m.label, unit:m.unit||'', value:(n===0?null:value), grain:m.grain, precisionLabel:METRIC_GRAIN_LABEL[m.grain], coverage, rows:n, estimate:false, noData:(n===0) }; }
+// Der zentrale Rechner. period={from,to} (YYYY-MM-DD), scope={project,skill}. Liefert Wert + Genauigkeit, nie geraten.
+async function metricOverPeriod(key, period, scope){
+  const m=METRIC_REGISTRY[key]; if(!m) return {error:'Unbekannte Kennzahl: '+key};
+  const from=period&&period.from, to=period&&period.to; if(!from||!to) return {error:'Zeitraum fehlt'};
+  const sel=m.col + (m.agg==='wavg'&&m.weight?(','+m.weight):'');
+  try{
+    if(m.grain==='day'){
+      let q=sb.from(m.source).select(sel).gte('work_date',from).lte('work_date',to); q=_metricScope(q,m,scope);
+      const {data,error}=await q; if(error) throw error;
+      return _metricResult(m, _metricAgg(data,m), 'Tage '+from+' bis '+to, (data||[]).length);
+    }
+    if(m.grain==='week'){
+      const weeks=_metricWeeksIn(from,to);
+      if(!weeks.length) return _metricResult(m, null, 'Keine ganze Woche im Zeitraum — eine Wochenkennzahl braucht mindestens eine volle ISO-Woche (Do im Zeitraum).', 0);
+      const orC=weeks.map(w=>`and(kw.eq.${w.kw},year.eq.${w.year})`).join(',');
+      let q=sb.from(m.source).select(sel).or(orC); q=_metricScope(q,m,scope);
+      const {data,error}=await q; if(error) throw error;
+      return _metricResult(m, _metricAgg(data,m), 'Ganze Wochen: '+weeks.map(w=>'KW'+w.kw).join(', '), (data||[]).length);
+    }
+    if(m.grain==='month'){
+      const yms=_metricMonthsIn(from,to);
+      let q=sb.from(m.source).select(sel).in('month', yms); q=_metricScope(q,m,scope);
+      const {data,error}=await q; if(error) throw error;
+      return _metricResult(m, _metricAgg(data,m), 'Monate: '+yms.join(', '), (data||[]).length);
+    }
+    return {error:'Unbekannte Ebene: '+m.grain};
+  }catch(e){ return {error:String((e&&e.message)||e), label:m.label, grain:m.grain}; }
+}
+// NUR als markierte Schätzung: Wochenwert anteilig auf die Werktage des Zeitraums (÷5). NIEMALS als Kopfzahl zeigen.
+async function metricProrataEstimate(key, period, scope){
+  const m=METRIC_REGISTRY[key]; if(!m||m.grain!=='week'||m.agg!=='sum') return {error:'Prorata nur für wochenweise Summen-Kennzahlen'};
+  const from=period&&period.from, to=period&&period.to; if(!from||!to) return {error:'Zeitraum fehlt'};
+  const f=new Date(from+'T00:00:00'), t=new Date(to+'T00:00:00'); const wk={};
+  let d=new Date(f.getFullYear(),f.getMonth(),f.getDate());
+  while(d<=t){ const w=getISOWeek(d); wk[w.year+'-'+w.kw]=w; d=new Date(d.getFullYear(),d.getMonth(),d.getDate()+1); }
+  const weeks=Object.values(wk); if(!weeks.length) return {error:'kein Tag im Zeitraum'};
+  const orC=weeks.map(w=>`and(kw.eq.${w.kw},year.eq.${w.year})`).join(',');
+  let q=sb.from(m.source).select(m.col+',kw,year').or(orC); q=_metricScope(q,m,scope);
+  const {data,error}=await q; if(error) return {error:String(error.message||error)};
+  const wv={}; (data||[]).forEach(r=>{ const k=r.year+'-'+r.kw; wv[k]=(wv[k]||0)+(Number(r[m.col])||0); });
+  let val=0; d=new Date(f.getFullYear(),f.getMonth(),f.getDate());
+  while(d<=t){ const dow=d.getDay(); if(dow>=1&&dow<=5){ const w=getISOWeek(d); const k=w.year+'-'+w.kw; if(wv[k]!=null) val+=wv[k]/5; } d=new Date(d.getFullYear(),d.getMonth(),d.getDate()+1); }
+  return { label:m.label, unit:m.unit||'', value:val, grain:'week', estimate:true, precisionLabel:'Schätzung (anteilig aus Wochenwerten ÷5)', coverage:'Prorata über Werktage — KEINE Kopfzahl, nur grober Zwischenstand.' };
+}
+try{ window.__metric = { registry:METRIC_REGISTRY, over:metricOverPeriod, prorata:metricProrataEstimate }; }catch(_e){}
+// Genauigkeits-Abzeichen: tagesgenau (grün) / auf ganze Wochen gerundet (bernstein) / monatsgebunden (grau) / Schätzung.
+function MetricPrecisionBadge({grain, estimate, title}){
+  if(estimate) return <span title={title||''} style={{fontSize:10,fontWeight:700,padding:'1px 7px',borderRadius:20,background:'#fff7ed',color:'#c2410c',border:'1px solid #c2410c55',whiteSpace:'nowrap'}}>Schätzung (anteilig)</span>;
+  const map={ day:{t:'tagesgenau',c:'#059669',bg:'#ecfdf5'}, week:{t:'auf ganze Wochen gerundet',c:'#b45309',bg:'#fffbeb'}, month:{t:'monatsgebunden',c:'#64748b',bg:'var(--surface-2)'} };
+  const s=map[grain]||map.month;
+  return <span title={title||''} style={{fontSize:10,fontWeight:700,padding:'1px 7px',borderRadius:20,background:s.bg,color:s.c,border:'1px solid '+s.c+'55',whiteSpace:'nowrap'}}>{s.t}</span>;
+}
+
 // ─── 25a: Employees CRUD on Supabase (Realtime + Deprecation) ────────
 // Return-Vertrag: Array (auch []) = erfolgreiche Abfrage, echte Datenlage.
 // null = echter Fehler (Netz/Rechte). Der Aufrufer unterscheidet damit "leer"
