@@ -34466,6 +34466,36 @@ const BOOKING_TEAM_FIELDS=[
   {key:'osl',         label:'OSL-Buchungen',       req:true, kind:'num', cand:['sum_osl_bookings','osl_bookings','osl bookings','osl']},
   {key:'calls',       label:'Sales Calls (unique)',req:true, kind:'int', cand:['unique_sales_calls_by_date','unique_sales_calls','unique sales calls','sales calls','calls']},
 ];
+// Reine Ableitung der Rohdaten-Fakten (eine Wahrheit für Live-Import UND Backfill): aus Datei-Zeilen + Spalten-
+// Zuordnung + Namensauflösung entstehen Wochen-Fakten (facts) UND Tages-Fakten (dailyFacts). Die Woche ist per
+// Konstruktion die Summe ihrer Tage. `resolve(name)` → Mitarbeiter|null, `ignored(name)` → true wenn bewusst
+// ausgeblendet. Kein React/State, damit von überall aufrufbar.
+function rohdatenDerive(rows, map, resolve, ignored){
+  const groups={}, dgroups={}, unmatched={};
+  (rows||[]).forEach(r=>{ const nm=String(r[map.name]==null?'':r[map.name]).trim(); if(!nm) return;
+    if(ignored&&ignored(nm)) return;
+    const dt=cqDate(r[map.date]); if(!dt) return;
+    const cw=getISOWeek(dt); const emp=resolve(nm);
+    if(!emp){ (unmatched[nm]=unmatched[nm]||{name:nm,rows:0}).rows++; return; }
+    const _log=cqSec(r[map.logtimetelefon]), _bos=cqSec(map.back_office_sales>=0?r[map.back_office_sales]:0), _url=cqSec(map.urlaubsteam>=0?r[map.urlaubsteam]:0),
+          _mail=cqSec(map.mailer>=0?r[map.mailer]:0), _pause=cqSec(map.pause>=0?r[map.pause]:0), _mittag=cqSec(map.mittagspause>=0?r[map.mittagspause]:0), _sc=cqSec(map.sales_calls>=0?r[map.sales_calls]:0);
+    const key=emp.id+'|'+cw.kw+'|'+cw.year; const g=groups[key]=groups[key]||{emp,kw:cw.kw,year:cw.year,log:0,bos:0,url:0,mail:0,pause:0,mittag:0,sc:0};
+    g.log+=_log; g.bos+=_bos; g.url+=_url; g.mail+=_mail; g.pause+=_pause; g.mittag+=_mittag; g.sc+=_sc;
+    const ds=isoLocal(dt); const dk=emp.id+'|'+ds; const dg=dgroups[dk]=dgroups[dk]||{emp,ds,kw:cw.kw,year:cw.year,log:0,bos:0,url:0,mail:0,pause:0,mittag:0,sc:0};
+    dg.log+=_log; dg.bos+=_bos; dg.url+=_url; dg.mail+=_mail; dg.pause+=_pause; dg.mittag+=_mittag; dg.sc+=_sc;
+  });
+  const mk=(g,extra)=>{ const sk=((g.emp.project_skill||g.emp.primary_skill||'')+'').toLowerCase();
+    const hoursSec = sk==='sales' ? (g.log+g.bos+g.url) : sk==='support' ? (g.log+g.mail) : null;
+    return { employee_id:g.emp.id, kw:g.kw, year:g.year, skill:sk||null,
+      hours: hoursSec==null?null:cqHours(hoursSec), pause_hours:cqHours(g.pause+g.mittag), sales_calls:Math.round(g.sc),
+      raw:{logtimetelefon:g.log,back_office_sales:g.bos,urlaubsteam:g.url,mailer:g.mail,pause:g.pause,mittagspause:g.mittag,sales_calls:g.sc}, ...extra }; };
+  const facts=Object.keys(groups).map(k=>{ const g=groups[k]; return mk(g,{name:((g.emp.first_name||'')+' '+(g.emp.last_name||'')).trim()}); })
+    .sort((a,b)=> a.year-b.year || a.kw-b.kw || a.name.localeCompare(b.name,'de'));
+  const dailyFacts=Object.keys(dgroups).map(k=>{ const g=dgroups[k]; return mk(g,{work_date:g.ds}); })
+    .sort((a,b)=> a.work_date.localeCompare(b.work_date));
+  const weeks=[...new Set(facts.map(f=>f.year+'-'+f.kw))].sort();
+  return {facts, dailyFacts, weeks, unmatched};
+}
 function RohdatenImport({projId, projName, employees, onSaved}){
   const [file,setFile]=useState(null); const [fileHash,setFileHash]=useState('');
   const [sheets,setSheets]=useState(null);     // [{name,headers,rows}]
@@ -34474,6 +34504,7 @@ function RohdatenImport({projId, projName, employees, onSaved}){
   const [step,setStep]=useState('upload');     // upload | map | preview
   const [result,setResult]=useState(null);
   const [busy,setBusy]=useState(false); const [saved,setSaved]=useState(false); const [err,setErr]=useState('');
+  const [bfBusy,setBfBusy]=useState(false); const [bfMsg,setBfMsg]=useState('');   // Backfill Tagesebene aus Archiv
   const cfgKey='jsr_import_map_rohdaten_'+projId;
   const sheet=sheets?sheets[sheetIdx]:null;
 
@@ -34506,36 +34537,10 @@ function RohdatenImport({projId, projName, employees, onSaved}){
     const emps=(employees||[]).filter(e=>e&&e.project_id===projId);
     const empById={}; const byName={}; emps.forEach(e=>{ empById[e.id]=e; byName[cqNormName((e.first_name||'')+' '+(e.last_name||''))]=e; });
     const resolve=nm=>{ const n=cqNormName(nm); if(aliasMap[n]) return empById[aliasMap[n]]||null; return byName[n]||null; };
-    const groups={}, dgroups={}, unmatched={};
-    (sheet.rows||[]).forEach(r=>{ const nm=String(r[map.name]==null?'':r[map.name]).trim(); if(!nm) return;
-      if(ignoredSet[cqNormName(nm)]) return;
-      const dt=cqDate(r[map.date]);
-      if(!dt) return;
-      const cw=getISOWeek(dt); const emp=resolve(nm);
-      if(!emp){ (unmatched[nm]=unmatched[nm]||{name:nm,rows:0}).rows++; return; }
-      const _log=cqSec(r[map.logtimetelefon]), _bos=cqSec(map.back_office_sales>=0?r[map.back_office_sales]:0), _url=cqSec(map.urlaubsteam>=0?r[map.urlaubsteam]:0),
-            _mail=cqSec(map.mailer>=0?r[map.mailer]:0), _pause=cqSec(map.pause>=0?r[map.pause]:0), _mittag=cqSec(map.mittagspause>=0?r[map.mittagspause]:0), _sc=cqSec(map.sales_calls>=0?r[map.sales_calls]:0);
-      const key=emp.id+'|'+cw.kw+'|'+cw.year; const g=groups[key]=groups[key]||{emp,kw:cw.kw,year:cw.year,log:0,bos:0,url:0,mail:0,pause:0,mittag:0,sc:0};
-      g.log+=_log; g.bos+=_bos; g.url+=_url; g.mail+=_mail; g.pause+=_pause; g.mittag+=_mittag; g.sc+=_sc;
-      // Punkt 1: dieselbe Summierung zusätzlich je TAG (feinste Ebene). Kann mehrere Quellzeilen pro Tag geben.
-      const ds=isoLocal(dt); const dk=emp.id+'|'+ds; const dg=dgroups[dk]=dgroups[dk]||{emp,ds,kw:cw.kw,year:cw.year,log:0,bos:0,url:0,mail:0,pause:0,mittag:0,sc:0};
-      dg.log+=_log; dg.bos+=_bos; dg.url+=_url; dg.mail+=_mail; dg.pause+=_pause; dg.mittag+=_mittag; dg.sc+=_sc;
-    });
-    const facts=Object.keys(groups).map(k=>{ const g=groups[k]; const sk=((g.emp.project_skill||g.emp.primary_skill||'')+'').toLowerCase();
-      const hoursSec = sk==='sales' ? (g.log+g.bos+g.url) : sk==='support' ? (g.log+g.mail) : null;
-      return { employee_id:g.emp.id, name:((g.emp.first_name||'')+' '+(g.emp.last_name||'')).trim(), kw:g.kw, year:g.year, skill:sk||null,
-        hours: hoursSec==null?null:cqHours(hoursSec), pause_hours:cqHours(g.pause+g.mittag), sales_calls:Math.round(g.sc),
-        raw:{logtimetelefon:g.log,back_office_sales:g.bos,urlaubsteam:g.url,mailer:g.mail,pause:g.pause,mittagspause:g.mittag,sales_calls:g.sc} }; })
-      .sort((a,b)=> a.year-b.year || a.kw-b.kw || a.name.localeCompare(b.name,'de'));
-    // Tages-Fakten: dieselbe Skill-Formel je Tag statt je Woche. Aggregat (Woche) bilden wir später beim Lesen.
-    const dailyFacts=Object.keys(dgroups).map(k=>{ const g=dgroups[k]; const sk=((g.emp.project_skill||g.emp.primary_skill||'')+'').toLowerCase();
-      const hoursSec = sk==='sales' ? (g.log+g.bos+g.url) : sk==='support' ? (g.log+g.mail) : null;
-      return { employee_id:g.emp.id, work_date:g.ds, kw:g.kw, year:g.year, skill:sk||null,
-        hours: hoursSec==null?null:cqHours(hoursSec), pause_hours:cqHours(g.pause+g.mittag), sales_calls:Math.round(g.sc),
-        raw:{logtimetelefon:g.log,back_office_sales:g.bos,urlaubsteam:g.url,mailer:g.mail,pause:g.pause,mittagspause:g.mittag,sales_calls:g.sc} }; })
-      .sort((a,b)=> a.work_date.localeCompare(b.work_date));
-    const unmatchedList=Object.values(unmatched).sort((a,b)=>b.rows-a.rows);
-    const weeks=[...new Set(facts.map(f=>f.year+'-'+f.kw))].sort();
+    const ignored=nm=>!!ignoredSet[cqNormName(nm)];
+    const der=rohdatenDerive(sheet.rows, map, resolve, ignored);
+    const facts=der.facts, dailyFacts=der.dailyFacts, weeks=der.weeks;
+    const unmatchedList=Object.values(der.unmatched).sort((a,b)=>b.rows-a.rows);
     const warnings=[];
     if(unmatchedList.length) warnings.push({type:'unmatched',message:unmatchedList.length+' nicht zuordenbare Namen (nicht importiert)',details:unmatchedList.map(u=>u.name+' ('+u.rows+')')});
     const noSkill=facts.filter(f=>f.skill!=='sales'&&f.skill!=='support');
@@ -34575,6 +34580,45 @@ function RohdatenImport({projId, projName, employees, onSaved}){
     setBusy(false);
     setSaved(true); setStep('upload'); setSheets(null); setFile(null); setResult(null); onSaved&&onSaved();
   }
+  // Punkt 1 / Schnitt 3: Backfill der Tagesebene aus den archivierten Rohdateien (Bucket weekly-imports).
+  // Liest jeden früheren rohdaten-Lauf neu, leitet mit derselben Funktion (rohdatenDerive) die Tage ab und
+  // schreibt daily_hours. Idempotent (je Woche Mo–So leeren + neu). Läufe aufsteigend → neuester gewinnt je Woche
+  // (wie der Live-Import). So bekommen wir die Vergangenheit zurück, ohne den Kunden zu fragen.
+  async function backfillDaily(){ if(bfBusy) return; setBfBusy(true); setErr(''); setBfMsg('Lade Import-Läufe…');
+    try{
+      const {data:imps}=await sb.from('data_imports').select('id,storage_path,created_at').eq('project_id',projId).eq('source_type','rohdaten').not('storage_path','is',null).order('created_at',{ascending:true});
+      if(!imps||!imps.length){ setBfMsg('Keine archivierten Rohdatei-Läufe für dieses Projekt.'); setBfBusy(false); return; }
+      const {data:aliasRows}=await sb.from('import_aliases').select('alias_name,employee_id').eq('project_id',projId);
+      const aliasMap={}, ignoredSet={}; (aliasRows||[]).forEach(a=>{ const k=cqNormName(a.alias_name); if(a.employee_id) aliasMap[k]=a.employee_id; else ignoredSet[k]=true; });
+      const emps=(employees||[]).filter(e=>e&&e.project_id===projId);
+      const empById={}, byName={}; emps.forEach(e=>{ empById[e.id]=e; byName[cqNormName((e.first_name||'')+' '+(e.last_name||''))]=e; });
+      const resolve=nm=>{ const n=cqNormName(nm); if(aliasMap[n]) return empById[aliasMap[n]]||null; return byName[n]||null; };
+      const ignored=nm=>!!ignoredSet[cqNormName(nm)];
+      let savedMap=null; try{ savedMap=await loadConfigFromDB(cfgKey); }catch(e){}
+      let ok=0, days=0, skip=0;
+      for(let i=0;i<imps.length;i++){ const imp=imps[i]; setBfMsg('Verarbeite '+(i+1)+'/'+imps.length+' …');
+        try{
+          const dl=await sb.storage.from('weekly-imports').download(imp.storage_path);
+          if(dl.error||!dl.data){ skip++; continue; }
+          const buf=new Uint8Array(await dl.data.arrayBuffer());
+          const wb=XLSX.read(buf,{type:'array',cellDates:true});
+          let pickNm=wb.SheetNames[0]; wb.SheetNames.forEach(nm=>{ const a0=XLSX.utils.sheet_to_json(wb.Sheets[nm],{header:1,defval:''}); const hd=(a0[0]||[]).map(x=>String(x==null?'':x)); if(hd.map(cqNormHead).includes('logtimetelefon')) pickNm=nm; });
+          const aoa=XLSX.utils.sheet_to_json(wb.Sheets[pickNm],{header:1,defval:''}); const headers=(aoa[0]||[]).map(x=>String(x==null?'':x)); const rows=aoa.slice(1);
+          const auto=cqAutoMap(headers, ROHDATEN_FIELDS); const bmap=savedMap&&typeof savedMap==='object'?{...auto,...savedMap}:auto;
+          if(ROHDATEN_FIELDS.some(f=>f.req&&(bmap[f.key]==null||bmap[f.key]<0))){ skip++; continue; }   // Spalten unklar → überspringen
+          const der=rohdatenDerive(rows, bmap, resolve, ignored);
+          for(const wk of der.weeks){ const yy=Number(wk.split('-')[0]),kw=Number(wk.split('-')[1]); const mon=isoWeekMonday(yy,kw); const sun=new Date(mon.getFullYear(),mon.getMonth(),mon.getDate()+6);
+            await sb.from('daily_hours').delete().eq('project_id',projId).gte('work_date',isoLocal(mon)).lte('work_date',isoLocal(sun)); }
+          const drows=der.dailyFacts.map(f=>({ import_id:imp.id, project_id:projId, employee_id:f.employee_id, work_date:f.work_date, skill:f.skill, hours:f.hours, pause_hours:f.pause_hours, sales_calls:f.sales_calls, raw:f.raw }));
+          if(drows.length){ const {error:de}=await sb.from('daily_hours').insert(drows); if(de){ skip++; continue; } }
+          ok++; days+=drows.length;
+        }catch(e){ skip++; }
+      }
+      setBfMsg('Fertig: '+ok+' von '+imps.length+' Läufen nachgefüllt, '+days+' Tageszeilen'+(skip?(' · '+skip+' übersprungen (Datei/Spalten nicht lesbar)'):'')+'.');
+      onSaved&&onSaved();
+    }catch(e){ setBfMsg('Backfill fehlgeschlagen: '+(e&&e.message||'')); }
+    setBfBusy(false);
+  }
 
   return <div>
     {err && <div style={{padding:'8px 12px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:8,color:'#dc2626',fontSize:12,marginBottom:12}}>{err}</div>}
@@ -34584,6 +34628,12 @@ function RohdatenImport({projId, projName, employees, onSaved}){
       ⬆ Rohdaten-Excel wählen
       <input type="file" accept=".xlsx,.xls" style={{display:'none'}} onChange={e=>{ const f=e.target.files&&e.target.files[0]; e.target.value=''; onFile(f); }}/>
     </label>}
+
+    {step==='upload' && <div style={{marginTop:14,paddingTop:12,borderTop:'1px solid var(--border)'}}>
+      <div style={{fontSize:11,color:'var(--muted)',marginBottom:6,lineHeight:1.5}}>Tagesebene aus dem Archiv nachfüllen: liest die früher hochgeladenen Rohdateien neu und füllt <b>daily_hours</b> je Tag (die Rohdatei hat ein Datum je Zeile, das wir früher nur wochenweise gespeichert haben). Idempotent, kann wiederholt werden.</div>
+      <button className="btn btn-sm" disabled={bfBusy} onClick={backfillDaily}>{bfBusy?'Läuft…':'⏳ Tagesebene nachfüllen (Backfill)'}</button>
+      {bfMsg && <span style={{marginLeft:10,fontSize:12,color:'var(--muted)'}}>{bfMsg}</span>}
+    </div>}
 
     {step==='map' && sheet && <div>
       <div style={{fontSize:13,fontWeight:700,marginBottom:8}}>Spalten zuordnen <span style={{fontWeight:400,color:'var(--muted)'}}>— Datei „{file&&file.name}"</span></div>
