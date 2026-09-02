@@ -34565,19 +34565,15 @@ function RohdatenImport({projId, projName, employees, onSaved}){
     const status=result.unmatched.length?'partial':'ok';
     const {data:imp,error:ie}=await sb.from('data_imports').insert({ project_id:projId, source_type:'rohdaten', kw:pkw, year:pyy, file_name:file.name, file_hash:fileHash, storage_path:storagePath, status, warnings:result.warnings, row_count:(sheet.rows||[]).length, matched_count:result.facts.length, unmatched_count:result.unmatched.length, uploaded_by:uid, uploaded_by_name:uname }).select('id').single();
     if(ie){ setBusy(false); setErr('Import nicht gespeichert: '+(ie.message||'')); return; }
-    for(const wk of result.weeks){ const yy=Number(wk.split('-')[0]),kw=Number(wk.split('-')[1]); await sb.from('weekly_hours').delete().eq('project_id',projId).eq('kw',kw).eq('year',yy); }
-    const rows=result.facts.map(f=>({ import_id:imp.id, project_id:projId, employee_id:f.employee_id, kw:f.kw, year:f.year, skill:f.skill, hours:f.hours, pause_hours:f.pause_hours, sales_calls:f.sales_calls, raw:f.raw }));
-    const {error:fe}=await sb.from('weekly_hours').insert(rows);
-    if(fe){ setBusy(false); setErr('Fakten nicht gespeichert: '+(fe.message||'')); return; }
-    // Punkt 1 / Schnitt 2: Tagesebene parallel schreiben (Dual-Write). Wie bei weekly: je importierter
-    // Woche den ganzen Mo–So-Bereich des Projekts leeren und die Tage neu schreiben (Re-Import überschreibt sauber).
-    try{
-      for(const wk of result.weeks){ const yy=Number(wk.split('-')[0]),kw=Number(wk.split('-')[1]); const mon=isoWeekMonday(yy,kw); const sun=new Date(mon.getFullYear(),mon.getMonth(),mon.getDate()+6);
-        await sb.from('daily_hours').delete().eq('project_id',projId).gte('work_date',isoLocal(mon)).lte('work_date',isoLocal(sun)); }
-      const drows=(result.dailyFacts||[]).map(f=>({ import_id:imp.id, project_id:projId, employee_id:f.employee_id, work_date:f.work_date, skill:f.skill, hours:f.hours, pause_hours:f.pause_hours, sales_calls:f.sales_calls, raw:f.raw }));
-      if(drows.length){ const {error:de}=await sb.from('daily_hours').insert(drows); if(de) console.warn('daily_hours nicht gespeichert:', de.message); }
-    }catch(e){ console.warn('daily_hours Dual-Write fehlgeschlagen:', e&&e.message); }
+    // Punkt 1 / Schnitt 4: weekly_hours ist jetzt eine View über daily_hours (Aggregat beim Lesen). Wir schreiben
+    // NUR noch die Tagesebene. Je importierter Woche den ganzen Mo–So-Bereich des Projekts leeren und neu schreiben
+    // (dieselbe „Woche säubern, neu schreiben"-Semantik wie früher bei weekly_hours).
+    for(const wk of result.weeks){ const yy=Number(wk.split('-')[0]),kw=Number(wk.split('-')[1]); const mon=isoWeekMonday(yy,kw); const sun=new Date(mon.getFullYear(),mon.getMonth(),mon.getDate()+6);
+      await sb.from('daily_hours').delete().eq('project_id',projId).gte('work_date',isoLocal(mon)).lte('work_date',isoLocal(sun)); }
+    const drows=(result.dailyFacts||[]).map(f=>({ import_id:imp.id, project_id:projId, employee_id:f.employee_id, work_date:f.work_date, skill:f.skill, hours:f.hours, pause_hours:f.pause_hours, sales_calls:f.sales_calls, raw:f.raw }));
+    const {error:fe}= drows.length ? await sb.from('daily_hours').insert(drows) : {error:null};
     setBusy(false);
+    if(fe){ setErr('Tagesdaten nicht gespeichert: '+(fe.message||'')); return; }
     setSaved(true); setStep('upload'); setSheets(null); setFile(null); setResult(null); onSaved&&onSaved();
   }
   // Punkt 1 / Schnitt 3: Backfill der Tagesebene aus den archivierten Rohdateien (Bucket weekly-imports).
