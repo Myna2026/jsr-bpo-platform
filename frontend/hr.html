@@ -7138,7 +7138,8 @@ function Widget_KrankUrlaubQuote({employees, projects, mobile, selY, selM0, selK
   // Zeitraum-Wähler im KW-Modus gibt die Woche direkt vor; sonst die abgeleitete Woche des Monats.
   const _defW = (selKw&&selKwYear) ? {year:selKwYear,kw:selKw} : getISOWeek(_useDate);
   const [sel,setSel]=useState(wkey(_defW));
-  React.useEffect(()=>{ setSel(wkey(_defW)); },[selY,selM0,selKw,selKwYear]);   // Monats-/KW-Wechsel -> Woche folgt
+  const [manualWk,setManualWk]=useState(null);   // hat der Nutzer im Dropdown eine Woche gewählt? Dann Woche statt Monat.
+  React.useEffect(()=>{ setSel(wkey(_defW)); setManualWk(null); },[selY,selM0,selKw,selKwYear]);   // Perioden-Wechsel -> zurück auf Monats-/Wochen-Standard
   const availWeeks=(()=>{ const a=[]; const base=mondayOf(_useDate); for(let i=0;i<12;i++){ const d=addDays(base,-7*i); a.push(getISOWeek(d)); } return a; })();
   const wLabel=w=>'KW '+w.kw+(w.year!==today.getFullYear()?('/'+String(w.year).slice(2)):'');
   const daysBetween=(a,b)=>{ const out=[]; let d=new Date(a.getFullYear(),a.getMonth(),a.getDate()); const e=new Date(b.getFullYear(),b.getMonth(),b.getDate()); while(d<=e){ out.push({ds:isoD(d),dow:d.getDay()}); d=addDays(d,1); } return out; };
@@ -7146,14 +7147,24 @@ function Widget_KrankUrlaubQuote({employees, projects, mobile, selY, selM0, selK
   // Freier Zeitraum (Datum bis Datum) rechnet tagesgenau über genau diese Tage; Vergleich = gleich langer Zeitraum davor.
   // Sonst: gewählte Woche (KW-Dropdown) vs. Vorwoche. tally() aggregiert beliebige Tagesmengen — echte Zahlen für 12.–24.
   const _useRange=!!(range&&range.from&&range.to);
+  const _weekMode = !!((selKw&&selKwYear) || manualWk);   // konkrete Woche gewählt (Cockpit-KW oder Dropdown-Drilldown)
+  const _monthMode = !_useRange && !_weekMode && selY!=null;   // Standard im Cockpit: der ganze Monat
   let selWLabel, rangeStart, rangeEnd, prevDays, curDays;
   if(_useRange){ const rF=new Date(range.from+'T00:00:00'), rT=new Date(range.to+'T00:00:00');
     const d0=new Date(rF.getFullYear(),rF.getMonth(),rF.getDate()), d1=new Date(rT.getFullYear(),rT.getMonth(),rT.getDate());
     const len=Math.max(1,Math.round((d1-d0)/864e5)+1); const pT=addDays(rF,-1), pF=addDays(rF,-len);
     selWLabel=_fmtDR(range.from)+'–'+_fmtDR(range.to); rangeStart=isoD(pF); rangeEnd=isoD(rT);
     prevDays=daysBetween(pF,pT); curDays=daysBetween(rF,rT);
+  } else if(_monthMode){
+    // Ganzer Monat (im laufenden bis heute), Vergleich = gleich langer Zeitraum unmittelbar davor. Folgt dem Monatswechsel.
+    const mStart=new Date(selY,selM0,1); const mEnd=new Date(selY,selM0+1,0); const end=_isCur?(today<mEnd?today:mEnd):mEnd;
+    const len=Math.max(1,Math.round((new Date(end.getFullYear(),end.getMonth(),end.getDate())-mStart)/864e5)+1);
+    const pT=addDays(mStart,-1), pF=addDays(mStart,-len);
+    selWLabel=new Date(selY,selM0,1).toLocaleDateString('de-DE',{month:'long'});
+    rangeStart=isoD(pF); rangeEnd=isoD(end); prevDays=daysBetween(pF,pT); curDays=daysBetween(mStart,end);
   } else {
-    const [_sy,_sk]=sel.split('-').map(Number);
+    const wsel=(selKw&&selKwYear)?(selKwYear+'-'+selKw):(manualWk||sel);
+    const [_sy,_sk]=String(wsel).split('-').map(Number);
     const selMon=mondayOf(isoWeekMonday(_sy,_sk)); const selEnd=addDays(selMon,6); const prevMon=addDays(selMon,-7);
     selWLabel=wLabel(getISOWeek(selMon)); rangeStart=isoD(prevMon); rangeEnd=isoD(selEnd);
     prevDays=daysBetween(prevMon, addDays(selMon,-1)); curDays=daysBetween(selMon, selEnd);
@@ -7242,8 +7253,9 @@ function Widget_KrankUrlaubQuote({employees, projects, mobile, selY, selM0, selK
   return <div>
     {_useRange
       ? <div style={{display:'flex',justifyContent:'flex-end',marginBottom:10,fontSize:11,color:'var(--muted)',fontWeight:700}}>Zeitraum {selWLabel}</div>
-      : <div style={{display:'flex',justifyContent:'flex-end',marginBottom:10}}>
-          <label style={{display:'inline-flex',alignItems:'center',gap:6,fontSize:11,color:'var(--muted)',fontWeight:700}}>KW <select value={sel} onChange={e=>setSel(e.target.value)} style={{padding:'3px 7px',border:'1px solid var(--border)',borderRadius:7,fontSize:11.5,fontWeight:700,background:'var(--card)',color:'var(--text)'}}>{availWeeks.map(w=><option key={wkey(w)} value={wkey(w)}>{wLabel(w)}</option>)}</select></label>
+      : <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8,marginBottom:10}}>
+          <span style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>{_monthMode?('Monat '+selWLabel):selWLabel}</span>
+          <label style={{display:'inline-flex',alignItems:'center',gap:6,fontSize:11,color:'var(--muted)',fontWeight:700}}>{_monthMode?'Woche':'KW'} <select value={_monthMode?'':(manualWk||sel)} onChange={e=>{ const v=e.target.value; if(!v){ setManualWk(null); } else { setSel(v); setManualWk(v); } }} style={{padding:'3px 7px',border:'1px solid var(--border)',borderRadius:7,fontSize:11.5,fontWeight:700,background:'var(--card)',color:'var(--text)'}}>{_monthMode&&<option value="">Ganzer Monat</option>}{availWeeks.map(w=><option key={wkey(w)} value={wkey(w)}>{wLabel(w)}</option>)}</select></label>
         </div>}
     <div style={{display:'grid',gridTemplateColumns:mobile?'1fr':'repeat(3,1fr)',gap:12}}>
       {rows.map((r,i)=>{ const rel=relTag(r.feat.w); return (
@@ -8936,9 +8948,12 @@ function CockpitProjectKpis({projects, team, mobile, selY, selM0, selKw, selKwYe
     _psig.current=sig+'#done';
     let target=want, prevW=_defP;
     if(!(selKw&&selKwYear) && !dataWks.has(want)){
-      const monEnd=new Date(_defDate.getFullYear(),_defDate.getMonth(),_defDate.getDate());
+      // Rückfall NUR auf Wochen des gewählten Monats (ISO-Donnerstag im Monat), nicht auf Vormonate. Hat der Monat
+      // keine Daten, bleibt die leere Woche → der Block zeigt ehrlich „keine KPI-Daten", statt einen Fremdmonat zu borgen.
+      const monY=_defDate.getFullYear(), monM=_defDate.getMonth();
+      const inMonth=(y,kw)=>{ const mon=isoWeekMonday(y,kw); const thu=new Date(mon.getFullYear(),mon.getMonth(),mon.getDate()+3); return thu.getFullYear()===monY && thu.getMonth()===monM; };
       const cand=[...dataWks].map(k=>{ const p=String(k).split('-').map(Number); return {k,year:p[0],kw:p[1]}; })
-        .filter(w=>Number.isFinite(w.year)&&Number.isFinite(w.kw)&&isoWeekMonday(w.year,w.kw)<=monEnd)
+        .filter(w=>Number.isFinite(w.year)&&Number.isFinite(w.kw)&&inMonth(w.year,w.kw))
         .sort((a,b)=> b.year-a.year || b.kw-a.kw);
       if(cand.length){ target=cand[0].k; const tm=isoWeekMonday(cand[0].year,cand[0].kw); prevW=getISOWeek(new Date(tm.getFullYear(),tm.getMonth(),tm.getDate()-7)); }
     }
@@ -8986,6 +9001,8 @@ function CockpitProjectKpis({projects, team, mobile, selY, selM0, selKw, selKwYe
   // Nur echte Kalenderwochen ins Dropdown (kein „KW NaN" aus Monats-/Leerzeilen mit fehlender kw).
   const availWeeks=[...wkSet].map(parseW).filter(w=>Number.isFinite(w.year)&&Number.isFinite(w.kw)&&w.kw>=1&&w.kw<=53).sort((a,b)=> b.year-a.year || b.kw-a.kw);
   const selW=parseW(sel); const cmpW=cmp?parseW(cmp):null;
+  const _selHasData = Object.values(emap).some(rec=>rec&&rec[sel]!==undefined) || Object.values(pent).some(byW=>byW&&byW[sel]!==undefined);
+  const _noDataHint = !_selHasData ? <div style={{fontSize:12,color:'#b45309',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:8,padding:'6px 10px',marginBottom:8}}>Keine KPI-Daten in diesem Zeitraum.</div> : null;
   const wLabel=w=>'KW '+w.kw+(w.year!==cwNow.year?('/'+String(w.year).slice(2)):'');
   const _selStyle={padding:'3px 7px',border:'1px solid var(--border)',borderRadius:7,fontSize:11.5,fontWeight:700,background:'var(--card)',color:'var(--text)'};
   const weekControls=(
@@ -9024,6 +9041,7 @@ function CockpitProjectKpis({projects, team, mobile, selY, selM0, selKw, selKwYe
   // Innenabstand konsistent (mobil hat .ckm-card KEIN Padding → sonst Punkte an der Kante).
   const inner=(
     <div style={{padding:'2px 14px 8px'}}>
+      {_noDataHint}
       {combos.map(c=>{ const kpis=comboKpis(c.pid,c.skill); if(!kpis.length) return null;
         const prim=kpis.filter(k=>k.is_primary), rest=kpis.filter(k=>!k.is_primary); const hasPrim=prim.length>0;
         return (
@@ -9092,6 +9110,7 @@ function CockpitProjectKpis({projects, team, mobile, selY, selM0, selKw, selKwYe
   };
   const deckGrid=(
     <div style={{padding:14}}>
+      {_noDataHint}
       <div style={{display:'flex',flexDirection:'column',gap:14}}>
         {projIdsCk.map(pid=>{ const pcombos=byProjCk[pid].slice().sort((a,b)=>(a.skill||'').localeCompare(b.skill||'','de'));
           if(!pcombos.some(c=>comboKpis(c.pid,c.skill).length)) return null;
@@ -9378,21 +9397,33 @@ function KpiTraceModal({projectId, skill, kpiId, kpiName, kw, year, fmt, onClose
 // GEPLANTE Stunden (shift_assignments, auf die Wochen summiert). Monat bis heute = abgeschlossene KWs des Monats
 // (Zwischenstand gegen Zwischenstand). Nur HolidayCheck Sales+Support (dort liegt der Forecast vor). Tagesgenau
 // erst, wenn der Detail-Forecast (forecast_demand) gefüllt ist. Größenordnungs-Hinweis fest dabei.
-function CockpitStundenabgleich({projects, team, mobile, selY, selM0}){
+function CockpitStundenabgleich({projects, team, mobile, selY, selM0, selKw, selKwYear, range}){
   const isMgmt=((team&&team.role_keys)||[]).some(r=>r==='management');
   const [data,setData]=useState(null);
   const [trace,setTrace]=useState(null);   // Spur zur Quelle
   const now=new Date();
   const hcProj=(projects||[]).find(p=>p&&/holiday/i.test(p.name||''));
-  // Folgt dem Zeitraum-Wähler. Tagesgenau bis heute (bzw. bis Monatsende bei vergangenem Monat): der WOCHEN-Forecast und
-  // die WOCHEN-Ist werden anteilig auf die Werktage der jeweiligen KW gerechnet (÷ Werktage), der Schichtplan ist echt
-  // tagesgenau. So bleibt der Block ab dem 1. gefüllt (Näherung, ehrlich beschriftet). Gelieferte Stunden gibt es nur je Woche.
-  const _isCur = selY==null || (selY===now.getFullYear() && selM0===now.getMonth());
-  const _y=selY!=null?selY:now.getFullYear(), _m=selM0!=null?selM0:now.getMonth();
-  const _mStart=new Date(_y,_m,1); const _today=new Date(now.getFullYear(),now.getMonth(),now.getDate()); const _mEnd=new Date(_y,_m+1,0);
-  const _to = _isCur ? (_today<_mEnd?_today:_mEnd) : _mEnd;
-  // Alle Tage von Monatsanfang bis _to (Werktage Mo–Fr zählen).
-  const days=(()=>{ const out=[]; let d=new Date(_mStart.getFullYear(),_mStart.getMonth(),_mStart.getDate()); while(d<=_to){ const dow=d.getDay(); out.push({ds:isoLocal(d),dow,isWork:dow>=1&&dow<=5,w:getISOWeek(d)}); d=new Date(d.getFullYear(),d.getMonth(),d.getDate()+1); } return out; })();
+  // Folgt dem Zeitraum-Wähler wochen-/zeitraumscharf: Woche → genau diese KW, Zeitraum → die Tage des Zeitraums,
+  // sonst Monat bis heute. Der WOCHEN-Forecast und die WOCHEN-Ist werden anteilig auf die Werktage gerechnet (÷ 5),
+  // der Schichtplan ist echt tagesgenau. Gelieferte Stunden gibt es nur je Woche.
+  const _todayD=new Date(now.getFullYear(),now.getMonth(),now.getDate());
+  let _from, _to, _isCur, _periodLabel;
+  if(selKw && selKwYear){
+    const mon=isoWeekMonday(selKwYear,selKw); _from=new Date(mon.getFullYear(),mon.getMonth(),mon.getDate());
+    const sun=new Date(mon.getFullYear(),mon.getMonth(),mon.getDate()+6);
+    _isCur=_todayD>=_from&&_todayD<=sun; _to=_isCur?_todayD:sun; _periodLabel='KW '+selKw+'/'+String(selKwYear).slice(2);
+  } else if(range && range.from && range.to){
+    _from=new Date(range.from+'T00:00:00'); const rt=new Date(range.to+'T00:00:00');
+    _isCur=false; _to=rt<_todayD?rt:_todayD;
+    _periodLabel=_from.getDate()+'.'+(_from.getMonth()+1)+'.–'+rt.getDate()+'.'+(rt.getMonth()+1)+'.';
+  } else {
+    const _y=selY!=null?selY:now.getFullYear(), _m=selM0!=null?selM0:now.getMonth();
+    _isCur=selY==null||(selY===now.getFullYear()&&selM0===now.getMonth());
+    _from=new Date(_y,_m,1); const _mEnd=new Date(_y,_m+1,0); _to=_isCur?(_todayD<_mEnd?_todayD:_mEnd):_mEnd;
+    _periodLabel=new Date(_y,_m,1).toLocaleDateString('de-DE',{month:'long',year:'numeric'});
+  }
+  // Alle Tage von _from bis _to (Werktage Mo–Fr zählen).
+  const days=(()=>{ const out=[]; let d=new Date(_from.getFullYear(),_from.getMonth(),_from.getDate()); while(d<=_to){ const dow=d.getDay(); out.push({ds:isoLocal(d),dow,isWork:dow>=1&&dow<=5,w:getISOWeek(d)}); d=new Date(d.getFullYear(),d.getMonth(),d.getDate()+1); } return out; })();
   useEffect(()=>{ if(!isMgmt||!hcProj||!days.length){ setData({skills:[]}); return; } let alive=true;
     (async()=>{ try{
       const kwSet={}; days.forEach(x=>{ kwSet[x.w.year+'-'+x.w.kw]=x.w; }); const kws=Object.values(kwSet);
@@ -9416,7 +9447,7 @@ function CockpitStundenabgleich({projects, team, mobile, selY, selM0}){
       const skills=['sales','support'].filter(s=>agg[s]&&(agg[s].fc>0||agg[s].delivered>0||agg[s].planned>0)).map(s=>({skill:s,...agg[s]}));
       setData({skills});
     }catch(e){ if(alive) setData({skills:[]}); } })();
-    return ()=>{alive=false;}; },[isMgmt, hcProj&&hcProj.id, _y, _m, _isCur, days.length]);
+    return ()=>{alive=false;}; },[isMgmt, hcProj&&hcProj.id, _isCur, days.length, (days[0]&&days[0].ds), (days[days.length-1]&&days[days.length-1].ds)]);
   if(!isMgmt) return null;
   const card=b=> <div className="card" style={{marginBottom:14,overflow:'hidden'}}>
     <div style={{padding:'10px 14px',borderBottom:'1px solid var(--border)',fontSize:12,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em'}}>Stundenabgleich · HolidayCheck</div>
@@ -9428,12 +9459,12 @@ function CockpitStundenabgleich({projects, team, mobile, selY, selM0}){
   const _workElapsed=days.filter(x=>x.isWork).length;
   if(_isCur && _workElapsed<5) return card(
     <div style={{fontSize:12.5,color:'var(--muted)',lineHeight:1.6}}>
-      <div style={{fontWeight:700,color:'var(--text)',marginBottom:3}}>{new Date(_y,_m,1).toLocaleDateString('de-DE',{month:'long',year:'numeric'})}</div>
-      Zu früh im Monat für eine belastbare Aussage. Erst nach der ersten vollen Woche werden Forecast und Ist sinnvoll vergleichbar ({_workElapsed} von 5 Werktagen).
+      <div style={{fontWeight:700,color:'var(--text)',marginBottom:3}}>{_periodLabel}</div>
+      Zu früh im Zeitraum für eine belastbare Aussage. Erst nach der ersten vollen Woche werden Forecast und Ist sinnvoll vergleichbar ({_workElapsed} von 5 Werktagen).
     </div>);
   const fmt=n=>Math.round(n).toLocaleString('de-DE');
   const dev=(a,b)=> b>0?Math.round((a-b)/b*100):null; const sLbl=s=>s==='sales'?'Sales':s==='support'?'Support':s;
-  const bisTxt = _isCur ? ('bis '+_to.getDate()+'.'+(_to.getMonth()+1)+'.') : 'ganzer Monat';
+  const bisTxt = _isCur ? ('bis '+_to.getDate()+'.'+(_to.getMonth()+1)+'.') : 'abgeschlossen';
   // Wochen des angezeigten Monats für die Spur zur Quelle (exakte weekly_hours, nicht die anteilige Anzeige).
   const _traceWeeks=[...new Set(days.map(x=>x.w.year+'-'+x.w.kw))].map(k=>({year:Number(k.split('-')[0]),kw:Number(k.split('-')[1])}));
   const cell=(lbl,val,delta,ref,onClick)=> <div style={{flex:1,textAlign:'center',padding:'8px 6px',background:'var(--surface-2)',borderRadius:10,border:'1px solid var(--border)'}}>
@@ -9442,41 +9473,46 @@ function CockpitStundenabgleich({projects, team, mobile, selY, selM0}){
     {delta!=null&&<div style={{fontSize:11,fontWeight:700,marginTop:2,color:Math.abs(delta)<=5?'var(--muted)':(delta<0?'var(--red)':'var(--green)')}}>{delta>0?'+':''}{delta}% {ref}</div>}
   </div>;
   return card(<div>
-    <div style={{fontSize:11,color:'var(--muted)',marginBottom:10}}>{new Date(_y,_m,1).toLocaleDateString('de-DE',{month:'long',year:'numeric'})}, {bisTxt} (Zwischenstand). Forecast und geliefert sind <b>anteilig</b> aus den Wochenwerten auf Tage gerechnet (nur wochenweise vorhanden); der Schichtplan ist tagesgenau.</div>
+    <div style={{fontSize:11,color:'var(--muted)',marginBottom:10}}>{_periodLabel}, {bisTxt} (Zwischenstand). Forecast und geliefert sind <b>anteilig</b> aus den Wochenwerten auf Tage gerechnet (nur wochenweise vorhanden); der Schichtplan ist tagesgenau.</div>
     {data.skills.length===0? <div style={{fontSize:12.5,color:'var(--muted)'}}>Kein Forecast/Ist für Sales oder Support in diesem Zeitraum.</div>
      : <div style={{display:'grid',gridTemplateColumns:mobile?'1fr':'1fr 1fr',gap:12}}>
         {data.skills.map(s=><div key={s.skill} style={{border:'1px solid var(--border)',borderRadius:12,padding:'11px 13px',background:'var(--card)'}}>
           <div style={{fontWeight:700,fontSize:13,marginBottom:9}}>{sLbl(s.skill)}</div>
-          <div style={{display:'flex',gap:8}}>{cell('Forecast',s.fc,null,'')}{cell('Geliefert',s.delivered,dev(s.delivered,s.fc),'vs FC',()=>setTrace({projectId:hcProj.id, skill:s.skill, weeks:_traceWeeks, title:sLbl(s.skill)+' · '+new Date(_y,_m,1).toLocaleDateString('de-DE',{month:'long',year:'numeric'})}))}{cell('Geplant (Schicht)',s.planned,dev(s.planned,s.fc),'vs FC')}</div>
+          <div style={{display:'flex',gap:8}}>{cell('Forecast',s.fc,null,'')}{cell('Geliefert',s.delivered,dev(s.delivered,s.fc),'vs FC',()=>setTrace({projectId:hcProj.id, skill:s.skill, weeks:_traceWeeks, title:sLbl(s.skill)+' · '+_periodLabel}))}{cell('Geplant (Schicht)',s.planned,dev(s.planned,s.fc),'vs FC')}</div>
         </div>)}
       </div>}
     <div style={{marginTop:10,padding:'9px 11px',borderRadius:9,background:'#fffbeb',border:'1px solid #fde68a',fontSize:11.5,color:'#92400e',lineHeight:1.5}}>⚠ Näherung: Forecast und Ist liegen nur wochenweise vor und sind anteilig auf Tage verteilt. Zusätzlich unklar, ob der Forecast nur die Telefonzeit oder die gesamte Arbeitszeit abdeckt, die Prozente sind erst belastbar, wenn das geklärt ist. Klick auf <b>Geliefert</b> zeigt die Herkunft (Wochen, Mitarbeiter, Datei).</div>
     {trace && <HoursTraceModal projectId={trace.projectId} skill={trace.skill} weeks={trace.weeks} title={trace.title} onClose={()=>setTrace(null)}/>}
   </div>);
 }
-function CockpitForecastIst({projects, team, mobile, selY, selM0}){
+function CockpitForecastIst({projects, team, mobile, selY, selM0, selKw, selKwYear, range}){
   const isMgmt=((team&&team.role_keys)||[]).some(r=>r==='management');
   const [data,setData]=useState(null);
   const [trace,setTrace]=useState(null);   // Spur zur Quelle: {projectId,skill,weeks,title}
   const now=new Date();
   const mondayOf=d=>{ const x=new Date(d.getFullYear(),d.getMonth(),d.getDate()); x.setDate(x.getDate()-((x.getDay()+6)%7)); return x; };
-  // Folgt dem Zeitraum-Wähler und bleibt IM gewählten Monat: die Wochen, deren Montag in diesen Monat fällt.
-  // Laufender Monat → nur die bereits abgeschlossenen Wochen (Ist vollständig); die laufende Woche nur als Hinweis.
-  // Kein rollierendes Fenster mehr (das ließ August und September identisch aussehen, weil die letzte
-  // abgeschlossene Woche Anfang September noch im August lag).
-  const _isCur = selY==null || (selY===now.getFullYear() && selM0===now.getMonth());
-  const _fy = selY!=null?selY:now.getFullYear(), _fm = selM0!=null?selM0:now.getMonth();
   const _todayF = new Date(now.getFullYear(),now.getMonth(),now.getDate());
-  // Monatszuordnung nach ISO-Donnerstag (wie die Jahreszuordnung der KW): die Grenzwoche Mo 31.8.–So 6.9. zählt
-  // zum September (Do 3.9.), nicht zum August. Immer nur ABGESCHLOSSENE Wochen (So < heute) als Hauptwert.
-  const _monWeeks=(()=>{ const map={}; let d=new Date(_fy,_fm,1); const end=new Date(_fy,_fm+1,0);
+  // Zeitraumscharf: Woche → genau diese KW; Zeitraum → die berührten Wochen; sonst der Monat (Wochen, deren
+  // ISO-Donnerstag im Monat liegt). Immer nur ABGESCHLOSSENE Wochen (So < heute) als Hauptwert, die laufende als Hinweis.
+  let weeks, runWeek, _isCur, _scopeLabel;
+  if(selKw && selKwYear){
+    const mon=isoWeekMonday(selKwYear,selKw); const sun=new Date(mon.getFullYear(),mon.getMonth(),mon.getDate()+6);
+    const w={year:selKwYear,kw:selKw}; _isCur=_todayF>=mon&&_todayF<=sun; const complete=sun<_todayF;
+    weeks=complete?[w]:[]; runWeek=complete?null:w; _scopeLabel='dieser Woche';
+  } else if(range && range.from && range.to){
+    const f=new Date(range.from+'T00:00:00'), t=new Date(range.to+'T00:00:00'); const map={}; let d=new Date(f.getFullYear(),f.getMonth(),f.getDate());
+    while(d<=t){ const mon=mondayOf(d); const sun=new Date(mon.getFullYear(),mon.getMonth(),mon.getDate()+6); const w=getISOWeek(mon); map[w.year+'-'+w.kw]={w,mon,sun}; d=new Date(d.getFullYear(),d.getMonth(),d.getDate()+1); }
+    const arr=Object.values(map).sort((a,b)=>a.mon-b.mon); weeks=arr.filter(x=>x.sun<_todayF).map(x=>x.w);
+    const ro=arr.find(x=>x.mon<=_todayF && x.sun>=_todayF); runWeek=ro?ro.w:null; _isCur=false; _scopeLabel='dieses Zeitraums';
+  } else {
+    const _fy=selY!=null?selY:now.getFullYear(), _fm=selM0!=null?selM0:now.getMonth();
+    _isCur=selY==null||(selY===now.getFullYear()&&selM0===now.getMonth()); const map={}; let d=new Date(_fy,_fm,1); const end=new Date(_fy,_fm+1,0);
     while(d<=end){ const mon=mondayOf(d); const thu=new Date(mon.getFullYear(),mon.getMonth(),mon.getDate()+3);
       if(thu.getFullYear()===_fy&&thu.getMonth()===_fm){ const w=getISOWeek(mon); const sun=new Date(mon.getFullYear(),mon.getMonth(),mon.getDate()+6); map[w.year+'-'+w.kw]={w,mon,sun}; }
       d=new Date(d.getFullYear(),d.getMonth(),d.getDate()+1); }
-    return Object.values(map).sort((a,b)=>a.mon-b.mon); })();
-  const weeks = _monWeeks.filter(x=>x.sun<_todayF).map(x=>x.w);
-  const _runObj = _isCur ? (_monWeeks.find(x=>x.mon<=_todayF && x.sun>=_todayF)||null) : null;
-  const runWeek = _runObj ? _runObj.w : (_isCur ? getISOWeek(mondayOf(now)) : null);
+    const arr=Object.values(map).sort((a,b)=>a.mon-b.mon); weeks=arr.filter(x=>x.sun<_todayF).map(x=>x.w);
+    const ro=_isCur?(arr.find(x=>x.mon<=_todayF && x.sun>=_todayF)||null):null; runWeek=ro?ro.w:(_isCur?getISOWeek(mondayOf(now)):null); _scopeLabel='des Monats';
+  }
   const wkey=w=>w.year+'-'+w.kw;
   useEffect(()=>{ if(!isMgmt){ setData({combos:[],noFc:[]}); return; } let alive=true;
     const load=async()=>{
@@ -9505,7 +9541,7 @@ function CockpitForecastIst({projects, team, mobile, selY, selM0}){
     load();
     const ch=sb.channel('cockpit-fc-ist').on('postgres_changes',{event:'*',schema:'public',table:'report_forecast'},load).subscribe();
     return ()=>{ alive=false; try{ sb.removeChannel(ch); }catch(e){} };
-  },[isMgmt,selY,selM0]);
+  },[isMgmt,selY,selM0,selKw,selKwYear,(range&&range.from),(range&&range.to)]);
   if(!isMgmt || data===null) return null;
   const combos=data.combos||[]; if(!combos.length) return null;   // kein Forecast = kein Vergleichsblock
   const projName=id=>{ const p=(projects||[]).find(x=>x&&x.id===id); return p?p.name:id; };
@@ -9541,7 +9577,7 @@ function CockpitForecastIst({projects, team, mobile, selY, selM0}){
     <div style={{padding:mobile?'2px 0 4px':14}}>
       <div style={mobile?{display:'flex',flexDirection:'column',gap:10}:{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(300px,1fr))',gap:12}}>{combos.map(c=>card(c))}</div>
       <div style={{fontSize:10,color:'var(--muted)',marginTop:mobile?8:10,lineHeight:1.5}}>
-        Ist (weekly_hours) gegen Auftraggeber-Forecast (report_forecast), Wochen des gewählten Monats. Lücke = (FC − Ist) ÷ FC. Farbe nach Größe der Abweichung, Werte beim Darüberfahren.
+        Ist (weekly_hours) gegen Auftraggeber-Forecast (report_forecast), Wochen {_scopeLabel}. Lücke = (FC − Ist) ÷ FC. Farbe nach Größe der Abweichung, Werte beim Darüberfahren.
         {(data.noFc||[]).length>0 && <span> Ohne Forecast (nur Ist, hier nicht verglichen): <b>{data.noFc.map(projName).join(', ')}</b>.</span>}
       </div>
     </div>
@@ -10418,8 +10454,8 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
       training: hasTraining ? wblock('training_status', <Widget_TrainingStatus plans={plans}/>, _ownRef('Momentaufnahme (aktueller Stand), folgt dem Zeitraum nicht.')) : null,
       fabletics: <LazyBlock minHeight={140}><Widget_DailyReports employees={employees} projects={projects} team={team}/></LazyBlock>,
       kpis: <LazyBlock minHeight={240}><CockpitProjectKpis projects={projects} team={team} mobile={false} selY={_selY} selM0={_selM0} selKw={_selKw} selKwYear={_selKwYear}/></LazyBlock>,
-      forecast_ist: <LazyBlock minHeight={200}><CockpitForecastIst projects={projects} team={team} mobile={false} selY={_selY} selM0={_selM0}/></LazyBlock>,
-      stundenabgleich: <LazyBlock minHeight={160}><CockpitStundenabgleich projects={projects} team={team} mobile={false} selY={_selY} selM0={_selM0}/></LazyBlock>,
+      forecast_ist: <LazyBlock minHeight={200}><CockpitForecastIst projects={projects} team={team} mobile={false} selY={_selY} selM0={_selM0} selKw={_selKw} selKwYear={_selKwYear} range={_selRange}/></LazyBlock>,
+      stundenabgleich: <LazyBlock minHeight={160}><CockpitStundenabgleich projects={projects} team={team} mobile={false} selY={_selY} selM0={_selM0} selKw={_selKw} selKwYear={_selKwYear} range={_selRange}/></LazyBlock>,
       longterm: <LazyBlock minHeight={200}><CockpitLongterm projects={projects} team={team} mobile={false}/></LazyBlock>,
       shiftplan: <React.Fragment>{_ownRef('Diese Woche, folgt dem Zeitraum nicht.')}<Widget_Schichtplan employees={employees} projects={projects} onNavigate={onNavigate}/></React.Fragment>,
       presentations: <LazyBlock minHeight={120}><CockpitPresentationComments projects={projects} team={team} mobile={false}/></LazyBlock>,
