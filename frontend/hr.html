@@ -9686,6 +9686,10 @@ function CockpitMarketingTile({team, employees, mobile, onNavigate}){
   const cpaVal=appsCPA>0?spend/appsCPA:null;
   const fmtD=d=>d?d.toLocaleDateString('de-DE',{day:'numeric',month:'short'}):'';
   const hasData=(rows||[]).some(x=>inR(x.date,cur));
+  // Ehrlich: liegen für den Zeitraum überhaupt Meta-Ausgaben vor? 0 € nur zeigen, wenn es wirklich 0 ist, nicht wenn
+  // die bezahlten Daten fehlen (Windsor-Feed hängt). latestMeta = jüngster Tag mit Meta-Ausgaben-Zeile.
+  const latestMeta=(rows||[]).reduce((m,x)=>(x.datasource==='facebook'&&(!m||x.date>m))?x.date:m,null);
+  const spendKnown=meta.length>0;
   const eur=n=>n==null?'—':n.toLocaleString('de-DE',{minimumFractionDigits:2,maximumFractionDigits:2})+' €';
   const int=n=>n==null?'—':Math.round(n).toLocaleString('de-DE');
   const go=()=>{ if(onNavigate) onNavigate({kind:'view',view:'recmkt'}); else if(window.dispatchEvent) window.dispatchEvent(new CustomEvent('navigate',{detail:'recmkt'})); };
@@ -9705,12 +9709,14 @@ function CockpitMarketingTile({team, employees, mobile, onNavigate}){
     <div style={{fontSize:13,fontWeight:800,marginBottom:10,display:'flex',alignItems:'center',gap:8}}>📣 Recruiting Marketing <span style={{fontSize:11,fontWeight:600,color:'var(--muted)'}}>· Dieser Monat →</span></div>
     {!hasData ? <div style={{fontSize:12,color:'var(--muted)'}}>Keine Marketingdaten für diesen Monat.</div>
       : <React.Fragment><div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
-          {stat('Ausgaben (Meta)', eur(spend))}
-          {stat('Meta-Reichweite', int(metaReach))}
+          {stat('Ausgaben (Meta)', spendKnown?eur(spend):'keine Daten', spendKnown?undefined:'var(--muted)')}
+          {stat('Meta-Reichweite', spendKnown?int(metaReach):'keine Daten', spendKnown?undefined:'var(--muted)')}
           {stat('Instagram-Reichw.', int(igReach))}
           {stat('Bewerbungen', int(apps))}
-          {stat('Kosten je Meta-Bew.', cpaVal==null?'—':eur(cpaVal), 'var(--accent,#2563eb)')}
-        </div><div style={{fontSize:10.5,color:'var(--muted)',marginTop:6}}>Herkunft: {int(appsMeta)} Meta · {int(appsSheet)} Sheet{(apps-appsMeta-appsSheet)>0?(' · '+int(apps-appsMeta-appsSheet)+' übrige'):''}{firstSpendDate?(' · Kosten je Meta-Bewerbung seit '+fmtD(firstSpendDate)):''}</div>{spendChart}</React.Fragment>}
+          {stat('Kosten je Meta-Bew.', !spendKnown?'keine Daten':(cpaVal==null?'—':eur(cpaVal)), !spendKnown?'var(--muted)':'var(--accent,#2563eb)')}
+        </div>
+        {!spendKnown && appsMeta>0 && <div style={{fontSize:11,color:'#b45309',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:8,padding:'6px 10px',marginTop:8}}>⚠ Keine Meta-Ausgaben für diesen Zeitraum, obwohl {int(appsMeta)} Meta-Bewerbungen kamen. Kosten je Bewerbung ist daher nicht 0, sondern unbekannt.{latestMeta?(' Ausgaben-Datenstand bis '+fmtD(latestMeta)+'.'):''}</div>}
+        <div style={{fontSize:10.5,color:'var(--muted)',marginTop:6}}>Herkunft: {int(appsMeta)} Meta · {int(appsSheet)} Sheet{(apps-appsMeta-appsSheet)>0?(' · '+int(apps-appsMeta-appsSheet)+' übrige'):''}{firstSpendDate?(' · Kosten je Meta-Bewerbung seit '+fmtD(firstSpendDate)):''}</div>{spendChart}</React.Fragment>}
   </div>;
 }
 function CockpitPresentationComments({projects, team, mobile}){
@@ -35581,11 +35587,11 @@ function RecruitingMarketingView({employees}){
   const cmpLabel = level==='today'?'vs. gestern':level==='week'?'vs. Vorwoche':level==='month'?'vs. Vormonat':'';
 
   const METRICS=[
-    {key:'spend', label:'Ausgaben (Meta)', fmt:eur, good:'neutral', val:r=>sum(metaIn(r),'spend'), subFn:r=>{ const s=new Set(); metaIn(r).forEach(x=>{ if((x.spend||0)>0) s.add(x.campaign||'(ohne Name)'); }); const n=s.size; return n>0?(n+' Kampagne'+(n===1?'':'n')):null; }},
+    {key:'spend', label:'Ausgaben (Meta)', fmt:eur, good:'neutral', val:r=>{ const m=metaIn(r); return m.length?sum(m,'spend'):null; }, subFn:r=>{ const m=metaIn(r); if(!m.length) return 'keine Daten'; const s=new Set(); m.forEach(x=>{ if((x.spend||0)>0) s.add(x.campaign||'(ohne Name)'); }); const n=s.size; return n>0?(n+' Kampagne'+(n===1?'':'n')):null; }},
     {key:'metaReach', label:'Meta-Reichweite', fmt:int, good:'up', sub:'bezahlt', val:r=>sum(metaIn(r),'reach')},
     {key:'instaReach', label:'Instagram-Reichweite', fmt:int, good:'up', sub:'organisch', val:r=>sum(instaIn(r),'reach')},
     {key:'apps', label:'Bewerbungen', fmt:int, good:'up', val:r=>appsIn(r), subFn:r=>{ const me=appsBy(r,'meta'),sh=appsBy(r,'sheet'),ot=appsBy(r,'other'); const p=[me+' Meta',sh+' Sheet']; if(ot) p.push(ot+' übrige'); const rp=repeatersIn(r); if(rp) p.push(rp+' Wiederholer'); return p.join(' · '); }},
-    {key:'cpa', label:'Kosten je neue Bewerbung', fmt:eur, good:'down', sub:(firstSpendDate?('nur Meta · seit '+fmtD(firstSpendDate)):'nur Meta'), val:r=>{ const a=metaAppsSinceSpend(r); return a>0? sum(metaIn(r),'spend')/a : null; }},
+    {key:'cpa', label:'Kosten je neue Bewerbung', fmt:eur, good:'down', sub:(firstSpendDate?('nur Meta · seit '+fmtD(firstSpendDate)):'nur Meta'), val:r=>{ const a=metaAppsSinceSpend(r); const m=metaIn(r); return (m.length&&a>0)? sum(m,'spend')/a : null; }},
   ];
   const chip=(c,p,good)=>{ if(c==null||p==null) return null;
     if(p===0) return c>0?{txt:'neu',color:'var(--muted)'}:null;
@@ -35614,7 +35620,8 @@ function RecruitingMarketingView({employees}){
   const cpaFrom=floorFrom(cur);
   const appsMetaTot=(cvs||[]).filter(c=>c&&c.source==='meta'&&inR(wmDate(c.cv_date),{from:cpaFrom,to:cur.to})).length;
   const appsSheetTot=appsBy({from:cpaFrom,to:cur.to},'sheet');
-  const spendCur=sum(metaIn(cur),'spend'); const cpaCur=appsMetaTot>0?spendCur/appsMetaTot:null;
+  const metaSpendKnown=metaIn(cur).length>0;   // liegen im Zeitraum überhaupt Meta-Ausgaben-Zeilen vor?
+  const spendCur=sum(metaIn(cur),'spend'); const cpaCur=(metaSpendKnown&&appsMetaTot>0)?spendCur/appsMetaTot:null;   // ohne Ausgaben-Daten: keine Angabe, nicht 0
   const repeatCur=repeatersIn({from:cpaFrom,to:cur.to}); const totContacts=appsMetaTot+repeatCur; const cpaContact=totContacts>0?spendCur/totContacts:null;
   const repeatPct=totContacts>0?Math.round(repeatCur/totContacts*100):0;
   // Bewerbungen je Tag (Stückzahl, direkt lesbar) — meta-Anteil getrennt. Bei Zeiträumen >70 Tagen nur Tage mit Eingang.
@@ -35771,19 +35778,20 @@ function RecruitingMarketingView({employees}){
           </div>}
           <div style={{marginTop:22}}>
             <div style={{fontSize:14,fontWeight:800,marginBottom:8}}>Kosten je Bewerbung</div>
+            {!metaSpendKnown && appsMetaTot>0 && <div style={{fontSize:12,color:'#b45309',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:8,padding:'8px 12px',marginBottom:10}}>⚠ Für diesen Zeitraum liegen keine Meta-Ausgaben vor, obwohl {int(appsMetaTot)} Meta-Bewerbungen kamen. Die Kosten je Bewerbung sind daher <b>unbekannt, nicht 0 €</b>.{latestMeta?(' Ausgaben-Datenstand bis '+fmtD(latestMeta)+'.'):''}</div>}
             <div style={{display:'flex',alignItems:'center',gap:18,flexWrap:'wrap',padding:'14px 18px',border:'1px solid var(--border)',borderRadius:12,background:'var(--card)'}}>
-              <div><div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)'}}>Meta-Ausgaben</div><div style={{fontSize:22,fontWeight:800}}>{eur(spendCur)}</div></div>
+              <div><div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)'}}>Meta-Ausgaben</div><div style={{fontSize:22,fontWeight:800,color:metaSpendKnown?undefined:'var(--muted)'}}>{metaSpendKnown?eur(spendCur):'keine Daten'}</div></div>
               <div style={{fontSize:20,fontWeight:800,color:'var(--muted)'}}>÷</div>
               <div><div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)'}}>Neue Bewerbungen</div><div style={{fontSize:22,fontWeight:800}}>{int(appsMetaTot)}</div><div style={{fontSize:11,color:'var(--muted)'}}>nur source=meta{firstSpendDate?(' · seit '+fmtD(firstSpendDate)):''}</div></div>
               <div style={{fontSize:20,fontWeight:800,color:'var(--muted)'}}>=</div>
-              <div><div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)'}}>Kosten je neue Bewerbung</div><div style={{fontSize:26,fontWeight:800,color:'var(--accent,#2563eb)'}}>{cpaCur==null?'—':eur(cpaCur)}</div></div>
+              <div><div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)'}}>Kosten je neue Bewerbung</div><div style={{fontSize:26,fontWeight:800,color:metaSpendKnown?'var(--accent,#2563eb)':'var(--muted)'}}>{!metaSpendKnown?'keine Daten':(cpaCur==null?'—':eur(cpaCur))}</div></div>
             </div>
             {totContacts>0&&<div style={{display:'flex',flexWrap:'wrap',gap:20,alignItems:'center',padding:'11px 16px',marginTop:10,border:'1px solid '+(repeatCur>0?'#fde68a':'var(--border)'),borderRadius:10,background:repeatCur>0?'#fffbeb':'var(--surface-2)'}}>
               <div><div style={{fontSize:10,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)'}}>Meta-Kontakte gesamt</div><div style={{fontSize:19,fontWeight:800}}>{int(totContacts)}</div></div>
               <div style={{color:repeatCur>0?'#b45309':'var(--muted)'}}><div style={{fontSize:10,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em'}}>davon Wiederholer</div><div style={{fontSize:19,fontWeight:800}}>{int(repeatCur)}{repeatCur>0?(' · '+repeatPct+' %'):''}</div><div style={{fontSize:10,fontWeight:600}}>bereits bekannt</div></div>
               <div><div style={{fontSize:10,fontWeight:800,textTransform:'uppercase',letterSpacing:'.06em',color:'var(--muted)'}}>Kosten je Kontakt (alle)</div><div style={{fontSize:19,fontWeight:800}}>{cpaContact==null?'—':eur(cpaContact)}</div></div>
             </div>}
-            <div style={{fontSize:11,color:'var(--muted)',marginTop:8,lineHeight:1.6}}><b>Echte Zuordnung.</b> Seit dem Meta-Import trägt jede Anzeigen-Bewerbung die Herkunft <b>source=meta</b> — gezählt werden nur diese, nicht mehr alle CV-Eingänge. Keine Näherung mehr. {repeatCur>0?('Zusätzlich meldeten sich '+repeatCur+' Wiederholer (Telefon schon im Bestand) — die werden gar nicht erst als Bewerbung angelegt und zählen bei „je neue Bewerbung" nicht mit; „je Kontakt (alle)" schließt sie ein. '):''}{appsSheetTot>0?('Im Zeitraum kamen zusätzlich '+appsSheetTot+' Bewerbung'+(appsSheetTot===1?'':'en')+' über den Google-Sheet-Sync (ohne Werbung) — die bleiben hier außen vor. '):''}{nCamp>1?('Je Kampagne ist die Zuordnung in der Kampagnen-Tabelle oben aufgeschlüsselt (Bewerbungen und Kosten je Bewerbung). '):''}{cpaCur==null?'(Keine Meta-Bewerbungen im Zeitraum → keine Angabe.)':''}</div>
+            <div style={{fontSize:11,color:'var(--muted)',marginTop:8,lineHeight:1.6}}><b>Echte Zuordnung.</b> Seit dem Meta-Import trägt jede Anzeigen-Bewerbung die Herkunft <b>source=meta</b> — gezählt werden nur diese, nicht mehr alle CV-Eingänge. Keine Näherung mehr. {repeatCur>0?('Zusätzlich meldeten sich '+repeatCur+' Wiederholer (Telefon schon im Bestand) — die werden gar nicht erst als Bewerbung angelegt und zählen bei „je neue Bewerbung" nicht mit; „je Kontakt (alle)" schließt sie ein. '):''}{appsSheetTot>0?('Im Zeitraum kamen zusätzlich '+appsSheetTot+' Bewerbung'+(appsSheetTot===1?'':'en')+' über den Google-Sheet-Sync (ohne Werbung) — die bleiben hier außen vor. '):''}{nCamp>1?('Je Kampagne ist die Zuordnung in der Kampagnen-Tabelle oben aufgeschlüsselt (Bewerbungen und Kosten je Bewerbung). '):''}{!metaSpendKnown?'(Keine Meta-Ausgaben-Daten im Zeitraum → Kosten je Bewerbung unbekannt, nicht 0.)':(cpaCur==null?'(Keine Meta-Bewerbungen im Zeitraum → keine Angabe.)':'')}</div>
           </div>
           <div style={{fontSize:11,color:'var(--muted)',marginTop:12,lineHeight:1.6}}>
             Reichweite = Summe der Tageswerte (nicht deduplizierte Unique-Reichweite); Meta (bezahlt) und Instagram (organisch) getrennt.
