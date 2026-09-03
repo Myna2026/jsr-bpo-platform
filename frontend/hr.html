@@ -30149,14 +30149,17 @@ function MetricPrecisionBadge({grain, estimate, title}){
 // Return-Vertrag: Array (auch []) = erfolgreiche Abfrage, echte Datenlage.
 // null = echter Fehler (Netz/Rechte). Der Aufrufer unterscheidet damit "leer"
 // von "fehlgeschlagen" und zeigt im Fehlerfall sichtbar an, statt still leer zu bleiben.
-async function loadEmployeesFromDB(){
+async function loadEmployeesFromDB(timeoutMs=18000){
   // Über die maskierende View (employees_masked): Management/Finance sehen volle Werte,
   // HR bekommt Gehalt/Bank/Vertrag der geschützten Personen serverseitig als NULL (+ _masked-Flag).
   try{
-    // 5s-Zeitgrenze: haengt die View-Abfrage (z. B. teurer Plan), nicht ewig warten — abbrechen und als
-    // Fehler (null) melden, damit der Aufrufer erneut versucht bzw. das sichtbare Banner zeigt statt leerer UI.
+    // Zeitgrenze pro Versuch. Die maskierende View ist an der DB schnell (~150 ms), aber der ERSTE Aufruf nach
+    // dem Login ist kalt (PostgREST-/Pooler-Kaltstart + Serialisierung ~100 breiter Spalten je Zeile): gemessen
+    // bis 21 s kalt, ~2,5-5 s warm. Ein 5s-Deckel brach genau dann ab (AbortError) → „null" → falsches Banner
+    // „Mitarbeiterdaten konnten nicht geladen werden" (und dadurch „neue Mitarbeiter fehlen"). 18 s deckt den
+    // warmen Lauf sicher und den kalten auf dem Retry ab; ein echter Hänger fällt weiterhin in den Abbruch.
     const ctrl = (typeof AbortController!=='undefined') ? new AbortController() : null;
-    const timer = ctrl ? setTimeout(()=>ctrl.abort(), 5000) : null;
+    const timer = ctrl ? setTimeout(()=>ctrl.abort(), timeoutMs) : null;
     let q = sb.from('employees_masked').select('*').order('created_at', {ascending:true});
     if(ctrl) q = q.abortSignal(ctrl.signal);
     const {data, error} = await q;
@@ -43288,11 +43291,14 @@ function App(){
     if(!loggedIn) return;
     let alive=true;
     (async()=>{
-      // Retry: ein transienter Fehler (Token noch nicht propagiert, Netz-Blip, RLS-Timing kurz nach Login)
-      // darf nicht in einem Dauer-Banner enden. Bis zu 3 Versuche mit Backoff, erst dann sichtbarer Fehler.
+      // Retry: ein transienter Fehler (Token noch nicht propagiert, Netz-Blip, RLS-Timing kurz nach Login) oder der
+      // KALTE Erstaufruf (PostgREST-/Pooler-Kaltstart, bis ~21 s) darf nicht in einem Dauer-Banner enden. Erster
+      // Versuch großzügig (deckt den Kaltstart), Retries knapper (danach ist die Verbindung warm, ~2,5 s) — so
+      // recovert der Kaltstart ohne Banner, ein ECHTER Hänger fällt aber zügig durch.
+      const _timeouts=[18000, 8000, 8000];
       let dbEmps = null;
-      for(let attempt=0; attempt<3 && alive; attempt++){
-        dbEmps = await loadEmployeesFromDB();
+      for(let attempt=0; attempt<_timeouts.length && alive; attempt++){
+        dbEmps = await loadEmployeesFromDB(_timeouts[attempt]);
         if(dbEmps!==null) break;
         await new Promise(r=>setTimeout(r, 800*(attempt+1)));
       }
