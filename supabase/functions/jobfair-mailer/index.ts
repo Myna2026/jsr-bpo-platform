@@ -131,7 +131,9 @@ const ORDER = ["cv_confirmed", "invited", "parking", "cv_accepted", "rejected_by
 const rnd = (a: number, b: number) => a + Math.floor(Math.random() * (b - a + 1));
 async function cfg(key: string): Promise<any> { const { data } = await sb.from("app_config").select("value").eq("key", key).maybeSingle(); return (data && data.value) || {}; }
 async function collectQueue(limit: number): Promise<any[]> {
-  const { data: done } = await sb.from("applicant_messages").select("cv_id").eq("purpose", "jobfair").eq("status", "sent");
+  // JEDER jobfair-Eintrag zählt als vergeben (sent/sending/failed), nicht nur 'sent' — sonst würde ein
+  // paralleler Lauf denselben Bewerber erneut aufnehmen. Der Unique-Index ist die harte Absicherung.
+  const { data: done } = await sb.from("applicant_messages").select("cv_id").eq("purpose", "jobfair");
   const seen = new Set((done || []).map((r: any) => r.cv_id));
   const out: any[] = [];
   for (const st of ORDER) {
@@ -148,18 +150,23 @@ async function collectQueue(limit: number): Promise<any[]> {
   }
   return out;
 }
-async function sendQueue(queue: any[], throttleMs: number): Promise<{ sent: number; failed: number }> {
-  let sent = 0, failed = 0;
+async function sendQueue(queue: any[], throttleMs: number): Promise<{ sent: number; failed: number; skipped: number }> {
+  let sent = 0, failed = 0, skipped = 0;
   for (let i = 0; i < queue.length; i++) {
     const { cv, tpl } = queue[i];
+    // Atomarer Anspruch VOR dem Senden: erst die Zeile anlegen. Der Unique-Index (cv_id where purpose='jobfair')
+    // lässt nur einen Eintrag je Bewerber zu — kollidiert der Insert, hat ein paralleler Lauf ihn schon
+    // → überspringen, KEIN Doppelversand. (Das war die Lücke: vorher wurde erst gesendet, dann geloggt.)
+    const claim = await sb.from("applicant_messages").insert({ cv_id: cv.id, channel: "email", purpose: "jobfair", origin: "campaign", sender_key: "recruiting", to_address: cv.email, status: "sending" }).select("id").maybeSingle();
+    if (claim.error || !claim.data) { skipped++; continue; }
     const { subject, html } = renderTemplate(tpl, varsFor(cv.first_name));
     const res = await smtpSend(cv.email, subject, html);
-    await sb.from("applicant_messages").insert({ cv_id: cv.id, channel: "email", purpose: "jobfair", origin: "campaign", sender_key: "recruiting", to_address: cv.email, status: res.ok ? "sent" : "failed", error: res.ok ? null : res.error, sent_at: res.ok ? new Date().toISOString() : null });
+    await sb.from("applicant_messages").update({ status: res.ok ? "sent" : "failed", error: res.ok ? null : res.error, sent_at: res.ok ? new Date().toISOString() : null }).eq("id", claim.data.id);
     await sb.from("mail_messages").insert({ direction: "out", mailbox: "recruiting", cv_id: cv.id, from_address: SENDER.email, to_address: cv.email, subject, body_html: html, message_id: res.messageId, status: res.ok ? "sent" : "failed", error: res.ok ? null : res.error });
     res.ok ? sent++ : failed++;
     if (i < queue.length - 1) await sleep(throttleMs);
   }
-  return { sent, failed };
+  return { sent, failed, skipped };
 }
 
 Deno.serve(async (req) => {
@@ -254,13 +261,14 @@ Deno.serve(async (req) => {
       if (hr < Number(p.hour_start) || hr >= Number(p.hour_end)) return json({ ok: true, skipped: "outside_hours", hour: hr });
     }
     if (state.next_send_at && now < new Date(state.next_send_at)) return json({ ok: true, skipped: "not_yet", next: state.next_send_at });
-    const want = rnd(Number(p.batch_min) || 15, Number(p.batch_max) || 30);
-    const queue = await collectQueue(want);
-    if (!queue.length) return json({ ok: true, done: true, note: "nichts offen (alle angeschrieben oder keine aktive Vorlage)" });
-    const { sent, failed } = await sendQueue(queue, rnd(600, 1800));
+    // Slot SOFORT beanspruchen (VOR dem Senden), damit ein überlappender Tick beim next_send_at-Check aussteigt.
     const next = new Date(Date.now() + rnd(Number(p.gap_min_minutes) || 6, Number(p.gap_max_minutes) || 14) * 60000).toISOString();
     await sb.from("app_config").upsert({ key: "jsr_jobfair_pace_state_v1", value: { next_send_at: next, last_sent_at: new Date().toISOString() } }, { onConflict: "key" });
-    return json({ ok: true, gesendet: sent, fehler: failed, batch: want, naechster_lauf: next });
+    const want = rnd(Number(p.batch_min) || 15, Number(p.batch_max) || 30);
+    const queue = await collectQueue(want);
+    if (!queue.length) return json({ ok: true, done: true, note: "nichts offen (alle angeschrieben oder keine aktive Vorlage)", naechster_lauf: next });
+    const { sent, failed, skipped } = await sendQueue(queue, rnd(600, 1800));
+    return json({ ok: true, gesendet: sent, fehler: failed, uebersprungen: skipped, batch: want, naechster_lauf: next });
   }
 
   return json({ ok: false, error: "unbekannter Modus" }, 400);
