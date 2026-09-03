@@ -1261,7 +1261,7 @@ const MENU_BADGE_MAIN_ITEMS = [
   {key:'timeline',label:'Timeline'},{key:'projects',label:'Projekte'},{key:'forecast',label:'Forecast'},{key:'fcist',label:'Forecast vs. Ist'},{key:'vorschau',label:'Personal-Vorschau'},
   {key:'profitability',label:'Wirtschaftlichkeit'},{key:'praesentation',label:'Präsentationen'},{key:'termin',label:'Termin vorbereiten'},{key:'uploads',label:'Uploads'},{key:'dataimport',label:'Datenimport'},{key:'uploadplan',label:'Upload-Plan'},{key:'recmkt',label:'Recruiting Marketing'},{key:'nlquery',label:'Datenabfrage'},
   {key:'useractivity',label:'Nutzung & Aktivität'},{key:'errorlog',label:'Fehler-Log'},{key:'reminders',label:'Erinnerungen'},{key:'taskadmin',label:'Aufgaben-Verwaltung'},
-  {key:'superadmin',label:'System / Konfiguration'},{key:'tabperms',label:'Portal-Tabs'},
+  {key:'contract_templates',label:'Vertragsvorlagen'},{key:'superadmin',label:'System / Konfiguration'},{key:'tabperms',label:'Portal-Tabs'},
   {key:'aisettings',label:'KI-Einstellungen'},{key:'aiendpoint',label:'KI-Anbindung'},{key:'cvsync',label:'CV-Sync'},
   {key:'cockpits',label:'Cockpits'},{key:'hraccess',label:'HR-Zugriff'},{key:'appusers',label:'App-User'},{key:'rechte',label:'Rechte'},{key:'aiaccess',label:'KI-Datenzugriff'},{key:'whosees',label:'Wer sieht was'},
   {key:'skillmatrix',label:'Skill Matrix'},{key:'elearning',label:'E-Learning'},{key:'knowledge',label:'Wissensbasis'},
@@ -7566,6 +7566,7 @@ function buildNavSections(f){
       {key:'orgchart',label:'Organigramm',icon:'⬡'},
       {key:'performance',label:'Performance',icon:'🏆'},
       {key:'payroll',label:'Löhne',icon:'💶'},
+      ...(_isMgmtHr ? [{key:'contract_templates',label:'Vertragsvorlagen',icon:'📄'}] : []),   // Management + HR
     ]},
     {sec:'Recruiting', items:[
       {key:'kanban',label:'Recruiting',icon:'🔄'},
@@ -37433,6 +37434,121 @@ function RemindersView({team}){
     </div>}
   </div>;
 }
+// ── Vertrags-System, Schnitt 2: Vorlagen-Verwaltung ──────────────────────────────────────────────────────────
+// Variablen-Katalog: die variablen Stellen im Vertrag. maps_to = Mitarbeiterfeld für die spätere Übernahme
+// (Schnitt 5). kind: field=direkt am MA, nested=contract.*, computed=abgeleitet (Name/Datum/Laufzeit). Neue Felder
+// (Probezeit, Zahlungsweise, Sektor, Zielvereinbarung, Sprache) legt Schnitt 5 am Mitarbeiter an.
+const CONTRACT_VARS = [
+  { key:'name',            label:'Name',                 kind:'computed', maps_to:'name' },
+  { key:'id_number',       label:'Ausweisnummer',        kind:'field',    maps_to:'id_number' },
+  { key:'position',        label:'Position',             kind:'field',    maps_to:'position' },
+  { key:'location',        label:'Standort',             kind:'field',    maps_to:'location' },
+  { key:'salary',          label:'Gehalt',               kind:'field',    maps_to:'fixed_salary' },
+  { key:'salary_type',     label:'Brutto/Netto',         kind:'nested',   maps_to:'contract.salary_type' },
+  { key:'target_agreement',label:'Zielvereinbarung (ja/nein)', kind:'nested', maps_to:'contract.target_agreement' },
+  { key:'probation',       label:'Probezeit',            kind:'nested',   maps_to:'contract.probation' },
+  { key:'contract_kind',   label:'Vertragsart',          kind:'nested',   maps_to:'contract.kind' },
+  { key:'start',           label:'Beginn',               kind:'nested',   maps_to:'contract.start' },
+  { key:'end',             label:'Ende',                 kind:'nested',   maps_to:'contract.end' },
+  { key:'duration',        label:'Laufzeit',             kind:'computed', maps_to:'duration' },
+  { key:'language',        label:'Sprache',              kind:'nested',   maps_to:'contract.language' },
+  { key:'payment_method',  label:'Zahlungsweise',        kind:'nested',   maps_to:'contract.payment_method' },
+  { key:'sector',          label:'Sektor',               kind:'nested',   maps_to:'contract.sector' },
+  { key:'date',            label:'Datum (heute)',        kind:'computed', maps_to:'today' },
+];
+const CONTRACT_VAR_BY_KEY = (()=>{ const m={}; CONTRACT_VARS.forEach(v=>{ m[v.key]=v; }); return m; })();
+// Alle {{key}} im Text finden (nur bekannte Katalog-Variablen zählen).
+function contractPlaceholdersUsed(html){ const set=new Set(); const re=/\{\{\s*([a-z_]+)\s*\}\}/g; let m;
+  while((m=re.exec(String(html||'')))){ if(CONTRACT_VAR_BY_KEY[m[1]]) set.add(m[1]); } return [...set]; }
+function ContractTemplatesView({team, showToast}){
+  const isAdmin=((team&&team.role_keys)||[]).some(r=>r==='management'||r==='hr');
+  const [rows,setRows]=useState(null);
+  const [edit,setEdit]=useState(null);   // Vorlage in Bearbeitung | 'new' | null
+  const [busy,setBusy]=useState(false);
+  const blank={ name:'', contract_kind:'unbefristet', language:'sq', body_html:'', reference_pdf_path:null, active:true };
+  const [form,setForm]=useState(blank);
+  const [pdfFile,setPdfFile]=useState(null);
+  const set=(k,v)=>setForm(f=>({...f,[k]:v}));
+  const bodyRef=React.useRef(null);
+  const load=()=>{ sb.from('contract_templates').select('*').order('created_at',{ascending:false})
+    .then(r=>{ if(r.error){ showToast&&showToast('⚠ Vorlagen laden fehlgeschlagen: '+(r.error.message||''),'error'); setRows([]); } else setRows(r.data||[]); }); };
+  useEffect(()=>{ if(isAdmin) load(); },[isAdmin]);
+  if(!isAdmin) return <div style={{padding:20,color:'var(--muted)'}}>Nur für Management und HR.</div>;
+  const openNew=()=>{ setForm(blank); setPdfFile(null); setEdit('new'); };
+  const openEdit=(t)=>{ setForm({ name:t.name||'', contract_kind:t.contract_kind||'unbefristet', language:t.language||'sq', body_html:t.body_html||'', reference_pdf_path:t.reference_pdf_path||null, active:t.active!==false }); setPdfFile(null); setEdit(t); };
+  const insertVar=(k)=>{ const ta=bodyRef.current; const tok='{{'+k+'}}';
+    if(ta){ const s=ta.selectionStart||0, e=ta.selectionEnd||0; const v=form.body_html||''; const nv=v.slice(0,s)+tok+v.slice(e); set('body_html',nv); setTimeout(()=>{ ta.focus(); ta.selectionStart=ta.selectionEnd=s+tok.length; },0); }
+    else set('body_html',(form.body_html||'')+tok); };
+  async function save(){ if(busy) return; if(!form.name.trim()){ showToast&&showToast('Name fehlt','error'); return; } setBusy(true);
+    try{
+      let refPath=form.reference_pdf_path;
+      if(pdfFile){ const ts=isoLocal(new Date())+'_sz'+pdfFile.size; const path='templates/'+ts+'_'+(pdfFile.name||'vorlage.pdf');
+        const up=await sb.storage.from('contract-templates').upload(path,pdfFile,{upsert:true,contentType:'application/pdf'});
+        if(up.error) throw new Error('PDF-Upload fehlgeschlagen: '+(up.error.message||'')); refPath=path; }
+      let uid=null; try{ const u=await sb.auth.getUser(); uid=u&&u.data&&u.data.user&&u.data.user.id||null; }catch(e){}
+      const payload={ name:form.name.trim(), contract_kind:form.contract_kind, language:form.language, body_html:form.body_html,
+        reference_pdf_path:refPath, placeholders:contractPlaceholdersUsed(form.body_html).map(k=>({...CONTRACT_VAR_BY_KEY[k]})), active:!!form.active, updated_at:new Date().toISOString() };
+      let error;
+      if(edit==='new'){ ({error}=await sb.from('contract_templates').insert({...payload, created_by:uid})); }
+      else { ({error}=await sb.from('contract_templates').update(payload).eq('id',edit.id)); }
+      if(error) throw new Error(error.message||'DB');
+      setBusy(false); setEdit(null); load(); showToast&&showToast('✓ Vorlage gespeichert');
+    }catch(e){ setBusy(false); showToast&&showToast('⚠ '+((e&&e.message)||e),'error'); }
+  }
+  async function del(t){ if(!(await uiConfirm({title:'Vorlage löschen', text:'„'+(t.name||'')+'" wirklich löschen? Bereits erstellte Verträge bleiben erhalten.', confirmLabel:'Löschen'}))) return;
+    await sb.from('contract_templates').delete().eq('id',t.id); load(); }
+  const LANG={sq:'Albanisch',de:'Deutsch',en:'Englisch'};
+  const used=contractPlaceholdersUsed(form.body_html);
+  const inp={fontSize:13,padding:'7px 9px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)'};
+  if(edit){
+    return <div style={{maxWidth:920}}>
+      <div style={{fontSize:20,fontWeight:700,marginBottom:4}}>📄 {edit==='new'?'Neue Vertragsvorlage':'Vorlage bearbeiten'}</div>
+      <div style={{fontSize:13,color:'var(--muted)',marginBottom:16}}>Fixer Vertragstext (Firma, Rechtsgrundlage, Klauseln, Unterschrift/Stempel) plus variable Stellen als <b>{'{{platzhalter}}'}</b>. Die hochgeladene PDF ist die Referenz; der Text hier wird zum Vertrag gerendert.</div>
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginBottom:14}}>
+        <label style={{display:'flex',flexDirection:'column',gap:4,fontSize:12,fontWeight:700}}>Name<input style={inp} value={form.name} onChange={e=>set('name',e.target.value)} placeholder="z.B. Arbeitsvertrag unbefristet (sq)"/></label>
+        <div style={{display:'flex',gap:12}}>
+          <label style={{display:'flex',flexDirection:'column',gap:4,fontSize:12,fontWeight:700,flex:1}}>Art<select style={inp} value={form.contract_kind} onChange={e=>set('contract_kind',e.target.value)}><option value="unbefristet">Unbefristet</option><option value="befristet">Befristet</option></select></label>
+          <label style={{display:'flex',flexDirection:'column',gap:4,fontSize:12,fontWeight:700,flex:1}}>Sprache<select style={inp} value={form.language} onChange={e=>set('language',e.target.value)}>{Object.keys(LANG).map(k=><option key={k} value={k}>{LANG[k]}</option>)}</select></label>
+        </div>
+      </div>
+      <div style={{marginBottom:14}}>
+        <div style={{fontSize:12,fontWeight:700,marginBottom:4}}>Original-PDF (Referenz)</div>
+        <label style={{display:'inline-flex',alignItems:'center',gap:8,padding:'8px 14px',border:'1px dashed var(--border)',borderRadius:9,cursor:'pointer',fontSize:13}}>
+          ⬆ PDF wählen<input type="file" accept="application/pdf" style={{display:'none'}} onChange={e=>{ const f=e.target.files&&e.target.files[0]; e.target.value=''; setPdfFile(f||null); }}/></label>
+        {pdfFile ? <span style={{marginLeft:10,fontSize:12,color:'var(--text)'}}>📄 {pdfFile.name}</span> : form.reference_pdf_path ? <span style={{marginLeft:10,fontSize:12,color:'var(--muted)'}}>📄 vorhanden</span> : <span style={{marginLeft:10,fontSize:12,color:'var(--muted)'}}>keine hinterlegt</span>}
+      </div>
+      <div style={{marginBottom:8,fontSize:12,fontWeight:700}}>Variable Stellen einfügen</div>
+      <div style={{display:'flex',flexWrap:'wrap',gap:6,marginBottom:10}}>
+        {CONTRACT_VARS.map(v=><button key={v.key} type="button" onClick={()=>insertVar(v.key)} title={'{{'+v.key+'}}'+' → '+v.maps_to} style={{fontSize:11,fontWeight:700,padding:'3px 9px',borderRadius:20,border:'1px solid '+(used.includes(v.key)?'#0F5661':'var(--border)'),background:used.includes(v.key)?'#0F566114':'var(--surface-2)',color:used.includes(v.key)?'#0F5661':'var(--text)',cursor:'pointer'}}>{v.label}{used.includes(v.key)?' ✓':''}</button>)}
+      </div>
+      <textarea ref={bodyRef} value={form.body_html} onChange={e=>set('body_html',e.target.value)} rows={16} placeholder="Vertragstext… fixe Klauseln + {{name}}, {{position}}, {{start}} …" style={{width:'100%',boxSizing:'border-box',fontSize:13,fontFamily:'var(--mono)',padding:'10px 12px',border:'1px solid var(--border)',borderRadius:9,background:'var(--card)',color:'var(--text)',lineHeight:1.6}}/>
+      <div style={{fontSize:11,color:'var(--muted)',marginTop:6}}>Verwendete Variablen: {used.length?used.map(k=>(CONTRACT_VAR_BY_KEY[k]||{}).label).join(', '):'— noch keine —'}</div>
+      <div style={{display:'flex',gap:8,marginTop:16}}>
+        <button className="btn" style={{background:'#0F5661',color:'#fff',borderColor:'#0F5661'}} disabled={busy} onClick={save}>{busy?'Speichert…':'✓ Speichern'}</button>
+        <button className="btn" onClick={()=>setEdit(null)}>Abbrechen</button>
+      </div>
+    </div>;
+  }
+  return <div style={{maxWidth:920}}>
+    <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:4}}>
+      <div style={{fontSize:20,fontWeight:700}}>📄 Vertragsvorlagen</div>
+      <button className="btn btn-sm" style={{marginLeft:'auto',background:'#0F5661',color:'#fff',borderColor:'#0F5661'}} onClick={openNew}>+ Neue Vorlage</button>
+    </div>
+    <div style={{fontSize:13,color:'var(--muted)',marginBottom:16}}>Fixe Vertragstexte mit variablen Stellen. Aus einer Vorlage entsteht am Mitarbeiter ein fertiger Vertrag (Schnitt 3). Mehrere Fassungen möglich, befristet/unbefristet und Sprachen.</div>
+    {rows===null ? <div style={{color:'var(--muted)'}}>Lädt…</div>
+     : rows.length===0 ? <div style={{padding:'16px',color:'var(--muted)',fontSize:13,background:'var(--surface-2)',border:'1px solid var(--border)',borderRadius:10}}>Noch keine Vorlage. Lade den Arbeitsvertrag als Referenz-PDF hoch und übertrage den Text mit {'{{platzhaltern}}'}.</div>
+     : <div style={{border:'1px solid var(--border)',borderRadius:12,overflow:'hidden'}}>
+        {rows.map((t,i)=>(<div key={t.id} style={{display:'flex',alignItems:'center',gap:12,padding:'11px 14px',borderTop:i?'1px solid var(--border)':'none',opacity:t.active===false?0.55:1}}>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontSize:13.5,fontWeight:700}}>{t.name}</div>
+            <div style={{fontSize:11,color:'var(--muted)'}}>{t.contract_kind==='befristet'?'Befristet':'Unbefristet'} · {LANG[t.language]||t.language} · {(t.placeholders||[]).length} variable Stellen{t.reference_pdf_path?' · PDF hinterlegt':''}{t.active===false?' · inaktiv':''}</div>
+          </div>
+          <button className="btn btn-sm" onClick={()=>openEdit(t)}>Bearbeiten</button>
+          <button className="btn btn-sm" style={{color:'#dc2626'}} onClick={()=>del(t)}>Löschen</button>
+        </div>))}
+      </div>}
+  </div>;
+}
 // Fehler-Log (Management-only): automatisch gesammelte Frontend-Fehler, Rollup je Signatur. Zeigt, was im Alltag
 // tatsächlich schiefgeht, ohne dass jemand es melden muss. Offen zuerst, nach Häufigkeit/zuletzt sortiert.
 function ErrorLogView({team}){
@@ -43635,6 +43751,7 @@ function App(){
       'activity_log':'<path fill-rule="evenodd" d="M2.625 6.75a1.125 1.125 0 1 1 2.25 0 1.125 1.125 0 0 1-2.25 0Zm4.875 0A.75.75 0 0 1 8.25 6h12a.75.75 0 0 1 0 1.5h-12a.75.75 0 0 1-.75-.75ZM2.625 12a1.125 1.125 0 1 1 2.25 0 1.125 1.125 0 0 1-2.25 0ZM7.5 12a.75.75 0 0 1 .75-.75h12a.75.75 0 0 1 0 1.5h-12A.75.75 0 0 1 7.5 12Zm-4.875 5.25a1.125 1.125 0 1 1 2.25 0 1.125 1.125 0 0 1-2.25 0Zm4.875 0a.75.75 0 0 1 .75-.75h12a.75.75 0 0 1 0 1.5h-12a.75.75 0 0 1-.75-.75Z" clip-rule="evenodd"/>',
       'useractivity':'<path d="M12 2.25c-5.385 0-9.75 4.365-9.75 9.75s4.365 9.75 9.75 9.75 9.75-4.365 9.75-9.75S17.385 2.25 12 2.25Zm4.28 7.28a.75.75 0 0 0-1.06-1.06l-3.72 3.72-1.72-1.72a.75.75 0 0 0-1.06 0l-2.5 2.5a.75.75 0 1 0 1.06 1.06l1.97-1.97 1.72 1.72a.75.75 0 0 0 1.06 0l4.25-4.25Z"/>',
       'errorlog':'<path d="M12 2.25a.75.75 0 0 1 .75.75v.845a5.98 5.98 0 0 1 2.4 1.02l.598-.597a.75.75 0 1 1 1.06 1.06l-.597.598A5.97 5.97 0 0 1 17.16 8.25H18a.75.75 0 0 1 0 1.5h-.06a6.03 6.03 0 0 1 0 1.5H18a.75.75 0 0 1 0 1.5h-.84a5.97 5.97 0 0 1-.95 2.324l.597.598a.75.75 0 1 1-1.06 1.06l-.598-.597A5.98 5.98 0 0 1 12.75 18.9V21a.75.75 0 0 1-1.5 0v-2.1a5.98 5.98 0 0 1-2.4-1.02l-.598.597a.75.75 0 0 1-1.06-1.06l.597-.598a5.97 5.97 0 0 1-.95-2.324H3a.75.75 0 0 1 0-1.5h.06a6.03 6.03 0 0 1 0-1.5H3a.75.75 0 0 1 0-1.5h.84a5.97 5.97 0 0 1 .95-2.324l-.597-.598a.75.75 0 0 1 1.06-1.06l.598.597a5.98 5.98 0 0 1 2.4-1.02V3a.75.75 0 0 1 .75-.75Zm0 6a3.75 3.75 0 1 0 0 7.5 3.75 3.75 0 0 0 0-7.5Z"/>',
+      'contract_templates':'<path fill-rule="evenodd" d="M5.625 1.5H9a3.75 3.75 0 0 1 3.75 3.75v1.875c0 1.036.84 1.875 1.875 1.875H16.5a3.75 3.75 0 0 1 3.75 3.75v7.875c0 1.035-.84 1.875-1.875 1.875H5.625a1.875 1.875 0 0 1-1.875-1.875V3.375c0-1.036.84-1.875 1.875-1.875Zm5.925 13.28a.75.75 0 0 0-1.1-1.02l-2.55 2.75-1.1-1.06a.75.75 0 1 0-1.05 1.08l1.65 1.6a.75.75 0 0 0 1.075-.03l3.075-3.32Z" clip-rule="evenodd"/><path d="M14.25 5.25a5.23 5.23 0 0 0-1.279-3.434 9.768 9.768 0 0 1 6.963 6.963A5.23 5.23 0 0 0 16.5 7.5h-1.875a.375.375 0 0 1-.375-.375V5.25Z"/>',
       'reminders':'<path fill-rule="evenodd" d="M5.25 9a6.75 6.75 0 0 1 13.5 0v.75c0 2.123.8 4.057 2.118 5.52a.75.75 0 0 1-.297 1.206c-1.544.57-3.16.99-4.831 1.243a3.75 3.75 0 1 1-7.48 0 24.585 24.585 0 0 1-4.831-1.244.75.75 0 0 1-.298-1.205A8.217 8.217 0 0 0 5.25 9.75V9Zm4.502 8.9a2.25 2.25 0 1 0 4.496 0 25.057 25.057 0 0 1-4.496 0Z" clip-rule="evenodd"/>',
       'taskadmin':'<path fill-rule="evenodd" d="M7.502 6h7.128A3.375 3.375 0 0 1 18 9.375v9.375a3 3 0 0 0 3-3V6.108c0-1.505-1.125-2.811-2.664-2.94a48.972 48.972 0 0 0-.673-.05A3 3 0 0 0 15 1.5h-1.5a3 3 0 0 0-2.663 1.618c-.225.015-.45.032-.673.05C8.662 3.295 7.554 4.542 7.502 6ZM13.5 3A1.5 1.5 0 0 0 12 4.5h4.5A1.5 1.5 0 0 0 15 3h-1.5Z" clip-rule="evenodd"/><path fill-rule="evenodd" d="M3 9.375C3 8.339 3.84 7.5 4.875 7.5h9.75c1.036 0 1.875.84 1.875 1.875v11.25c0 1.035-.84 1.875-1.875 1.875h-9.75A1.875 1.875 0 0 1 3 20.625V9.375Zm9.53 3.905a.75.75 0 0 0-1.06-1.06l-2.97 2.97-.97-.97a.75.75 0 0 0-1.06 1.06l1.5 1.5a.75.75 0 0 0 1.06 0l3.5-3.5Z" clip-rule="evenodd"/>',
       'datacheck':'<path fill-rule="evenodd" d="M7.502 6h7.128A3.375 3.375 0 0 1 18 9.375v9.375a3 3 0 0 0 3-3V6.108c0-1.505-1.125-2.811-2.664-2.94a48.972 48.972 0 0 0-.673-.05A3 3 0 0 0 15 1.5h-1.5a3 3 0 0 0-2.663 1.618c-.225.015-.45.032-.673.05C8.662 3.295 7.554 4.542 7.502 6ZM13.5 3A1.5 1.5 0 0 0 12 4.5h4.5A1.5 1.5 0 0 0 15 3h-1.5Z" clip-rule="evenodd"/><path fill-rule="evenodd" d="M3 9.375C3 8.339 3.84 7.5 4.875 7.5h9.75c1.036 0 1.875.84 1.875 1.875v11.25c0 1.035-.84 1.875-1.875 1.875h-9.75A1.875 1.875 0 0 1 3 20.625V9.375Zm9.586 4.594a.75.75 0 0 0-1.172-.938l-2.476 3.096-.908-.907a.75.75 0 0 0-1.06 1.06l1.5 1.5a.75.75 0 0 0 1.116-.062l3-3.75Z" clip-rule="evenodd"/>',
@@ -43974,6 +44091,7 @@ function App(){
           {view==='whosees'&&<AiWhoSeesView team={team} employees={employees} onOpenView={setView}/>}
           {view==='useractivity'&&<LoginActivityView team={team}/>}
           {view==='errorlog'&&<ErrorLogView team={team}/>}
+          {view==='contract_templates'&&<ContractTemplatesView team={team} showToast={showToast}/>}
           {view==='reminders'&&<RemindersView team={team}/>}
           {view==='taskadmin'&&<TaskAdminView team={team} projects={projects} catalog={taskCatalog}/>}
           {view==='fcist'&&<ForecastVsIstView projects={projects}/>}
