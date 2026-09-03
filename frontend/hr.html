@@ -9426,26 +9426,31 @@ function CockpitStundenabgleich({projects, team, mobile, selY, selM0, selKw, sel
   const days=(()=>{ const out=[]; let d=new Date(_from.getFullYear(),_from.getMonth(),_from.getDate()); while(d<=_to){ const dow=d.getDay(); out.push({ds:isoLocal(d),dow,isWork:dow>=1&&dow<=5,w:getISOWeek(d)}); d=new Date(d.getFullYear(),d.getMonth(),d.getDate()+1); } return out; })();
   useEffect(()=>{ if(!isMgmt||!hcProj||!days.length){ setData({skills:[]}); return; } let alive=true;
     (async()=>{ try{
-      const kwSet={}; days.forEach(x=>{ kwSet[x.w.year+'-'+x.w.kw]=x.w; }); const kws=Object.values(kwSet);
-      const orC=kws.map(w=>'and(year.eq.'+w.year+',kw.eq.'+w.kw+')').join(',');
-      const dFrom=days[0].ds, dTo=days[days.length-1].ds;
-      const [fcR,dhR,saR]=await Promise.all([
-        sb.from('report_forecast').select('skill,kw,year,fc_hours').eq('project_id',hcProj.id).or(orC),   // Forecast NUR wochenweise
-        sb.from('daily_hours').select('skill,work_date,hours').eq('project_id',hcProj.id).gte('work_date',dFrom).lte('work_date',dTo),   // GELIEFERT tagesgenau
-        sb.from('shift_assignments').select('skill,work_date,net_hours').eq('project_id',hcProj.id).gte('work_date',dFrom).lte('work_date',dTo),   // Plan tagesgenau
-      ]);
+      // Phase 2: gemeinsame Basis = GANZE Wochen, deren Donnerstag im gewählten Zeitraum liegt (die Ebene des
+      // Forecast). Alle drei über den zentralen Rechner über DIESELBE Spanne → fairer Vergleich, keine Randverzerrung.
+      // Geliefert/Geplant tagesgenau, Forecast wochenweise. Kein ÷5 mehr.
+      const df=new Date(days[0].ds+'T00:00:00'), dt=new Date(days[days.length-1].ds+'T00:00:00'); const wmap={};
+      let d=new Date(df.getFullYear(),df.getMonth(),df.getDate());
+      while(d<=dt){ const mon=new Date(d.getFullYear(),d.getMonth(),d.getDate()); mon.setDate(mon.getDate()-((mon.getDay()+6)%7)); const thu=new Date(mon.getFullYear(),mon.getMonth(),mon.getDate()+3);
+        if(thu>=df&&thu<=dt){ const sun=new Date(mon.getFullYear(),mon.getMonth(),mon.getDate()+6); wmap[isoLocal(mon)]={mon,sun,w:getISOWeek(mon)}; }
+        d=new Date(d.getFullYear(),d.getMonth(),d.getDate()+1); }
+      const warr=Object.values(wmap).sort((a,b)=>a.mon-b.mon);
+      if(!warr.length){ if(alive) setData({skills:[], noWholeWeek:true}); return; }
+      const today=new Date(now.getFullYear(),now.getMonth(),now.getDate());
+      const from=isoLocal(warr[0].mon); const ls=warr[warr.length-1].sun; const to=isoLocal(ls<today?ls:today);
+      const traceWeeks=warr.map(x=>({year:x.w.year, kw:x.w.kw})); const fcCov='KW '+warr.map(x=>x.w.kw).join(', KW ');
+      const out=[];
+      for(const sk of ['sales','support']){ const sc={project:hcProj.id, skill:sk};
+        const [dlv,pln,fcv]=await Promise.all([
+          metricOverPeriod('geleistete_stunden', {from,to}, sc),
+          metricOverPeriod('geplante_stunden', {from,to}, sc),
+          metricOverPeriod('forecast_stunden', {from,to}, sc),
+        ]);
+        out.push({ skill:sk, delivered:(dlv&&dlv.value), planned:(pln&&pln.value), fc:(fcv&&fcv.value) });
+      }
       if(!alive) return;
-      const norm=s=>String(s||'').toLowerCase();
-      const fcW={}; (fcR.data||[]).forEach(r=>{ fcW[norm(r.skill)+'|'+r.year+'-'+r.kw]=Number(r.fc_hours||0); });
-      const agg={}; const ens=s=>agg[s]||(agg[s]={fc:0,delivered:0,planned:0});
-      // Forecast bleibt anteilig aus den Wochenwerten (÷5 je Werktag) — es gibt keinen Tages-Forecast.
-      days.forEach(x=>{ if(!x.isWork) return; const wk=x.w.year+'-'+x.w.kw;
-        ['sales','support'].forEach(sk=>{ const f=fcW[sk+'|'+wk]; if(f!=null) ens(sk).fc+=f/5; }); });
-      // GELIEFERT jetzt TAGESGENAU aus daily_hours (inkl. Wochenende), exakt über die Zeitraum-Tage — keine ÷5-Näherung mehr.
-      (dhR.data||[]).forEach(r=>{ ens(norm(r.skill)).delivered+=Number(r.hours||0); });
-      (saR.data||[]).forEach(r=>{ ens(norm(r.skill)).planned+=Number(r.net_hours||0); });
-      const skills=['sales','support'].filter(s=>agg[s]&&(agg[s].fc>0||agg[s].delivered>0||agg[s].planned>0)).map(s=>({skill:s,...agg[s]}));
-      setData({skills});
+      const skills=out.filter(s=>(s.fc!=null&&s.fc>0)||(s.delivered!=null&&s.delivered>0)||(s.planned!=null&&s.planned>0));
+      setData({skills, fcCov, traceWeeks});
     }catch(e){ if(alive) setData({skills:[]}); } })();
     return ()=>{alive=false;}; },[isMgmt, hcProj&&hcProj.id, _isCur, days.length, (days[0]&&days[0].ds), (days[days.length-1]&&days[days.length-1].ds)]);
   if(!isMgmt) return null;
@@ -9454,34 +9459,32 @@ function CockpitStundenabgleich({projects, team, mobile, selY, selM0, selKw, sel
     <div style={{padding:14}}>{b}</div></div>;
   if(!hcProj) return card(<div style={{fontSize:12.5,color:'var(--muted)'}}>Kein HolidayCheck-Projekt gefunden.</div>);
   if(data===null) return card(<div style={{fontSize:12.5,color:'var(--muted)'}}>Lädt…</div>);
-  // Schwelle: liegt im laufenden Monat noch keine volle Arbeitswoche (5 Werktage), sind die anteilig gerechneten
-  // Prozente wertlos (ein Tag ergibt „−90 %"). Dann nur ein Hinweis, keine alarmierende Zahl.
-  const _workElapsed=days.filter(x=>x.isWork).length;
-  if(_isCur && _workElapsed<5) return card(
+  // Der Stundenabgleich vergleicht ganze Wochen (der Forecast liegt nur wochenweise vor). Ohne abgeschlossene
+  // Woche im Zeitraum gibt es nichts zu vergleichen — ehrlicher Hinweis statt einer verzerrten Zahl.
+  if(data.noWholeWeek) return card(
     <div style={{fontSize:12.5,color:'var(--muted)',lineHeight:1.6}}>
       <div style={{fontWeight:700,color:'var(--text)',marginBottom:3}}>{_periodLabel}</div>
-      Zu früh im Zeitraum für eine belastbare Aussage. Erst nach der ersten vollen Woche werden Forecast und Ist sinnvoll vergleichbar ({_workElapsed} von 5 Werktagen).
+      Noch keine abgeschlossene Woche im gewählten Zeitraum. Der Stundenabgleich vergleicht ganze Wochen (der Forecast liegt nur wochenweise vor).
     </div>);
   const fmt=n=>Math.round(n).toLocaleString('de-DE');
   const dev=(a,b)=> b>0?Math.round((a-b)/b*100):null; const sLbl=s=>s==='sales'?'Sales':s==='support'?'Support':s;
-  const bisTxt = _isCur ? ('bis '+_to.getDate()+'.'+(_to.getMonth()+1)+'.') : 'abgeschlossen';
-  // Wochen des angezeigten Monats für die Spur zur Quelle (exakte weekly_hours, nicht die anteilige Anzeige).
-  const _traceWeeks=[...new Set(days.map(x=>x.w.year+'-'+x.w.kw))].map(k=>({year:Number(k.split('-')[0]),kw:Number(k.split('-')[1])}));
-  const cell=(lbl,val,delta,ref,onClick)=> <div style={{flex:1,textAlign:'center',padding:'8px 6px',background:'var(--surface-2)',borderRadius:10,border:'1px solid var(--border)'}}>
+  const _traceWeeks=data.traceWeeks||[];
+  const cell=(lbl,val,delta,ref,onClick,grain)=> <div style={{flex:1,textAlign:'center',padding:'8px 6px',background:'var(--surface-2)',borderRadius:10,border:'1px solid var(--border)'}}>
     <div style={{fontSize:10.5,color:'var(--muted)',fontWeight:600}}>{lbl}</div>
-    <div onClick={onClick} title={onClick?'Herkunft anzeigen (Wochen, Mitarbeiter, Datei)':undefined} style={{fontSize:20,fontWeight:800,fontFamily:'var(--mono)',lineHeight:1.1,marginTop:3,cursor:onClick?'pointer':undefined,textDecoration:onClick?'underline dotted':undefined,textUnderlineOffset:3}}>{fmt(val)}<span style={{fontSize:11,color:'var(--muted)'}}> h</span></div>
+    <div onClick={val!=null?onClick:undefined} title={(onClick&&val!=null)?'Herkunft anzeigen (Wochen, Mitarbeiter, Datei)':undefined} style={{fontSize:20,fontWeight:800,fontFamily:'var(--mono)',lineHeight:1.1,marginTop:3,cursor:(onClick&&val!=null)?'pointer':undefined,textDecoration:(onClick&&val!=null)?'underline dotted':undefined,textUnderlineOffset:3}}>{val==null?<span style={{fontSize:12,fontWeight:600,color:'var(--muted)'}}>keine Daten</span>:<React.Fragment>{fmt(val)}<span style={{fontSize:11,color:'var(--muted)'}}> h</span></React.Fragment>}</div>
     {delta!=null&&<div style={{fontSize:11,fontWeight:700,marginTop:2,color:Math.abs(delta)<=5?'var(--muted)':(delta<0?'var(--red)':'var(--green)')}}>{delta>0?'+':''}{delta}% {ref}</div>}
+    {grain&&<div style={{marginTop:4}}><MetricPrecisionBadge grain={grain}/></div>}
   </div>;
   return card(<div>
-    <div style={{fontSize:11,color:'var(--muted)',marginBottom:10}}>{_periodLabel}, {bisTxt} (Zwischenstand). <b>Geliefert</b> und Schichtplan sind tagesgenau (aus daily_hours bzw. Schichtplan); nur der <b>Forecast</b> ist anteilig aus den Wochenwerten gerechnet (es gibt keinen Tages-Forecast).</div>
+    <div style={{fontSize:11,color:'var(--muted)',marginBottom:10}}>{_periodLabel}, verglichen über ganze Wochen{data.fcCov?(' ('+data.fcCov+')'):''}. <b>Geliefert</b> und <b>Geplant</b> sind tagesgenau über genau diese Wochen, der <b>Forecast</b> ist wochenweise. Das Abzeichen unter jeder Zahl sagt, wie genau sie ist.</div>
     {data.skills.length===0? <div style={{fontSize:12.5,color:'var(--muted)'}}>Kein Forecast/Ist für Sales oder Support in diesem Zeitraum.</div>
      : <div style={{display:'grid',gridTemplateColumns:mobile?'1fr':'1fr 1fr',gap:12}}>
         {data.skills.map(s=><div key={s.skill} style={{border:'1px solid var(--border)',borderRadius:12,padding:'11px 13px',background:'var(--card)'}}>
           <div style={{fontWeight:700,fontSize:13,marginBottom:9}}>{sLbl(s.skill)}</div>
-          <div style={{display:'flex',gap:8}}>{cell('Forecast',s.fc,null,'')}{cell('Geliefert',s.delivered,dev(s.delivered,s.fc),'vs FC',()=>setTrace({projectId:hcProj.id, skill:s.skill, weeks:_traceWeeks, title:sLbl(s.skill)+' · '+_periodLabel}))}{cell('Geplant (Schicht)',s.planned,dev(s.planned,s.fc),'vs FC')}</div>
+          <div style={{display:'flex',gap:8}}>{cell('Forecast',s.fc,null,'',null,'week')}{cell('Geliefert',s.delivered,dev(s.delivered,s.fc),'vs FC',()=>setTrace({projectId:hcProj.id, skill:s.skill, weeks:_traceWeeks, title:sLbl(s.skill)+' · '+_periodLabel}),'day')}{cell('Geplant (Schicht)',s.planned,dev(s.planned,s.fc),'vs FC',null,'day')}</div>
         </div>)}
       </div>}
-    <div style={{marginTop:10,padding:'9px 11px',borderRadius:9,background:'#fffbeb',border:'1px solid #fde68a',fontSize:11.5,color:'#92400e',lineHeight:1.5}}>⚠ Näherung nur beim Forecast: der liegt nur wochenweise vor und ist anteilig auf Tage verteilt. Die gelieferten Stunden sind tagesgenau. Zusätzlich unklar, ob der Forecast nur die Telefonzeit oder die gesamte Arbeitszeit abdeckt, die Prozente sind erst belastbar, wenn das geklärt ist. Klick auf <b>Geliefert</b> zeigt die Herkunft (Wochen, Mitarbeiter, Datei).</div>
+    <div style={{marginTop:10,padding:'9px 11px',borderRadius:9,background:'#fffbeb',border:'1px solid #fde68a',fontSize:11.5,color:'#92400e',lineHeight:1.5}}>⚠ Verglichen wird über ganze Wochen (Forecast gibt es nur wochenweise), alle drei über dieselbe Spanne — kein Randfehler mehr. Unklar bleibt, ob der Forecast nur die Telefonzeit oder die gesamte Arbeitszeit abdeckt, erst wenn das geklärt ist, ist die Lücke voll belastbar. Klick auf <b>Geliefert</b> zeigt die Herkunft (Wochen, Mitarbeiter, Datei).</div>
     {trace && <HoursTraceModal projectId={trace.projectId} skill={trace.skill} weeks={trace.weeks} title={trace.title} onClose={()=>setTrace(null)}/>}
   </div>);
 }
