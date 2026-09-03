@@ -39048,6 +39048,8 @@ const MAILER_HOURS_SOURCE={
 function mailerHoursToH(v){ const n=Number(String(v==null?'':v).replace(',','.'))||0; const u=MAILER_HOURS_SOURCE.unit; return u==='sec'?n/3600:(u==='min'?n/60:n); }
 function mailerNum(v){ return Number(String(v==null?'':v).replace(',','.'))||0; }
 function mailerYw(v){ if(v==null||v==='') return null; const d = v instanceof Date ? v : new Date(String(v).slice(0,10)); if(isNaN(d.getTime())) return null; const w=getISOWeek(d); return w.year+'-'+String(w.kw).padStart(2,'0'); }
+function mailerDay(v){ if(v==null||v==='') return null; const d = v instanceof Date ? v : new Date(String(v).slice(0,10)); if(isNaN(d.getTime())) return null; return isoLocal(d); }   // YYYY-MM-DD (Tagesebene, wie die Kundenformel je Datum)
+function mailerIsME(v){ return String(v==null?'':v).trim().toUpperCase()==='ME'; }   // Excel „=ME" ist case-insensitiv
 
 function MailerImport({employees, onSaved}){
   const [file,setFile]=useState(null); const [fileHash,setFileHash]=useState('');
@@ -39083,21 +39085,26 @@ function MailerImport({employees, onSaved}){
       const qN=qm.idx(MAILER_HOURS_SOURCE.nameCol), qD=qm.idx(MAILER_HOURS_SOURCE.dateCol), qV=qm.idx(MAILER_HOURS_SOURCE.valueCol);
       if(qN<0||qD<0||qV<0) throw new Error('Stunden-Spalten fehlen ('+MAILER_HOURS_SOURCE.nameCol+' / '+MAILER_HOURS_SOURCE.dateCol+' / '+MAILER_HOURS_SOURCE.valueCol+').');
       setFile(f); setFileHash('sz'+bytes.length);
-      // Mails je (Name, ISO-Woche), nur Bearbeiter=ME
-      const mails={};
-      roh.rows.forEach(r=>{ if(String(r[iB]).trim()!=='ME') return; const nm=String(r[iN]||'').trim(); if(!nm) return;
-        const yw=mailerYw(r[iD]); if(!yw) return; const key=nm+'|'+yw; mails[key]=(mails[key]||0)+mailerNum(r[iM]); });
-      // Stunden je (Name, ISO-Woche)
-      const hours={};
-      qm.rows.forEach(r=>{ const nm=String(r[qN]||'').trim(); if(!nm) return; const yw=mailerYw(r[qD]); if(!yw) return;
-        const key=nm+'|'+yw; hours[key]=(hours[key]||0)+mailerHoursToH(r[qV]); });
-      window.__mailerAgg={mails,hours}; // Rohaggregat für Reprocess nach Alias-Zuordnung
-      compute(mails,hours);
+      // Mails je (Name, ISO-Woche) UND je (Name, Tag), nur Bearbeiter=ME (case-insensitiv wie Excel „=ME").
+      // Der Tages-Bucket rechnet exakt wie die Kundenformel (SUMPRODUCT je Datum); die Woche = Summe ihrer Tage.
+      const mails={}, dmails={};
+      roh.rows.forEach(r=>{ if(!mailerIsME(r[iB])) return; const nm=String(r[iN]||'').trim(); if(!nm) return;
+        const val=mailerNum(r[iM]);
+        const yw=mailerYw(r[iD]); if(yw){ const key=nm+'|'+yw; mails[key]=(mails[key]||0)+val; }
+        const ds=mailerDay(r[iD]); if(ds){ const dk=nm+'|'+ds; dmails[dk]=(dmails[dk]||0)+val; } });
+      // Stunden je (Name, ISO-Woche) UND je (Name, Tag)
+      const hours={}, dhours={};
+      qm.rows.forEach(r=>{ const nm=String(r[qN]||'').trim(); if(!nm) return; const h=mailerHoursToH(r[qV]);
+        const yw=mailerYw(r[qD]); if(yw){ const key=nm+'|'+yw; hours[key]=(hours[key]||0)+h; }
+        const ds=mailerDay(r[qD]); if(ds){ const dk=nm+'|'+ds; dhours[dk]=(dhours[dk]||0)+h; } });
+      window.__mailerAgg={mails,hours,dmails,dhours}; // Rohaggregat (Woche + Tag) für Reprocess nach Alias-Zuordnung
+      compute(mails,hours,dmails,dhours);
     }catch(e){ setErr('Datei nicht lesbar: '+(e.message||'')); } };
     rd.readAsArrayBuffer(f);
   }
 
-  function compute(mails,hours){
+  function compute(mails,hours,dmails,dhours){
+    dmails=dmails||{}; dhours=dhours||{};
     // Skill-Index aus UNSEREM System (alle Mitarbeiter, nicht projektgebunden — Kennzahl ist skill-weit).
     const bySkill={}, empByName={};
     (employees||[]).forEach(e=>{ if(!e) return; const n=cqNormName((e.first_name||'')+' '+(e.last_name||''));
@@ -39125,7 +39132,16 @@ function MailerImport({employees, onSaved}){
           year:y, kw:w, mails:Math.round(m), hours:h, meh: h>0 ? m/h : null }); });
     });
     facts.sort((a,b)=>(a.year-b.year)||(a.kw-b.kw)||a.name.localeCompare(b.name,'de'));
-    setResult({ facts,
+    // Tages-Fakten je Support-MA je Tag (dieselbe Namensauflösung). Mails/h wird beim Lesen abgeleitet, hier nur roh.
+    const dailyFacts=[];
+    names.forEach(nm=>{ const n=cqNormName(nm); const al=alias[n]; if(al==='skip') return;
+      const emp = al ? (employees||[]).find(e=>e&&e.id===al) : empByName[n];
+      if(!emp || String(emp.project_skill||'').toLowerCase()!=='support') return;
+      const days=[...new Set([...Object.keys(dmails),...Object.keys(dhours)].filter(k=>k.split('|')[0]===nm).map(k=>k.split('|')[1]))];
+      days.forEach(ds=>{ const key=nm+'|'+ds; const m=dmails[key]||0; const h=dhours[key]||0; if(m<=0 && h<=0) return;
+        dailyFacts.push({ emp_id:emp.id, project_id:emp.project_id, work_date:ds, mails:Math.round(m*100)/100, log_hours:Math.round(h*100)/100 }); }); });
+    dailyFacts.sort((a,b)=>a.work_date.localeCompare(b.work_date));
+    setResult({ facts, dailyFacts,
       skippedSales:[...skippedSales].sort(),
       unmatched:Object.values(unmatched).sort((a,b)=>b.mails-a.mails),
       weeks:[...new Set(facts.map(f=>f.year+'-'+String(f.kw).padStart(2,'0')))].sort(),
@@ -39133,7 +39149,7 @@ function MailerImport({employees, onSaved}){
       noHours:facts.filter(f=>f.meh==null).map(f=>f.name+' (KW '+f.kw+')') });
     setStep('preview');
   }
-  function reCompute(){ if(window.__mailerAgg) compute(window.__mailerAgg.mails, window.__mailerAgg.hours); }
+  function reCompute(){ if(window.__mailerAgg) compute(window.__mailerAgg.mails, window.__mailerAgg.hours, window.__mailerAgg.dmails, window.__mailerAgg.dhours); }
   async function assignAlias(nm, val){ const n=cqNormName(nm); const next={...alias,[n]:val}; setAlias(next);
     try{ await saveConfigToDB('jsr_mailer_alias_v1', next); }catch(e){} setTimeout(reCompute,0); }
 
@@ -39168,6 +39184,19 @@ function MailerImport({employees, onSaved}){
       const ins=await sb.from('kpi_entries').insert(rows).select('id');
       if(ins.error) throw new Error('Werte nicht gespeichert: '+(ins.error.message||ins.error));
       if((ins.data||[]).length!==rows.length) throw new Error('Nur '+(ins.data||[]).length+' von '+rows.length+' Werten geschrieben — bitte Rechte prüfen.');
+      // 3) Tagesebene parallel (daily_mailer): Mails + LogTime je (Projekt, MA, Tag), exakt wie die Kundenformel je Datum.
+      //    import_id = der Lauf der ISO-Woche des Tages. Je importierter Woche den Mo–So-Bereich des Projekts leeren
+      //    und neu schreiben (Re-Import überschreibt sauber, wie bei daily_hours).
+      const dfacts=result.dailyFacts||[];
+      if(pid && dfacts.length){
+        for(const [y,w] of weeks){ const mon=isoWeekMonday(y,w); const sun=new Date(mon.getFullYear(),mon.getMonth(),mon.getDate()+6);
+          await sb.from('daily_mailer').delete().eq('project_id',pid).gte('work_date',isoLocal(mon)).lte('work_date',isoLocal(sun)); }
+        const drows=dfacts.map(f=>{ const wk=getISOWeek(new Date(f.work_date+'T00:00:00'));
+          return { import_id:impByWeek[wk.year+'-'+wk.kw]||null, project_id:f.project_id||pid, employee_id:f.emp_id, work_date:f.work_date,
+            mails:f.mails, log_hours:f.log_hours, raw:{name:(result.facts.find(x=>x.emp_id===f.emp_id)||{}).genesys||null} }; });
+        const dm=await sb.from('daily_mailer').insert(drows);
+        if(dm.error) console.warn('daily_mailer nicht gespeichert:', dm.error.message);
+      }
       setBusy(false); setSaved(true); setStep('upload'); setFile(null); setResult(null); onSaved&&onSaved();
     }catch(e){ setBusy(false); setErr(String((e&&e.message)||e)); }
   }
