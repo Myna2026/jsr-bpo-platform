@@ -3620,6 +3620,7 @@ function EmployeeModal({emp, projects, employees, onSave, onClose, initialTab, o
   // fmtMonth lokal, da die Definition in PayrollView (7165) nicht im Scope von EmployeeModal liegt
   const fmtMonth=(m)=>{const [y,mo]=String(m||'').split('-');return new Date(y,mo-1,1).toLocaleDateString('de-DE',{month:'long',year:'numeric'});};
   const [empPayslips, setEmpPayslips] = useState([]);
+  const [contractBuilder, setContractBuilder] = useState(false);   // Vertrag aus Vorlage erstellen (Schnitt 3)
   useEffect(()=>{
     if(!emp||!emp.id) return;
     (async ()=>{
@@ -4404,6 +4405,9 @@ function EmployeeModal({emp, projects, employees, onSave, onClose, initialTab, o
           {/* ── TAB: VERTRAG (READ-ONLY) ── */}
           {tab==='vertrag'&&(
             <div style={{paddingTop:16}}>
+              <div style={{display:'flex',justifyContent:'flex-end',marginBottom:12}}>
+                <button type="button" className="btn btn-sm" style={{background:'#0F5661',color:'#fff',borderColor:'#0F5661'}} onClick={()=>setContractBuilder(true)}>📄 Vertrag aus Vorlage erstellen</button>
+              </div>
               {form.contract?(
                 <>
                   {(()=>{ const _signed=(form.contract?.signed_at||form.contract?.signed_manual||form.contract_signed_manual); return(
@@ -5009,6 +5013,8 @@ function EmployeeModal({emp, projects, employees, onSave, onClose, initialTab, o
           {_asgInvalid&&<span style={{fontSize:12,color:'var(--red)',fontWeight:700,alignSelf:'center'}}>Zuweisungs-Anteile = {_asgSumSave}% (muss 100% sein)</span>}
           {!isTerminated&&<button className="btn btn-primary" disabled={_asgInvalid} onClick={handleSave} title={_asgInvalid?'Summe der Zuweisungs-Anteile muss 100% sein':''}>Speichern</button>}
         </div>
+
+    {contractBuilder&&<ContractBuilderModal emp={form} onClose={()=>setContractBuilder(false)}/>}
 
     {/* ── ABMAHNUNG MODAL ── */}
     {abmahnungModal&&(()=>{
@@ -37547,6 +37553,97 @@ function ContractTemplatesView({team, showToast}){
           <button className="btn btn-sm" style={{color:'#dc2626'}} onClick={()=>del(t)}>Löschen</button>
         </div>))}
       </div>}
+  </div>;
+}
+// ── Vertrags-System, Schnitt 3: Vertrag am Mitarbeiter aus Vorlage anlegen, ausfüllen, Vorschau, Druck/PDF ──
+// Vorbelegung: je Platzhalter aus dem Mitarbeiter lesen (Umkehrung des maps_to). Vorschau = body_html mit {{key}}
+// ersetzt. Druck/PDF über ein sauberes Druckfenster (browser print-to-PDF). Speichern als employee_contracts (Entwurf).
+function contractPrefill(emp, v){ emp=emp||{}; const C=emp.contract||{};
+  const s=(C.start||emp.contract_start||''), en=(C.end||emp.contract_end||'');
+  const dur=(()=>{ if(!s) return ''; if(!en) return 'i pacaktuar'; const mo=Math.max(0,Math.round((new Date(en)-new Date(s))/(864e5*30.44))); return mo+' muaj'; })();
+  switch(v.key){
+    case 'name': return ((emp.first_name||'')+' '+(emp.last_name||'')).trim();
+    case 'id_number': return emp.id_number||'';
+    case 'position': return emp.position||'';
+    case 'location': return emp.location||'';
+    case 'salary': return emp.fixed_salary!=null?String(emp.fixed_salary):'';
+    case 'salary_type': return C.salary_type||'';
+    case 'target_agreement': return C.target_agreement||'';
+    case 'probation': return C.probation||'';
+    case 'contract_kind': return C.kind||'';
+    case 'start': return s||'';
+    case 'end': return en||'';
+    case 'duration': return dur;
+    case 'language': return C.language||'';
+    case 'payment_method': return C.payment_method||'';
+    case 'sector': return C.sector||'';
+    case 'date': return isoLocal(new Date());
+    default: return '';
+  }
+}
+function contractRender(html, values){ return String(html||'').replace(/\{\{\s*([a-z_]+)\s*\}\}/g, (m,k)=> (values&&values[k]!=null&&values[k]!=='')?String(values[k]):'__________'); }
+function ContractBuilderModal({emp, onClose}){
+  const [tpls,setTpls]=useState(null);
+  const [tplId,setTplId]=useState('');
+  const [values,setValues]=useState({});
+  const [busy,setBusy]=useState(false); const [msg,setMsg]=useState('');
+  useEffect(()=>{ sb.from('contract_templates').select('*').eq('active',true).order('name').then(r=>setTpls(r.data||[])); },[]);
+  const tpl=(tpls||[]).find(t=>t.id===tplId)||null;
+  const vars=tpl?(tpl.placeholders&&tpl.placeholders.length?tpl.placeholders:contractPlaceholdersUsed(tpl.body_html).map(k=>CONTRACT_VAR_BY_KEY[k]).filter(Boolean)):[];
+  // Bei Vorlagenwahl aus dem Mitarbeiter vorbelegen.
+  useEffect(()=>{ if(!tpl){ setValues({}); return; } const v={}; vars.forEach(x=>{ v[x.key]=contractPrefill(emp,x); }); setValues(v); },[tplId]);
+  const setV=(k,val)=>setValues(o=>({...o,[k]:val}));
+  const rendered=tpl?contractRender(tpl.body_html, values):'';
+  async function saveDraft(){ if(busy||!tpl) return; setBusy(true); setMsg('');
+    try{ let uid=null; try{ const u=await sb.auth.getUser(); uid=u&&u.data&&u.data.user&&u.data.user.id||null; }catch(e){}
+      const {error}=await sb.from('employee_contracts').insert({ employee_id:emp.id, template_id:tpl.id, field_values:values, status:'draft', created_by:uid });
+      if(error) throw new Error(error.message||'DB'); setMsg('✓ Als Entwurf gespeichert.');
+    }catch(e){ setMsg('⚠ '+((e&&e.message)||e)); } setBusy(false);
+  }
+  function printContract(){ const w=window.open('','_blank'); if(!w){ setMsg('⚠ Druckfenster blockiert (Popup erlauben).'); return; }
+    w.document.write('<!doctype html><html><head><meta charset="utf-8"><title>'+((emp.first_name||'')+' '+(emp.last_name||'')).trim()+'</title>'+
+      '<style>@page{margin:2.2cm}body{font-family:Georgia,\'Times New Roman\',serif;font-size:12pt;line-height:1.6;color:#111;white-space:pre-wrap;max-width:18cm;margin:0 auto}</style></head><body>'+
+      contractRender(tpl.body_html, values).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')+
+      '</body></html>');
+    w.document.close(); setTimeout(()=>{ try{ w.focus(); w.print(); }catch(e){} }, 300);
+  }
+  const inp={fontSize:13,padding:'6px 8px',border:'1px solid var(--border)',borderRadius:7,background:'var(--card)',color:'var(--text)',width:'100%',boxSizing:'border-box'};
+  return <div onClick={onClose} style={{position:'fixed',inset:0,zIndex:1450,background:'rgba(15,23,42,.55)',display:'flex',alignItems:'center',justifyContent:'center',padding:16}}>
+    <div onClick={e=>e.stopPropagation()} style={{background:'var(--card)',border:'1px solid var(--border)',borderRadius:16,width:'min(1000px,96vw)',maxHeight:'90vh',display:'flex',flexDirection:'column',overflow:'hidden',boxShadow:'0 20px 60px rgba(0,0,0,.35)'}}>
+      <div style={{padding:'13px 16px',borderBottom:'1px solid var(--border)',display:'flex',alignItems:'center',gap:10}}>
+        <span style={{fontSize:18}}>📄</span>
+        <div style={{flex:1,minWidth:0}}><div style={{fontWeight:800,fontSize:14}}>Vertrag erstellen</div><div style={{fontSize:11,color:'var(--muted)'}}>{((emp.first_name||'')+' '+(emp.last_name||'')).trim()}{emp.staff_number?(' · '+emp.staff_number):''}</div></div>
+        <button onClick={onClose} style={{background:'transparent',border:'none',fontSize:20,cursor:'pointer',color:'var(--muted)',lineHeight:1}}>×</button>
+      </div>
+      <div style={{padding:'14px 16px',borderBottom:'1px solid var(--border)'}}>
+        <label style={{fontSize:12,fontWeight:700,display:'flex',alignItems:'center',gap:8}}>Vorlage
+          <select style={{...inp,width:'auto',flex:1}} value={tplId} onChange={e=>setTplId(e.target.value)}>
+            <option value="">— wählen —</option>
+            {(tpls||[]).map(t=><option key={t.id} value={t.id}>{t.name} ({t.contract_kind==='befristet'?'befristet':'unbefristet'}, {t.language})</option>)}
+          </select></label>
+      </div>
+      {tpl && <div style={{display:'grid',gridTemplateColumns:'320px 1fr',gap:0,flex:1,minHeight:0}}>
+        <div style={{borderRight:'1px solid var(--border)',padding:'14px 16px',overflowY:'auto'}}>
+          <div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.05em',color:'var(--muted)',marginBottom:10}}>Felder (vorbelegt aus dem Mitarbeiter)</div>
+          <div style={{display:'flex',flexDirection:'column',gap:10}}>
+            {vars.map(v=><label key={v.key} style={{display:'flex',flexDirection:'column',gap:3,fontSize:12,fontWeight:600}}>{v.label}
+              <input style={inp} value={values[v.key]||''} onChange={e=>setV(v.key,e.target.value)}/></label>)}
+            {!vars.length && <div style={{fontSize:12,color:'var(--muted)'}}>Diese Vorlage hat keine variablen Stellen.</div>}
+          </div>
+        </div>
+        <div style={{padding:'14px 16px',overflowY:'auto',background:'var(--surface-2)'}}>
+          <div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.05em',color:'var(--muted)',marginBottom:10}}>Vorschau</div>
+          <div style={{background:'#fff',color:'#111',border:'1px solid var(--border)',borderRadius:8,padding:'20px 22px',fontFamily:'Georgia,serif',fontSize:13,lineHeight:1.7,whiteSpace:'pre-wrap',minHeight:200}}>{rendered||'(leer)'}</div>
+        </div>
+      </div>}
+      <div style={{padding:'12px 16px',borderTop:'1px solid var(--border)',display:'flex',alignItems:'center',gap:10}}>
+        {msg&&<span style={{fontSize:12,fontWeight:600,color:msg[0]==='✓'?'#059669':'#dc2626'}}>{msg}</span>}
+        <div style={{marginLeft:'auto',display:'flex',gap:8}}>
+          <button className="btn btn-sm" disabled={!tpl} onClick={printContract}>🖨 Drucken / als PDF</button>
+          <button className="btn btn-sm" style={{background:'#0F5661',color:'#fff',borderColor:'#0F5661'}} disabled={busy||!tpl} onClick={saveDraft}>{busy?'Speichert…':'Als Entwurf speichern'}</button>
+        </div>
+      </div>
+    </div>
   </div>;
 }
 // Fehler-Log (Management-only): automatisch gesammelte Frontend-Fehler, Rollup je Signatur. Zeigt, was im Alltag
