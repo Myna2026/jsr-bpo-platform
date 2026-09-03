@@ -125,6 +125,42 @@ async function isArmed(): Promise<boolean> {
   const { data } = await sb.from("app_config").select("value").eq("key", "jobfair_armed").maybeSingle();
   return !!(data && (data.value === true || (data.value && data.value.on === true)));
 }
+// Selbst-getakteter Versand (wie beim Akquise-Dispatcher): unregelmäßige Abstände + schwankende Batch-Größe,
+// damit ein neues Postfach nicht nach Maschine aussieht. Reihenfolge: engagierte Gruppen zuerst.
+const ORDER = ["cv_confirmed", "invited", "parking", "cv_accepted", "rejected_by_employee", "no_contact"];
+const rnd = (a: number, b: number) => a + Math.floor(Math.random() * (b - a + 1));
+async function cfg(key: string): Promise<any> { const { data } = await sb.from("app_config").select("value").eq("key", key).maybeSingle(); return (data && data.value) || {}; }
+async function collectQueue(limit: number): Promise<any[]> {
+  const { data: done } = await sb.from("applicant_messages").select("cv_id").eq("purpose", "jobfair").eq("status", "sent");
+  const seen = new Set((done || []).map((r: any) => r.cv_id));
+  const out: any[] = [];
+  for (const st of ORDER) {
+    if (out.length >= limit) break;
+    const tpl = await loadTemplate(st);
+    if (!tpl) continue;                                             // Status ohne aktive Vorlage übersprungen
+    const need = limit - out.length;
+    const { data: cands } = await sb.from("cvs").select("id,first_name,email").eq("status", st).not("email", "is", null).order("created_at", { ascending: true }).limit(need + seen.size);
+    for (const c of (cands || [])) {
+      if (out.length >= limit) break;
+      if (!c.email || !String(c.email).includes("@") || seen.has(c.id)) continue;
+      out.push({ cv: c, tpl }); seen.add(c.id);
+    }
+  }
+  return out;
+}
+async function sendQueue(queue: any[], throttleMs: number): Promise<{ sent: number; failed: number }> {
+  let sent = 0, failed = 0;
+  for (let i = 0; i < queue.length; i++) {
+    const { cv, tpl } = queue[i];
+    const { subject, html } = renderTemplate(tpl, varsFor(cv.first_name));
+    const res = await smtpSend(cv.email, subject, html);
+    await sb.from("applicant_messages").insert({ cv_id: cv.id, channel: "email", purpose: "jobfair", origin: "campaign", sender_key: "recruiting", to_address: cv.email, status: res.ok ? "sent" : "failed", error: res.ok ? null : res.error, sent_at: res.ok ? new Date().toISOString() : null });
+    await sb.from("mail_messages").insert({ direction: "out", mailbox: "recruiting", cv_id: cv.id, from_address: SENDER.email, to_address: cv.email, subject, body_html: html, message_id: res.messageId, status: res.ok ? "sent" : "failed", error: res.ok ? null : res.error });
+    res.ok ? sent++ : failed++;
+    if (i < queue.length - 1) await sleep(throttleMs);
+  }
+  return { sent, failed };
+}
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
@@ -205,6 +241,26 @@ Deno.serve(async (req) => {
     const { count: total } = await sb.from("cvs").select("id", { count: "exact", head: true }).eq("status", st).not("email", "is", null);
     const remaining = Math.max(0, (total || 0) - seen.size - sent);
     return json({ ok: true, status: st, sent, failed, verbleibend: remaining, throttle_ms: throttle });
+  }
+
+  // ── Selbst-getakteter Versand (Cron minütlich, feuert aber unregelmäßig) ──
+  if (mode === "dispatch") {
+    if (!(await isArmed())) return json({ ok: true, skipped: "not_armed" });
+    const p = await cfg("jsr_jobfair_pace_v1");
+    const state = await cfg("jsr_jobfair_pace_state_v1");
+    const now = new Date();
+    if (p.hour_start != null && p.hour_end != null) {
+      const hr = Number(new Intl.DateTimeFormat("en-GB", { timeZone: p.timezone || "Europe/Berlin", hour: "2-digit", hour12: false }).format(now));
+      if (hr < Number(p.hour_start) || hr >= Number(p.hour_end)) return json({ ok: true, skipped: "outside_hours", hour: hr });
+    }
+    if (state.next_send_at && now < new Date(state.next_send_at)) return json({ ok: true, skipped: "not_yet", next: state.next_send_at });
+    const want = rnd(Number(p.batch_min) || 15, Number(p.batch_max) || 30);
+    const queue = await collectQueue(want);
+    if (!queue.length) return json({ ok: true, done: true, note: "nichts offen (alle angeschrieben oder keine aktive Vorlage)" });
+    const { sent, failed } = await sendQueue(queue, rnd(600, 1800));
+    const next = new Date(Date.now() + rnd(Number(p.gap_min_minutes) || 6, Number(p.gap_max_minutes) || 14) * 60000).toISOString();
+    await sb.from("app_config").upsert({ key: "jsr_jobfair_pace_state_v1", value: { next_send_at: next, last_sent_at: new Date().toISOString() } }, { onConflict: "key" });
+    return json({ ok: true, gesendet: sent, fehler: failed, batch: want, naechster_lauf: next });
   }
 
   return json({ ok: false, error: "unbekannter Modus" }, 400);

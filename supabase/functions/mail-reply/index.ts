@@ -60,10 +60,17 @@ Deno.serve(async (req) => {
 
   const to = emailOf(body.to || "");
   if (!to) return json({ ok: false, error: "Empfänger (to) fehlt" }, 400);
-  const subjectIn = String(body.subject || "").trim() || "Ihre Nachricht an 25hours Recruiting";
-  const subject = /^re:/i.test(subjectIn) ? subjectIn : "Re: " + subjectIn;
-  const cvId = body.cv_id || null;
+  const subjectIn = String(body.subject || "").trim() || "Nachricht von 25hours Recruiting";
   const replyTo = body.in_reply_to || null;   // mail_messages.id der eingehenden Nachricht (für Lese-Markierung)
+  // "Re:" nur bei echter Antwort (in_reply_to gesetzt), NICHT bei neu verfasster Mail.
+  const subject = (replyTo && !/^re:/i.test(subjectIn)) ? "Re: " + subjectIn : subjectIn;
+  // cv_id: vom Aufrufer ODER automatisch über die Empfängeradresse (neu verfasste Mail an einen Bewerber
+  // erscheint dann automatisch in seinem Verlauf).
+  let cvId = body.cv_id || null;
+  if (!cvId) {
+    const { data: m } = await sb.from("cvs").select("id").or("email.ilike." + to + ",better_email.ilike." + to).limit(1);
+    if (m && m.length) cvId = m[0].id;
+  }
 
   // Inhalt: fertiges HTML nutzen oder Klartext sauber zu HTML wandeln.
   const html = body.body_html
