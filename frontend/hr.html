@@ -31282,7 +31282,9 @@ async function saveEmployeeToDB(emp){
   const isAdmin=((CURRENT_TEAM&&CURRENT_TEAM.role_keys)||[]).some(r=>r==='management'||r==='hr'||r==='finance');
   let data;
   if(isAdmin){
-    const r=await sb.from('employees').upsert(payload).select().single(); if(r.error) throw r.error; data=r.data;
+    // Readback bewusst schlank (nur unsensible Spalten): sensible Felder sind auf der Basistabelle
+    // nicht mehr direkt lesbar (Lockdown). Autoritative DB-id/Namen über die lokalen Payload-Felder legen.
+    const r=await sb.from('employees').upsert(payload).select('id,first_name,last_name').single(); if(r.error) throw r.error; data={...payload, ...r.data};
   } else {
     const existing = payload.id && EMP_BY_ID[payload.id];   // Bestand? → Update, sonst Anlage
     const r=await sb.rpc(existing?'update_employee_lead':'promote_employee', {p_payload:payload});
@@ -31311,15 +31313,24 @@ async function deleteEmployeeFromDB(id, label){
   return true;
 }
 function subscribeEmployees(setter){
+  // Realtime-Events tragen nur unsensible Spalten (Publikation begrenzt, Cut 1b). Statt die
+  // Roh-Zeile p.new einzumischen (das umging bisher die Maskierung), die betroffene Zeile
+  // frisch und korrekt maskiert aus employees_masked_lite nachladen. Sieht der Aufrufer die
+  // Zeile nicht (RLS), kommt null zurueck und es passiert nichts.
+  const refetchOne = async (id)=>{
+    if(!id) return;
+    try{
+      const {data}=await sb.from('employees_masked_lite').select('*').eq('id', id).maybeSingle();
+      if(!data) return;
+      const row=empWithExtra(data);
+      setter(prev => prev.some(e=>e.id===id) ? prev.map(e=>e.id===id?row:e) : [...prev, row]);
+    }catch(e){}
+  };
   const chan = sb.channel('employees-25a')
-    .on('postgres_changes', {event:'INSERT', schema:'public', table:'employees'}, (p)=>{
-      setter(prev => prev.some(e=>e.id===p.new.id) ? prev : [...prev, empWithExtra(p.new)]);
-    })
-    .on('postgres_changes', {event:'UPDATE', schema:'public', table:'employees'}, (p)=>{
-      setter(prev => prev.map(e => e.id===p.new.id ? empWithExtra(p.new) : e));
-    })
+    .on('postgres_changes', {event:'INSERT', schema:'public', table:'employees'}, (p)=>{ refetchOne(p.new&&p.new.id); })
+    .on('postgres_changes', {event:'UPDATE', schema:'public', table:'employees'}, (p)=>{ refetchOne(p.new&&p.new.id); })
     .on('postgres_changes', {event:'DELETE', schema:'public', table:'employees'}, (p)=>{
-      setter(prev => prev.filter(e => e.id !== p.old.id));
+      setter(prev => prev.filter(e => e.id !== (p.old&&p.old.id)));
     })
     .subscribe();
   return ()=>{ try{ sb.removeChannel(chan); }catch(e){} };
