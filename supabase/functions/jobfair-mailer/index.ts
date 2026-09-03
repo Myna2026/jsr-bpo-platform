@@ -131,10 +131,10 @@ const ORDER = ["cv_confirmed", "invited", "parking", "cv_accepted", "rejected_by
 const rnd = (a: number, b: number) => a + Math.floor(Math.random() * (b - a + 1));
 async function cfg(key: string): Promise<any> { const { data } = await sb.from("app_config").select("value").eq("key", key).maybeSingle(); return (data && data.value) || {}; }
 async function collectQueue(limit: number): Promise<any[]> {
-  // JEDER jobfair-Eintrag zählt als vergeben (sent/sending/failed), nicht nur 'sent' — sonst würde ein
-  // paralleler Lauf denselben Bewerber erneut aufnehmen. Der Unique-Index ist die harte Absicherung.
-  const { data: done } = await sb.from("applicant_messages").select("cv_id").eq("purpose", "jobfair");
-  const seen = new Set((done || []).map((r: any) => r.cv_id));
+  // Vergeben = 'sent' oder 'sending' (laufender Anspruch). 'failed' (z. B. Zoho-Drossel) bleibt RETRY-fähig
+  // und wird erneut aufgenommen. Die harte Absicherung gegen Doppelversand ist der RPC jobfair_claim + Unique-Index.
+  const { data: done } = await sb.from("applicant_messages").select("cv_id,status").eq("purpose", "jobfair");
+  const seen = new Set((done || []).filter((r: any) => r.status === "sent" || r.status === "sending").map((r: any) => r.cv_id));
   const out: any[] = [];
   for (const st of ORDER) {
     if (out.length >= limit) break;
@@ -150,23 +150,24 @@ async function collectQueue(limit: number): Promise<any[]> {
   }
   return out;
 }
-async function sendQueue(queue: any[], throttleMs: number): Promise<{ sent: number; failed: number; skipped: number }> {
-  let sent = 0, failed = 0, skipped = 0;
+const isThrottle = (err: string) => /unusual sending activity|5\.4\.6|\b550\b/i.test(String(err || ""));
+async function sendQueue(queue: any[], throttleMs: number): Promise<{ sent: number; failed: number; skipped: number; throttled: number }> {
+  let sent = 0, failed = 0, skipped = 0, throttled = 0;
   for (let i = 0; i < queue.length; i++) {
     const { cv, tpl } = queue[i];
-    // Atomarer Anspruch VOR dem Senden: erst die Zeile anlegen. Der Unique-Index (cv_id where purpose='jobfair')
-    // lässt nur einen Eintrag je Bewerber zu — kollidiert der Insert, hat ein paralleler Lauf ihn schon
-    // → überspringen, KEIN Doppelversand. (Das war die Lücke: vorher wurde erst gesendet, dann geloggt.)
-    const claim = await sb.from("applicant_messages").insert({ cv_id: cv.id, channel: "email", purpose: "jobfair", origin: "campaign", sender_key: "recruiting", to_address: cv.email, status: "sending" }).select("id").maybeSingle();
-    if (claim.error || !claim.data) { skipped++; continue; }
+    // Atomarer Anspruch VOR dem Senden (RPC jobfair_claim): gibt id zurück, wenn frei (neu ODER Retry nach
+    // 'failed'), sonst null (bereits 'sent'/'sending' → ein paralleler Lauf hat ihn) → überspringen, KEIN
+    // Doppelversand. (Vorher wurde erst gesendet, dann geloggt — das war die Wettlauf-Lücke.)
+    const { data: claimId } = await sb.rpc("jobfair_claim", { p_cv_id: cv.id, p_email: cv.email });
+    if (!claimId) { skipped++; continue; }
     const { subject, html } = renderTemplate(tpl, varsFor(cv.first_name));
     const res = await smtpSend(cv.email, subject, html);
-    await sb.from("applicant_messages").update({ status: res.ok ? "sent" : "failed", error: res.ok ? null : res.error, sent_at: res.ok ? new Date().toISOString() : null }).eq("id", claim.data.id);
+    await sb.from("applicant_messages").update({ status: res.ok ? "sent" : "failed", error: res.ok ? null : res.error, sent_at: res.ok ? new Date().toISOString() : null }).eq("id", claimId);
     await sb.from("mail_messages").insert({ direction: "out", mailbox: "recruiting", cv_id: cv.id, from_address: SENDER.email, to_address: cv.email, subject, body_html: html, message_id: res.messageId, status: res.ok ? "sent" : "failed", error: res.ok ? null : res.error });
-    res.ok ? sent++ : failed++;
+    if (res.ok) sent++; else { failed++; if (isThrottle(res.error || "")) throttled++; }
     if (i < queue.length - 1) await sleep(throttleMs);
   }
-  return { sent, failed, skipped };
+  return { sent, failed, skipped, throttled };
 }
 
 Deno.serve(async (req) => {
@@ -261,14 +262,30 @@ Deno.serve(async (req) => {
       if (hr < Number(p.hour_start) || hr >= Number(p.hour_end)) return json({ ok: true, skipped: "outside_hours", hour: hr });
     }
     if (state.next_send_at && now < new Date(state.next_send_at)) return json({ ok: true, skipped: "not_yet", next: state.next_send_at });
-    // Slot SOFORT beanspruchen (VOR dem Senden), damit ein überlappender Tick beim next_send_at-Check aussteigt.
-    const next = new Date(Date.now() + rnd(Number(p.gap_min_minutes) || 6, Number(p.gap_max_minutes) || 14) * 60000).toISOString();
-    await sb.from("app_config").upsert({ key: "jsr_jobfair_pace_state_v1", value: { next_send_at: next, last_sent_at: new Date().toISOString() } }, { onConflict: "key" });
-    const want = rnd(Number(p.batch_min) || 15, Number(p.batch_max) || 30);
+    const gapMin = Number(p.gap_min_minutes) || 10, gapMax = Number(p.gap_max_minutes) || 18;
+    const bMin = Number(p.batch_min) || 2, bMax = Number(p.batch_max) || 4;
+    const dynBatch = Number(state.dyn_batch) || bMax;   // selbstregelnd, startet bei bMax
+    // Slot provisorisch beanspruchen (verhindert Überlappung WÄHREND des Laufs); der echte nächste Zeitpunkt
+    // wird nach dem Ergebnis gesetzt (Backoff).
+    const provisional = new Date(Date.now() + gapMin * 60000).toISOString();
+    await sb.from("app_config").upsert({ key: "jsr_jobfair_pace_state_v1", value: { ...state, next_send_at: provisional } }, { onConflict: "key" });
+    const want = rnd(bMin, Math.max(bMin, Math.min(bMax, dynBatch)));
     const queue = await collectQueue(want);
-    if (!queue.length) return json({ ok: true, done: true, note: "nichts offen (alle angeschrieben oder keine aktive Vorlage)", naechster_lauf: next });
-    const { sent, failed, skipped } = await sendQueue(queue, rnd(600, 1800));
-    return json({ ok: true, gesendet: sent, fehler: failed, uebersprungen: skipped, batch: want, naechster_lauf: next });
+    if (!queue.length) {
+      const idleNext = new Date(Date.now() + rnd(gapMin, gapMax) * 60000).toISOString();
+      await sb.from("app_config").upsert({ key: "jsr_jobfair_pace_state_v1", value: { ...state, next_send_at: idleNext, dyn_batch: dynBatch } }, { onConflict: "key" });
+      return json({ ok: true, done: true, note: "nichts offen (alle angeschrieben oder keine aktive Vorlage)" });
+    }
+    const { sent, failed, skipped, throttled } = await sendQueue(queue, rnd(600, 1800));
+    // Selbstregelung: Zoho-Drossel -> lange Pause (30-60 Min) + kleinerer Batch; sauberer Lauf -> Batch
+    // langsam zurück Richtung Maximum. Nie erzwingen, sondern weiter runterdrosseln.
+    let nb = dynBatch, gap: number;
+    if (throttled > 0) { nb = Math.max(1, dynBatch - 1); gap = rnd(30, 60); }
+    else if (failed === 0 && sent > 0) { nb = Math.min(bMax, dynBatch + 1); gap = rnd(gapMin, gapMax); }
+    else { gap = rnd(gapMin, gapMax); }
+    const next = new Date(Date.now() + gap * 60000).toISOString();
+    await sb.from("app_config").upsert({ key: "jsr_jobfair_pace_state_v1", value: { next_send_at: next, last_sent_at: new Date().toISOString(), dyn_batch: nb, last_throttled: throttled, last_sent: sent, last_failed: failed } }, { onConflict: "key" });
+    return json({ ok: true, gesendet: sent, fehler: failed, uebersprungen: skipped, gedrosselt: throttled, batch: want, dyn_batch: nb, naechster_lauf: next });
   }
 
   return json({ ok: false, error: "unbekannter Modus" }, 400);
