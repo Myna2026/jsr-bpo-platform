@@ -3615,7 +3615,7 @@ function CareBadges({emp, fpMap, contractDocs}){
   </span>);
 }
 
-function EmployeeModal({emp, projects, employees, onSave, onClose, initialTab, onTerminate, plans}){
+function EmployeeModal({emp, projects, employees, onSave, onClose, initialTab, onTerminate, plans, showToast}){
   // 27d-2: Salary-History-Panel liest direkt aus payslips-Table (Q3: kein Spinner)
   // fmtMonth lokal, da die Definition in PayrollView (7165) nicht im Scope von EmployeeModal liegt
   const fmtMonth=(m)=>{const [y,mo]=String(m||'').split('-');return new Date(y,mo-1,1).toLocaleDateString('de-DE',{month:'long',year:'numeric'});};
@@ -4408,6 +4408,10 @@ function EmployeeModal({emp, projects, employees, onSave, onClose, initialTab, o
               <div style={{display:'flex',justifyContent:'flex-end',marginBottom:12}}>
                 <button type="button" className="btn btn-sm" style={{background:'#0F5661',color:'#fff',borderColor:'#0F5661'}} onClick={()=>setContractBuilder(true)}>📄 Vertrag aus Vorlage erstellen</button>
               </div>
+              {form.id && <EmployeeContractsPanel emp={form} showToast={showToast} onApply={(flat,contract)=>{
+                Object.entries(flat||{}).forEach(([k,v])=>set(k,v));
+                if(contract&&Object.keys(contract).length) set('contract',{...(form.contract||{}),...contract});
+              }}/>}
               {form.contract?(
                 <>
                   {(()=>{ const _signed=(form.contract?.signed_at||form.contract?.signed_manual||form.contract_signed_manual); return(
@@ -25307,7 +25311,7 @@ async function empDocUpload(employeeId, file, docType){   // docType: 'contract'
   let uid=null; try{ const u=await sb.auth.getUser(); uid=u&&u.data&&u.data.user?u.data.user.id:null; }catch(e){}
   const ins=await sb.from('employee_documents').insert({employee_id:employeeId, doc_type:docType, storage_path:path, original_name:(file.name||null), size_bytes:file.size||null, mime_type:'application/pdf', uploaded_by:uid});
   if(ins.error){ console.warn('[empDoc] insert', ins.error); try{ await sb.storage.from(EMP_DOC_BUCKET).remove([path]); }catch(e){} return {error:'Metadaten speichern fehlgeschlagen: '+(ins.error.message||'')}; }
-  return {ok:true};
+  return {ok:true, path};
 }
 async function empDocOpen(path){   // 300 s signierter Link; RLS entscheidet, ob er ueberhaupt erzeugt wird
   try{ const {data,error}=await sb.storage.from(EMP_DOC_BUCKET).createSignedUrl(path, 300); if(error||!data) return null; return data.signedUrl||null; }catch(e){ return null; }
@@ -37503,6 +37507,24 @@ function ContractTemplatesView({team, showToast}){
   }
   async function del(t){ if(!(await uiConfirm({title:'Vorlage löschen', text:'„'+(t.name||'')+'" wirklich löschen? Bereits erstellte Verträge bleiben erhalten.', confirmLabel:'Löschen'}))) return;
     await sb.from('contract_templates').delete().eq('id',t.id); load(); }
+  // Einmal-Migration: base64-Altverträge aus employees.extra.contract_file in den Storage (employee-docs) + als
+  // employee_contracts (manuell) verlinken, dann contract_file aus der Zeile entfernen. Behebt die inline-Base64-Last.
+  const [mig,setMig]=useState('');
+  async function migrateOldContracts(){ if(busy) return; setBusy(true); setMig('Suche Altverträge…');
+    try{ const {data,error}=await sb.from('employees_masked').select('id,first_name,last_name,extra'); if(error) throw error;
+      const withFile=(data||[]).filter(e=>e&&e.extra&&e.extra.contract_file); if(!withFile.length){ setMig('Keine base64-Altverträge gefunden.'); setBusy(false); return; }
+      let ok=0, fail=0;
+      for(const e of withFile){ try{
+        const blob=await (await fetch(e.extra.contract_file)).blob();
+        const file=new File([blob],'arbeitsvertrag.pdf',{type:'application/pdf'});
+        const up=await empDocUpload(e.id, file, 'contract'); if(up.error){ fail++; continue; }
+        await sb.from('employee_contracts').insert({ employee_id:e.id, template_id:null, field_values:{}, status:'manual', signed_pdf_path:up.path, signed_at:new Date().toISOString(), note:'Aus base64-Altbestand migriert' });
+        const nx={...e.extra}; delete nx.contract_file; const u=await sb.from('employees').update({extra:nx}).eq('id',e.id); if(u.error){ fail++; continue; }
+        ok++;
+      }catch(_e){ fail++; } }
+      setMig('Fertig: '+ok+' migriert'+(fail?(' · '+fail+' fehlgeschlagen'):'')+'.');
+    }catch(e){ setMig('Fehlgeschlagen: '+((e&&e.message)||e)); } setBusy(false);
+  }
   const LANG={sq:'Albanisch',de:'Deutsch',en:'Englisch'};
   const used=contractPlaceholdersUsed(form.body_html);
   const inp={fontSize:13,padding:'7px 9px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)'};
@@ -37541,6 +37563,11 @@ function ContractTemplatesView({team, showToast}){
       <button className="btn btn-sm" style={{marginLeft:'auto',background:'#0F5661',color:'#fff',borderColor:'#0F5661'}} onClick={openNew}>+ Neue Vorlage</button>
     </div>
     <div style={{fontSize:13,color:'var(--muted)',marginBottom:16}}>Fixe Vertragstexte mit variablen Stellen. Aus einer Vorlage entsteht am Mitarbeiter ein fertiger Vertrag (Schnitt 3). Mehrere Fassungen möglich, befristet/unbefristet und Sprachen.</div>
+    <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:14,padding:'8px 12px',border:'1px dashed var(--border)',borderRadius:10,background:'var(--surface-2)'}}>
+      <span style={{fontSize:11.5,color:'var(--muted)',flex:1}}>Einmalig: alte, als Base64 in der Mitarbeiterzeile gespeicherte Verträge in den Storage verschieben (schlankere Zeilen).</span>
+      <button className="btn btn-sm" disabled={busy} onClick={migrateOldContracts}>Alt-Verträge migrieren</button>
+      {mig&&<span style={{fontSize:11.5,color:'var(--muted)'}}>{mig}</span>}
+    </div>
     {rows===null ? <div style={{color:'var(--muted)'}}>Lädt…</div>
      : rows.length===0 ? <div style={{padding:'16px',color:'var(--muted)',fontSize:13,background:'var(--surface-2)',border:'1px solid var(--border)',borderRadius:10}}>Noch keine Vorlage. Lade den Arbeitsvertrag als Referenz-PDF hoch und übertrage den Text mit {'{{platzhaltern}}'}.</div>
      : <div style={{border:'1px solid var(--border)',borderRadius:12,overflow:'hidden'}}>
@@ -37644,6 +37671,88 @@ function ContractBuilderModal({emp, onClose}){
         </div>
       </div>
     </div>
+  </div>;
+}
+// ── Vertrags-System, Schnitt 5: Übernahme der Vertragsdaten an den Mitarbeiter (Umkehrung des maps_to) ──
+// Flache Felder (position/location/fixed_salary) + verschachtelter contract-Patch. Computed (name/duration/date)
+// wird NICHT zurückgeschrieben. Nur nicht-leere Werte.
+function contractApplyUpdates(fieldValues){ const flat={}, contract={};
+  CONTRACT_VARS.forEach(v=>{ const raw=fieldValues&&fieldValues[v.key]; if(raw==null||raw==='') return;
+    if(v.kind==='computed') return;
+    if(String(v.maps_to).indexOf('contract.')===0){ contract[String(v.maps_to).slice(9)]=raw; }
+    else { flat[v.maps_to]=(v.key==='salary'?(Number(raw)||raw):raw); } });
+  return {flat, contract};
+}
+// Verträge-Panel im Vertrag-Tab: Liste der employee_contracts + Lebenszyklus (verschicken / unterschrieben
+// hochladen / übernehmen) plus manueller Upload extern erstellter Verträge.
+function EmployeeContractsPanel({emp, onApply, showToast}){
+  const [rows,setRows]=useState(null); const [tplMap,setTplMap]=useState({});
+  const [busyId,setBusyId]=useState(null);
+  const load=React.useCallback(()=>{ if(!emp||!emp.id){ setRows([]); return; }
+    sb.from('employee_contracts').select('*').eq('employee_id',emp.id).order('created_at',{ascending:false})
+      .then(async r=>{ const list=r.data||[]; setRows(list);
+        const ids=[...new Set(list.map(x=>x.template_id).filter(Boolean))];
+        if(ids.length){ const t=await sb.from('contract_templates').select('id,name,body_html').in('id',ids); const m={}; (t.data||[]).forEach(x=>{ m[x.id]=x; }); setTplMap(m); } }); },[emp&&emp.id]);
+  useEffect(()=>{ load(); },[load]);
+  const STAT={ draft:{l:'Entwurf',c:'#64748b'}, sent:{l:'Verschickt',c:'#2563eb'}, signed:{l:'Unterschrieben',c:'#059669'}, manual:{l:'Manuell hochgeladen',c:'#0891b2'}, archived:{l:'Archiviert',c:'#94a3b8'} };
+  const emailOf=()=> emp.email||emp.email_internal||'';
+  async function doSend(row){ const tpl=tplMap[row.template_id]; if(!tpl){ showToast&&showToast('Vorlage nicht ladbar','error'); return; }
+    const to=emailOf(); if(!to){ showToast&&showToast('Keine Mail-Adresse am Mitarbeiter','error'); return; }
+    setBusyId(row.id);
+    try{ const { data:{ session } }=await sb.auth.getSession();
+      const text=contractRender(tpl.body_html,row.field_values)+'\n\n— Bitte ausdrucken, unterschreiben und zurücksenden.';
+      const r=await fetch(SB_URL+'/functions/v1/mail-send',{ method:'POST', headers:{'Content-Type':'application/json', Authorization:'Bearer '+((session&&session.access_token)||'')},
+        body:JSON.stringify({ mailbox:'hr', to, subject:'Arbeitsvertrag 25HRS', body_text:text, employee_id:emp.id }) });
+      const d=await r.json().catch(()=>({})); if(!r.ok||!d.ok) throw new Error(d.error||'Versand fehlgeschlagen');
+      await sb.from('employee_contracts').update({status:'sent',sent_at:new Date().toISOString()}).eq('id',row.id);
+      showToast&&showToast('✓ Vertrag an '+to+' verschickt'); load();
+    }catch(e){ showToast&&showToast('⚠ '+((e&&e.message)||e),'error'); } setBusyId(null);
+  }
+  async function doUploadSigned(row, file){ if(!file) return; setBusyId(row.id);
+    const up=await empDocUpload(emp.id, file, 'contract');
+    if(up.error){ showToast&&showToast('⚠ '+up.error,'error'); setBusyId(null); return; }
+    await sb.from('employee_contracts').update({status:'signed',signed_at:new Date().toISOString(),signed_pdf_path:up.path}).eq('id',row.id);
+    showToast&&showToast('✓ Unterschriebener Vertrag hinterlegt'); load(); setBusyId(null);
+  }
+  async function doApply(row){ if(!onApply) return; setBusyId(row.id);
+    const {flat,contract}=contractApplyUpdates(row.field_values);
+    onApply(flat, contract);
+    await sb.from('employee_contracts').update({applied_at:new Date().toISOString()}).eq('id',row.id);
+    showToast&&showToast('✓ Vertragsdaten in die Felder übernommen — bitte den Mitarbeiter speichern'); load(); setBusyId(null);
+  }
+  async function doManualUpload(file){ if(!file) return; setBusyId('manual');
+    const up=await empDocUpload(emp.id, file, 'contract');
+    if(up.error){ showToast&&showToast('⚠ '+up.error,'error'); setBusyId(null); return; }
+    let uid=null; try{ const u=await sb.auth.getUser(); uid=u&&u.data&&u.data.user&&u.data.user.id||null; }catch(e){}
+    await sb.from('employee_contracts').insert({ employee_id:emp.id, template_id:null, field_values:{}, status:'manual', signed_pdf_path:up.path, signed_at:new Date().toISOString(), created_by:uid });
+    showToast&&showToast('✓ Externer Vertrag hochgeladen'); load(); setBusyId(null);
+  }
+  const openSigned=async(path)=>{ const url=await empDocOpen(path); if(url) window.open(url,'_blank'); else showToast&&showToast('Datei nicht verfügbar','error'); };
+  return <div style={{marginTop:16,borderTop:'1px solid var(--border)',paddingTop:14}}>
+    <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10}}>
+      <span style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:.5}}>Verträge</span>
+      <label style={{marginLeft:'auto',display:'inline-flex',alignItems:'center',gap:6,fontSize:12,fontWeight:600,color:'#0F5661',cursor:'pointer'}}>⬆ Externen Vertrag hochladen
+        <input type="file" accept="application/pdf" style={{display:'none'}} onChange={e=>{ const f=e.target.files&&e.target.files[0]; e.target.value=''; doManualUpload(f); }}/></label>
+    </div>
+    {rows===null ? <div style={{fontSize:12,color:'var(--muted)'}}>Lädt…</div>
+     : rows.length===0 ? <div style={{fontSize:12.5,color:'var(--muted)'}}>Noch kein Vertrag. Oben „Vertrag aus Vorlage erstellen" oder hier einen externen hochladen.</div>
+     : <div style={{display:'flex',flexDirection:'column',gap:8}}>
+        {rows.map(row=>{ const s=STAT[row.status]||STAT.draft; const tpl=tplMap[row.template_id]; const busy=busyId===row.id;
+          return <div key={row.id} style={{border:'1px solid var(--border)',borderRadius:10,padding:'10px 12px',background:'var(--surface-2)'}}>
+            <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+              <span style={{fontSize:12.5,fontWeight:700}}>{tpl?tpl.name:(row.template_id?'Vorlage':'Externer Vertrag')}</span>
+              <span style={{fontSize:10.5,fontWeight:800,padding:'1px 8px',borderRadius:20,background:s.c+'1a',color:s.c}}>{s.l}</span>
+              {row.applied_at&&<span style={{fontSize:10.5,fontWeight:700,color:'#059669'}}>· übernommen</span>}
+              <span style={{marginLeft:'auto',fontSize:10.5,color:'var(--muted)'}}>{String(row.created_at||'').slice(0,10)}</span>
+            </div>
+            <div style={{display:'flex',gap:6,flexWrap:'wrap',marginTop:8}}>
+              {tpl && row.status!=='signed' && row.status!=='manual' && <button className="btn btn-sm" disabled={busy} onClick={()=>doSend(row)}>✉ Zur Unterschrift verschicken</button>}
+              {row.status!=='manual' && <label className="btn btn-sm" style={{cursor:'pointer'}}>⬆ Unterschriebenen hochladen<input type="file" accept="application/pdf" style={{display:'none'}} onChange={e=>{ const f=e.target.files&&e.target.files[0]; e.target.value=''; doUploadSigned(row,f); }}/></label>}
+              {row.signed_pdf_path && <button className="btn btn-sm" onClick={()=>openSigned(row.signed_pdf_path)}>📄 Unterschriebenen öffnen</button>}
+              {tpl && !row.applied_at && Object.keys(row.field_values||{}).length>0 && <button className="btn btn-sm" style={{color:'#0F5661',fontWeight:700}} disabled={busy} onClick={()=>doApply(row)}>✓ Daten übernehmen</button>}
+            </div>
+          </div>; })}
+      </div>}
   </div>;
 }
 // Fehler-Log (Management-only): automatisch gesammelte Frontend-Fehler, Rollup je Signatur. Zeigt, was im Alltag
@@ -44100,8 +44209,8 @@ function App(){
       <div className="mobile-fab-area">
         {view==='employees'&&<button className="fab" onClick={()=>setModal('add')}>＋</button>}
       </div>
-      {modal&&modal!=='add'&&<EmployeeModal emp={modal} initialTab={modalTab} projects={projects} employees={employees} plans={plans} onSave={saveEmployee} onClose={()=>setModal(null)} onTerminate={e=>{setModal(null);setTerminateModal(e);}}/>}
-          {modal==='add'&&<EmployeeModal emp={null} projects={projects} employees={employees} onSave={saveEmployee} onClose={()=>setModal(null)} onTerminate={null}/>}
+      {modal&&modal!=='add'&&<EmployeeModal emp={modal} initialTab={modalTab} projects={projects} employees={employees} plans={plans} onSave={saveEmployee} onClose={()=>setModal(null)} onTerminate={e=>{setModal(null);setTerminateModal(e);}} showToast={showToast}/>}
+          {modal==='add'&&<EmployeeModal emp={null} projects={projects} employees={employees} onSave={saveEmployee} onClose={()=>setModal(null)} onTerminate={null} showToast={showToast}/>}
 
           {VIEW_AGENT[view]&&<AgentPresence agentKey={VIEW_AGENT[view]} onOpen={()=>setView('agents')}/>}
           {view==='start'&&<WelcomePage firstName={firstName}/>}
