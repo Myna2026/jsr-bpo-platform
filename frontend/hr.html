@@ -9683,7 +9683,7 @@ function CockpitMarketingTile({team, employees, mobile, onNavigate}){
       const parsed=(data||[]).map(r=>({date:wmDate(r.date),datasource:String(r.datasource||'').toLowerCase(),spend:wmNum(r.spend),reach:wmNum(r.reach)})).filter(x=>x.date);
       if(alive) setRows(parsed);
     }catch(e){ if(alive) setRows([]); }
-    try{ const {data:cv}=await sb.from('cvs').select('id,cv_date,source'); if(alive) setCvs(cv||[]); }catch(e){}
+    try{ const cv=await loadAllCvs('id,cv_date,source'); if(alive) setCvs(cv); }catch(e){}
   })(); return ()=>{alive=false;}; },[isMgmt]);
   if(!isMgmt || rows===null) return null;
   const cur=wmRange('month', new Date());
@@ -31937,12 +31937,23 @@ function cvWithAlias(c){
 // Feldnamen-Map vor Payload-Build: target_project → project_id (Master-Spalte).
 function mapCvFields(cv){ if(cv && cv.target_project!==undefined && (cv.project_id===undefined||cv.project_id===null)){ cv.project_id = cv.target_project; } return cv; }
 
+// Voll-Load einer cvs-Spaltenauswahl ÜBER die PostgREST-1000er-Grenze hinweg (Seiten à 1000, bis eine Seite
+// unvollständig ist). Stabile id-Ordnung gegen Lücken/Duplikate an Seitengrenzen. EINE Wahrheit für alle
+// cvs-Voll-Loads — sonst untertreiben Zähl-/Analyse-Pfade bei >1000 Bewerbern still (Haris-Fall 2026-09-04).
+async function loadAllCvs(cols){
+  const PAGE=1000; let from=0; const all=[];
+  for(;;){
+    const {data, error} = await sb.from('cvs').select(cols).order('id', {ascending:true}).range(from, from+PAGE-1);
+    if(error){ console.error('[cvs] loadAllCvs', error); break; }
+    const batch=data||[]; for(const c of batch) all.push(c);
+    if(batch.length<PAGE) break;
+    from+=PAGE;
+  }
+  return all;
+}
 async function loadCvsFromDB(){
-  try{
-    const {data, error} = await sb.from('cvs').select('*').order('created_at', {ascending:false});
-    if(error){ console.error('[4a-1] loadCvsFromDB', error); return []; }
-    return (data||[]).map(cvWithAlias);
-  }catch(e){ console.error('[4a-1] loadCvsFromDB', e); return []; }
+  try{ return (await loadAllCvs('*')).map(cvWithAlias); }
+  catch(e){ console.error('[4a-1] loadCvsFromDB', e); return []; }
 }
 
 async function saveCvToDB(cv){
@@ -35996,7 +36007,7 @@ function RecruitingMarketingView({employees}){
       if(alive) setRows(parsed);
     }catch(e){ if(alive){ setErr(e.message||'Ladefehler'); setRows([]); } }
   })(); return ()=>{alive=false;}; },[]);
-  useEffect(()=>{ let alive=true; (async()=>{ try{ const {data}=await sb.from('cvs').select('id,cv_date,source,extra'); if(alive) setCvs(data||[]); }catch(e){} })(); return ()=>{alive=false;}; },[]);
+  useEffect(()=>{ let alive=true; (async()=>{ try{ const data=await loadAllCvs('id,cv_date,source,extra'); if(alive) setCvs(data); }catch(e){} })(); return ()=>{alive=false;}; },[]);
   // Wiederholer = Meta-Leads, deren Telefon schon im Bestand lag (nie als Bewerbung angelegt). Nach created_time
   // ins Zeitfenster gebucht wie die neuen Bewerbungen (cv_date), damit beide vergleichbar sind.
   useEffect(()=>{ let alive=true; (async()=>{ try{ const {data}=await sb.from('windsor_leads').select('created_time,status_review').in('status_review',['dup','discarded','auto_discarded']); if(alive) setWlDups(data||[]); }catch(e){} })(); return ()=>{alive=false;}; },[]);
