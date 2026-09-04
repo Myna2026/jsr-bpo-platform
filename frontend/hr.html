@@ -3729,6 +3729,7 @@ function EmployeeModal({emp, projects, employees, onSave, onClose, initialTab, o
   if(emp) TABS.push({id:'feedback', label:'Zufriedenheit', icon:'💬'});   // nur bei bestehendem MA (Feedbackgespräche = Sicht des MA)
   if(emp&&emp.id) TABS.push({id:'callqa', label:'Call-Qualität', icon:'📞'});   // QM-Bewertung durch HR (Call-Stichproben)
   if(emp&&emp.id) TABS.push({id:'dokumente', label:'Dokumente', icon:'📎'});   // Ablage: Arbeitsvertrag + Kündigungsoriginal (nur bei bestehendem MA)
+  if(emp&&emp.id) TABS.push({id:'mailakte', label:'Mail-Akte', icon:'📬'});   // in die Akte gelegte hr@-Mails (filed_at) — Schnitt 6
 
 
   return(
@@ -3809,6 +3810,7 @@ function EmployeeModal({emp, projects, employees, onSave, onClose, initialTab, o
           {tab==='feedback'&&<FeedbackEmployeeTab emp={form}/>}
           {tab==='callqa'&&<CallQaEmployeeTab emp={form}/>}
           {tab==='dokumente'&&<EmployeeDocsPanel emp={emp}/>}
+          {tab==='mailakte'&&<EmployeeMailFile empId={emp&&emp.id}/>}
           {/* ── TAB: HR & VERWALTUNG ── */}
           {tab==='profil'&&(
             <div style={{paddingTop:16}}>
@@ -19393,6 +19395,49 @@ function MailThread({cvId, toEmail}){
         {msg&&<span style={{fontSize:12.5,fontWeight:600,color:msg.startsWith('Fehler')?'var(--red)':'var(--green)'}}>{msg}</span>}
       </div>
     </div>
+  </div>;
+}
+// Personalakte-Mails (Schnitt 6): die im hr@-Postfach bewusst „in die Akte" gelegten Mails (filed_at) EINES
+// Mitarbeiters. Read-only. Auto-zugeordnete, aber NICHT abgelegte Mails erscheinen hier NICHT (bleiben nur im
+// Postfach) — das ist die technische Abgrenzung „wen es betrifft" (employee_id) vs. „gehört in die Akte" (filed_at).
+function EmployeeMailFile({empId}){
+  const [msgs,setMsgs]=React.useState(null);
+  const [att,setAtt]=React.useState({});
+  const load=async()=>{ try{
+    const {data}=await sb.from('mail_messages').select('*').eq('employee_id',empId).not('filed_at','is',null).order('occurred_at',{ascending:true});
+    const rows=data||[]; setMsgs(rows);
+    const ids=rows.map(m=>m.id);
+    if(ids.length){ const {data:a}=await sb.from('mail_attachments').select('*').in('message_id',ids); const m={}; (a||[]).forEach(x=>{ (m[x.message_id]=m[x.message_id]||[]).push(x); }); setAtt(m); } else setAtt({});
+  }catch(e){ setMsgs([]); } };
+  React.useEffect(()=>{ if(empId) load(); },[empId]);
+  const attOpen=async(path)=>{ try{ const {data}=await sb.storage.from('mail-attachments').createSignedUrl(path,300); if(data&&data.signedUrl) window.open(data.signedUrl,'_blank'); }catch(e){} };
+  const humanSize=(n)=>{ n=Number(n)||0; return n<1024?n+' B':n<1048576?(n/1024).toFixed(0)+' KB':(n/1048576).toFixed(1)+' MB'; };
+  const unfile=async(m)=>{ if(!(await uiConfirm({title:'Aus der Akte nehmen', text:'Die Mail bleibt im Postfach, verschwindet aber aus dieser Personalakte.', confirmLabel:'Aus der Akte nehmen'}))) return;
+    try{ const {error}=await sb.from('mail_messages').update({filed_at:null,filed_by:null}).eq('id',m.id); if(error) throw error; setMsgs(s=>(s||[]).filter(x=>x.id!==m.id)); }catch(e){} };
+  if(!empId) return <div style={{padding:16,color:'var(--muted)',fontSize:13}}>Erst speichern.</div>;
+  if(msgs===null) return <div style={{padding:16,color:'var(--muted)',fontSize:13}}>Lädt…</div>;
+  return <div style={{padding:'4px 2px'}}>
+    <div style={{fontSize:12,color:'var(--muted)',marginBottom:10}}>In die Akte gelegte Mails aus dem HR-Postfach (hr@25hrs.net). Nur bewusst abgelegte erscheinen hier, automatisch zugeordnete bleiben allein im Postfach.</div>
+    {msgs.length===0
+      ? <div style={{padding:'14px 16px',borderRadius:10,background:'var(--surface-2)',border:'1px solid var(--border)',fontSize:13,color:'var(--muted)'}}>Noch keine Mails in der Akte. Im Postfach (hr@) über „📁 Akte" ablegen.</div>
+      : <div style={{display:'flex',flexDirection:'column',gap:9}}>
+        {msgs.map(m=>{ const out=m.direction==='out';
+          return <div key={m.id} style={{border:'1px solid var(--border)',borderRadius:12,overflow:'hidden',background:'var(--card)'}}>
+            <div style={{display:'flex',alignItems:'center',gap:8,padding:'8px 12px',borderBottom:'1px solid var(--border)'}}>
+              <span style={{fontSize:10,fontWeight:800,color:out?'var(--blue)':'var(--green)',background:out?'rgba(37,99,235,.12)':'var(--green-bg)',borderRadius:20,padding:'2px 8px'}}>{out?'Gesendet':'Eingang'}</span>
+              <span style={{fontSize:12.5,fontWeight:700,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{m.subject||'(kein Betreff)'}</span>
+              <span style={{marginLeft:'auto',fontSize:11,color:'var(--muted)',whiteSpace:'nowrap'}}>{(m.occurred_at||'').slice(0,16).replace('T',' ')}</span>
+              <button onClick={()=>unfile(m)} title="Aus der Personalakte nehmen" style={{fontSize:10.5,fontWeight:700,border:'1px solid var(--border)',background:'transparent',color:'var(--muted)',borderRadius:20,padding:'2px 9px',cursor:'pointer',whiteSpace:'nowrap'}}>Aus Akte</button>
+            </div>
+            <div style={{padding:'8px 12px'}}>
+              <div style={{fontSize:11,color:'var(--muted)',marginBottom:6}}>{out?('An: '+(m.to_address||'')):('Von: '+(m.from_address||''))}</div>
+              {m.body_html? <MailFrame html={m.body_html}/> : <div style={{fontSize:13,lineHeight:1.55,whiteSpace:'pre-wrap',color:'var(--text)'}}>{m.body_text||''}</div>}
+              {(att[m.id]||[]).length>0&&<div style={{display:'flex',flexWrap:'wrap',gap:6,marginTop:10}}>
+                {(att[m.id]||[]).map(a=><button key={a.id} onClick={()=>attOpen(a.storage_path)} style={{fontSize:12,border:'1px solid var(--border)',background:'var(--surface-2)',borderRadius:8,padding:'5px 10px',cursor:'pointer',display:'flex',alignItems:'center',gap:6}}>📎 {a.name} <span style={{color:'var(--muted)',fontSize:10.5}}>{humanSize(a.size_bytes)}</span></button>)}
+              </div>}
+            </div>
+          </div>; })}
+      </div>}
   </div>;
 }
 // Postfach-Bereich recruiting@25hrs.net: Eingang (mit Ungelesen-Zähler), Gesendet, Suche, Threads je
