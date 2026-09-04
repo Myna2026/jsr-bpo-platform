@@ -80,12 +80,13 @@ Deno.serve(async (req) => {
   try {
     const at = await accessToken();
     const acc = await accountId(at);
-    if (body.mode === "att_probe") {   // einmalige Strukturprüfung der Zoho-Anhang-API
+    if (body.mode === "att_probe") {   // Strukturprüfung der Zoho-Anhang-API — attachmentinfo UNABHÄNGIG vom hasAttachment-Flag
       const l = await zget(at, "/api/accounts/" + acc + "/messages/view?limit=50");
-      const wa = (l.data || []).find((x: any) => x.hasAttachment === true || x.hasAttachment === "1" || x.hasAttachment === 1);
-      if (!wa) return json({ ok: true, note: "keine Nachricht mit Anhang im Eingang", flags: (l.data || []).slice(0, 12).map((x: any) => ({ s: x.subject, ha: x.hasAttachment })) });
-      const info = await zget(at, "/api/accounts/" + acc + "/folders/" + wa.folderId + "/messages/" + wa.messageId + "/attachmentinfo");
-      return json({ ok: true, msg: { subject: wa.subject, from: wa.fromAddress }, attachmentinfo: info });
+      const data = l.data || [];
+      const target = body.subject ? data.find((x: any) => (x.subject || "").includes(body.subject)) : (data.find((x: any) => x.hasAttachment === true || x.hasAttachment === "1" || x.hasAttachment === 1) || data[0]);
+      if (!target) return json({ ok: true, note: "kein Nachricht gefunden", flags: data.slice(0, 12).map((x: any) => ({ s: x.subject, ha: x.hasAttachment })) });
+      const info = await zget(at, "/api/accounts/" + acc + "/folders/" + target.folderId + "/messages/" + target.messageId + "/attachmentinfo");
+      return json({ ok: true, msg: { subject: target.subject, from: target.fromAddress, hasAttachment: target.hasAttachment }, attachmentinfo: info });
     }
     const limit = Math.max(1, Math.min(100, Number(body.limit) || 50));
     const list = await zget(at, "/api/accounts/" + acc + "/messages/view?limit=" + limit);
@@ -113,7 +114,8 @@ Deno.serve(async (req) => {
         message_id: mid, status: "unread", occurred_at: occurred,
       }).select("id").maybeSingle();
       neu++; if (cvId) zugeordnet++;
-      if (ins && ins.id && (m.hasAttachment === true || m.hasAttachment === "1" || m.hasAttachment === 1)) await pullAttachments(at, acc, m.folderId, m.messageId, ins.id);
+      // attachmentinfo IMMER prüfen (das hasAttachment-Flag ist unzuverlässig); pullAttachments ist bei leer folgenlos.
+      if (ins && ins.id) await pullAttachments(at, acc, m.folderId, m.messageId, ins.id);
     }
     return json({ ok: true, geprueft: msgs.length, neu, zugeordnet, uebersprungen: skip, eigen_ausgang: ausgang });
   } catch (e) {
