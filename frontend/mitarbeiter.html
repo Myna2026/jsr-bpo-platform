@@ -903,7 +903,7 @@ function logActivity(action, entity, id, label, details){
 // ─── 25h: Employee Self-View direct Supabase read ────────────────────
 // Whitelist fuer Self-Edit: kein role_keys/status/hourly_rate/contract/etc.
 // email raus (Konsistenz mit auth.users), bank raus (HR/Payroll-Verification).
-var EMP_SELF_EDITABLE_COLS = ['about_text','interests','photo_url','phone','city'];
+var EMP_SELF_EDITABLE_COLS = ['about_text','interests','photo_url','phone','city','education','hobbies','favorite_food','dream','travel_wish'];
 var EMP_SELF_WARNED_FIELDS = {};
 var showSelfFallbackBannerOnBoot = false;
 
@@ -1450,6 +1450,14 @@ function applyPerfVisibility(){
   if(PERF_ME && PERF_ME.length>0) return;
   document.querySelectorAll('[data-view="Perf"]').forEach(function(el){ el.style.display='none'; });
 }
+// Lohnzettel-Bereich (Sidebar + Bottom-Nav) erst zeigen, wenn der erste Lohnlauf drin ist (>=1 payslip).
+// Eine leere Lohn-Ansicht macht beim Onboarding einen schlechten ersten Eindruck. Schaltet in beide
+// Richtungen und wird nach dem Laden + bei jedem payslip-Realtime-Event aufgerufen.
+function applyPayrollVisibility(){
+  var show = !!(PAYSLIPS_ME && PAYSLIPS_ME.length>0);
+  document.querySelectorAll('[data-view="Payroll"]').forEach(function(el){ el.style.display = show?'':'none'; });
+  if(!show){ var pv=document.getElementById('vPayroll'); if(pv && pv.classList.contains('on')){ showView('Home', document.querySelector('[data-view="Home"]')); } }
+}
 
 var MY_PORTALS = [];
 var AUTH_GATING = false;   // verhindert doppelte Login-Verarbeitung
@@ -1553,7 +1561,7 @@ function gateSession(session, event){
             // Aktualisierung per Reload — ein MA-Portal braucht keine Sekunden-Aktualisierung der Kollegenliste.
             // 27d: MA-Portal Payslips — eigene Slips laden + Realtime auf employee_id
             loadMyPayslipsFromDB(ME.id)
-              .then(function(rows){ PAYSLIPS_ME = rows; renderCurrentViewOnRealtime(); })
+              .then(function(rows){ PAYSLIPS_ME = rows; applyPayrollVisibility(); renderCurrentViewOnRealtime(); })
               .catch(function(err){ console.error('[27d] Payslips-Load fehlgeschlagen', err); });
             subscribeMyPayslips(ME.id, function(s, evtType){
               if(!s) return;
@@ -1569,6 +1577,7 @@ function gateSession(session, event){
                   PAYSLIPS_ME.sort(function(a,b){ return (b.month||'').localeCompare(a.month||''); });
                 }
               }
+              applyPayrollVisibility();
               renderCurrentViewOnRealtime();
             });
             // Schritt 2: eigener Schichtplan aus shift_assignments (RLS self-read) + Realtime
@@ -1878,16 +1887,17 @@ function openMobileMenu(){toggleSidebar();}
 // Das MA-Portal las bisher localStorage (pro Subdomain getrennt) und lief so gegenueber HR
 // auseinander. Jetzt: Urlaubs-Config + Feiertage aus app_config. Bei Ladefehler NICHT still auf
 // Default fallen, sondern sichtbar melden (wie beim fehlenden Wechselkurs in hr.html).
-var APP_CFG = { vacation:null, holidays:null, daily_reports:null };
+var APP_CFG = { vacation:null, holidays:null, daily_reports:null, kb:null };
 var CFG_LOAD_ERROR = false;
 function loadAppConfigForMA(){
-  return sb.from('app_config').select('key,value').in('key',['jsr_vacation_cfg','jsr_holidays_v1','jsr_daily_reports_cfg'])
+  return sb.from('app_config').select('key,value').in('key',['jsr_vacation_cfg','jsr_holidays_v1','jsr_daily_reports_cfg','jsr_kb_v1'])
     .then(function(r){
       if(r.error){ throw r.error; }
       (r.data||[]).forEach(function(row){
         if(row.key==='jsr_vacation_cfg') APP_CFG.vacation=row.value;
         else if(row.key==='jsr_holidays_v1') APP_CFG.holidays=row.value;
         else if(row.key==='jsr_daily_reports_cfg') APP_CFG.daily_reports=row.value;
+        else if(row.key==='jsr_kb_v1') APP_CFG.kb=row.value;
       });
       // Erfolg: fehlende Zeile = Config nie gesetzt = dokumentierter Default (beide Portale gleich).
       CFG_LOAD_ERROR=false; hideCfgErrorBanner();
@@ -2146,8 +2156,8 @@ function renderHome(){
   html+='<div class="kpi"><div class="kpi-label">Stundenkonto</div><div class="kpi-val '+deltaClass+'">'+deltaStr+'</div><div class="kpi-sub">Differenz zum Soll</div></div>';
   // KPI 4: Urlaub
   html+='<div class="kpi"><div class="kpi-label">Urlaub frei</div><div class="kpi-val blue">'+vac.remaining+'</div><div class="kpi-sub">von '+vac.total+' Tagen</div></div>';
-  // KPI 5: Letzter Lohn
-  html+='<div class="kpi"><div class="kpi-label">Letzter Lohn</div><div class="kpi-val" style="font-size:18px;">'+slipNet+'</div><div class="kpi-sub">'+slipMonth+'</div></div>';
+  // KPI 5: Letzter Lohn — erst ab dem ersten echten Lohnzettel zeigen (vorher kein "—", das macht beim Onboarding leeren Eindruck)
+  if(mySlip){ html+='<div class="kpi"><div class="kpi-label">Letzter Lohn</div><div class="kpi-val" style="font-size:18px;">'+slipNet+'</div><div class="kpi-sub">'+slipMonth+'</div></div>'; }
   html+='</div>';
 
   // Performance-Karte (nur wenn Werte existieren) — neueste erfasste Woche
@@ -2341,7 +2351,7 @@ function downloadPayslip(month){alert('Lohnzettel-Download für '+month+' folgt,
 var DOCS_ME=[];
 function renderDocs(){
   var host=document.getElementById('vDocs');
-  var note='<div class="card" style="border-color:#7c3aed;"><div class="card-body"><div style="font-size:13px;color:var(--muted);line-height:1.5;">ℹ Diese Ansicht ist neu. Aktuell sind erst <b>drei Zugänge</b> mit einem Mitarbeiter verknüpft; die Portal-Zugänge für die restliche Belegschaft fehlen noch. Bis die eingerichtet sind, sieht hier kaum jemand seine Unterlagen.</div></div></div>';
+  var note='';
   if(!ME||!ME.id){ host.innerHTML=note+'<div class="empty"><div class="empty-icon">📎</div><div>Dein Zugang ist noch mit keinem Mitarbeiter verknüpft.</div></div>'; return; }
   host.innerHTML=note+'<div class="card"><div class="card-body"><div style="color:var(--muted);font-size:14px;">Lädt…</div></div></div>';
   sb.from('employee_documents').select('*').eq('employee_id', ME.id).order('created_at',{ascending:false}).then(function(res){
@@ -3185,10 +3195,14 @@ var _kbArts=[],_kbCat='all',_kbSearch='',_kbOpen=-1;
 
 // WISSENSBASIS (team-gepflegte Fachartikel) — kbx-Akkordeon: aufklappen an Ort und Stelle.
 function renderKnowledge(){
-  var arts=ls('jsr_kb_v1');
-  if(!Array.isArray(arts)){
-    arts=(arts && typeof arts==='object')?Object.values(arts).filter(function(a){return a&&typeof a==='object';}):[];
-  }
+  // Quelle = DB (app_config jsr_kb_v1), damit der Mitarbeiter sieht, was HR pflegt (kein localStorage-Auseinanderlaufen
+  // mehr). DB-Form: {articles:[{title,content,skill,level,tags}]}; die Kategorie wird aus skill/level abgeleitet, weil
+  // das Feld dort nicht "category" heißt. Fällt auf eine flache Liste zurück, falls das Format doch ein Array ist.
+  var raw=APP_CFG.kb;
+  var arts=(raw && Array.isArray(raw.articles)) ? raw.articles : (Array.isArray(raw)?raw:[]);
+  arts=arts.filter(function(a){return a&&typeof a==='object';}).map(function(a){
+    return Object.assign({}, a, {category:a.category||a.skill||a.level||''});
+  });
   _kbArts=arts;
   var cats=['all'];
   arts.forEach(function(a){if(a.category&&cats.indexOf(a.category)<0)cats.push(a.category);});
@@ -3592,6 +3606,12 @@ function saveMyEmpFields(fields){
     alert('Speichern fehlgeschlagen: ' + (err.message || 'DB-Fehler'));
   });
 }
+function saveContact(){
+  var ph=document.getElementById('pfPhone'), ci=document.getElementById('pfCity');
+  saveMyEmpFields({ phone: ph?ph.value.trim():'', city: ci?ci.value.trim():'' });
+  var s=document.getElementById('pfContactSaved');
+  if(s){s.style.opacity='1';setTimeout(function(){s.style.opacity='0';},2000);}
+}
 function saveAboutMe(){
   saveMyEmpFields({
     education:document.getElementById('pfEducation').value.trim(),
@@ -3651,10 +3671,11 @@ function renderProfile(){
   // Stammdaten
   html+='<div class="card"><div class="card-header"><div class="card-title">👤 Stammdaten</div></div><div class="card-body">';
   html+='<div class="data-row"><span class="data-lbl">E-Mail</span><span class="data-val">'+esc(ME.email||'—')+'</span></div>';
-  html+='<div class="data-row"><span class="data-lbl">Telefon</span><span class="data-val">'+esc(ME.phone||'—')+'</span></div>';
+  html+='<div class="data-row"><span class="data-lbl">Telefon</span><input type="text" id="pfPhone" class="form-input" style="max-width:190px;text-align:right;" value="'+esc(ME.phone||'')+'" placeholder="Telefonnummer"></div>';
   html+='<div class="data-row"><span class="data-lbl">Standort</span><span class="data-val">'+esc(ME.location||'—')+'</span></div>';
-  html+='<div class="data-row"><span class="data-lbl">Wohnort</span><span class="data-val">'+esc(ME.city||'—')+'</span></div>';
+  html+='<div class="data-row"><span class="data-lbl">Wohnort</span><input type="text" id="pfCity" class="form-input" style="max-width:190px;text-align:right;" value="'+esc(ME.city||'')+'" placeholder="Wohnort"></div>';
   if(ME.birthday)html+='<div class="data-row"><span class="data-lbl">Geburtstag</span><span class="data-val">'+esc(ME.birthday)+'</span></div>';
+  html+='<div style="display:flex;align-items:center;gap:10px;margin-top:8px;"><button class="btn btn-sm btn-primary" onclick="saveContact()">Speichern</button><span id="pfContactSaved" style="color:var(--green);font-size:12px;font-weight:600;opacity:0;transition:opacity .2s;">✓ Gespeichert</span></div>';
   html+='</div></div>';
 
   // Vertrag
@@ -3714,7 +3735,7 @@ function renderProfile(){
   html+='<div class="form-group"><label class="form-label">Reiseziel</label><input type="text" id="pfTravel" class="form-input" value="'+esc(ME.travel_wish||'')+'"></div>';
   html+='<div style="display:flex;align-items:center;gap:10px;margin-top:6px;"><button class="btn btn-primary" onclick="saveAboutMe()">Speichern</button><span id="pfSaved" style="color:var(--green);font-size:12px;font-weight:600;opacity:0;transition:opacity .2s;">✓ Gespeichert</span></div>';
   html+='</div></div>';
-  html+='<div style="margin-top:14px;text-align:center;color:var(--muted);font-size:11px;">Stammdaten-Änderungen bitte über HR beantragen.</div>';
+  html+='<div style="margin-top:14px;text-align:center;color:var(--muted);font-size:11px;">Telefon, Wohnort und „Über mich" kannst du selbst pflegen. Weitere Stammdaten-Änderungen bitte über HR.</div>';
 
   document.getElementById('vProfile').innerHTML=html;
 }
