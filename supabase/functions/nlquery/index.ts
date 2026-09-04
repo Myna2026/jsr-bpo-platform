@@ -152,6 +152,21 @@ Anwesenheit in Echtzeit, alles was oben nicht steht.
   ohne Rand-Warnung: GEPLANTE Stunden aus shift_assignments, GELEISTETE Stunden aus daily_hours (NICHT weekly_hours,
   das ist nur die Wochen-View). Fuer "geleistete Stunden im August" also daily_hours mit work_date BETWEEN '2026-08-01'
   AND '2026-08-31'. Nur wochenweise (Rand-Warnung noetig): weekly_calls, weekly_gauges, kpi_entries. Nicht die Ebenen vermischen.
+- KENNZAHLEN-REGISTER (kanonische Quelle + Genauigkeit je Kennzahl; IMMER so rechnen, NIE Genauigkeit erfinden). Die
+  Genauigkeit einer Antwort ergibt sich aus der Ebene der Quelle. Drei Stufen — genau diese Worte im 'warning'/'explanation':
+  TAGESGENAU (exakter Zeitraum ueber work_date, KEINE Rand-Warnung):
+    · Geleistete Stunden = sum(daily_hours.hours) · Pausen = sum(daily_hours.pause_hours)
+    · Sales Calls (Roh) = sum(daily_hours.sales_calls) · Geplante Stunden = sum(shift_assignments.net_hours)
+  AUF GANZE WOCHEN GERUNDET (nur ganze ISO-Wochen, deren Donnerstag im Zeitraum liegt; bei Monat/Zeitraum 'warning', dass
+  wochenweise gerundet wird — kein anteiliges ÷5 als Kopfzahl):
+    · Angenommene Anrufe = sum(weekly_calls.answered) · Forecast-Stunden = sum(report_forecast.fc_hours)
+    · AHT = weekly_calls.avg_handle_sec · ACW = weekly_calls.avg_acw_sec · CSAT = weekly_gauges.csat
+  GEWICHTETE MITTEL: avg_handle_sec/avg_acw_sec/csat NIEMALS als einfacher AVG ueber Zeilen/Personen, sondern
+  sum(wert*gewicht)/sum(gewicht) — Anrufzeiten mit Gewicht answered, CSAT mit Gewicht anzahl. Sonst zaehlt eine Person mit
+  3 Anrufen gleich viel wie eine mit 300. Beispiel AHT je Projekt/Woche:
+    select p.name projekt, sum(c.avg_handle_sec*c.answered)/nullif(sum(c.answered),0) aht_sek
+    from weekly_calls c join employees e on e.id=c.employee_id join projects p on p.id=e.project_id
+    where c.kw=33 and c.year=2026 group by p.id, p.name order by p.name;
 - Immer ein festes ORDER BY mit eindeutigem Zweit-Kriterium (z.B. zusaetzlich nach name), damit die Reihenfolge
   stabil ist. Fuer dieselbe Frage IMMER dieselbe Abfrage bauen (kanonische, einfachste Form).
 - "Mitarbeiter" ohne Zusatz = alle Zeilen in employees, kein Status-Filter (nur filtern, wenn ein Status genannt
