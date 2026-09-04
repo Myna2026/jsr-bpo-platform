@@ -20788,6 +20788,7 @@ function CVsView({cvList, setCvList, projects, onPromoteToEmployee, team, showTo
   const [resultsModal, setResultsModal] = useState(null);
   const [filter, setFilter] = useState(isMobileW?'cv_inbound':'all');   // mobil auf den Posteingang starten
   const [sort, setSort] = useState('rank');   // Standard: nach Rang (Sortierhilfe); umschaltbar auf Datum/Name
+  const [q, setQ] = useState('');   // Sofort-Suche (Name/Telefon/Mail)
 
   async function saveCv(form){
     if(form.id){
@@ -20829,7 +20830,11 @@ function CVsView({cvList, setCvList, projects, onPromoteToEmployee, team, showTo
   const _navCv = navFilter && String(navFilter.type||'').startsWith('cv_') ? navFilter : null;
   const _navCvPred = (_navCv && COCKPIT_FILTERS[_navCv.type]) || null;
   useEffect(()=>{ if(_navCv) setFilter('all'); },[navFilter]);
-  const filtered = (filter==='all' ? cvList : cvList.filter(c=>normStatus(c.status)===filter)).filter(c=>!_navCvPred||_navCvPred(c));
+  // Sofort-Suche: diakritik-unempfindlich über Name, Telefon, Mail. Leere Suche = alles.
+  const _cvNorm = s => String(s==null?'':s).toLowerCase().normalize('NFD').replace(new RegExp('[\u0300-\u036f]','g'),'');
+  const cvMatch = c => { const s=_cvNorm(q).trim(); if(!s) return true;
+    return _cvNorm((c.first_name||'')+' '+(c.last_name||'')).includes(s) || _cvNorm(c.phone||'').includes(s) || _cvNorm(c.email||'').includes(s); };
+  const filtered = (filter==='all' ? cvList : cvList.filter(c=>normStatus(c.status)===filter)).filter(c=>!_navCvPred||_navCvPred(c)).filter(cvMatch);
   // Rang = Sortierhilfe (Sprache dominant, Refinement innerhalb der Stufe). Umschaltbar; niemand wird gefiltert.
   const sorted = React.useMemo(()=>{ const arr=[...filtered];
     if(sort==='rank'){ const rk=new Map(); arr.forEach(c=>rk.set(c.id, applicantRank(c).score));
@@ -20860,6 +20865,9 @@ function CVsView({cvList, setCvList, projects, onPromoteToEmployee, team, showTo
       {/* Toolbar */}
       <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8,flexWrap:'wrap'}}>
         <button className="btn btn-primary btn-sm" onClick={()=>setModal('add')}>+ Neuer Bewerber</button>
+        <input value={q} onChange={e=>setQ(e.target.value)} placeholder="🔍 Suchen (Name, Telefon, Mail)…"
+          style={{flex:'1 1 220px',maxWidth:300,padding:'5px 10px',border:'1px solid var(--border)',borderRadius:7,fontSize:12.5,background:'var(--card)',color:'var(--text)'}}/>
+        {q&&<button className="btn btn-sm" onClick={()=>setQ('')} title="Suche zurücksetzen" style={{color:'var(--muted)'}}>✕</button>}
         <label style={{fontSize:12,color:'var(--muted)',fontWeight:700,display:'inline-flex',alignItems:'center',gap:6}}>Sortierung
           <select value={sort} onChange={e=>setSort(e.target.value)} style={{padding:'4px 8px',border:'1px solid var(--border)',borderRadius:7,fontSize:12,fontWeight:700,background:'var(--card)',color:'var(--text)'}}>
             <option value="rank">Rang (Qualität)</option>
@@ -22131,6 +22139,7 @@ function RecruitingKanban({employees, setEmployees, cvList, setCvList, projects,
   const [dragType, setDragType] = useState(null); // 'cv' | 'emp'
   const [selectedItem, setSelectedItem] = useState(null);
   const [selTab, setSelTab] = useState(null);   // Ziel-Tab beim Öffnen (z.B. 'vertrag' vom Sperr-Hinweis)
+  const [kbSearch, setKbSearch] = useState('');   // Sofort-Suche über alle Spalten (Name/Telefon/Mail)
   // Zwei Strecken: Bewerber (bis Vertrag) frei ziehbar; Mitarbeiter-Phasen NUR über die passende Handlung, nie per
   // Ziehen/„→". Wer es versucht, bekommt einen Dialog mit Weg dorthin.
   const EMP_PHASES = new Set(['contract','training_planned','training','active']);
@@ -22194,6 +22203,13 @@ function RecruitingKanban({employees, setEmployees, cvList, setCvList, projects,
       .filter(e=>EMP_PHASES.has(normalizeStatus(e.status)))
       .map(e=>({...e, _type:'emp', status:normalizeStatus(e.status)})),
   ];
+  // Sofort-Suche: diakritik-unempfindlich über Name, Telefon, Mail. Leere Suche = alles sichtbar.
+  const _kbNorm = s => String(s==null?'':s).toLowerCase().normalize('NFD').replace(new RegExp('[\u0300-\u036f]','g'),'');
+  const kbMatch = it => { const q=_kbNorm(kbSearch).trim(); if(!q) return true;
+    return _kbNorm((it.first_name||'')+' '+(it.last_name||'')).includes(q)
+        || _kbNorm(it.phone||'').includes(q)
+        || _kbNorm(it.email||'').includes(q); };
+  const _kbHits = kbSearch.trim() ? allItems.filter(kbMatch).length : 0;
 
   // Vorwaerts-Pipeline für den "→"-Knopf (nächste Feinstufe). parking/rejected/blacklist
   // haben keine "nächste" Stufe → kein Knopf.
@@ -22334,7 +22350,11 @@ function RecruitingKanban({employees, setEmployees, cvList, setCvList, projects,
             />
       )}
       <div style={{display:'flex',gap:10,alignItems:'center',marginBottom:12,flexWrap:'wrap'}}>
-        <div style={{fontSize:12,color:'var(--muted)'}}>
+        <input value={kbSearch} onChange={e=>setKbSearch(e.target.value)} placeholder="🔍 Bewerber suchen (Name, Telefon, Mail)…"
+          style={{flex:'1 1 260px',maxWidth:360,padding:'7px 11px',border:'1px solid var(--border)',borderRadius:8,fontSize:13,background:'var(--card)',color:'var(--text)'}}/>
+        {kbSearch.trim()&&<span style={{fontSize:12,fontWeight:700,color:'var(--muted)'}}>{_kbHits} Treffer</span>}
+        {kbSearch&&<button onClick={()=>setKbSearch('')} style={{border:'1px solid var(--border)',background:'var(--surface-2)',borderRadius:8,padding:'6px 10px',fontSize:12,cursor:'pointer',color:'var(--muted)'}}>✕ Zurücksetzen</button>}
+        <div style={{fontSize:12,color:'var(--muted)',flex:'1 1 100%'}}>
           Bewerber per Ziehen durch die Phasen 1-5. Ab Phase 6 (Vertrag) spiegelt der Trichter den Mitarbeiterbestand, Bewegung nur über Übernahme und Schulungsplanung.
         </div>
       </div>
@@ -22342,7 +22362,7 @@ function RecruitingKanban({employees, setEmployees, cvList, setCvList, projects,
       <div style={{display:'flex',gap:14,overflowX:'auto',paddingBottom:12,alignItems:'flex-start'}}>
         {KANBAN_GROUPS.map(g=>{
           const inGroup=it=> g.statuses.includes(it.status);
-          const total=allItems.filter(inGroup).length;
+          const total=allItems.filter(inGroup).filter(kbMatch).length;
 
           // Eingeklappt (nur Ruhend/Beendet) → schmaler Streifen mit Anzahl
           if(g.collapsible && collapsed[g.key]){
@@ -22374,7 +22394,7 @@ function RecruitingKanban({employees, setEmployees, cvList, setCvList, projects,
                 {g.statuses.map(sk=>{
                   const sf=SF_BY_KEY[sk];
                   const isEmpCol=EMP_PHASES.has(sk);   // Mitarbeiter-Phase (6-8): read-only, kein Drop, Operativ scrollt intern
-                  let items=allItems.filter(item=>item.status===sk);
+                  let items=allItems.filter(item=>item.status===sk).filter(kbMatch);
                   return(
                     <div key={sk} style={{flex:'0 0 180px',width:180}}
                       onDragOver={e=>e.preventDefault()} onDrop={()=>onDrop(sk)}>
