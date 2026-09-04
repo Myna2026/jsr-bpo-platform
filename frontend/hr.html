@@ -22184,11 +22184,14 @@ function RecruitingKanban({employees, setEmployees, cvList, setCvList, projects,
   };
   function normalizeStatus(s){ return STATUS_MAP[s]||s; }
 
-  // Combine CVs and employees for the funnel
+  // Combine CVs and employees for the funnel. Der Bewerber-Track kommt aus cvs, der Mitarbeiter-Track (Phase 6-8)
+  // SPIEGELT den Bestand aus employees: wer im Vertrag, in der Schulung oder operativ ist, erscheint hier — inkl.
+  // 'active' (Phase 8 „Operativ"). Verlassene Zustände (terminated_*/inactive/freigestellt_*) sind raus, die haben
+  // den operativen Trichter verlassen. Whitelist = die 4 Mitarbeiter-Phasen (EMP_PHASES), nichts anderes.
   const allItems = [
     ...(cvList||[]).map(c=>({...c, _type:'cv', status:normalizeStatus(c.status)})),
     ...(employees||[])
-      .filter(e=>!['active','terminated','inactive','freigestellt_bezahlt','freigestellt_unbezahlt'].includes(e.status))
+      .filter(e=>EMP_PHASES.has(normalizeStatus(e.status)))
       .map(e=>({...e, _type:'emp', status:normalizeStatus(e.status)})),
   ];
 
@@ -22224,6 +22227,9 @@ function RecruitingKanban({employees, setEmployees, cvList, setCvList, projects,
     const item=allItems.find(x=>x.id===dragging && x._type===dragType);
     setDragging(null); setDragType(null);
     if(!item) return;
+    // Two-Track: eine Mitarbeiter-Karte (ab Vertrag) bewegt sich NIE per Ziehen — weder vorwärts noch zurück in den
+    // Bewerber-Trichter. Belt-and-suspenders zusätzlich zu draggable=false auf der Karte (der „Jetmir andersherum"-Fall).
+    if(EMP_PHASES.has(item.status)) return;
     if(EMP_PHASES.has(newStatus) && item.status!==newStatus){ await blockedCross(item, newStatus); return; }
     await moveTo(item, newStatus);
   }
@@ -22255,13 +22261,14 @@ function RecruitingKanban({employees, setEmployees, cvList, setCvList, projects,
     const d = since ? Math.round((new Date()-new Date(since))/(864e5)) : null;
     const ageC = d===null?null:(d>14?'var(--red)':d>7?'var(--amber)':'var(--dim)');
     return(
-      <div key={item.id} draggable
+      <div key={item.id} draggable={!isEmp}
         onDragStart={e=>{e.stopPropagation();setDragging(item.id);setDragType(item._type);}}
         onClick={()=>setSelectedItem(item)}
+        title={isEmp?'Mitarbeiter — Bewegung nur über Übernahme/Schulungsplanung, nicht per Ziehen':undefined}
         style={{padding:'6px 8px',background:isEmp?'var(--green-bg)':'var(--card)',
           border:'1px solid '+(isEmp?'rgba(5,150,105,.35)':'rgba(15,86,97,.22)'),
           borderLeft:'4px solid '+accent,
-          borderRadius:'var(--r)',cursor:'grab',fontSize:11,boxShadow:'0 1px 3px rgba(0,0,0,.06)'}}>
+          borderRadius:'var(--r)',cursor:isEmp?'default':'grab',fontSize:11,boxShadow:'0 1px 3px rgba(0,0,0,.06)'}}>
         {hi&&<div style={{marginBottom:5,display:'flex',alignItems:'center',gap:6}}>{rankBadge(hi)}<WhyButton make={()=>applicantWhy(item)}/></div>}
         {!isEmp && item.source==='meta' && <div style={{marginBottom:4}}><AgentChip agentKey="clara" prefix="Von " size={13}/></div>}
         <div style={{display:'flex',alignItems:'center',gap:4,marginBottom:3}}>
@@ -22269,7 +22276,7 @@ function RecruitingKanban({employees, setEmployees, cvList, setCvList, projects,
             background:isEmp?'var(--green)':'var(--blue-bg)',color:isEmp?'#fff':'var(--blue)'}}>{isEmp?'Mitarbeiter':'Bewerber'}</span>
           <span style={{fontWeight:600,flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{name}</span>
           {d!==null&&<span style={{fontSize:9,color:ageC,fontWeight:d>7?700:400,whiteSpace:'nowrap'}}>{d===0?'Heute':d===1?'Gestern':d+'d'}{d>7?' ⚠':''}</span>}
-          {nx&&<button title={(EMP_PHASES.has(nx)?'Nur über die passende Handlung: ':'→ ')+(SF_BY_KEY[nx]?SF_BY_KEY[nx].label:nx)}
+          {nx&&!isEmp&&<button title={(EMP_PHASES.has(nx)?'Nur über die passende Handlung: ':'→ ')+(SF_BY_KEY[nx]?SF_BY_KEY[nx].label:nx)}
             onClick={e=>{e.stopPropagation(); if(EMP_PHASES.has(nx)&&item.status!==nx){ blockedCross(item,nx); } else { moveTo(item,nx); }}}
             style={{flexShrink:0,width:20,height:20,borderRadius:6,border:'1px solid '+(sf?sf.color:'#94a3b8')+'55',
               background:(sf?sf.color:'#94a3b8')+'18',color:sf?sf.color:'#475569',fontWeight:800,fontSize:12,cursor:'pointer',lineHeight:1,padding:0}}>→</button>}
@@ -22278,6 +22285,7 @@ function RecruitingKanban({employees, setEmployees, cvList, setCvList, projects,
         <div style={{color:'var(--muted)',fontSize:10,display:'flex',gap:4,flexWrap:'wrap'}}>
           {item.language_level&&<span>{item.language_level}</span>}
           {item.location&&<span>{item.location==='Tirana'?'🇦🇱':'🇽🇰'}</span>}
+          {isEmp&&item.project_id&&(()=>{ const p=(projects||[]).find(x=>x&&x.id===item.project_id); return p?<span style={{background:'var(--green-bg)',color:'var(--green)',borderRadius:6,padding:'0 4px',fontWeight:600}}>{p.name}</span>:null; })()}
           {item.primary_skill&&<span style={{background:'var(--surface-2)',borderRadius:6,padding:'0 4px'}}>{item.primary_skill}</span>}
         </div>
         {hi&&q.chips.length>0&&<div style={{display:'flex',gap:3,flexWrap:'wrap',marginTop:3}}>
@@ -22327,7 +22335,7 @@ function RecruitingKanban({employees, setEmployees, cvList, setCvList, projects,
       )}
       <div style={{display:'flex',gap:10,alignItems:'center',marginBottom:12,flexWrap:'wrap'}}>
         <div style={{fontSize:12,color:'var(--muted)'}}>
-          Drag & Drop, CVs und Mitarbeiter durch die Pipeline ziehen
+          Bewerber per Ziehen durch die Phasen 1-5. Ab Phase 6 (Vertrag) spiegelt der Trichter den Mitarbeiterbestand, Bewegung nur über Übernahme und Schulungsplanung.
         </div>
       </div>
 
@@ -22365,6 +22373,7 @@ function RecruitingKanban({employees, setEmployees, cvList, setCvList, projects,
               <div style={{display:'flex',gap:8}}>
                 {g.statuses.map(sk=>{
                   const sf=SF_BY_KEY[sk];
+                  const isEmpCol=EMP_PHASES.has(sk);   // Mitarbeiter-Phase (6-8): read-only, kein Drop, Operativ scrollt intern
                   let items=allItems.filter(item=>item.status===sk);
                   return(
                     <div key={sk} style={{flex:'0 0 180px',width:180}}
@@ -22375,13 +22384,15 @@ function RecruitingKanban({employees, setEmployees, cvList, setCvList, projects,
                         <span style={{fontSize:10.5,fontWeight:700,color:sf?sf.color:'#475569',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{sf?sf.label:sk}</span>
                         <span style={{fontSize:9.5,background:'rgba(0,0,0,.06)',borderRadius:10,padding:'1px 6px',fontWeight:700,flexShrink:0}}>{items.length}</span>
                       </div>
-                      <div style={{minHeight:60,display:'flex',flexDirection:'column',gap:5}}>
+                      <div style={{minHeight:60,display:'flex',flexDirection:'column',gap:5,...(isEmpCol?{maxHeight:'68vh',overflowY:'auto',paddingRight:2}:{})}}>
                         {items.map(renderCard)}
                         {items.length===0&&(
-                          <div style={{height:36,border:'1.5px dashed var(--border)',borderRadius:'var(--r)',
-                            display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,color:'var(--border)'}}>
-                            Ablegen
-                          </div>
+                          isEmpCol
+                            ? <div style={{height:36,display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,color:'var(--muted)',fontStyle:'italic'}}>niemand</div>
+                            : <div style={{height:36,border:'1.5px dashed var(--border)',borderRadius:'var(--r)',
+                                display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,color:'var(--border)'}}>
+                                Ablegen
+                              </div>
                         )}
                       </div>
                     </div>
@@ -22392,26 +22403,6 @@ function RecruitingKanban({employees, setEmployees, cvList, setCvList, projects,
           );
         })}
       </div>
-
-      {/* Active employees */}
-      {(employees||[]).filter(e=>e&&e.status==='active').length>0&&(
-        <div className="card" style={{marginTop:12}}>
-          <div className="card-header">
-            <span className="card-title">⚡ Aktive Mitarbeiter</span>
-            <span style={{fontSize:11,color:'var(--muted)'}}>{(employees||[]).filter(e=>e&&e.status==='active').length}</span>
-          </div>
-          <div style={{display:'flex',flexWrap:'wrap',gap:6,padding:'10px 14px'}}>
-            {(employees||[]).filter(e=>e&&e.status==='active').map(e=>(
-              <div key={e.id} style={{padding:'4px 10px',borderRadius:20,fontSize:11,
-                background:'var(--green-bg)',color:'var(--green)',fontWeight:600,
-                border:'1px solid rgba(5,150,105,.2)'}}>
-                {e.first_name} {e.last_name}
-                {e.primary_skill&&<span style={{marginLeft:4,opacity:.7}}>· {e.primary_skill}</span>}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
     </div>
   );
 }
