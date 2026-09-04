@@ -130,11 +130,24 @@ async function isArmed(): Promise<boolean> {
 const ORDER = ["cv_confirmed", "invited", "parking", "cv_accepted", "rejected_by_employee", "no_contact"];
 const rnd = (a: number, b: number) => a + Math.floor(Math.random() * (b - a + 1));
 async function cfg(key: string): Promise<any> { const { data } = await sb.from("app_config").select("value").eq("key", key).maybeSingle(); return (data && data.value) || {}; }
+// PostgREST liefert max. ~1000 Zeilen/Abfrage. Die Dedup-/Seen-Sets (bereits angeschriebene cv_ids) müssen
+// VOLLSTÄNDIG geladen werden, sonst gälten >1000 bereits Angeschriebene als "neu" → Re-Kontakt. Harter Backstop
+// bleibt der RPC jobfair_claim + Unique-Index; das hier ist die saubere Vermeidung davor.
+async function fetchAll(makeQuery: (a: number, b: number) => any): Promise<any[]> {
+  const PAGE = 1000; let from = 0; const all: any[] = [];
+  for (;;) {
+    const { data, error } = await makeQuery(from, from + PAGE - 1);
+    if (error) { if (from === 0) throw error; break; }
+    const batch = data || []; for (const r of batch) all.push(r);
+    if (batch.length < PAGE) break; from += PAGE;
+  }
+  return all;
+}
 async function collectQueue(limit: number): Promise<any[]> {
   // Vergeben = 'sent' oder 'sending' (laufender Anspruch). 'failed' (z. B. Zoho-Drossel) bleibt RETRY-fähig
   // und wird erneut aufgenommen. Die harte Absicherung gegen Doppelversand ist der RPC jobfair_claim + Unique-Index.
-  const { data: done } = await sb.from("applicant_messages").select("cv_id,status").eq("purpose", "jobfair");
-  const seen = new Set((done || []).filter((r: any) => r.status === "sent" || r.status === "sending").map((r: any) => r.cv_id));
+  const done = await fetchAll((a: number, b: number) => sb.from("applicant_messages").select("cv_id,status").eq("purpose", "jobfair").order("id", { ascending: true }).range(a, b));
+  const seen = new Set(done.filter((r: any) => r.status === "sent" || r.status === "sending").map((r: any) => r.cv_id));
   const out: any[] = [];
   for (const st of ORDER) {
     if (out.length >= limit) break;
@@ -182,10 +195,10 @@ Deno.serve(async (req) => {
     const out: any = { ok: true, sender: SENDER, secret_present: !!SMTP_PASS, armed, statuses: {} };
     for (const st of STATUSES) {
       const { count: total } = await sb.from("cvs").select("id", { count: "exact", head: true }).eq("status", st).not("email", "is", null);
-      const { data: sent } = await sb.from("applicant_messages").select("cv_id").eq("purpose", "jobfair").eq("status", "sent");
+      const sent = await fetchAll((a: number, b: number) => sb.from("applicant_messages").select("cv_id").eq("purpose", "jobfair").eq("status", "sent").order("id", { ascending: true }).range(a, b));
       const tpl = await loadTemplate(st);
       out.statuses[st] = { empfaenger_mit_mail: total || 0, vorlage_aktiv: !!tpl,
-        betreff: tpl ? tpl.subject : null, bereits_gesendet: (sent || []).length };
+        betreff: tpl ? tpl.subject : null, bereits_gesendet: sent.length };
     }
     return json(out);
   }
@@ -224,8 +237,8 @@ Deno.serve(async (req) => {
     const throttle = Math.max(500, Math.min(15000, Number(body.throttle_ms) || 2500));
 
     // bereits angeschriebene cv_ids (dedup)
-    const { data: done } = await sb.from("applicant_messages").select("cv_id").eq("purpose", "jobfair").eq("status", "sent");
-    const seen = new Set((done || []).map((r: any) => r.cv_id));
+    const done = await fetchAll((a: number, b: number) => sb.from("applicant_messages").select("cv_id").eq("purpose", "jobfair").eq("status", "sent").order("id", { ascending: true }).range(a, b));
+    const seen = new Set(done.map((r: any) => r.cv_id));
     const { data: cands } = await sb.from("cvs").select("id,first_name,email")
       .eq("status", st).not("email", "is", null).order("created_at", { ascending: true }).limit(limit + seen.size);
     const queue = (cands || []).filter((c: any) => c.email && String(c.email).includes("@") && !seen.has(c.id)).slice(0, limit);

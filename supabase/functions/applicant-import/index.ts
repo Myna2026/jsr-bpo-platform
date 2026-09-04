@@ -124,13 +124,27 @@ function parseCsv(text: string) {
   return rows.slice(1).filter((r) => r.some((c) => (c || "").trim() !== "")).map((r) => { const o: any = {}; header.forEach((h, i) => { o[h] = (r[i] != null ? r[i] : "").trim(); }); return o; });
 }
 
+// PostgREST liefert pro Abfrage max. ~1000 Zeilen. Für Dedup-Prüfungen gegen die GANZE cvs-Tabelle (>1000)
+// muss seitenweise geladen werden, sonst gelten die ältesten Bewerber als "nicht vorhanden" und werden als
+// Dublette neu angelegt. Stabile id-Ordnung. makeQuery(from,to) liefert eine Query mit .range(from,to).
+async function fetchAll(makeQuery: (a: number, b: number) => any): Promise<any[]> {
+  const PAGE = 1000; let from = 0; const all: any[] = [];
+  for (;;) {
+    const { data, error } = await makeQuery(from, from + PAGE - 1);
+    if (error) { if (from === 0) throw error; break; }
+    const batch = data || []; for (const r of batch) all.push(r);
+    if (batch.length < PAGE) break; from += PAGE;
+  }
+  return all;
+}
+
 // ── Meta-Import ──────────────────────────────────────────────────────────────
 async function importMeta(admin: any) {
   const { data: leads, error } = await admin.from("windsor_leads").select("*").eq("imported", false).is("status_review", null).order("created_time", { ascending: true });
   if (error) return { error: error.message };
   if (!leads || !leads.length) return { created: 0, held: 0, errors: 0, noPhone: 0, total: 0 };
   const byPhone = new Map<string, any>();
-  const { data: cvs } = await admin.from("cvs").select("id,phone"); (cvs || []).forEach((c: any) => { if (c.phone) byPhone.set(String(c.phone).trim(), c.id); });
+  const cvs = await fetchAll((a: number, b: number) => admin.from("cvs").select("id,phone").order("id", { ascending: true }).range(a, b)); cvs.forEach((c: any) => { if (c.phone) byPhone.set(String(c.phone).trim(), c.id); });
   let created = 0, held = 0, errors = 0, noPhone = 0;
   for (const lead of leads) {
     const { payload, phone } = metaLeadToPayload(lead);
@@ -158,8 +172,8 @@ async function googleSync(admin: any) {
   const cutoff = String(cfg.cutoff_date || "").slice(0, 10);
   const norm = (x: any) => String(x || "").trim().replace(/\s+/g, " ").toLowerCase();
   const pick = (r: any, h: string) => { const key = norm(h); const hit = Object.keys(r).find((k) => norm(k) === key); return hit != null ? String(r[hit] || "").trim() : ""; };
-  const { data: existing } = await admin.from("cvs").select("phone"); const seen = new Set<string>();
-  (existing || []).forEach((x: any) => { const pc = phoneClassify(x && x.phone); if (pc.cat === "ok" || pc.cat === "e164") seen.add(pc.target); });
+  const existing = await fetchAll((a: number, b: number) => admin.from("cvs").select("phone").order("id", { ascending: true }).range(a, b)); const seen = new Set<string>();
+  existing.forEach((x: any) => { const pc = phoneClassify(x && x.phone); if (pc.cat === "ok" || pc.cat === "e164") seen.add(pc.target); });
   const ALLOWED = new Set(["355", "383"]);
   const nz = (v: any) => { const s = (v == null ? "" : String(v)).trim(); return s || null; };
   const payloads: any[] = []; const skip: Record<string, number> = {}; let preCutoff = 0;

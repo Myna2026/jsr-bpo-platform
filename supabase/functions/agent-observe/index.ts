@@ -13,6 +13,18 @@ const ANTHROPIC_KEY = Deno.env.get("ANTHROPIC_API_KEY") || "";
 const SB_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const sb = createClient(SB_URL, SERVICE);
+// PostgREST liefert max. ~1000 Zeilen/Abfrage; Analysen über große Tabellen (cvs, activity_log) sonst auf
+// Teildaten → untertriebene Zahlen. Seitenweise laden mit stabiler id-Ordnung.
+async function fetchAll(makeQuery: (a: number, b: number) => any): Promise<any[]> {
+  const PAGE = 1000; let from = 0; const all: any[] = [];
+  for (;;) {
+    const { data, error } = await makeQuery(from, from + PAGE - 1);
+    if (error) { if (from === 0) throw error; break; }
+    const batch = data || []; for (const r of batch) all.push(r);
+    if (batch.length < PAGE) break; from += PAGE;
+  }
+  return all;
+}
 
 // ── Kollegen-Stimme (identisch zu usage-digest; später ins _shared) ──
 const PERSONAE: Record<string,string> = {};
@@ -83,8 +95,8 @@ Deno.serve(async (req)=>{
     const { data:chkC } = await sb.from("agent_checks").select("metrics").eq("agent_key","clara").maybeSingle();
     const prevC = (chkC&&chkC.metrics)||{};
     const HIRED = ["contract","training_planned","training","active"];
-    const { data:dec } = await sb.from("cvs").select("status,language_level").not("language_level","is",null)
-      .in("status",[...HIRED,"rejected_by_us","rejected_by_employee","rejected_by_client","blacklist"]);
+    const dec = await fetchAll((a:number,b:number)=> sb.from("cvs").select("status,language_level").not("language_level","is",null)
+      .in("status",[...HIRED,"rejected_by_us","rejected_by_employee","rejected_by_client","blacklist"]).order("id",{ascending:true}).range(a,b));
     const top=(dec||[]).filter((c:any)=> ["C1","C2"].includes(c.language_level) || /mutter/i.test(c.language_level||""));
     const topN=top.length, topHired=top.filter((c:any)=>HIRED.includes(c.status)).length;
     if(topN>=10 && (topHired/topN)<=0.2 && (prevC.rank_topN!==topN || prevC.rank_topHired!==topHired)){
@@ -163,7 +175,7 @@ Deno.serve(async (req)=>{
 
   // Maya: Zugänge mit plötzlichem Abbruch (vorher regelmäßig, letzte 7 Tage nichts)
   try{
-    const { data:al } = await sb.from("activity_log").select("user_id,created_at").gte("created_at",d28).lt("created_at",n1);
+    const al = await fetchAll((a:number,b:number)=> sb.from("activity_log").select("user_id,created_at").gte("created_at",d28).lt("created_at",n1).order("id",{ascending:true}).range(a,b));
     const prevDays:Record<string,Set<string>>={}, lastDays:Record<string,Set<string>>={};
     (al||[]).forEach((r:any)=>{ const day=String(r.created_at).slice(0,10); const u=r.user_id; if(!u) return;
       if(day>=d7){ (lastDays[u]=lastDays[u]||new Set()).add(day); } else { (prevDays[u]=prevDays[u]||new Set()).add(day); } });
