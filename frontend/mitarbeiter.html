@@ -1887,10 +1887,10 @@ function openMobileMenu(){toggleSidebar();}
 // Das MA-Portal las bisher localStorage (pro Subdomain getrennt) und lief so gegenueber HR
 // auseinander. Jetzt: Urlaubs-Config + Feiertage aus app_config. Bei Ladefehler NICHT still auf
 // Default fallen, sondern sichtbar melden (wie beim fehlenden Wechselkurs in hr.html).
-var APP_CFG = { vacation:null, holidays:null, daily_reports:null, kb:null };
+var APP_CFG = { vacation:null, holidays:null, daily_reports:null, kb:null, wheel:null };
 var CFG_LOAD_ERROR = false;
 function loadAppConfigForMA(){
-  return sb.from('app_config').select('key,value').in('key',['jsr_vacation_cfg','jsr_holidays_v1','jsr_daily_reports_cfg','jsr_kb_v1'])
+  return sb.from('app_config').select('key,value').in('key',['jsr_vacation_cfg','jsr_holidays_v1','jsr_daily_reports_cfg','jsr_kb_v1','jsr_wheel_cfg'])
     .then(function(r){
       if(r.error){ throw r.error; }
       (r.data||[]).forEach(function(row){
@@ -1898,6 +1898,7 @@ function loadAppConfigForMA(){
         else if(row.key==='jsr_holidays_v1') APP_CFG.holidays=row.value;
         else if(row.key==='jsr_daily_reports_cfg') APP_CFG.daily_reports=row.value;
         else if(row.key==='jsr_kb_v1') APP_CFG.kb=row.value;
+        else if(row.key==='jsr_wheel_cfg') APP_CFG.wheel=row.value;
       });
       // Erfolg: fehlende Zeile = Config nie gesetzt = dokumentierter Default (beide Portale gleich).
       CFG_LOAD_ERROR=false; hideCfgErrorBanner();
@@ -3311,7 +3312,9 @@ function renderAnlList(){
 // MOTI / WHEEL VIEW
 // ═══════════════════════════════════════════════════════════════════════════
 function getWheelCfg(){
-  var s=ls('jsr_wheel_cfg');
+  // Quelle = DB (app_config jsr_wheel_cfg) — dieselbe Config, aus der der Server (spin_wheel) zahlt. Damit ist
+  // das angezeigte Rad garantiert = die Auszahlungsliste (kein localStorage-Auseinanderlaufen, keine Täuschung).
+  var s=APP_CFG.wheel;
   // HR-Format: {prizes:[{label,amount,color,weight}], active_days, daily_draw, daily_draw_amount}
   // Legacy/Portal-Format: {enabled, segments:[{label,color,value}]}
   if(s){
@@ -3531,6 +3534,14 @@ function spinWheel(){
       if(resEl)resEl.innerHTML='<div class="wheel-result-banner">✓ '+esc(r.message||'Heute schon gedreht, morgen wieder!')+'</div>';
       return;
     }
+    if(r.source==='budget_exhausted'){
+      // Ehrlich statt Fake-Verlust: nicht ins "nichts" drehen, sondern sagen, dass der Monatstopf leer ist.
+      _wheelServerResult=r;
+      if(btn)btn.style.display='none';
+      if(resEl)resEl.innerHTML='<div class="wheel-result-banner">🫙 '+esc(r.message||'Der Bonus-Topf für diesen Monat ist ausgeschöpft.')+'</div>';
+      (WHEEL_SPINS_ME=WHEEL_SPINS_ME||[]).unshift({emp_id:ME.id, spin_date:isoDate(new Date()), amount:0, source:'budget_exhausted'});
+      return;
+    }
     _wheelServerResult=r;
     var cfg=getWheelCfg(), segs=cfg.segments, n=segs.length;
     // Segment passend zum Server-Betrag (sonst 0-Segment, sonst erstes)
@@ -3572,7 +3583,7 @@ function animateWheel(t){
 }
 
 function finishSpin(){
-  var r=_wheelServerResult||{amount:0,source:'normal',message:'Kein Gewinn, deine Chance steigt!'};
+  var r=_wheelServerResult||{amount:0,source:'normal',message:'Diesmal kein Gewinn. Morgen wieder!'};
   var val=parseFloat(r.amount)||0;
   // Ergebnis (vom Server) anzeigen
   var resultEl=document.getElementById('wheelResult');
