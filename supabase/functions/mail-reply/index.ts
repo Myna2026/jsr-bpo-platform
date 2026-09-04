@@ -38,6 +38,14 @@ async function accountId(at: string): Promise<string> {
   if (!a) throw new Error("kein Postfach");
   return a.accountId;
 }
+// Datei bei Zoho hochladen (Voraussetzung fürs Anhängen beim Senden). Gibt die Zoho-Referenz zurück.
+async function zohoUploadAttachment(at: string, acc: string, name: string, bytes: Uint8Array): Promise<any | null> {
+  const r = await fetch(MAIL + "/api/accounts/" + acc + "/messages/attachments?fileName=" + encodeURIComponent(name), {
+    method: "POST", headers: { Authorization: "Zoho-oauthtoken " + at, "Content-Type": "application/octet-stream" }, body: bytes });
+  const j = await r.json().catch(() => ({}));
+  const d = j && j.data; const o = Array.isArray(d) ? d[0] : d;
+  return (o && (o.storeName || o.attachmentPath)) ? { storeName: o.storeName, attachmentPath: o.attachmentPath, attachmentName: o.attachmentName || name } : null;
+}
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
@@ -81,26 +89,46 @@ Deno.serve(async (req) => {
   try {
     const at = await accessToken();
     const acc = await accountId(at);
+    // Anhänge: das Frontend hat die Dateien in den Bucket 'mail-attachments' geladen und schickt die Pfade.
+    // Wir laden sie von dort, hängen sie bei Zoho hoch und referenzieren sie im Versand.
+    const attIn: Array<{ path: string; name?: string }> = Array.isArray(body.attachments) ? body.attachments : [];
+    const zohoAtts: any[] = []; const attMeta: any[] = [];
+    for (const a of attIn) {
+      try {
+        const dl = await sb.storage.from("mail-attachments").download(a.path);
+        if (dl.error || !dl.data) continue;
+        const bytes = new Uint8Array(await dl.data.arrayBuffer());
+        const name = a.name || String(a.path).split("/").pop() || "anhang";
+        const ref = await zohoUploadAttachment(at, acc, name, bytes);
+        if (ref) { zohoAtts.push(ref); attMeta.push({ path: a.path, name, size: bytes.length }); }
+      } catch (_e) { /* einzelner Anhang darf den Versand nicht kippen */ }
+    }
+    const sendBody: any = { fromAddress: MAILBOX, toAddress: to, subject, content: html, mailFormat: "html", askReceipt: "no" };
+    if (zohoAtts.length) sendBody.attachments = zohoAtts;
     const sendRes = await fetch(MAIL + "/api/accounts/" + acc + "/messages", {
       method: "POST",
       headers: { Authorization: "Zoho-oauthtoken " + at, "Content-Type": "application/json" },
-      body: JSON.stringify({ fromAddress: MAILBOX, toAddress: to, subject, content: html, mailFormat: "html", askReceipt: "no" }),
+      body: JSON.stringify(sendBody),
     });
     const sj = await sendRes.json().catch(() => ({}));
     const ok = sendRes.status < 300 && (!sj.status || sj.status.code === 200 || String(sj.status?.code) === "200");
     const zid = (sj.data && (sj.data.messageId || sj.data.msgId)) || null;
 
-    await sb.from("mail_messages").insert({
+    const { data: outMsg } = await sb.from("mail_messages").insert({
       direction: "out", mailbox: "recruiting", cv_id: cvId,
       from_address: MAILBOX, to_address: to, subject, body_html: html,
       body_text: String(body.body_text || html.replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim().slice(0, 4000),
       message_id: zid ? "zoho:" + zid : crypto.randomUUID() + "@25hrs.net",
       in_reply_to: replyTo, status: ok ? "sent" : "failed", error: ok ? null : JSON.stringify(sj).slice(0, 300),
-    });
+    }).select("id").maybeSingle();
+    // Gesendete Anhänge protokollieren (im Verlauf/Gesendet herunterladbar).
+    if (ok && outMsg && outMsg.id && attMeta.length) {
+      for (const a of attMeta) { try { await sb.from("mail_attachments").insert({ message_id: outMsg.id, direction: "out", name: a.name, size_bytes: a.size, storage_path: a.path }); } catch (_e) { /* */ } }
+    }
     // Eingehende Nachricht als beantwortet/gelesen markieren.
     if (ok && replyTo) { try { await sb.from("mail_messages").update({ status: "read" }).eq("id", replyTo); } catch (_e) { /* */ } }
 
-    return json({ ok, to, zoho: sj.status || sj.data || null, error: ok ? undefined : "Zoho: " + JSON.stringify(sj).slice(0, 200) });
+    return json({ ok, to, angehaengt: zohoAtts.length, zoho: sj.status || sj.data || null, error: ok ? undefined : "Zoho: " + JSON.stringify(sj).slice(0, 200) });
   } catch (e) {
     return json({ ok: false, error: (e as Error).message || String(e) }, 500);
   }

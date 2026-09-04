@@ -48,6 +48,27 @@ async function matchCv(fromEmail: string): Promise<string | null> {
   const { data } = await sb.from("cvs").select("id").or("email.ilike." + fromEmail + ",better_email.ilike." + fromEmail).limit(1);
   return data && data.length ? data[0].id : null;
 }
+// Anhänge einer Zoho-Nachricht in den Bucket spiegeln + in mail_attachments protokollieren.
+async function pullAttachments(at: string, acc: string, folderId: string, zohoMsgId: string, ourMsgId: string) {
+  try {
+    const info = await zget(at, "/api/accounts/" + acc + "/folders/" + folderId + "/messages/" + zohoMsgId + "/attachmentinfo");
+    const d = info && info.data;
+    const arr = Array.isArray(d) ? d : (d && Array.isArray(d.attachments) ? d.attachments : []);
+    for (const a of arr) {
+      const aid = a.attachmentId || a.attachmentPath || a.id || a.storeName;
+      const name = a.attachmentName || a.fileName || a.name || "anhang";
+      if (!aid) continue;
+      const r = await fetch(MAIL + "/api/accounts/" + acc + "/folders/" + folderId + "/messages/" + zohoMsgId + "/attachments/" + aid, { headers: { Authorization: "Zoho-oauthtoken " + at } });
+      if (!r.ok) continue;
+      const bytes = new Uint8Array(await r.arrayBuffer());
+      const safe = String(name).replace(/[^\w.\-]+/g, "_").slice(0, 120);
+      const path = "recruiting/" + ourMsgId + "/" + safe;
+      const up = await sb.storage.from("mail-attachments").upload(path, bytes, { contentType: a.contentType || a.type || "application/octet-stream", upsert: true });
+      if (up.error) continue;
+      await sb.from("mail_attachments").insert({ message_id: ourMsgId, direction: "in", name: String(name), size_bytes: a.size || bytes.length, mime_type: a.contentType || a.type || null, storage_path: path });
+    }
+  } catch (_e) { /* Anhänge optional, dürfen den Abruf nicht abbrechen */ }
+}
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
@@ -59,6 +80,13 @@ Deno.serve(async (req) => {
   try {
     const at = await accessToken();
     const acc = await accountId(at);
+    if (body.mode === "att_probe") {   // einmalige Strukturprüfung der Zoho-Anhang-API
+      const l = await zget(at, "/api/accounts/" + acc + "/messages/view?limit=50");
+      const wa = (l.data || []).find((x: any) => x.hasAttachment === true || x.hasAttachment === "1" || x.hasAttachment === 1);
+      if (!wa) return json({ ok: true, note: "keine Nachricht mit Anhang im Eingang", flags: (l.data || []).slice(0, 12).map((x: any) => ({ s: x.subject, ha: x.hasAttachment })) });
+      const info = await zget(at, "/api/accounts/" + acc + "/folders/" + wa.folderId + "/messages/" + wa.messageId + "/attachmentinfo");
+      return json({ ok: true, msg: { subject: wa.subject, from: wa.fromAddress }, attachmentinfo: info });
+    }
     const limit = Math.max(1, Math.min(100, Number(body.limit) || 50));
     const list = await zget(at, "/api/accounts/" + acc + "/messages/view?limit=" + limit);
     const msgs = list.data || [];
@@ -76,15 +104,16 @@ Deno.serve(async (req) => {
         html = (c.data && c.data.content) || "";
       } catch (_e) { /* Content optional */ }
       const occurred = m.receivedTime ? new Date(Number(m.receivedTime)).toISOString() : new Date().toISOString();
-      await sb.from("mail_messages").insert({
+      const { data: ins } = await sb.from("mail_messages").insert({
         direction: "in", mailbox: "recruiting", cv_id: cvId,
         from_address: from, to_address: emailOf(m.toAddress || MAILBOX),
         subject: m.subject || "(kein Betreff)",
         body_html: html,
         body_text: (html ? String(html).replace(/<[^>]+>/g, " ") : String(m.summary || "")).replace(/\s+/g, " ").trim().slice(0, 4000),
         message_id: mid, status: "unread", occurred_at: occurred,
-      });
+      }).select("id").maybeSingle();
       neu++; if (cvId) zugeordnet++;
+      if (ins && ins.id && (m.hasAttachment === true || m.hasAttachment === "1" || m.hasAttachment === 1)) await pullAttachments(at, acc, m.folderId, m.messageId, ins.id);
     }
     return json({ ok: true, geprueft: msgs.length, neu, zugeordnet, uebersprungen: skip, eigen_ausgang: ausgang });
   } catch (e) {
