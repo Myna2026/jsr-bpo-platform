@@ -45,8 +45,8 @@ const emailOf = (s: string): string => { const m = String(s || "").match(/[\w.+-
 
 async function matchCv(fromEmail: string): Promise<string | null> {
   if (!fromEmail) return null;
-  const { data } = await sb.from("cvs").select("id").or("email.ilike." + fromEmail + ",better_email.ilike." + fromEmail).limit(1);
-  return data && data.length ? data[0].id : null;
+  const { data } = await sb.rpc("match_cv_by_email", { p_email: fromEmail });   // robust: case-insensitiv + getrimmt, nur cvs.email
+  return (data as string) || null;
 }
 // Anhänge einer Zoho-Nachricht in den Bucket spiegeln + in mail_attachments protokollieren.
 async function pullAttachments(at: string, acc: string, folderId: string, zohoMsgId: string, ourMsgId: string) {

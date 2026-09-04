@@ -76,8 +76,8 @@ Deno.serve(async (req) => {
   // erscheint dann automatisch in seinem Verlauf).
   let cvId = body.cv_id || null;
   if (!cvId) {
-    const { data: m } = await sb.from("cvs").select("id").or("email.ilike." + to + ",better_email.ilike." + to).limit(1);
-    if (m && m.length) cvId = m[0].id;
+    const { data: m } = await sb.rpc("match_cv_by_email", { p_email: to });   // robust: case-insensitiv + getrimmt
+    if (m) cvId = m as string;
   }
 
   // Inhalt: fertiges HTML nutzen oder Klartext sauber zu HTML wandeln.
