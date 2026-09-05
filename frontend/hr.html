@@ -40737,6 +40737,42 @@ function MeetingNotesView({team, projects, employees, showToast, isMobileW}){
 // Parametern erzeugen (Teilnehmer/Formen bzw. Fassung des alten Links).
 const AL_TFORM={phone:'Telefon',teams:'Teams',office:'Persönlich im Büro'};
 const AL_SENDABLE=['cv_inbound','cv_accepted','cv_confirmed'];   // Phasen, in denen ein Anschreiben Sinn ergibt
+// Clara-Übergabe-Liste (Schnitt 3): Bewerber, die Clara an Deonita übergeben hat (offene clara_handovers).
+// Das ist der sichtbare Teil der Exklusivität: hier stehen die, die JETZT dem Menschen gehören.
+function ClaraHandoverList({showToast}){
+  const [rows,setRows]=React.useState(null);
+  const REASON={ no_email:{t:'Keine Mailadresse, Clara kann nicht anschreiben',c:'#dc2626'}, no_completion:{t:'Vervollständigungs-Link nicht ausgefüllt (Frist erreicht)',c:'#b45309'}, no_booking:{t:'Kein Termin gebucht (Frist erreicht)',c:'#b45309'}, hard_cap:{t:'Über der Bearbeitungsgrenze',c:'#dc2626'} };
+  const fmtd=(s)=>{ if(!s) return ''; const d=new Date(s); const p=n=>String(n).padStart(2,'0'); return p(d.getDate())+'.'+p(d.getMonth()+1)+'.'; };
+  const load=async()=>{
+    const {data}=await sb.from('clara_handovers').select('*').is('resolved_at',null).order('created_at',{ascending:true});
+    const hs=data||[]; const ids=[...new Set(hs.map(h=>h.cv_id))]; let cm={};
+    if(ids.length){ const {data:cvs}=await sb.from('cvs').select('id,first_name,last_name,status,phone,email').in('id',ids); (cvs||[]).forEach(c=>cm[c.id]=c); }
+    setRows(hs.map(h=>({...h, cv:cm[h.cv_id]||{}})));
+  };
+  React.useEffect(()=>{ load(); },[]);
+  const resolve=async(h)=>{ let uid=null; try{ const s=await sb.auth.getSession(); uid=s&&s.data&&s.data.session&&s.data.session.user&&s.data.session.user.id; }catch(e){}
+    try{ const {error}=await sb.from('clara_handovers').update({resolved_at:new Date().toISOString(),resolved_by:uid}).eq('id',h.id); if(error) throw error; setRows(r=>(r||[]).filter(x=>x.id!==h.id)); showToast&&showToast('Übernommen'); }catch(e){ showToast&&showToast('Fehlgeschlagen: '+((e&&e.message)||e),'error'); } };
+  if(rows===null) return null;
+  return <div className="card" style={{marginBottom:14,overflow:'hidden',borderLeft:'4px solid '+(rows.length?'#dc2626':'#16a34a')}}>
+    <div style={{padding:'12px 16px',display:'flex',alignItems:'center',gap:10,borderBottom:rows.length?'1px solid var(--border)':'none'}}>
+      <span style={{fontSize:15,fontWeight:800}}>📌 Wartet auf dich</span>
+      <span style={{fontSize:12,fontWeight:800,color:'#fff',background:rows.length?'#dc2626':'#16a34a',borderRadius:20,padding:'1px 9px'}}>{rows.length}</span>
+      <span style={{fontSize:12,color:'var(--muted)'}}>{rows.length?'Clara hat übergeben, bitte übernehmen':'nichts offen'}</span>
+      <button className="btn btn-sm" style={{marginLeft:'auto'}} onClick={load}>↻</button>
+    </div>
+    {rows.length>0&&<div style={{maxHeight:'42vh',overflowY:'auto'}}>
+      {rows.map(h=>{ const c=h.cv||{}; const rm=REASON[h.reason]||{t:h.reason,c:'var(--muted)'}; const nm=((c.first_name||'')+' '+(c.last_name||'')).trim()||'(ohne Name)';
+        return <div key={h.id} style={{display:'flex',alignItems:'center',gap:10,padding:'9px 16px',borderBottom:'1px solid var(--border)'}}>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontSize:13.5,fontWeight:700,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{nm}{c.phone?<span style={{color:'var(--muted)',fontWeight:400,fontSize:12}}> · {c.phone}</span>:null}</div>
+            <div style={{fontSize:12,color:rm.c,fontWeight:600}}>{rm.t}</div>
+            <div style={{fontSize:11,color:'var(--muted)'}}>wartet seit {fmtd(h.created_at)}</div>
+          </div>
+          <button className="btn btn-sm" style={{flex:'0 0 auto'}} onClick={()=>resolve(h)}>✓ Übernommen</button>
+        </div>; })}
+    </div>}
+  </div>;
+}
 // Clara-Steuerung (Schnitt 1): Automatik-Schalter je Phase/Ausgang, Wartefenster (Werktage) + 48h-Absage,
 // und der Vorlagen-Editor (Betreff/Text je Vorlage, Vorschau, Variablen-Legende) — alles ohne Code.
 // Speichert app_config jsr_clara_auto_v1 (Schalter/Fenster) und mail_templates (Betreff/Text).
@@ -41085,6 +41121,7 @@ function ApplicantLinksView({employees, showToast, team}){
       </span>
     </div>
 
+    <ClaraHandoverList showToast={showToast}/>
     <ClaraSteuerung showToast={showToast} isMgmt={isMgmt}/>
 
     {showCfg&&<div className="card" style={{padding:16,marginBottom:14}}>
