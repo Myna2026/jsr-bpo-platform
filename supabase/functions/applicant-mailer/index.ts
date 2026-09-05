@@ -19,6 +19,7 @@ const SERVICE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const Z_HOST  = Deno.env.get("ZOHO_SMTP_HOST") || "smtppro.zoho.eu";
 const Z_PORT  = Number(Deno.env.get("ZOHO_SMTP_PORT") || "465");
 const TEST_KEY = Deno.env.get("MAILER_TEST_KEY") || "";
+const CAMPAIGN_KEY = Deno.env.get("CAMPAIGN_KEY") || "";
 const PUBLIC_BASE = "https://client.tive360.de";   // oeffentliche Anreicherungsseite
 
 const cors = {
@@ -191,6 +192,71 @@ async function sendOne(cv: any, cfg: any, sender: any, origin: string, createdBy
   return res;
 }
 
+// ── Clara-Automatik (Phasen) ─────────────────────────────────────────────────
+// Offene Übergabe? Dann gehört der Bewerber Deonita -> Clara sendet NICHT (Exklusivität, kein Überschneiden).
+async function hasOpenHandover(cvId: string): Promise<boolean> {
+  const { data } = await sb.from("clara_handovers").select("id").eq("cv_id", cvId).is("resolved_at", null).limit(1);
+  return !!(data && data.length);
+}
+// Werktage (Mo-Fr) seit einem ISO-Zeitpunkt, ab dem Folgetag (deckt sich mit clara_workdays_since in SQL).
+function workdaysSince(iso: string | null): number {
+  if (!iso) return 9999;
+  const s = new Date(iso), t = new Date();
+  const d = new Date(Date.UTC(s.getUTCFullYear(), s.getUTCMonth(), s.getUTCDate())); d.setUTCDate(d.getUTCDate() + 1);
+  const end = new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), t.getUTCDate()));
+  let n = 0; while (d <= end) { const w = d.getUTCDay(); if (w >= 1 && w <= 5) n++; d.setUTCDate(d.getUTCDate() + 1); }
+  return n;
+}
+// Phase-2-Terminlink: interview_invite direkt anlegen (Service-Rolle; die RPC ist auf angemeldete Admins gegated).
+// Braucht Standard-Interviewer aus der Config; ohne die kein Link (Phase 2 sendet dann nicht).
+async function createInterviewLink(cvId: string, ph2: any): Promise<string | null> {
+  const parts = Array.isArray(ph2.participant_ids) ? ph2.participant_ids : [];
+  if (!parts.length) return null;
+  const forms = (Array.isArray(ph2.forms) && ph2.forms.length) ? ph2.forms : ["phone", "teams", "office"];
+  const days = Number(ph2.expires_days) || 14;
+  const token = crypto.randomUUID().replaceAll("-", "");
+  const expires = new Date(Date.now() + days * 86400000).toISOString();
+  const { error } = await sb.from("interview_invites").insert({ cv_id: cvId, token, participant_ids: parts, forms, status: "open", expires_at: expires });
+  if (error) return null;
+  return PUBLIC_BASE + "/termin.html?t=" + token;
+}
+// Generischer Phasen-Versand: Link ist bereits erzeugt. purpose = 'phase1'/'phase2' (+ '_reminder').
+async function sendPhaseMail(cv: any, tplKey: string, link: string, sender: any, purpose: string, origin: string) {
+  const tpl = await loadTemplate(tplKey);
+  if (!tpl) return { ok: false, error: "Vorlage " + tplKey + " nicht aktiv" };
+  const hi = cv.first_name ? "Hallo " + cv.first_name + "," : "Hallo,";
+  const { subject, html } = renderTemplate(tpl, { hi, link: link || "", name: sender.name || "Clara", disc: sender.disclosure || "" });
+  const res = await smtpSend(sender, cv.email, subject, html);
+  await sb.from("applicant_messages").insert({ cv_id: cv.id, channel: "email", purpose, origin, sender_key: sender.key, to_address: cv.email, status: res.ok ? "sent" : "failed", error: res.ok ? null : res.error, sent_at: res.ok ? new Date().toISOString() : null });
+  await sb.from("mail_messages").insert({ direction: "out", mailbox: "recruiting", cv_id: cv.id, from_address: sender.email, to_address: cv.email, subject, body_html: html, message_id: res.messageId, status: res.ok ? "sent" : "failed", error: res.ok ? null : res.error });
+  return res;
+}
+// Eine Phase abarbeiten (Erst-Mail + Erinnerung), Besitz/Dedup/Fenster beachtet. dry = nur zählen.
+async function runPhase(phaseKey: string, status: string, ph: any, sender: any, remDays: number, dry: boolean, makeLink: (cv: any) => Promise<string | null>, reactedOf: (cvId: string) => Promise<boolean>, reuseLink: (cvId: string) => Promise<string | null>) {
+  const r = { sent: 0, reminded: 0, skipped: 0, failed: 0 };
+  const { data: cands } = await sb.from("cvs").select("id,first_name,email,status").eq("status", status).not("email", "is", null).limit(300);
+  for (const cv of (cands || [])) {
+    if (!cv.email || !String(cv.email).includes("@")) { r.skipped++; continue; }
+    if (await hasOpenHandover(cv.id)) { r.skipped++; continue; }   // gehört Deonita
+    const { data: msgs } = await sb.from("applicant_messages").select("purpose,status,sent_at").eq("cv_id", cv.id).in("purpose", [phaseKey, phaseKey + "_reminder"]);
+    const first = (msgs || []).find((m: any) => m.purpose === phaseKey && m.status === "sent");
+    const remDone = (msgs || []).some((m: any) => m.purpose === phaseKey + "_reminder" && m.status === "sent");
+    if (!first) {
+      if (dry) { r.sent++; continue; }
+      const link = await makeLink(cv);
+      if (!link) { r.failed++; continue; }
+      const res = await sendPhaseMail(cv, ph.template, link, sender, phaseKey, "auto");
+      res.ok ? r.sent++ : r.failed++;
+    } else if (!remDone && !(await reactedOf(cv.id)) && workdaysSince(first.sent_at) >= remDays) {
+      if (dry) { r.reminded++; continue; }
+      const link = await reuseLink(cv.id);
+      const res = await sendPhaseMail(cv, ph.template, link || "", sender, phaseKey + "_reminder", "auto");
+      res.ok ? r.reminded++ : r.failed++;
+    } else r.skipped++;
+  }
+  return r;
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   let body: any = {}; try { body = await req.json(); } catch (_e) { /* leerer Body ok (Cron) */ }
@@ -217,28 +283,40 @@ Deno.serve(async (req) => {
     return json({ ok: res.ok, agent: sender.key, from: sender.email, to, error: res.ok ? undefined : res.error });
   }
 
-  // ── Automatik / Cron ────────────────────────────────────────────────────────
+  // ── Automatik / Cron (Clara-Phasen aus jsr_clara_auto_v1) ─────────────────────
+  // Ersetzt den alten Einzeltrigger (cv_accepted -> enrich). Phase 1 (cv_inbound): Eingang + Vervollständigungs-
+  // Link. Phase 2 (cv_confirmed): Termineinladung. Bewerber mit offener Übergabe gehören Deonita -> übersprungen.
+  // body.dry:true -> nur zählen, NICHTS senden (sicheres Testen vor der Scharfschaltung).
   if (mode === "scan") {
-    if (!cfg.auto_enabled) return json({ ok: true, skipped: "auto_off" });
+    // Auth: der Scan versendet echt (sobald Phasen an sind) -> nur Trigger-Key ODER Service-Bearer (Cron).
+    const authz = req.headers.get("Authorization") || "";
+    if (!((CAMPAIGN_KEY && body.key === CAMPAIGN_KEY) || (SERVICE && authz === "Bearer " + SERVICE))) return json({ ok: false, error: "nicht autorisiert" }, 403);
+    const dry = !!body.dry;
+    const { data: c2 } = await sb.from("app_config").select("value").eq("key", "jsr_clara_auto_v1").maybeSingle();
+    const cfg2: any = c2 && c2.value; if (!cfg2) return json({ ok: true, skipped: "no_clara_config" });
     const sender = await agentSender("clara");
     if (!sender) return json({ ok: true, skipped: "sender_inactive" });
+    const g = await guardClass(sender.key, "mail_external");
+    if (g !== "freigabe" && g !== "autonom") return json({ ok: false, error: "Leitplanke: externe Mail nicht erlaubt (" + g + ")" });
+    const remDays = Number(cfg2.windows && cfg2.windows.reminder_workdays) || 2;
+    const out: any = { ok: true, dry };
 
-    const { data: cands } = await sb.from("cvs")
-      .select("id,first_name,email,status")
-      .eq("status", cfg.trigger_status || "cv_accepted")
-      .not("email", "is", null)
-      .limit(200);
-
-    let sent = 0, failed = 0, skipped = 0;
-    for (const cv of (cands || [])) {
-      if (!cv.email || !String(cv.email).includes("@")) { skipped++; continue; }
-      const { data: prev } = await sb.from("applicant_messages")
-        .select("id").eq("cv_id", cv.id).eq("purpose", "enrich_invite").eq("channel", "email").eq("status", "sent").limit(1);
-      if (prev && prev.length) { skipped++; continue; }
-      const res = await sendOne(cv, cfg, sender, "auto", null);
-      res.ok ? sent++ : failed++;
+    const p1 = cfg2.phases && cfg2.phases.phase1;
+    if (p1 && p1.enabled) {
+      out.phase1 = await runPhase("phase1", "cv_inbound", p1, sender, remDays, dry,
+        async (cv) => { const t = await makeInvite(cv.id, (cfg && cfg.form_id) || null); return PUBLIC_BASE + "/bewerber.html?t=" + t; },
+        async (cvId) => { const { data } = await sb.from("cv_enrich_invites").select("used_at").eq("cv_id", cvId).order("created_at", { ascending: false }).limit(1); return !!(data && data[0] && data[0].used_at); },
+        async (cvId) => { const { data } = await sb.from("cv_enrich_invites").select("token").eq("cv_id", cvId).order("created_at", { ascending: false }).limit(1); return (data && data[0]) ? PUBLIC_BASE + "/bewerber.html?t=" + data[0].token : null; });
     }
-    return json({ ok: true, sent, failed, skipped });
+    const p2 = cfg2.phases && cfg2.phases.phase2;
+    if (p2 && p2.enabled) {
+      if (!(Array.isArray(p2.participant_ids) && p2.participant_ids.length)) { out.phase2 = { note: "keine Standard-Interviewer konfiguriert" }; }
+      else out.phase2 = await runPhase("phase2", "cv_confirmed", p2, sender, remDays, dry,
+        (cv) => createInterviewLink(cv.id, p2),
+        async (cvId) => { const { data } = await sb.from("interview_invites").select("status").eq("cv_id", cvId).order("created_at", { ascending: false }).limit(1); return !!(data && data[0] && data[0].status === "booked"); },
+        async (cvId) => { const { data } = await sb.from("interview_invites").select("token").eq("cv_id", cvId).order("created_at", { ascending: false }).limit(1); return (data && data[0]) ? PUBLIC_BASE + "/termin.html?t=" + data[0].token : null; });
+    }
+    return json(out);
   }
 
   // ── Manueller Einzelversand (angemeldeter management/hr-User) ────────────────

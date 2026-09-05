@@ -34,7 +34,7 @@ insert into public.app_config (key, value) values ('jsr_clara_auto_v1', $cfg$
   "windows": { "reminder_workdays": 2, "handover_workdays": 3, "hard_cap_workdays": 5 },
   "phases": {
     "phase1": { "enabled": false, "status": "cv_inbound",   "template": "phase1_eingang" },
-    "phase2": { "enabled": false, "status": "cv_confirmed", "template": "phase2_termin" }
+    "phase2": { "enabled": false, "status": "cv_confirmed", "template": "phase2_termin", "participant_ids": [], "forms": ["phone","teams","office"], "expires_days": 14 }
   },
   "rejects": {
     "rejected_by_us":     { "enabled": false, "template": "reject_by_us" },
