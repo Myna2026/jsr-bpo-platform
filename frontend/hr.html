@@ -40082,6 +40082,48 @@ function WissensspeicherView({projects, team, showToast}){
     }catch(e){ setAns({error:(e&&e.message)||String(e)}); }
     setAsking(false);
   };
+  // Register (Schnitt 3): kb_facts durchsehen/öffnen/korrigieren/löschen/von-Hand-anlegen, Herkunft sichtbar.
+  const [mode,setMode]=React.useState('ask');   // ask | register | docs
+  const [facts,setFacts]=React.useState(null);
+  const [factDocs,setFactDocs]=React.useState({});
+  const [fq,setFq]=React.useState('');
+  const [showArch,setShowArch]=React.useState(false);
+  const [editF,setEditF]=React.useState(null);
+  const [names,setNames]=React.useState({});
+  const KB_INFO_TYPES=[['kontakt','Kontakt / Nummer'],['zeit','Zeit / Dauer'],['ablauf','Ablauf'],['regel','Regel'],['preis','Preis'],['sonstiges','Sonstiges']];
+  React.useEffect(()=>{ sb.from('app_users').select('user_id,full_name').then(({data})=>{ const m={}; (data||[]).forEach(u=>{ m[u.user_id]=u.full_name; }); setNames(m); }).catch(()=>{}); },[]);
+  const loadFacts=async(pid)=>{ if(!pid){ setFacts([]); return; } setFacts(null);
+    try{ const {data}=await sb.from('kb_facts').select('*').eq('project_id',pid).order('topic').order('zielgebiet',{nullsFirst:true}).order('label');
+      const rows=data||[]; setFacts(rows);
+      const dids=[...new Set(rows.map(r=>r.source_document_id).filter(Boolean))];
+      if(dids.length){ const {data:dd}=await sb.from('kb_documents').select('id,title').in('id',dids); const m={}; (dd||[]).forEach(d=>{ m[d.id]=d.title; }); setFactDocs(m); } else setFactDocs({});
+    }catch(e){ setFacts([]); showToast&&showToast('Register laden fehlgeschlagen: '+((e&&e.message)||e),'error'); }
+  };
+  React.useEffect(()=>{ if(partner&&mode==='register'&&facts===null) loadFacts(partner); },[partner,mode]);
+  const blankFact=()=>({__new:true, topic:'', zielgebiet:'', info_type:'kontakt', label:'', value:'', q_saison:'', q_veranstalter:'', valid_from:'', valid_to:''});
+  const editExisting=(f)=>setEditF({...f, q_saison:(f.qualifier&&f.qualifier.saison)||'', q_veranstalter:(f.qualifier&&f.qualifier.veranstalter)||'', zielgebiet:f.zielgebiet||'', info_type:f.info_type||'sonstiges', valid_from:f.valid_from||'', valid_to:f.valid_to||''});
+  const saveFact=async()=>{ const f=editF; if(!f) return;
+    if(!f.topic.trim()||!f.label.trim()||!f.value.trim()){ showToast&&showToast('Thema, Titel und Wert sind Pflicht','error'); return; }
+    const qualifier={}; if(f.q_saison&&f.q_saison.trim()) qualifier.saison=f.q_saison.trim(); if(f.q_veranstalter&&f.q_veranstalter.trim()) qualifier.veranstalter=f.q_veranstalter.trim();
+    const uid=(team&&team.user_id)||null; const now=new Date().toISOString();
+    const payload={ topic:f.topic.trim(), zielgebiet:(f.zielgebiet||'').trim()||null, info_type:f.info_type||null, label:f.label.trim(), value:f.value.trim(), qualifier, valid_from:f.valid_from||null, valid_to:f.valid_to||null, updated_by:uid, updated_at:now };
+    setBusy('fact');
+    try{
+      if(f.__new){ const {error}=await sb.from('kb_facts').insert({...payload, project_id:partner, source:'manual', confidence:'confirmed', status:'active', created_by:uid}); if(error) throw error; }
+      else { const {error}=await sb.from('kb_facts').update(payload).eq('id',f.id); if(error) throw error; }
+      setEditF(null); showToast&&showToast('Gespeichert'); loadFacts(partner);
+    }catch(e){ showToast&&showToast('Speichern fehlgeschlagen: '+((e&&e.message)||e),'error'); }
+    setBusy('');
+  };
+  const setFactStatus=async(f,st)=>{ try{ const {error}=await sb.from('kb_facts').update({status:st, updated_by:(team&&team.user_id)||null, updated_at:new Date().toISOString()}).eq('id',f.id); if(error) throw error; loadFacts(partner); }catch(e){ showToast&&showToast('Fehlgeschlagen: '+((e&&e.message)||e),'error'); } };
+  const delFact=async(f)=>{ if(!(await uiConfirm({title:'Eintrag löschen', text:'"'+f.label+'" wird aus dem Register und den Antworten entfernt. Unter „Gelöschte" bleibt er wiederherstellbar.', confirmLabel:'Löschen'}))) return; setFactStatus(f,'archived'); };
+  const purgeFact=async(f)=>{ if(!(await uiConfirm({title:'Endgültig löschen', text:'"'+f.label+'" wird unwiderruflich entfernt.', confirmLabel:'Endgültig löschen', danger:true}))) return; try{ const {error}=await sb.from('kb_facts').delete().eq('id',f.id); if(error) throw error; loadFacts(partner); }catch(e){ showToast&&showToast('Fehlgeschlagen: '+((e&&e.message)||e),'error'); } };
+  const factProv=(f)=>{ const who=(id)=> id?(names[id]||'jemand'):null;
+    const src = f.source==='manual' ? 'von Hand angelegt' : ('aus Datei'+(factDocs[f.source_document_id]?(' „'+factDocs[f.source_document_id]+'"'):'')+(f.source_locator?(', '+f.source_locator):''));
+    const seen = f.first_seen_at? (' · eingespielt '+fmtDt(f.first_seen_at)) : '';
+    const upd = f.updated_by? (' · zuletzt geändert von '+who(f.updated_by)+' am '+fmtDt(f.updated_at)) : '';
+    return src+seen+upd;
+  };
   const fmtDt=(s)=>{ if(!s) return ''; const d=new Date(s); const p=n=>String(n).padStart(2,'0'); return p(d.getDate())+'.'+p(d.getMonth()+1)+'.'+d.getFullYear(); };
   const loadDocs=async(pid)=>{ if(!pid){ setDocs([]); return; } setDocs(null);
     try{ const {data}=await sb.from('kb_documents').select('*').eq('project_id',pid).eq('status','active').order('created_at',{ascending:false});
@@ -40131,9 +40173,17 @@ function WissensspeicherView({projects, team, showToast}){
   };
   const partnerName=(id)=>{ const p=(projects||[]).find(x=>x.id===id); return p?p.name:id; };
   const card={background:'var(--card)',border:'1px solid var(--border)',borderRadius:12,padding:16,marginBottom:14};
+  const efSet=(k,v)=>setEditF(x=>({...x,[k]:v}));
+  const efIn=(k,label,ph,type)=><label style={{fontSize:12,color:'var(--muted)'}}>{label}<input type={type||'text'} value={editF&&editF[k]!=null?editF[k]:''} onChange={e=>efSet(k,e.target.value)} placeholder={ph||''} style={{display:'block',width:'100%',marginTop:3,padding:'7px 9px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)',fontSize:13.5,boxSizing:'border-box'}}/></label>;
 
   if(allowed!==null && allowed===undefined) return <div style={{padding:24,color:'var(--muted)'}}>Lädt…</div>;
   if(!partners.length) return <div style={{padding:24,color:'var(--muted)'}}>Kein Partner freigegeben.</div>;
+
+  const factList=(facts||[]).filter(f=> showArch? f.status==='archived' : f.status==='active');
+  const factFiltered=factList.filter(f=> !fq.trim() || (((f.topic||'')+' '+(f.zielgebiet||'')+' '+(f.label||'')+' '+(f.value||'')).toLowerCase().includes(fq.trim().toLowerCase())));
+  const factGroups={}; factFiltered.forEach(f=>{ (factGroups[f.topic]=factGroups[f.topic]||[]).push(f); });
+  const factTopics=Object.keys(factGroups).sort((a,b)=>a.localeCompare(b,'de'));
+  const archCount=(facts||[]).filter(f=>f.status==='archived').length;
 
   return <div style={{maxWidth:920,margin:'0 auto',padding:'8px 4px'}}>
     <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:6}}>
@@ -40142,13 +40192,19 @@ function WissensspeicherView({projects, team, showToast}){
     </div>
     {/* Partner-Auswahl */}
     <div style={{display:'flex',flexWrap:'wrap',gap:8,marginBottom:14}}>
-      {partners.map(p=>{ const on=p.id===partner; return <button key={p.id} onClick={()=>{setPartner(p.id);setPrev(null);setOpenDoc(null);setAns(null);setQ('');}}
+      {partners.map(p=>{ const on=p.id===partner; return <button key={p.id} onClick={()=>{setPartner(p.id);setPrev(null);setOpenDoc(null);setAns(null);setQ('');setFacts(null);setEditF(null);}}
         style={{padding:'7px 14px',borderRadius:20,border:'1px solid '+(on?'var(--accent,#0F5661)':'var(--border)'),cursor:'pointer',
           background:on?'var(--accent,#0F5661)':'var(--card)',color:on?'#fff':'var(--text)',fontWeight:on?700:500,fontSize:13.5}}>{p.name}</button>; })}
     </div>
 
+    {/* Unter-Tabs */}
+    <div style={{display:'flex',gap:6,marginBottom:14,borderBottom:'1px solid var(--border)'}}>
+      {[['ask','Fragen'],['register','Register'],['docs','Dokumente']].map(([k,l])=>{ const on=mode===k;
+        return <button key={k} onClick={()=>{setMode(k);setEditF(null);}} style={{padding:'8px 14px',border:'none',borderBottom:'2px solid '+(on?'var(--accent,#0F5661)':'transparent'),background:'none',cursor:'pointer',color:on?'var(--text)':'var(--muted)',fontWeight:on?800:500,fontSize:13.5}}>{l}</button>; })}
+    </div>
+
     {/* Fragen (Antwort-Motor) */}
-    <div style={{...card,borderColor:'var(--accent,#0F5661)'}}>
+    {mode==='ask'&&<div style={{...card,borderColor:'var(--accent,#0F5661)'}}>
       <div style={{fontSize:14,fontWeight:800,marginBottom:4}}>Frag den Wissensspeicher</div>
       <div style={{fontSize:12.5,color:'var(--muted)',marginBottom:10}}>Antwort kommt nur aus den hinterlegten Unterlagen, immer mit Quelle. Steht nichts drin, sagt er das ehrlich.</div>
       <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
@@ -40166,8 +40222,61 @@ function WissensspeicherView({projects, team, showToast}){
           </div>
          : <div style={{fontSize:13.5,color:'var(--muted)'}}>{ans.note||'Dazu ist nichts hinterlegt.'}</div>}
       </div>}
-    </div>
+    </div>}
 
+    {/* Register: durchsehen nach Thema/Zielgebiet, öffnen, korrigieren, von Hand anlegen, löschen, Herkunft sichtbar */}
+    {mode==='register'&&<div>
+      <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center',marginBottom:12}}>
+        <input value={fq} onChange={e=>setFq(e.target.value)} placeholder="Register durchsuchen (Thema, Zielgebiet, Wert)…" style={{flex:'1 1 260px',padding:'8px 11px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)',fontSize:13.5}}/>
+        {canEdit&&<button className="btn btn-primary" onClick={()=>setEditF(blankFact())}>+ Neuer Eintrag</button>}
+        <label style={{fontSize:12.5,color:'var(--muted)',display:'flex',alignItems:'center',gap:6,cursor:'pointer'}}><input type="checkbox" checked={showArch} onChange={e=>{setShowArch(e.target.checked);setEditF(null);}}/> Gelöschte anzeigen{archCount?(' ('+archCount+')'):''}</label>
+      </div>
+      {editF&&<div style={{...card,borderColor:'var(--accent,#0F5661)'}}>
+        <div style={{fontSize:14,fontWeight:800,marginBottom:10}}>{editF.__new?'Neuer Eintrag':'Eintrag bearbeiten'}</div>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(190px,1fr))',gap:10,marginBottom:10}}>
+          {efIn('topic','Thema *','z. B. Notfallnummer')}
+          {efIn('zielgebiet','Zielgebiet','z. B. Rhodos')}
+          <label style={{fontSize:12,color:'var(--muted)'}}>Art<select value={editF.info_type||'sonstiges'} onChange={e=>efSet('info_type',e.target.value)} style={{display:'block',width:'100%',marginTop:3,padding:'7px 9px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)',fontSize:13.5,boxSizing:'border-box'}}>{KB_INFO_TYPES.map(([k,l])=><option key={k} value={k}>{l}</option>)}</select></label>
+          {efIn('label','Titel *','kurzer Titel des Eintrags')}
+        </div>
+        <label style={{fontSize:12,color:'var(--muted)'}}>Wert *<textarea value={editF.value||''} onChange={e=>efSet('value',e.target.value)} rows={3} placeholder="die eigentliche Antwort / der Wert" style={{display:'block',width:'100%',marginTop:3,padding:'7px 9px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)',fontSize:13.5,boxSizing:'border-box',resize:'vertical'}}/></label>
+        <div style={{fontSize:11.5,color:'var(--muted)',margin:'10px 0 4px'}}>Unterscheidung (nur wenn der Wert je Saison oder Veranstalter abweicht) und Gültigkeit:</div>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(190px,1fr))',gap:10}}>
+          {efIn('q_saison','Saison','z. B. Sommer')}
+          {efIn('q_veranstalter','Veranstalter','z. B. TUI')}
+          {efIn('valid_from','Gültig ab','','date')}
+          {efIn('valid_to','Gültig bis','','date')}
+        </div>
+        <div style={{display:'flex',gap:8,marginTop:12}}>
+          <button className="btn btn-primary" disabled={busy==='fact'} onClick={saveFact}>{busy==='fact'?'Speichere…':'Speichern'}</button>
+          <button className="btn" disabled={busy==='fact'} onClick={()=>setEditF(null)}>Abbrechen</button>
+        </div>
+      </div>}
+      <div style={card}>
+        {facts===null? <div style={{color:'var(--muted)',fontSize:13}}>Lädt…</div>
+         : !factTopics.length? <div style={{color:'var(--muted)',fontSize:13}}>{showArch?'Keine gelöschten Einträge.':(fq.trim()?'Nichts gefunden.':'Noch keine Einträge. Lege den ersten von Hand an oder speise eine Datei ein.')}</div>
+         : factTopics.map(t=><div key={t}>
+            <div style={{fontSize:12,fontWeight:800,textTransform:'uppercase',letterSpacing:'.04em',color:'var(--muted)',marginTop:14,marginBottom:2}}>{t}</div>
+            {factGroups[t].map(f=><div key={f.id} style={{borderTop:'1px solid var(--border)',padding:'8px 0',opacity:showArch?0.75:1}}>
+              <div style={{display:'flex',gap:10,alignItems:'flex-start'}}>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontSize:13.5}}>{f.zielgebiet&&<span style={{background:'var(--bg)',border:'1px solid var(--border)',borderRadius:6,padding:'1px 7px',fontSize:11.5,marginRight:6}}>{f.zielgebiet}</span>}<span style={{fontWeight:700}}>{f.label}</span></div>
+                  <div style={{fontSize:13.5,marginTop:2,whiteSpace:'pre-wrap',wordBreak:'break-word'}}>{f.value}</div>
+                  {(f.qualifier&&(f.qualifier.saison||f.qualifier.veranstalter))&&<div style={{fontSize:11.5,color:'#b45309',marginTop:2}}>{[f.qualifier.saison&&('Saison: '+f.qualifier.saison), f.qualifier.veranstalter&&('Veranstalter: '+f.qualifier.veranstalter)].filter(Boolean).join(' · ')}</div>}
+                  <div style={{fontSize:11,color:'var(--muted)',marginTop:3}}>{factProv(f)}</div>
+                </div>
+                {canEdit&&<div style={{flex:'0 0 auto',display:'flex',gap:6}}>
+                  {showArch? <React.Fragment><button className="btn btn-sm" onClick={()=>setFactStatus(f,'active')}>Wiederherstellen</button><button className="btn btn-sm" onClick={()=>purgeFact(f)}>Endgültig</button></React.Fragment>
+                   : <React.Fragment><button className="btn btn-sm" onClick={()=>editExisting(f)}>Bearbeiten</button><button className="btn btn-sm" onClick={()=>delFact(f)}>Löschen</button></React.Fragment>}
+                </div>}
+              </div>
+            </div>)}
+          </div>)}
+      </div>
+    </div>}
+
+    {/* Dokumente: Einspeisen + Übersicht */}
+    {mode==='docs'&&<React.Fragment>
     {/* Einspeisen */}
     {canEdit ? <div style={card}>
       <div style={{fontSize:14,fontWeight:800,marginBottom:4}}>Datei einspeisen</div>
@@ -40215,6 +40324,7 @@ function WissensspeicherView({projects, team, showToast}){
           </div>}
         </div>)}</div>}
     </div>
+    </React.Fragment>}
   </div>;
 }
 function DataImportView({projects, employees}){
