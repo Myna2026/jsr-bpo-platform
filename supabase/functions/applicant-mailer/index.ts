@@ -232,8 +232,8 @@ async function sendPhaseMail(cv: any, tplKey: string, link: string, sender: any,
   return res;
 }
 // Eine Phase abarbeiten (Erst-Mail + Erinnerung), Besitz/Dedup/Fenster beachtet. dry = nur zählen.
-async function runPhase(phaseKey: string, status: string, ph: any, sender: any, remDays: number, dry: boolean, makeLink: (cv: any) => Promise<string | null>, reactedOf: (cvId: string) => Promise<boolean>, reuseLink: (cvId: string) => Promise<string | null>) {
-  const r = { sent: 0, reminded: 0, skipped: 0, failed: 0 };
+async function runPhase(phaseKey: string, status: string, ph: any, sender: any, remDays: number, dry: boolean, budget: { left: number }, makeLink: (cv: any) => Promise<string | null>, reactedOf: (cvId: string) => Promise<boolean>, reuseLink: (cvId: string) => Promise<string | null>) {
+  const r = { sent: 0, reminded: 0, skipped: 0, failed: 0, capped: 0 };
   const { data: cands } = await sb.from("cvs").select("id,first_name,email,status").eq("status", status).not("email", "is", null).limit(300);
   for (const cv of (cands || [])) {
     if (!cv.email || !String(cv.email).includes("@")) { r.skipped++; continue; }
@@ -243,23 +243,25 @@ async function runPhase(phaseKey: string, status: string, ph: any, sender: any, 
     const remDone = (msgs || []).some((m: any) => m.purpose === phaseKey + "_reminder" && m.status === "sent");
     if (!first) {
       if (dry) { r.sent++; continue; }
+      if (budget.left <= 0) { r.capped++; continue; }               // Sende-Budget je Lauf erschöpft (sanfter Start)
       const link = await makeLink(cv);
       if (!link) { r.failed++; continue; }
       const res = await sendPhaseMail(cv, ph.template, link, sender, phaseKey, "auto");
-      res.ok ? r.sent++ : r.failed++;
+      if (res.ok) { r.sent++; budget.left--; } else r.failed++;
     } else if (!remDone && !(await reactedOf(cv.id)) && workdaysSince(first.sent_at) >= remDays) {
       if (dry) { r.reminded++; continue; }
+      if (budget.left <= 0) { r.capped++; continue; }
       const link = await reuseLink(cv.id);
       const res = await sendPhaseMail(cv, ph.template, link || "", sender, phaseKey + "_reminder", "auto");
-      res.ok ? r.reminded++ : r.failed++;
+      if (res.ok) { r.reminded++; budget.left--; } else r.failed++;
     } else r.skipped++;
   }
   return r;
 }
 // Fällige Absagen versenden (48h abgelaufen). Prüft den Status ERNEUT: hat HR revidiert -> abbrechen, nichts raus.
 // Ist die Automatik für den Ausgang aus, bleibt die Absage liegen (skipped), sie wird nie ohne Schalter versendet.
-async function runDueRejections(cfg2: any, sender: any, dry: boolean) {
-  const r = { sent: 0, cancelled: 0, skipped: 0, failed: 0 };
+async function runDueRejections(cfg2: any, sender: any, dry: boolean, budget: { left: number }) {
+  const r = { sent: 0, cancelled: 0, skipped: 0, failed: 0, capped: 0 };
   const { data: due } = await sb.from("clara_rejections").select("*").is("sent_at", null).is("cancelled_at", null).lte("due_at", new Date().toISOString()).limit(200);
   for (const rej of (due || [])) {
     const rc = cfg2.rejects && cfg2.rejects[rej.reject_status];
@@ -269,7 +271,9 @@ async function runDueRejections(cfg2: any, sender: any, dry: boolean) {
     if (!enabled) { r.skipped++; continue; }
     if (!cv.email || !String(cv.email).includes("@")) { if (!dry) await sb.from("clara_rejections").update({ cancelled_at: new Date().toISOString(), cancel_reason: "keine_mail" }).eq("id", rej.id); r.cancelled++; continue; }
     if (dry) { r.sent++; continue; }
+    if (budget.left <= 0) { r.capped++; continue; }
     const res = await sendPhaseMail(cv, rc.template, "", sender, "reject_" + rej.reject_status, "auto");
+    if (res.ok) budget.left--;
     if (res.ok) { await sb.from("clara_rejections").update({ sent_at: new Date().toISOString(), message_id: res.messageId || null, error: null }).eq("id", rej.id); r.sent++; }
     else { await sb.from("clara_rejections").update({ error: res.error || "fehler" }).eq("id", rej.id); r.failed++; }
   }
@@ -318,11 +322,14 @@ Deno.serve(async (req) => {
     const g = await guardClass(sender.key, "mail_external");
     if (g !== "freigabe" && g !== "autonom") return json({ ok: false, error: "Leitplanke: externe Mail nicht erlaubt (" + g + ")" });
     const remDays = Number(cfg2.windows && cfg2.windows.reminder_workdays) || 2;
-    const out: any = { ok: true, dry };
+    // Sende-Budget je Lauf: sanfter Start, verhindert einen Schwall (Rückstau ~300) aus clara@ und schont
+    // die Absender-Reputation. dry rechnet ohne Deckel. 0/leer -> Default 25.
+    const budget = { left: dry ? 999999 : (Number(cfg2.max_sends_per_run) || 25) };
+    const out: any = { ok: true, dry, budget_start: budget.left };
 
     const p1 = cfg2.phases && cfg2.phases.phase1;
     if (p1 && p1.enabled) {
-      out.phase1 = await runPhase("phase1", "cv_inbound", p1, sender, remDays, dry,
+      out.phase1 = await runPhase("phase1", "cv_inbound", p1, sender, remDays, dry, budget,
         async (cv) => { const t = await makeInvite(cv.id, (cfg && cfg.form_id) || null); return PUBLIC_BASE + "/bewerber.html?t=" + t; },
         async (cvId) => { const { data } = await sb.from("cv_enrich_invites").select("used_at").eq("cv_id", cvId).order("created_at", { ascending: false }).limit(1); return !!(data && data[0] && data[0].used_at); },
         async (cvId) => { const { data } = await sb.from("cv_enrich_invites").select("token").eq("cv_id", cvId).order("created_at", { ascending: false }).limit(1); return (data && data[0]) ? PUBLIC_BASE + "/bewerber.html?t=" + data[0].token : null; });
@@ -330,13 +337,14 @@ Deno.serve(async (req) => {
     const p2 = cfg2.phases && cfg2.phases.phase2;
     if (p2 && p2.enabled) {
       if (!(Array.isArray(p2.participant_ids) && p2.participant_ids.length)) { out.phase2 = { note: "keine Standard-Interviewer konfiguriert" }; }
-      else out.phase2 = await runPhase("phase2", "cv_confirmed", p2, sender, remDays, dry,
+      else out.phase2 = await runPhase("phase2", "cv_confirmed", p2, sender, remDays, dry, budget,
         (cv) => createInterviewLink(cv.id, p2),
         async (cvId) => { const { data } = await sb.from("interview_invites").select("status").eq("cv_id", cvId).order("created_at", { ascending: false }).limit(1); return !!(data && data[0] && data[0].status === "booked"); },
         async (cvId) => { const { data } = await sb.from("interview_invites").select("token").eq("cv_id", cvId).order("created_at", { ascending: false }).limit(1); return (data && data[0]) ? PUBLIC_BASE + "/termin.html?t=" + data[0].token : null; });
     }
     // Fällige Absagen (48h) — unabhängig von den Phasen-Schaltern; jede Absage prüft ihren eigenen Ausgang-Schalter.
-    out.rejects = await runDueRejections(cfg2, sender, dry);
+    out.rejects = await runDueRejections(cfg2, sender, dry, budget);
+    out.budget_left = budget.left;
     return json(out);
   }
 

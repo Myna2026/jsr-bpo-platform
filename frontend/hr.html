@@ -40738,6 +40738,51 @@ function MeetingNotesView({team, projects, employees, showToast, isMobileW}){
 const AL_TFORM={phone:'Telefon',teams:'Teams',office:'Persönlich im Büro'};
 const AL_SENDABLE=['cv_inbound','cv_accepted','cv_confirmed'];   // Phasen, in denen ein Anschreiben Sinn ergibt
 // Clara-Absagen-Kontrolle (Schnitt 5): geplante (48-h-Frist) + automatisch verschickte Absagen, zum Nachprüfen.
+// Clara-Übersicht (Schnitt 6): ein Blick auf den Tag. Grundregel „nichts geht verloren, nichts liegt lange" —
+// hier steht schwarz auf weiß, was Clara heute gesendet hat, wer auf Deonita wartet und was an Absagen läuft.
+// Zeigt zusätzlich, ob die Automatik überhaupt scharf ist (sonst läuft alles manuell weiter).
+function ClaraUebersicht({showToast}){
+  const [d,setD]=React.useState(null);
+  const load=async()=>{
+    const now=new Date(); const t0=new Date(now.getFullYear(),now.getMonth(),now.getDate()).toISOString();
+    const [msgs,hand,rejPend,rejToday,cfgRow]=await Promise.all([
+      sb.from('applicant_messages').select('purpose,status,sent_at').gte('sent_at',t0).eq('status','sent'),
+      sb.from('clara_handovers').select('created_at').is('resolved_at',null),
+      sb.from('clara_rejections').select('id').is('sent_at',null).is('cancelled_at',null),
+      sb.from('clara_rejections').select('id').gte('sent_at',t0),
+      sb.from('app_config').select('value').eq('key','jsr_clara_auto_v1').maybeSingle()
+    ]);
+    const ms=(msgs.data||[]); const cfg=(cfgRow.data&&cfgRow.data.value)||{};
+    const sentToday=ms.filter(m=>!/^reject_/.test(m.purpose||'')).length;
+    const phEnabled=(cfg.phases&&(cfg.phases.phase1&&cfg.phases.phase1.enabled)||(cfg.phases&&cfg.phases.phase2&&cfg.phases.phase2.enabled));
+    const rjEnabled=cfg.rejects&&Object.values(cfg.rejects).some(r=>r&&r.enabled);
+    // Überfällig: offene Übergaben älter als die harte Grenze wären schon da; hier zeigen wir die ältesten offenen.
+    const hs=(hand.data||[]);
+    setD({ sentToday, waiting:hs.length, oldestWait:hs.reduce((a,h)=>{ const x=new Date(h.created_at); return (!a||x<a)?x:a; },null),
+           rejPend:(rejPend.data||[]).length, rejToday:(rejToday.data||[]).length, active:!!(phEnabled||rjEnabled), phEnabled:!!phEnabled, rjEnabled:!!rjEnabled });
+  };
+  React.useEffect(()=>{ load(); },[]);
+  if(d===null) return null;
+  const days=(dt)=>{ if(!dt) return 0; return Math.floor((Date.now()-dt.getTime())/86400000); };
+  const tile=(label,val,color)=><div style={{flex:'1 1 120px',minWidth:120,background:'var(--bg)',border:'1px solid var(--border)',borderRadius:10,padding:'10px 12px'}}>
+    <div style={{fontSize:22,fontWeight:800,color:color||'var(--text)',fontVariantNumeric:'tabular-nums'}}>{val}</div>
+    <div style={{fontSize:11.5,color:'var(--muted)',marginTop:2}}>{label}</div></div>;
+  return <div className="card" style={{marginBottom:14,overflow:'hidden'}}>
+    <div style={{padding:'12px 16px',display:'flex',alignItems:'center',gap:10,borderBottom:'1px solid var(--border)'}}>
+      <span style={{fontSize:15,fontWeight:800}}>🤖 Clara heute</span>
+      <span style={{fontSize:12,fontWeight:700,color:'#fff',background:d.active?'#16a34a':'#94a3b8',borderRadius:20,padding:'1px 9px'}}>{d.active?'aktiv':'aus'}</span>
+      {!d.active&&<span style={{fontSize:12,color:'var(--muted)'}}>Automatik aus, alles läuft manuell</span>}
+      <button className="btn btn-sm" style={{marginLeft:'auto'}} onClick={load}>↻</button>
+    </div>
+    <div style={{padding:'12px 16px',display:'flex',flexWrap:'wrap',gap:10}}>
+      {tile('heute gesendet',d.sentToday)}
+      {tile('wartet auf Deonita',d.waiting,d.waiting?'#dc2626':'#16a34a')}
+      {tile('Absagen geplant',d.rejPend,d.rejPend?'#b45309':undefined)}
+      {tile('Absagen heute',d.rejToday)}
+    </div>
+    {d.waiting>0&&d.oldestWait&&<div style={{padding:'0 16px 12px',fontSize:12,color:days(d.oldestWait)>=3?'#dc2626':'var(--muted)'}}>Ältester offener Fall wartet seit {days(d.oldestWait)} Tag{days(d.oldestWait)===1?'':'en'}. Bitte in „Wartet auf dich" abarbeiten.</div>}
+  </div>;
+}
 function ClaraRejectionLog({showToast}){
   const [rows,setRows]=React.useState(null);
   const SL={ rejected_by_us:'Absage durch uns', rejected_by_client:'Absage Kunde', no_contact:'Kein Kontakt möglich' };
@@ -40841,6 +40886,7 @@ function ClaraSteuerung({showToast, isMgmt, employees}){
   const toggleReject=(r)=>{ const n=clone(); n.rejects[r].enabled=!n.rejects[r].enabled; saveCfg(n); };
   const setWin=(k,v)=>{ const n=clone(); n.windows[k]=Math.max(0,parseInt(v,10)||0); saveCfg(n); };
   const setRej=(v)=>{ const n=clone(); n.reject_delay_hours=Math.max(0,parseInt(v,10)||0); saveCfg(n); };
+  const setMax=(v)=>{ const n=clone(); n.max_sends_per_run=Math.max(1,parseInt(v,10)||1); saveCfg(n); };
   const p2get=(f,def)=>{ const p=cfg&&cfg.phases&&cfg.phases.phase2; return (p&&p[f]!==undefined)?p[f]:def; };
   const setP2=(f,v)=>{ const n=clone(); if(!n.phases.phase2) n.phases.phase2={}; n.phases.phase2[f]=v; saveCfg(n); };
   const toggleInterviewer=(id)=>{ const cur=p2get('participant_ids',[])||[]; setP2('participant_ids', cur.includes(id)?cur.filter(x=>x!==id):[...cur,id]); };
@@ -40883,8 +40929,9 @@ function ClaraSteuerung({showToast, isMgmt, employees}){
             <label style={{display:'flex',alignItems:'center',gap:7}}>Übergabe an Tag {numIn(cfg.windows.handover_workdays,v=>setWin('handover_workdays',v))}</label>
             <label style={{display:'flex',alignItems:'center',gap:7}}>Harte Grenze Tag {numIn(cfg.windows.hard_cap_workdays,v=>setWin('hard_cap_workdays',v))}</label>
             <label style={{display:'flex',alignItems:'center',gap:7}}>Absage-Verzögerung {numIn(cfg.reject_delay_hours,setRej)} Std.</label>
+            <label style={{display:'flex',alignItems:'center',gap:7}}>Max. Mails pro Lauf {numIn(cfg.max_sends_per_run==null?25:cfg.max_sends_per_run,setMax)}</label>
           </div>
-          <div style={{fontSize:11.5,color:'var(--muted)',marginTop:8}}>Werktage (Wochenende zählt nicht). Nach der harten Grenze übergibt Clara an Deonita, sortiert aber nie selbst aus.</div>
+          <div style={{fontSize:11.5,color:'var(--muted)',marginTop:8}}>Werktage (Wochenende zählt nicht). Nach der harten Grenze übergibt Clara an Deonita, sortiert aber nie selbst aus. „Max. Mails pro Lauf" bremst den Start, damit kein Schwall auf einmal rausgeht (Scan läuft alle 30 Min in der Geschäftszeit).</div>
         </div>
         {/* Phase 2: Termin-Einstellungen */}
         <div>
@@ -41181,6 +41228,7 @@ function ApplicantLinksView({employees, showToast, team}){
       </span>
     </div>
 
+    <ClaraUebersicht showToast={showToast}/>
     <ClaraHandoverList showToast={showToast}/>
     <ClaraRejectionLog showToast={showToast}/>
     <ClaraSteuerung showToast={showToast} isMgmt={isMgmt} employees={employees}/>
