@@ -40022,9 +40022,17 @@ function MailerImport({employees, onSaved}){
 // Volltext-Chunks: Tabellen zeilenweise (Spalte: Wert), Text absatzweise. Zugriff/Schreiben regelt die RLS (perm 'wissen').
 const KB_DOC_KINDS=[['agb','AGB / Vertrag'],['faq','FAQ'],['zielgebiet','Zielgebiet'],['produkt','Produkt'],['ablauf','Ablauf / Prozess'],['sonstiges','Sonstiges']];
 const KB_DOC_KIND_LABEL=Object.fromEntries(KB_DOC_KINDS);
+function kbU8ToB64(u8){ let s=''; const CH=0x8000; for(let i=0;i<u8.length;i+=CH){ s+=String.fromCharCode.apply(null,u8.subarray(i,i+CH)); } return btoa(s); }
 async function kbParseFile(file){
   const name=file.name||''; const ext=(name.split('.').pop()||'').toLowerCase();
   const buf=await file.arrayBuffer(); const chunks=[]; let columns=[];
+  if(ext==='pdf'||ext==='docx'){   // PDF/Word kann der Browser nicht selbst — Edge Function kb-parse extrahiert den Text
+    const b64=kbU8ToB64(new Uint8Array(buf));
+    const {data,error}=await sb.functions.invoke('kb-parse',{body:{filename:name, mime:file.type, b64}});
+    if(error){ let m=error.message||'Fehler'; try{ const j=await error.context.json(); if(j&&j.error) m=j.error; }catch(_e){} throw new Error(m); }
+    if(!data||data.ok!==true) throw new Error((data&&data.error)||'Nicht lesbar');
+    return {kind:data.kind, chunks:data.chunks||[], columns:data.columns||[]};
+  }
   if(ext==='txt'||file.type==='text/plain'){
     const text=new TextDecoder('utf-8').decode(new Uint8Array(buf));
     text.split(/\n\s*\n/).map(s=>s.trim()).filter(Boolean).forEach(p=>{
@@ -40153,7 +40161,7 @@ function WissensspeicherView({projects, team, showToast}){
         mime_type:f.type||null, size_bytes:f.size, doc_kind:prev.kind_sel, uploaded_by:(team&&team.user_id)||null
       }).select('id').single();
       if(de){ await sb.storage.from('partner-knowledge').remove([path]); throw de; }
-      const rows=prev.chunks.map((c,i)=>({document_id:docRow.id, project_id:partner, ord:i, section:c.section||null, content:c.content}));
+      const rows=prev.chunks.map((c,i)=>({document_id:docRow.id, project_id:partner, ord:i, section:c.section||null, page:c.page||null, content:c.content}));
       for(let i=0;i<rows.length;i+=500){ const {error:ce}=await sb.from('kb_chunks').insert(rows.slice(i,i+500)); if(ce) throw ce; }
       setPrev(null); showToast&&showToast('Gespeichert: '+rows.length+' Abschnitte'); loadDocs(partner);
     }catch(e){ showToast&&showToast('Speichern fehlgeschlagen: '+((e&&e.message)||e),'error'); }
@@ -40280,9 +40288,9 @@ function WissensspeicherView({projects, team, showToast}){
     {/* Einspeisen */}
     {canEdit ? <div style={card}>
       <div style={{fontSize:14,fontWeight:800,marginBottom:4}}>Datei einspeisen</div>
-      <div style={{fontSize:12.5,color:'var(--muted)',marginBottom:12}}>Excel, CSV oder Text. Die Datei wird in durchsuchbare Abschnitte zerlegt, du siehst vor dem Speichern die Vorschau.</div>
+      <div style={{fontSize:12.5,color:'var(--muted)',marginBottom:12}}>Excel, CSV, PDF, Word oder Text. Die Datei wird in durchsuchbare Abschnitte zerlegt, du siehst vor dem Speichern die Vorschau. (PDF/Word bis ca. 10 MB; gescannte PDFs ohne Textebene können nicht gelesen werden.)</div>
       {!prev ? <div>
-        <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv,.txt" onChange={onPick} style={{display:'none'}}/>
+        <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv,.txt,.pdf,.docx" onChange={onPick} style={{display:'none'}}/>
         <button className="btn" disabled={busy==='parse'} onClick={()=>fileRef.current&&fileRef.current.click()}>{busy==='parse'?'Lese Datei…':'Datei wählen'}</button>
       </div> : <div>
         <div style={{display:'flex',flexWrap:'wrap',gap:12,alignItems:'flex-end',marginBottom:12}}>
