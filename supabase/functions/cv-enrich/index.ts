@@ -36,6 +36,8 @@ Deno.serve(async (req)=>{
   if(inv.form_id){ const {data:frm}=await sb.from('cv_enrich_forms').select('sections').eq('id',inv.form_id).maybeSingle(); sections = (frm&&frm.sections) || {}; }
 
   if(action==='load'){
+    // Schnitt 2: erster Öffnungszeitpunkt (JS-getriggert, nicht durch reinen Link-Prefetch). Nur einmal setzen.
+    if(!inv.opened_at){ try{ await sb.from('cv_enrich_invites').update({opened_at:new Date().toISOString()}).eq('token',token); }catch(_e){} }
     const ex=cv.extra||{};
     return json({ ok:true, first_name:cv.first_name, used:!!inv.used_at, reusable:!!inv.reusable, sections, cv:{
       email:cv.email, phone:cv.phone, city:cv.city, birthday:cv.birthday,
