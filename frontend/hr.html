@@ -1252,7 +1252,7 @@ const MENU_BADGES_DEFAULT = { assignments:{
 // Hauptmenü-Items für den Badge-Admin (Keys müssen zu navSections passen).
 const MENU_BADGE_MAIN_ITEMS = [
   {key:'start',label:'Start'},{key:'daily_tasks',label:'Tagesaufgaben'},{key:'meetingnotes',label:'Besprechungen'},{key:'agents',label:'AI Kollegen'},{key:'datacheck',label:'Daten-Checks'},
-  {key:'wissen_system',label:'Wissen System'},{key:'cockpit',label:'Cockpit'},{key:'productivity',label:'Produktivität'},
+  {key:'wissen_system',label:'Wissen System'},{key:'wissensspeicher',label:'Partner-Wissen'},{key:'cockpit',label:'Cockpit'},{key:'productivity',label:'Produktivität'},
   {key:'performance',label:'Performance'},{key:'auswertung',label:'Auswertung'},{key:'callqa',label:'Call-Qualität'},{key:'shiftplan',label:'Schichtplanung'},{key:'checkin',label:'Check-in'},{key:'workforce',label:'Workforce (Beta)'},{key:'employees',label:'Mitarbeiter'},
   {key:'timetracking',label:'Zeiterfassung'},{key:'locations',label:'Standorte'},{key:'spaces',label:'Spaces & Seats'},
   {key:'payroll',label:'Löhne'},{key:'orgchart',label:'Organigramm'},{key:'absences',label:'Abwesenheiten'},{key:'calendar',label:'Kalender'},
@@ -1292,7 +1292,7 @@ const HR_DEFAULT_LOCKED_TABS = ['workforce'];
 // Führungs-Set: reine Leads (projektleiter/teamlead, NICHT auch management/hr/finance) sehen NUR diese Tabs
 // (harte Obergrenze in hasAccess — auch die „always"-Admin-Tabs superadmin/appusers/hraccess/tabperms bleiben aus).
 // Recruiting = kanban+cvs+funnel (der Workflow braucht alle drei). Management kann darunter weiter einzeln sperren.
-const LEAD_ALLOWED_TABS = ['start','cockpit','shiftplan','checkin','absences','urlaubantraege','employees','performance','calendar','callqa','feedback','praesentation','dataimport','kanban','cvs','funnel','training_plans'];
+const LEAD_ALLOWED_TABS = ['start','cockpit','shiftplan','checkin','absences','urlaubantraege','employees','performance','calendar','callqa','feedback','praesentation','dataimport','kanban','cvs','funnel','training_plans','wissensspeicher'];
 const isLeadOnlyRoles = rk => { const r=rk||[]; return (r.includes('projektleiter')||r.includes('teamlead')) && !r.some(x=>x==='management'||x==='hr'||x==='finance'); };
 // Sperrbarer Katalog = alle Menue-Tabs ausser always-Tabs. workforce ist normal sperrbar.
 const HR_LOCKABLE_TABS = [...MENU_BADGE_MAIN_ITEMS.filter(t=>HR_ALWAYS_TABS.indexOf(t.key)<0)];
@@ -7562,6 +7562,7 @@ function buildNavSections(f){
     ]},
     {sec:'Werkzeuge', items:[   // täglich gebrauchte Werkzeuge
       {key:'wissen_system',label:'Wissen',icon:'📖'},
+      {key:'wissensspeicher',label:'Partner-Wissen',icon:'📚'},   // Wissensspeicher je Partner (Carlos/Fabian/Holger/Georg)
       ...(_isMgmt ? [{key:'nlquery',label:'Datenabfrage',icon:'🔎'}] : []),   // Management-only
       {key:'datacheck',label:'Daten-Checks',icon:'🩺'},
     ]},
@@ -7709,6 +7710,7 @@ const PERM_AREA_OF_KEY = (()=>{ const m={}; const A={
     praesent:['praesentation'], feedback:['feedback'], meeting:['meetingnotes'], kalender:['calendar'],
     datenpflege:['dataimport','uploads','uploadplan','datacheck','recmkt'],
     schulung:['training_plans','timeline','elearning','knowledge','test_editor','test_preview','wissen_system'],
+    wissen:['wissensspeicher'],
   };
   Object.keys(A).forEach(area=>A[area].forEach(k=>{ m[k]=area; })); return m; })();
 // Schnitt 3 ist gebaut, aber noch NICHT scharf: erst wenn die Rollen-Parität (hr/projektleiter/teamlead)
@@ -40015,6 +40017,175 @@ function MailerImport({employees, onSaved}){
   </div>;
 }
 
+// Wissensspeicher je Partner — Schnitt 1: Einspeisen (Excel/CSV/Text, clientseitig geparst) + Dokument-Übersicht.
+// Partner = projects-Slug. Datei -> Bucket partner-knowledge (Pfad-Segment 1 = project_id) + kb_documents + kb_chunks.
+// Volltext-Chunks: Tabellen zeilenweise (Spalte: Wert), Text absatzweise. Zugriff/Schreiben regelt die RLS (perm 'wissen').
+const KB_DOC_KINDS=[['agb','AGB / Vertrag'],['faq','FAQ'],['zielgebiet','Zielgebiet'],['produkt','Produkt'],['ablauf','Ablauf / Prozess'],['sonstiges','Sonstiges']];
+const KB_DOC_KIND_LABEL=Object.fromEntries(KB_DOC_KINDS);
+async function kbParseFile(file){
+  const name=file.name||''; const ext=(name.split('.').pop()||'').toLowerCase();
+  const buf=await file.arrayBuffer(); const chunks=[]; let columns=[];
+  if(ext==='txt'||file.type==='text/plain'){
+    const text=new TextDecoder('utf-8').decode(new Uint8Array(buf));
+    text.split(/\n\s*\n/).map(s=>s.trim()).filter(Boolean).forEach(p=>{
+      for(let i=0;i<p.length;i+=1500) chunks.push({section:null, content:p.slice(i,i+1500)});
+    });
+    return {kind:'text', chunks, columns};
+  }
+  let wb;
+  if(ext==='csv'){ const text=new TextDecoder('utf-8').decode(new Uint8Array(buf)); wb=XLSX.read(text,{type:'string'}); }
+  else { wb=XLSX.read(new Uint8Array(buf),{type:'array',cellDates:true}); }
+  (wb.SheetNames||[]).forEach(sn=>{
+    const aoa=XLSX.utils.sheet_to_json(wb.Sheets[sn],{header:1,defval:'',blankrows:false});
+    if(!aoa.length) return;
+    const first=(aoa[0]||[]).map(x=>String(x==null?'':x).trim());
+    const looksHeader = first.length>1 && first.every(c=>c!=='' && isNaN(Number(c)));
+    const header = looksHeader ? first : null;
+    if(header && !columns.length) columns=header;
+    (looksHeader?aoa.slice(1):aoa).forEach(row=>{
+      const cells=(row||[]).map(x=>String(x==null?'':(x instanceof Date? x.toISOString().slice(0,10) : x)).trim());
+      if(cells.every(c=>c==='')) return;
+      const content = header
+        ? header.map((h,i)=> (cells[i]!==undefined&&cells[i]!=='')? (h+': '+cells[i]) : null).filter(Boolean).join('  |  ')
+        : cells.filter(c=>c!=='').join('  |  ');
+      if(content) chunks.push({section:sn, content});
+    });
+  });
+  return {kind:'table', chunks, columns};
+}
+function WissensspeicherView({projects, team, showToast}){
+  const pw=(team&&team.perms&&team.perms.wissen)||{};
+  const canEdit=pw.mode==='edit';
+  const scope=pw.projects||'own';
+  const [ownProj,setOwnProj]=React.useState(scope==='all'||scope==='list'?undefined:null);
+  React.useEffect(()=>{ if((scope!=='all'&&scope!=='list')&&team&&team.employee_id){
+    sb.from('employees').select('project_id').eq('id',team.employee_id).maybeSingle().then(({data})=>setOwnProj(data&&data.project_id||null)).catch(()=>setOwnProj(null));
+  } },[]);
+  const allowed = scope==='all' ? null : scope==='list' ? (pw.project_ids||[]) : (ownProj===undefined?undefined:(ownProj?[ownProj]:[]));
+  const partners=(projects||[]).filter(p=>p&&p.id && (allowed===null || (Array.isArray(allowed)&&allowed.includes(p.id))))
+    .slice().sort((a,b)=>String(a.name).localeCompare(String(b.name),'de'));
+  const [partner,setPartner]=React.useState('');
+  React.useEffect(()=>{ if(!partner && partners.length) setPartner(partners[0].id); },[partners.length]);
+  const [docs,setDocs]=React.useState(null);
+  const [busy,setBusy]=React.useState('');
+  const [prev,setPrev]=React.useState(null);          // {file, kind, chunks, columns, title, kind_sel}
+  const [openDoc,setOpenDoc]=React.useState(null);
+  const [openChunks,setOpenChunks]=React.useState(null);
+  const fileRef=React.useRef(null);
+  const fmtDt=(s)=>{ if(!s) return ''; const d=new Date(s); const p=n=>String(n).padStart(2,'0'); return p(d.getDate())+'.'+p(d.getMonth()+1)+'.'+d.getFullYear(); };
+  const loadDocs=async(pid)=>{ if(!pid){ setDocs([]); return; } setDocs(null);
+    try{ const {data}=await sb.from('kb_documents').select('*').eq('project_id',pid).eq('status','active').order('created_at',{ascending:false});
+      const rows=data||[]; const ids=rows.map(r=>r.id);
+      let cnt={}; if(ids.length){ const {data:cs}=await sb.from('kb_chunks').select('document_id').in('document_id',ids); (cs||[]).forEach(c=>{ cnt[c.document_id]=(cnt[c.document_id]||0)+1; }); }
+      setDocs(rows.map(r=>({...r, chunk_count:cnt[r.id]||0})));
+    }catch(e){ setDocs([]); showToast&&showToast('Laden fehlgeschlagen: '+((e&&e.message)||e),'error'); }
+  };
+  React.useEffect(()=>{ if(partner) loadDocs(partner); },[partner]);
+  const onPick=async(e)=>{ const file=e.target.files&&e.target.files[0]; if(fileRef.current) fileRef.current.value=''; if(!file) return;
+    if(file.size>26214400){ showToast&&showToast('Datei größer als 25 MB','error'); return; }
+    setBusy('parse');
+    try{ const res=await kbParseFile(file);
+      if(!res.chunks.length){ showToast&&showToast('Keine Inhalte erkannt','error'); setBusy(''); return; }
+      setPrev({file, kind:res.kind, chunks:res.chunks, columns:res.columns, title:file.name.replace(/\.[^.]+$/,''), kind_sel:'sonstiges'});
+    }catch(e){ showToast&&showToast('Datei nicht lesbar: '+((e&&e.message)||e),'error'); }
+    setBusy('');
+  };
+  const saveDoc=async()=>{ if(!prev||!partner) return; setBusy('save');
+    try{
+      const f=prev.file; const safe=(f.name||'datei').replace(/[^a-zA-Z0-9._-]/g,'_').slice(-80);
+      const path=partner+'/'+Date.now()+'_'+Math.random().toString(36).slice(2,8)+'_'+safe;
+      const up=await sb.storage.from('partner-knowledge').upload(path,f,{upsert:false});
+      if(up.error) throw up.error;
+      const {data:docRow,error:de}=await sb.from('kb_documents').insert({
+        project_id:partner, title:prev.title||f.name, original_name:f.name, storage_path:path,
+        mime_type:f.type||null, size_bytes:f.size, doc_kind:prev.kind_sel, uploaded_by:(team&&team.user_id)||null
+      }).select('id').single();
+      if(de){ await sb.storage.from('partner-knowledge').remove([path]); throw de; }
+      const rows=prev.chunks.map((c,i)=>({document_id:docRow.id, project_id:partner, ord:i, section:c.section||null, content:c.content}));
+      for(let i=0;i<rows.length;i+=500){ const {error:ce}=await sb.from('kb_chunks').insert(rows.slice(i,i+500)); if(ce) throw ce; }
+      setPrev(null); showToast&&showToast('Gespeichert: '+rows.length+' Abschnitte'); loadDocs(partner);
+    }catch(e){ showToast&&showToast('Speichern fehlgeschlagen: '+((e&&e.message)||e),'error'); }
+    setBusy('');
+  };
+  const delDoc=async(d)=>{ if(!(await uiConfirm({title:'Dokument löschen', text:'"'+(d.title||d.original_name)+'" wird mit allen Abschnitten entfernt.', confirmLabel:'Löschen', danger:true}))) return;
+    try{ const {error}=await sb.from('kb_documents').delete().eq('id',d.id); if(error) throw error;
+      if(d.storage_path) await sb.storage.from('partner-knowledge').remove([d.storage_path]);
+      if(openDoc===d.id){ setOpenDoc(null); setOpenChunks(null); }
+      showToast&&showToast('Gelöscht'); loadDocs(partner);
+    }catch(e){ showToast&&showToast('Löschen fehlgeschlagen: '+((e&&e.message)||e),'error'); }
+  };
+  const toggleDoc=async(d)=>{ if(openDoc===d.id){ setOpenDoc(null); setOpenChunks(null); return; }
+    setOpenDoc(d.id); setOpenChunks(null);
+    try{ const {data}=await sb.from('kb_chunks').select('ord,section,content').eq('document_id',d.id).order('ord'); setOpenChunks(data||[]); }
+    catch(e){ setOpenChunks([]); }
+  };
+  const partnerName=(id)=>{ const p=(projects||[]).find(x=>x.id===id); return p?p.name:id; };
+  const card={background:'var(--card)',border:'1px solid var(--border)',borderRadius:12,padding:16,marginBottom:14};
+
+  if(allowed!==null && allowed===undefined) return <div style={{padding:24,color:'var(--muted)'}}>Lädt…</div>;
+  if(!partners.length) return <div style={{padding:24,color:'var(--muted)'}}>Kein Partner freigegeben.</div>;
+
+  return <div style={{maxWidth:920,margin:'0 auto',padding:'8px 4px'}}>
+    <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:6}}>
+      <span style={{fontSize:20,fontWeight:800}}>📚 Partner-Wissen</span>
+      <span style={{fontSize:12.5,color:'var(--muted)'}}>Unterlagen je Partner, aus denen die Agenten Antworten mit Quelle bekommen</span>
+    </div>
+    {/* Partner-Auswahl */}
+    <div style={{display:'flex',flexWrap:'wrap',gap:8,marginBottom:14}}>
+      {partners.map(p=>{ const on=p.id===partner; return <button key={p.id} onClick={()=>{setPartner(p.id);setPrev(null);setOpenDoc(null);}}
+        style={{padding:'7px 14px',borderRadius:20,border:'1px solid '+(on?'var(--accent,#0F5661)':'var(--border)'),cursor:'pointer',
+          background:on?'var(--accent,#0F5661)':'var(--card)',color:on?'#fff':'var(--text)',fontWeight:on?700:500,fontSize:13.5}}>{p.name}</button>; })}
+    </div>
+
+    {/* Einspeisen */}
+    {canEdit ? <div style={card}>
+      <div style={{fontSize:14,fontWeight:800,marginBottom:4}}>Datei einspeisen</div>
+      <div style={{fontSize:12.5,color:'var(--muted)',marginBottom:12}}>Excel, CSV oder Text. Die Datei wird in durchsuchbare Abschnitte zerlegt, du siehst vor dem Speichern die Vorschau.</div>
+      {!prev ? <div>
+        <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv,.txt" onChange={onPick} style={{display:'none'}}/>
+        <button className="btn" disabled={busy==='parse'} onClick={()=>fileRef.current&&fileRef.current.click()}>{busy==='parse'?'Lese Datei…':'Datei wählen'}</button>
+      </div> : <div>
+        <div style={{display:'flex',flexWrap:'wrap',gap:12,alignItems:'flex-end',marginBottom:12}}>
+          <label style={{flex:'1 1 240px',fontSize:12.5,color:'var(--muted)'}}>Titel
+            <input value={prev.title} onChange={e=>setPrev({...prev,title:e.target.value})} style={{display:'block',width:'100%',marginTop:4,padding:'7px 9px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)',fontSize:13.5}}/></label>
+          <label style={{fontSize:12.5,color:'var(--muted)'}}>Art
+            <select value={prev.kind_sel} onChange={e=>setPrev({...prev,kind_sel:e.target.value})} style={{display:'block',marginTop:4,padding:'7px 9px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)',fontSize:13.5}}>
+              {KB_DOC_KINDS.map(([k,l])=><option key={k} value={k}>{l}</option>)}</select></label>
+        </div>
+        <div style={{background:'var(--bg)',border:'1px solid var(--border)',borderRadius:10,padding:12,marginBottom:12}}>
+          <div style={{fontSize:12.5,fontWeight:700,marginBottom:6}}>Erkannt: {prev.chunks.length} Abschnitt{prev.chunks.length===1?'':'e'} aus „{prev.file.name}"{prev.columns&&prev.columns.length?(' · Spalten: '+prev.columns.join(', ')):''}</div>
+          {prev.chunks.slice(0,5).map((c,i)=><div key={i} style={{fontSize:12.5,color:'var(--text)',padding:'4px 0',borderTop:i?'1px solid var(--border)':'none',whiteSpace:'pre-wrap',wordBreak:'break-word'}}>{c.content.slice(0,240)}{c.content.length>240?'…':''}</div>)}
+          {prev.chunks.length>5&&<div style={{fontSize:11.5,color:'var(--muted)',marginTop:6}}>… und {prev.chunks.length-5} weitere</div>}
+        </div>
+        <div style={{display:'flex',gap:8}}>
+          <button className="btn btn-primary" disabled={busy==='save'} onClick={saveDoc}>{busy==='save'?'Speichere…':'Speichern'}</button>
+          <button className="btn" disabled={busy==='save'} onClick={()=>setPrev(null)}>Verwerfen</button>
+        </div>
+      </div>}
+    </div> : <div style={{...card,color:'var(--muted)',fontSize:13}}>Für diesen Partner hast du Leserechte. Einspeisen und Ändern übernimmt das Management/HR.</div>}
+
+    {/* Dokument-Übersicht */}
+    <div style={card}>
+      <div style={{fontSize:14,fontWeight:800,marginBottom:10}}>Dokumente · {partnerName(partner)}</div>
+      {docs===null? <div style={{color:'var(--muted)',fontSize:13}}>Lädt…</div>
+       : !docs.length? <div style={{color:'var(--muted)',fontSize:13}}>Noch keine Dokumente hinterlegt.</div>
+       : <div>{docs.map(d=><div key={d.id} style={{borderTop:'1px solid var(--border)',padding:'9px 0'}}>
+          <div style={{display:'flex',alignItems:'center',gap:10}}>
+            <div style={{flex:1,minWidth:0,cursor:'pointer'}} onClick={()=>toggleDoc(d)}>
+              <div style={{fontSize:13.5,fontWeight:700,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{openDoc===d.id?'▾ ':'▸ '}{d.title||d.original_name}</div>
+              <div style={{fontSize:11.5,color:'var(--muted)'}}>{KB_DOC_KIND_LABEL[d.doc_kind]||d.doc_kind||'Sonstiges'} · {d.chunk_count} Abschnitte · {fmtDt(d.created_at)}</div>
+            </div>
+            {canEdit&&<button className="btn btn-sm" style={{flex:'0 0 auto'}} onClick={()=>delDoc(d)}>Löschen</button>}
+          </div>
+          {openDoc===d.id&&<div style={{marginTop:8,maxHeight:'40vh',overflowY:'auto',background:'var(--bg)',border:'1px solid var(--border)',borderRadius:8,padding:10}}>
+            {openChunks===null? <div style={{color:'var(--muted)',fontSize:12.5}}>Lädt…</div>
+             : !openChunks.length? <div style={{color:'var(--muted)',fontSize:12.5}}>Leer.</div>
+             : openChunks.map((c,i)=><div key={i} style={{fontSize:12.5,padding:'4px 0',borderTop:i?'1px solid var(--border)':'none',whiteSpace:'pre-wrap',wordBreak:'break-word'}}>{c.section?<span style={{color:'var(--muted)'}}>[{c.section}] </span>:null}{c.content}</div>)}
+          </div>}
+        </div>)}</div>}
+    </div>
+  </div>;
+}
 function DataImportView({projects, employees}){
   const projList=(projects||[]).filter(p=>p&&p.id).slice().sort((a,b)=>String(a.name).localeCompare(String(b.name),'de'));
   const [projId,setProjId]=useState(()=>{ const hc=projList.find(p=>/holiday.?check/i.test(p.name||'')); return hc?hc.id:(projList[0]?projList[0].id:''); });
@@ -44671,6 +44842,7 @@ function App(){
       'training_plans':'<path d="M11.25 4.533A9.707 9.707 0 0 0 6 3a9.735 9.735 0 0 0-3.25.555.75.75 0 0 0-.5.707v14.25a.75.75 0 0 0 1 .707A8.237 8.237 0 0 1 6 18.75c1.995 0 3.823.707 5.25 1.886V4.533ZM12.75 20.636A8.214 8.214 0 0 1 18 18.75c.966 0 1.89.166 2.75.47a.75.75 0 0 0 1-.708V4.262a.75.75 0 0 0-.5-.707A9.735 9.735 0 0 0 18 3a9.707 9.707 0 0 0-5.25 1.533v16.103Z"/>',
       'timeline':'<path fill-rule="evenodd" d="M4.755 10.059a7.5 7.5 0 0 1 12.548-3.364l1.903 1.903h-3.183a.75.75 0 1 0 0 1.5h4.992a.75.75 0 0 0 .75-.75V4.356a.75.75 0 0 0-1.5 0v3.18l-1.9-1.9A9 9 0 0 0 3.306 9.67a.75.75 0 1 0 1.45.388Zm15.408 3.352a.75.75 0 0 0-.919.53 7.5 7.5 0 0 1-12.548 3.364l-1.902-1.903h3.183a.75.75 0 0 0 0-1.5H2.984a.75.75 0 0 0-.75.75v4.992a.75.75 0 0 0 1.5 0v-3.18l1.9 1.9a9 9 0 0 0 15.059-4.035.75.75 0 0 0-.53-.918Z" clip-rule="evenodd"/>',
       'knowledge':'<path d="M12 .75a8.25 8.25 0 0 0-4.135 15.39c.686.398 1.115 1.008 1.134 1.623a.75.75 0 0 0 .577.706c.352.083.71.148 1.074.195.323.041.6-.218.6-.544v-4.661a6.714 6.714 0 0 1-.937-.171.75.75 0 1 1 .374-1.453 5.261 5.261 0 0 0 2.626 0 .75.75 0 1 1 .374 1.452 6.712 6.712 0 0 1-.937.172v4.66c0 .327.277.586.6.545.364-.047.722-.112 1.074-.195a.75.75 0 0 0 .577-.706c.02-.615.448-1.225 1.134-1.623A8.25 8.25 0 0 0 12 .75Z"/> <path fill-rule="evenodd" d="M9.013 19.9a.75.75 0 0 1 .877-.597 11.319 11.319 0 0 0 4.22 0 .75.75 0 1 1 .28 1.473 12.819 12.819 0 0 1-4.78 0 .75.75 0 0 1-.597-.876ZM9.754 22.344a.75.75 0 0 1 .824-.668 13.682 13.682 0 0 0 2.844 0 .75.75 0 1 1 .156 1.492 15.156 15.156 0 0 1-3.156 0 .75.75 0 0 1-.668-.824Z" clip-rule="evenodd"/>',
+      'wissensspeicher':'<path d="M11.25 4.533A9.707 9.707 0 0 0 6 3a9.735 9.735 0 0 0-3.25.555.75.75 0 0 0-.5.707v14.25a.75.75 0 0 0 1 .707A8.237 8.237 0 0 1 6 18.75c1.995 0 3.823.707 5.25 1.886V4.533ZM12.75 20.636A8.214 8.214 0 0 1 18 18.75c.966 0 1.89.166 2.75.47a.75.75 0 0 0 1-.708V4.262a.75.75 0 0 0-.5-.707A9.735 9.735 0 0 0 18 3a9.707 9.707 0 0 0-5.25 1.533v16.103Z"/>',
       'projects':'<path d="M19.5 21a3 3 0 0 0 3-3v-4.5a3 3 0 0 0-3-3h-15a3 3 0 0 0-3 3V18a3 3 0 0 0 3 3h15ZM1.5 10.146V6a3 3 0 0 1 3-3h5.379a2.25 2.25 0 0 1 1.59.659l2.122 2.121c.14.141.331.22.53.22H19.5a3 3 0 0 1 3 3v1.146A4.483 4.483 0 0 0 19.5 9h-15a4.483 4.483 0 0 0-3 1.146Z"/>',
       'forecast':'<path d="M18.375 2.25c-1.035 0-1.875.84-1.875 1.875v15.75c0 1.035.84 1.875 1.875 1.875h.75c1.035 0 1.875-.84 1.875-1.875V4.125c0-1.036-.84-1.875-1.875-1.875h-.75ZM9.75 8.625c0-1.036.84-1.875 1.875-1.875h.75c1.036 0 1.875.84 1.875 1.875v11.25c0 1.035-.84 1.875-1.875 1.875h-.75a1.875 1.875 0 0 1-1.875-1.875V8.625ZM3 13.125c0-1.036.84-1.875 1.875-1.875h.75c1.036 0 1.875.84 1.875 1.875v6.75c0 1.035-.84 1.875-1.875 1.875h-.75A1.875 1.875 0 0 1 3 19.875v-6.75Z"/>',
       'fcist':'<path fill-rule="evenodd" d="M15.22 6.268a.75.75 0 0 1 .968-.432l5.942 2.28a.75.75 0 0 1 .431.97l-2.28 5.941a.75.75 0 1 1-1.4-.537l1.63-4.251-1.086.483a11.2 11.2 0 0 0-5.45 5.174.75.75 0 0 1-1.199.19L9 12.31l-6.22 6.22a.75.75 0 1 1-1.06-1.06l6.75-6.75a.75.75 0 0 1 1.06 0l3.606 3.605a12.694 12.694 0 0 1 5.68-4.973l1.086-.483-4.251-1.632a.75.75 0 0 1-.432-.97Z" clip-rule="evenodd"/>',
@@ -44972,6 +45144,7 @@ function App(){
           {view==='vorschau'&&<StaffingForecastView team={team} projects={projects}/>}
           {view==='uploads'&&<UploadHubView team={team} projects={projects} onNavigate={dqNavigate}/>}
           {view==='dataimport'&&<DataImportView projects={projects} employees={employees}/>}
+          {view==='wissensspeicher'&&<WissensspeicherView projects={projects} team={team} showToast={showToast}/>}
           {view==='uploadplan'&&<UploadScheduleAdminView team={team} projects={projects}/>}
           {view==='recmkt'&&<RecruitingMarketingView employees={employees}/>}
           {view==='nlquery'&&<NlQueryView team={team}/>}
