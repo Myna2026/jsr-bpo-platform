@@ -40132,6 +40132,27 @@ function WissensspeicherView({projects, team, showToast}){
     const upd = f.updated_by? (' · zuletzt geändert von '+who(f.updated_by)+' am '+fmtDt(f.updated_at)) : '';
     return src+seen+upd;
   };
+  // Selbst-Katalog (Schnitt 5): nach dem Speichern schlägt kb-catalog Register-Fakten vor, der Mensch bestätigt.
+  const [catalog,setCatalog]=React.useState(null);   // {docId,docTitle,loading,proposals,sel,truncated,error}
+  const runCatalog=async(docId,docTitle)=>{ setCatalog({docId,docTitle,loading:true,proposals:null});
+    try{ const {data,error}=await sb.functions.invoke('kb-catalog',{body:{document_id:docId}});
+      if(error){ let m=error.message||'Fehler'; try{ const j=await error.context.json(); if(j&&j.error) m=j.error; }catch(_e){} setCatalog({docId,docTitle,loading:false,proposals:[],error:m}); return; }
+      const props=(data&&data.facts)||[];
+      setCatalog({docId,docTitle,loading:false,proposals:props, sel:props.map(()=>true), truncated:!!(data&&data.truncated)});
+    }catch(e){ setCatalog({docId,docTitle,loading:false,proposals:[],error:(e&&e.message)||String(e)}); }
+  };
+  const toggleProp=(i)=>setCatalog(c=>({...c, sel:c.sel.map((v,j)=>j===i?!v:v)}));
+  const acceptCatalog=async()=>{ const c=catalog; if(!c||!c.proposals) return;
+    const chosen=c.proposals.filter((_,i)=>c.sel[i]); if(!chosen.length){ setCatalog(null); return; }
+    const uid=(team&&team.user_id)||null; const now=new Date().toISOString();
+    const rows=chosen.map(p=>{ const qualifier={}; if(p.saison) qualifier.saison=p.saison; if(p.veranstalter) qualifier.veranstalter=p.veranstalter;
+      return {project_id:partner, topic:p.topic, zielgebiet:p.zielgebiet||null, info_type:p.info_type||'sonstiges', label:p.label, value:p.value, qualifier, source:'file', source_document_id:c.docId, source_locator:p.source_locator||null, confidence:'confirmed', status:'active', created_by:uid, updated_by:uid, updated_at:now}; });
+    setBusy('catalog');
+    try{ for(let i=0;i<rows.length;i+=200){ const {error}=await sb.from('kb_facts').insert(rows.slice(i,i+200)); if(error) throw error; }
+      showToast&&showToast(rows.length+' Einträge ins Register übernommen'); setCatalog(null); if(facts!==null) loadFacts(partner);
+    }catch(e){ showToast&&showToast('Übernehmen fehlgeschlagen: '+((e&&e.message)||e),'error'); }
+    setBusy('');
+  };
   const fmtDt=(s)=>{ if(!s) return ''; const d=new Date(s); const p=n=>String(n).padStart(2,'0'); return p(d.getDate())+'.'+p(d.getMonth()+1)+'.'+d.getFullYear(); };
   const loadDocs=async(pid)=>{ if(!pid){ setDocs([]); return; } setDocs(null);
     try{ const {data}=await sb.from('kb_documents').select('*').eq('project_id',pid).eq('status','active').order('created_at',{ascending:false});
@@ -40163,7 +40184,9 @@ function WissensspeicherView({projects, team, showToast}){
       if(de){ await sb.storage.from('partner-knowledge').remove([path]); throw de; }
       const rows=prev.chunks.map((c,i)=>({document_id:docRow.id, project_id:partner, ord:i, section:c.section||null, page:c.page||null, content:c.content}));
       for(let i=0;i<rows.length;i+=500){ const {error:ce}=await sb.from('kb_chunks').insert(rows.slice(i,i+500)); if(ce) throw ce; }
+      const savedTitle=prev.title||f.name;
       setPrev(null); showToast&&showToast('Gespeichert: '+rows.length+' Abschnitte'); loadDocs(partner);
+      runCatalog(docRow.id, savedTitle);   // Selbst-Katalog: Fakten vorschlagen (Mensch bestätigt)
     }catch(e){ showToast&&showToast('Speichern fehlgeschlagen: '+((e&&e.message)||e),'error'); }
     setBusy('');
   };
@@ -40311,6 +40334,30 @@ function WissensspeicherView({projects, team, showToast}){
         </div>
       </div>}
     </div> : <div style={{...card,color:'var(--muted)',fontSize:13}}>Für diesen Partner hast du Leserechte. Einspeisen und Ändern übernimmt das Management/HR.</div>}
+
+    {/* Selbst-Katalog: Vorschläge fürs Register nach dem Speichern */}
+    {catalog&&<div style={{...card,borderColor:'var(--accent,#0F5661)'}}>
+      <div style={{fontSize:14,fontWeight:800,marginBottom:2}}>Vorschläge fürs Register</div>
+      <div style={{fontSize:12.5,color:'var(--muted)',marginBottom:10}}>aus „{catalog.docTitle}" · du entscheidest, was übernommen wird{catalog.truncated?' (großes Dokument, nur der Anfang wurde katalogisiert)':''}</div>
+      {catalog.loading? <div style={{color:'var(--muted)',fontSize:13}}>Claude liest das Dokument…</div>
+       : catalog.error? <div style={{color:'#dc2626',fontSize:13}}>{catalog.error}</div>
+       : !catalog.proposals.length? <div style={{color:'var(--muted)',fontSize:13}}>Keine klaren Fakten erkannt. Du kannst Einträge im Register von Hand anlegen.</div>
+       : <div>
+          {catalog.proposals.map((p,i)=><label key={i} style={{display:'flex',gap:10,alignItems:'flex-start',padding:'8px 0',borderTop:i?'1px solid var(--border)':'none',cursor:'pointer'}}>
+            <input type="checkbox" checked={!!catalog.sel[i]} onChange={()=>toggleProp(i)} style={{marginTop:3}}/>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontSize:13.5}}>{p.zielgebiet&&<span style={{background:'var(--bg)',border:'1px solid var(--border)',borderRadius:6,padding:'1px 7px',fontSize:11.5,marginRight:6}}>{p.zielgebiet}</span>}<span style={{fontWeight:700}}>{p.label}</span> <span style={{color:'var(--muted)',fontSize:11.5}}>· {p.topic}</span></div>
+              <div style={{fontSize:13.5,marginTop:2,whiteSpace:'pre-wrap',wordBreak:'break-word'}}>{p.value}</div>
+              {(p.saison||p.veranstalter)&&<div style={{fontSize:11.5,color:'#b45309',marginTop:2}}>{[p.saison&&('Saison: '+p.saison),p.veranstalter&&('Veranstalter: '+p.veranstalter)].filter(Boolean).join(' · ')}</div>}
+              {p.source_locator&&<div style={{fontSize:11,color:'var(--muted)',marginTop:2}}>Fundstelle: {p.source_locator}</div>}
+            </div>
+          </label>)}
+          <div style={{display:'flex',gap:8,marginTop:12}}>
+            <button className="btn btn-primary" disabled={busy==='catalog'} onClick={acceptCatalog}>{busy==='catalog'?'Übernehme…':('Übernehmen ('+catalog.sel.filter(Boolean).length+')')}</button>
+            <button className="btn" disabled={busy==='catalog'} onClick={()=>setCatalog(null)}>Verwerfen</button>
+          </div>
+        </div>}
+    </div>}
 
     {/* Dokument-Übersicht */}
     <div style={card}>
