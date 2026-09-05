@@ -256,6 +256,25 @@ async function runPhase(phaseKey: string, status: string, ph: any, sender: any, 
   }
   return r;
 }
+// Fällige Absagen versenden (48h abgelaufen). Prüft den Status ERNEUT: hat HR revidiert -> abbrechen, nichts raus.
+// Ist die Automatik für den Ausgang aus, bleibt die Absage liegen (skipped), sie wird nie ohne Schalter versendet.
+async function runDueRejections(cfg2: any, sender: any, dry: boolean) {
+  const r = { sent: 0, cancelled: 0, skipped: 0, failed: 0 };
+  const { data: due } = await sb.from("clara_rejections").select("*").is("sent_at", null).is("cancelled_at", null).lte("due_at", new Date().toISOString()).limit(200);
+  for (const rej of (due || [])) {
+    const rc = cfg2.rejects && cfg2.rejects[rej.reject_status];
+    const enabled = !!(rc && rc.enabled);
+    const { data: cv } = await sb.from("cvs").select("id,first_name,email,status").eq("id", rej.cv_id).maybeSingle();
+    if (!cv || cv.status !== rej.reject_status) { if (!dry) await sb.from("clara_rejections").update({ cancelled_at: new Date().toISOString(), cancel_reason: "status_geaendert" }).eq("id", rej.id); r.cancelled++; continue; }
+    if (!enabled) { r.skipped++; continue; }
+    if (!cv.email || !String(cv.email).includes("@")) { if (!dry) await sb.from("clara_rejections").update({ cancelled_at: new Date().toISOString(), cancel_reason: "keine_mail" }).eq("id", rej.id); r.cancelled++; continue; }
+    if (dry) { r.sent++; continue; }
+    const res = await sendPhaseMail(cv, rc.template, "", sender, "reject_" + rej.reject_status, "auto");
+    if (res.ok) { await sb.from("clara_rejections").update({ sent_at: new Date().toISOString(), message_id: res.messageId || null, error: null }).eq("id", rej.id); r.sent++; }
+    else { await sb.from("clara_rejections").update({ error: res.error || "fehler" }).eq("id", rej.id); r.failed++; }
+  }
+  return r;
+}
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
@@ -316,6 +335,8 @@ Deno.serve(async (req) => {
         async (cvId) => { const { data } = await sb.from("interview_invites").select("status").eq("cv_id", cvId).order("created_at", { ascending: false }).limit(1); return !!(data && data[0] && data[0].status === "booked"); },
         async (cvId) => { const { data } = await sb.from("interview_invites").select("token").eq("cv_id", cvId).order("created_at", { ascending: false }).limit(1); return (data && data[0]) ? PUBLIC_BASE + "/termin.html?t=" + data[0].token : null; });
     }
+    // Fällige Absagen (48h) — unabhängig von den Phasen-Schaltern; jede Absage prüft ihren eigenen Ausgang-Schalter.
+    out.rejects = await runDueRejections(cfg2, sender, dry);
     return json(out);
   }
 
