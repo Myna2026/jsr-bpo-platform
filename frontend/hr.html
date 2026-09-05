@@ -40023,6 +40023,20 @@ function MailerImport({employees, onSaved}){
 const KB_DOC_KINDS=[['agb','AGB / Vertrag'],['faq','FAQ'],['zielgebiet','Zielgebiet'],['produkt','Produkt'],['ablauf','Ablauf / Prozess'],['sonstiges','Sonstiges']];
 const KB_DOC_KIND_LABEL=Object.fromEntries(KB_DOC_KINDS);
 function kbU8ToB64(u8){ let s=''; const CH=0x8000; for(let i=0;i<u8.length;i+=CH){ s+=String.fromCharCode.apply(null,u8.subarray(i,i+CH)); } return btoa(s); }
+// Änderungserkennung (Schnitt 6): passt ein Vorschlag zu einem vorhandenen Fakt? Identität = Thema + Zielgebiet
+// + gleiche Unterscheidung (Saison/Veranstalter). Gleiche Identität + gleicher Wert = Dublette; gleiche Identität
+// + anderer Wert = Konflikt (alt vs neu); andere Unterscheidung = eigener neuer Eintrag (kein Konflikt).
+function kbNorm(s){ return (s==null?'':String(s)).trim().toLowerCase(); }
+function kbQualKey(o){ const s=(o&&o.qualifier)?o.qualifier.saison:(o&&o.saison); const v=(o&&o.qualifier)?o.qualifier.veranstalter:(o&&o.veranstalter); return kbNorm(s)+'|'+kbNorm(v); }
+function kbMatchFact(p, existing){
+  const cands=(existing||[]).filter(f=> kbNorm(f.topic)===kbNorm(p.topic) && kbNorm(f.zielgebiet)===kbNorm(p.zielgebiet));
+  if(!cands.length) return {status:'new', match:null};
+  const sameQ=cands.filter(f=> kbQualKey(f)===kbQualKey(p));
+  if(!sameQ.length) return {status:'new', match:null};        // andere Saison/Veranstalter -> eigener Eintrag
+  const dup=sameQ.find(f=> kbNorm(f.value)===kbNorm(p.value));
+  if(dup) return {status:'dup', match:dup};
+  return {status:'conflict', match:sameQ[0]};
+}
 async function kbParseFile(file){
   const name=file.name||''; const ext=(name.split('.').pop()||'').toLowerCase();
   const buf=await file.arrayBuffer(); const chunks=[]; let columns=[];
@@ -40133,23 +40147,38 @@ function WissensspeicherView({projects, team, showToast}){
     return src+seen+upd;
   };
   // Selbst-Katalog (Schnitt 5): nach dem Speichern schlägt kb-catalog Register-Fakten vor, der Mensch bestätigt.
-  const [catalog,setCatalog]=React.useState(null);   // {docId,docTitle,loading,proposals,sel,truncated,error}
+  const [catalog,setCatalog]=React.useState(null);   // {docId,docTitle,loading,proposals,res,truncated,error}
   const runCatalog=async(docId,docTitle)=>{ setCatalog({docId,docTitle,loading:true,proposals:null});
-    try{ const {data,error}=await sb.functions.invoke('kb-catalog',{body:{document_id:docId}});
-      if(error){ let m=error.message||'Fehler'; try{ const j=await error.context.json(); if(j&&j.error) m=j.error; }catch(_e){} setCatalog({docId,docTitle,loading:false,proposals:[],error:m}); return; }
-      const props=(data&&data.facts)||[];
-      setCatalog({docId,docTitle,loading:false,proposals:props, sel:props.map(()=>true), truncated:!!(data&&data.truncated)});
+    try{ const [cat,ex]=await Promise.all([
+        sb.functions.invoke('kb-catalog',{body:{document_id:docId}}),
+        sb.from('kb_facts').select('id,topic,zielgebiet,label,value,qualifier').eq('project_id',partner).eq('status','active')
+      ]);
+      if(cat.error){ let m=cat.error.message||'Fehler'; try{ const j=await cat.error.context.json(); if(j&&j.error) m=j.error; }catch(_e){} setCatalog({docId,docTitle,loading:false,proposals:[],error:m}); return; }
+      const props=(cat.data&&cat.data.facts)||[]; const existing=(ex&&ex.data)||[];
+      const res=props.map(p=>{ const m=kbMatchFact(p,existing); return {status:m.status, match:m.match, choice:'ersetzen', include:m.status==='new', saison:p.saison||'', veranstalter:p.veranstalter||''}; });
+      setCatalog({docId,docTitle,loading:false,proposals:props, res, truncated:!!(cat.data&&cat.data.truncated)});
     }catch(e){ setCatalog({docId,docTitle,loading:false,proposals:[],error:(e&&e.message)||String(e)}); }
   };
-  const toggleProp=(i)=>setCatalog(c=>({...c, sel:c.sel.map((v,j)=>j===i?!v:v)}));
-  const acceptCatalog=async()=>{ const c=catalog; if(!c||!c.proposals) return;
-    const chosen=c.proposals.filter((_,i)=>c.sel[i]); if(!chosen.length){ setCatalog(null); return; }
+  const setRes=(i,patch)=>setCatalog(c=>({...c, res:c.res.map((r,j)=>j===i?{...r,...patch}:r)}));
+  const acceptCatalog=async()=>{ const c=catalog; if(!c||!c.res) return;
     const uid=(team&&team.user_id)||null; const now=new Date().toISOString();
-    const rows=chosen.map(p=>{ const qualifier={}; if(p.saison) qualifier.saison=p.saison; if(p.veranstalter) qualifier.veranstalter=p.veranstalter;
-      return {project_id:partner, topic:p.topic, zielgebiet:p.zielgebiet||null, info_type:p.info_type||'sonstiges', label:p.label, value:p.value, qualifier, source:'file', source_document_id:c.docId, source_locator:p.source_locator||null, confidence:'confirmed', status:'active', created_by:uid, updated_by:uid, updated_at:now}; });
+    const mkRow=(p,saison,veranstalter)=>{ const qualifier={}; if(saison) qualifier.saison=saison; if(veranstalter) qualifier.veranstalter=veranstalter;
+      return {project_id:partner, topic:p.topic, zielgebiet:p.zielgebiet||null, info_type:p.info_type||'sonstiges', label:p.label, value:p.value, qualifier, source:'file', source_document_id:c.docId, source_locator:p.source_locator||null, confidence:'confirmed', status:'active', created_by:uid, updated_by:uid, updated_at:now}; };
+    const inserts=[]; const archiveIds=[];
+    c.proposals.forEach((p,i)=>{ const r=c.res[i];
+      if(r.status==='new'||r.status==='dup'){ if(r.include) inserts.push(mkRow(p,p.saison,p.veranstalter)); }
+      else if(r.status==='conflict'){
+        if(r.choice==='alt') return;
+        if(r.choice==='ersetzen'){ if(r.match) archiveIds.push(r.match.id); inserts.push(mkRow(p,p.saison,p.veranstalter)); }
+        else if(r.choice==='beides'){ inserts.push(mkRow(p,r.saison,r.veranstalter)); }   // alt bleibt, neu mit Unterscheidung
+      }
+    });
+    if(!inserts.length && !archiveIds.length){ setCatalog(null); return; }
     setBusy('catalog');
-    try{ for(let i=0;i<rows.length;i+=200){ const {error}=await sb.from('kb_facts').insert(rows.slice(i,i+200)); if(error) throw error; }
-      showToast&&showToast(rows.length+' Einträge ins Register übernommen'); setCatalog(null); if(facts!==null) loadFacts(partner);
+    try{
+      if(archiveIds.length){ const {error}=await sb.from('kb_facts').update({status:'archived',updated_by:uid,updated_at:now}).in('id',archiveIds); if(error) throw error; }
+      for(let i=0;i<inserts.length;i+=200){ const {error}=await sb.from('kb_facts').insert(inserts.slice(i,i+200)); if(error) throw error; }
+      showToast&&showToast('Register aktualisiert: '+inserts.length+' neu'+(archiveIds.length?(', '+archiveIds.length+' ersetzt'):'')); setCatalog(null); if(facts!==null) loadFacts(partner);
     }catch(e){ showToast&&showToast('Übernehmen fehlgeschlagen: '+((e&&e.message)||e),'error'); }
     setBusy('');
   };
@@ -40343,19 +40372,39 @@ function WissensspeicherView({projects, team, showToast}){
        : catalog.error? <div style={{color:'#dc2626',fontSize:13}}>{catalog.error}</div>
        : !catalog.proposals.length? <div style={{color:'var(--muted)',fontSize:13}}>Keine klaren Fakten erkannt. Du kannst Einträge im Register von Hand anlegen.</div>
        : <div>
-          {catalog.proposals.map((p,i)=><label key={i} style={{display:'flex',gap:10,alignItems:'flex-start',padding:'8px 0',borderTop:i?'1px solid var(--border)':'none',cursor:'pointer'}}>
-            <input type="checkbox" checked={!!catalog.sel[i]} onChange={()=>toggleProp(i)} style={{marginTop:3}}/>
-            <div style={{flex:1,minWidth:0}}>
+          {catalog.proposals.map((p,i)=>{ const r=catalog.res[i]||{};
+            const preview=<div style={{flex:1,minWidth:0}}>
               <div style={{fontSize:13.5}}>{p.zielgebiet&&<span style={{background:'var(--bg)',border:'1px solid var(--border)',borderRadius:6,padding:'1px 7px',fontSize:11.5,marginRight:6}}>{p.zielgebiet}</span>}<span style={{fontWeight:700}}>{p.label}</span> <span style={{color:'var(--muted)',fontSize:11.5}}>· {p.topic}</span></div>
               <div style={{fontSize:13.5,marginTop:2,whiteSpace:'pre-wrap',wordBreak:'break-word'}}>{p.value}</div>
               {(p.saison||p.veranstalter)&&<div style={{fontSize:11.5,color:'#b45309',marginTop:2}}>{[p.saison&&('Saison: '+p.saison),p.veranstalter&&('Veranstalter: '+p.veranstalter)].filter(Boolean).join(' · ')}</div>}
               {p.source_locator&&<div style={{fontSize:11,color:'var(--muted)',marginTop:2}}>Fundstelle: {p.source_locator}</div>}
-            </div>
-          </label>)}
-          <div style={{display:'flex',gap:8,marginTop:12}}>
-            <button className="btn btn-primary" disabled={busy==='catalog'} onClick={acceptCatalog}>{busy==='catalog'?'Übernehme…':('Übernehmen ('+catalog.sel.filter(Boolean).length+')')}</button>
-            <button className="btn" disabled={busy==='catalog'} onClick={()=>setCatalog(null)}>Verwerfen</button>
-          </div>
+            </div>;
+            if(r.status==='dup') return <div key={i} style={{display:'flex',gap:10,alignItems:'flex-start',padding:'8px 0',borderTop:i?'1px solid var(--border)':'none',opacity:0.6}}>{preview}<span style={{flex:'0 0 auto',fontSize:11,color:'var(--muted)',border:'1px solid var(--border)',borderRadius:6,padding:'1px 7px'}}>schon vorhanden</span></div>;
+            if(r.status==='conflict') return <div key={i} style={{padding:'10px 0',borderTop:i?'1px solid var(--border)':'none'}}>
+              <div style={{display:'flex',gap:8}}><span style={{flex:'0 0 auto',fontSize:11,fontWeight:700,color:'#fff',background:'#b45309',borderRadius:6,padding:'1px 7px',height:'fit-content'}}>Abweichung</span>{preview}</div>
+              <div style={{marginTop:8,background:'var(--bg)',border:'1px solid var(--border)',borderRadius:8,padding:'8px 10px',fontSize:12.5}}>
+                <div style={{color:'var(--muted)'}}>bisher im Register:</div>
+                <div style={{marginTop:2}}><span style={{color:'#dc2626'}}>{r.match&&r.match.value}</span> <span style={{color:'var(--muted)'}}>→ neu:</span> <span style={{color:'#16a34a'}}>{p.value}</span></div>
+              </div>
+              <div style={{display:'flex',gap:14,flexWrap:'wrap',marginTop:8}}>
+                {[['ersetzen','Ersetzen'],['beides','Beides, mit Unterscheidung'],['alt','Alt behalten']].map(([v,l])=><label key={v} style={{display:'flex',alignItems:'center',gap:5,fontSize:12.5,cursor:'pointer'}}><input type="radio" name={'conf'+i} checked={r.choice===v} onChange={()=>setRes(i,{choice:v})}/>{l}</label>)}
+              </div>
+              {r.choice==='beides'&&<div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(170px,1fr))',gap:8,marginTop:8}}>
+                <input value={r.saison||''} onChange={e=>setRes(i,{saison:e.target.value})} placeholder="Saison (z. B. Sommer)" style={{padding:'6px 9px',border:'1px solid var(--border)',borderRadius:7,background:'var(--card)',color:'var(--text)',fontSize:12.5}}/>
+                <input value={r.veranstalter||''} onChange={e=>setRes(i,{veranstalter:e.target.value})} placeholder="Veranstalter (z. B. TUI)" style={{padding:'6px 9px',border:'1px solid var(--border)',borderRadius:7,background:'var(--card)',color:'var(--text)',fontSize:12.5}}/>
+                <div style={{fontSize:11,color:'var(--muted)',gridColumn:'1 / -1'}}>Womit unterscheidet sich der neue Wert vom alten? Beide bleiben, der neue bekommt diese Kennzeichnung.</div>
+              </div>}
+            </div>;
+            return <label key={i} style={{display:'flex',gap:10,alignItems:'flex-start',padding:'8px 0',borderTop:i?'1px solid var(--border)':'none',cursor:'pointer'}}>
+              <input type="checkbox" checked={!!r.include} onChange={()=>setRes(i,{include:!r.include})} style={{marginTop:3}}/>{preview}
+              <span style={{flex:'0 0 auto',fontSize:11,color:'#16a34a',border:'1px solid #16a34a',borderRadius:6,padding:'1px 7px'}}>neu</span>
+            </label>;
+          })}
+          {(()=>{ const willChange=(catalog.res||[]).filter(r=> (r.status!=='conflict'&&r.include)||(r.status==='conflict'&&r.choice!=='alt')).length;
+            return <div style={{display:'flex',gap:8,marginTop:12,alignItems:'center'}}>
+              <button className="btn btn-primary" disabled={busy==='catalog'||!willChange} onClick={acceptCatalog}>{busy==='catalog'?'Übernehme…':('Übernehmen ('+willChange+')')}</button>
+              <button className="btn" disabled={busy==='catalog'} onClick={()=>setCatalog(null)}>Verwerfen</button>
+            </div>; })()}
         </div>}
     </div>}
 
