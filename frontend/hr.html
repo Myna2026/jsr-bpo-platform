@@ -40737,6 +40737,112 @@ function MeetingNotesView({team, projects, employees, showToast, isMobileW}){
 // Parametern erzeugen (Teilnehmer/Formen bzw. Fassung des alten Links).
 const AL_TFORM={phone:'Telefon',teams:'Teams',office:'Persönlich im Büro'};
 const AL_SENDABLE=['cv_inbound','cv_accepted','cv_confirmed'];   // Phasen, in denen ein Anschreiben Sinn ergibt
+// Clara-Steuerung (Schnitt 1): Automatik-Schalter je Phase/Ausgang, Wartefenster (Werktage) + 48h-Absage,
+// und der Vorlagen-Editor (Betreff/Text je Vorlage, Vorschau, Variablen-Legende) — alles ohne Code.
+// Speichert app_config jsr_clara_auto_v1 (Schalter/Fenster) und mail_templates (Betreff/Text).
+function ClaraSteuerung({showToast, isMgmt}){
+  const [open,setOpen]=React.useState(false);
+  const [cfg,setCfg]=React.useState(null);
+  const [tpls,setTpls]=React.useState(null);
+  const [dirty,setDirty]=React.useState({});
+  const [prev,setPrev]=React.useState('');       // Vorlage, deren Vorschau offen ist
+  const [openTpl,setOpenTpl]=React.useState(''); // Vorlage, die bearbeitet wird
+  const TPL_META=[
+    {key:'phase1_eingang',  label:'Phase 1: Eingangsbestätigung',  grp:'Phasen'},
+    {key:'phase2_termin',   label:'Phase 2: Termineinladung',       grp:'Phasen'},
+    {key:'reject_by_us',    label:'Absage durch uns',               grp:'Absagen'},
+    {key:'reject_by_client',label:'Absage Kunde',                   grp:'Absagen'},
+    {key:'no_contact',      label:'Kein Kontakt möglich',           grp:'Absagen'},
+  ];
+  const load=async()=>{
+    const c=await loadConfigFromDB('jsr_clara_auto_v1'); setCfg(c||null);
+    const {data}=await sb.from('mail_templates').select('key,subject,body_html').eq('agent_key','clara');
+    const m={}; (data||[]).forEach(t=>{ m[t.key]={subject:t.subject||'',body_html:t.body_html||''}; }); setTpls(m);
+  };
+  React.useEffect(()=>{ if(open&&cfg===null) load(); },[open]);
+  const saveCfg=async(next)=>{ setCfg(next); try{ await saveConfigToDB('jsr_clara_auto_v1', next); }catch(e){ showToast&&showToast('Speichern fehlgeschlagen','error'); } };
+  const clone=()=>JSON.parse(JSON.stringify(cfg));
+  const togglePhase=(p)=>{ const n=clone(); n.phases[p].enabled=!n.phases[p].enabled; saveCfg(n); };
+  const toggleReject=(r)=>{ const n=clone(); n.rejects[r].enabled=!n.rejects[r].enabled; saveCfg(n); };
+  const setWin=(k,v)=>{ const n=clone(); n.windows[k]=Math.max(0,parseInt(v,10)||0); saveCfg(n); };
+  const setRej=(v)=>{ const n=clone(); n.reject_delay_hours=Math.max(0,parseInt(v,10)||0); saveCfg(n); };
+  const editTpl=(key,field,val)=>{ setTpls(m=>({...m,[key]:{...m[key],[field]:val}})); setDirty(d=>({...d,[key]:true})); };
+  const saveTpl=async(key)=>{ const t=tpls[key]; try{ const {error}=await sb.from('mail_templates').update({subject:t.subject,body_html:t.body_html,updated_at:new Date().toISOString()}).eq('key',key); if(error) throw error; setDirty(d=>({...d,[key]:false})); showToast&&showToast('Vorlage gespeichert'); }catch(e){ showToast&&showToast('Speichern fehlgeschlagen: '+((e&&e.message)||e),'error'); } };
+  const fillVars=(html)=> (html||'')
+    .replace(/\{\{hi\}\}/g,'Hallo Max,')
+    .replace(/\{\{link\}\}/g,'https://client.tive360.de/bewerber.html?t=beispiel')
+    .replace(/\{\{name\}\}/g,'Clara')
+    .replace(/\{\{disc\}\}/g,'Clara, KI-Recruiting-Assistentin bei 25hours');
+  const chk=(on,onClick)=><button onClick={onClick} style={{width:40,height:22,borderRadius:20,border:'none',cursor:'pointer',background:on?'var(--green)':'#cbd5e1',position:'relative',flex:'0 0 auto'}}><span style={{position:'absolute',top:2,left:on?20:2,width:18,height:18,borderRadius:9,background:'#fff',transition:'left .15s'}}/></button>;
+  const numIn=(v,on)=><input type="number" min="0" value={v==null?'':v} onChange={e=>on(e.target.value)} style={{width:56,padding:'4px 7px',border:'1px solid var(--border)',borderRadius:7,fontSize:13,background:'var(--card)',color:'var(--text)'}}/>;
+
+  return <div className="card" style={{marginBottom:14,overflow:'hidden'}}>
+    <div onClick={()=>setOpen(o=>!o)} style={{padding:'12px 16px',display:'flex',alignItems:'center',gap:10,cursor:'pointer',borderBottom:open?'1px solid var(--border)':'none'}}>
+      <span style={{fontSize:15,fontWeight:800}}>🤖 Clara-Steuerung</span>
+      <span style={{fontSize:12,color:'var(--muted)'}}>Automatik, Wartefenster und Vorlagen</span>
+      <span style={{marginLeft:'auto',fontSize:13,color:'var(--muted)'}}>{open?'▲':'▼'}</span>
+    </div>
+    {open&&(cfg===null||tpls===null? <div style={{padding:16,color:'var(--muted)',fontSize:13}}>Lädt…</div>
+     : !isMgmt? <div style={{padding:16,color:'var(--muted)',fontSize:13}}>Clara-Einstellungen ändert das Management.</div>
+     : <div style={{padding:16,display:'flex',flexDirection:'column',gap:18}}>
+        {/* Schalter */}
+        <div>
+          <div style={{fontSize:12,fontWeight:800,textTransform:'uppercase',letterSpacing:'.05em',color:'var(--muted)',marginBottom:8}}>Automatik an/aus</div>
+          <div style={{display:'flex',flexDirection:'column',gap:7}}>
+            {[['phase1','Phase 1: Eingangsbestätigung + Vervollständigungs-Link'],['phase2','Phase 2: Termineinladung']].map(([p,l])=>(
+              <div key={p} style={{display:'flex',alignItems:'center',gap:10,fontSize:13.5}}>{chk(!!(cfg.phases[p]&&cfg.phases[p].enabled),()=>togglePhase(p))}<span>{l}</span></div>))}
+            {[['rejected_by_us','Absage durch uns'],['rejected_by_client','Absage Kunde'],['no_contact','Kein Kontakt möglich']].map(([r,l])=>(
+              <div key={r} style={{display:'flex',alignItems:'center',gap:10,fontSize:13.5}}>{chk(!!(cfg.rejects[r]&&cfg.rejects[r].enabled),()=>toggleReject(r))}<span>{l} <span style={{color:'var(--muted)',fontSize:12}}>(Absage 48 h verzögert)</span></span></div>))}
+          </div>
+          <div style={{fontSize:11.5,color:'var(--muted)',marginTop:8}}>Ist ein Schalter aus, läuft der manuelle Prozess unverändert weiter. „Absage Mitarbeiter" und „Blacklist" bekommen nie eine Mail.</div>
+        </div>
+        {/* Wartefenster */}
+        <div>
+          <div style={{fontSize:12,fontWeight:800,textTransform:'uppercase',letterSpacing:'.05em',color:'var(--muted)',marginBottom:8}}>Wartefenster (Werktage)</div>
+          <div style={{display:'flex',flexWrap:'wrap',gap:16,alignItems:'center',fontSize:13.5}}>
+            <label style={{display:'flex',alignItems:'center',gap:7}}>Erinnerung an Tag {numIn(cfg.windows.reminder_workdays,v=>setWin('reminder_workdays',v))}</label>
+            <label style={{display:'flex',alignItems:'center',gap:7}}>Übergabe an Tag {numIn(cfg.windows.handover_workdays,v=>setWin('handover_workdays',v))}</label>
+            <label style={{display:'flex',alignItems:'center',gap:7}}>Harte Grenze Tag {numIn(cfg.windows.hard_cap_workdays,v=>setWin('hard_cap_workdays',v))}</label>
+            <label style={{display:'flex',alignItems:'center',gap:7}}>Absage-Verzögerung {numIn(cfg.reject_delay_hours,setRej)} Std.</label>
+          </div>
+          <div style={{fontSize:11.5,color:'var(--muted)',marginTop:8}}>Werktage (Wochenende zählt nicht). Nach der harten Grenze übergibt Clara an Deonita, sortiert aber nie selbst aus.</div>
+        </div>
+        {/* Vorlagen-Editor */}
+        <div>
+          <div style={{fontSize:12,fontWeight:800,textTransform:'uppercase',letterSpacing:'.05em',color:'var(--muted)',marginBottom:8}}>Vorlagen</div>
+          <div style={{display:'flex',flexDirection:'column',gap:8}}>
+            {TPL_META.map(tm=>{ const t=tpls[tm.key]||{subject:'',body_html:''}; const isOpen=openTpl===tm.key;
+              return <div key={tm.key} style={{border:'1px solid var(--border)',borderRadius:10,overflow:'hidden'}}>
+                <div onClick={()=>{ setOpenTpl(isOpen?'':tm.key); setPrev(''); }} style={{padding:'9px 12px',display:'flex',alignItems:'center',gap:8,cursor:'pointer',background:'var(--surface-2)'}}>
+                  <span style={{fontSize:13,fontWeight:700}}>{tm.label}</span>
+                  {dirty[tm.key]&&<span style={{fontSize:10.5,fontWeight:700,color:'#b45309'}}>ungespeichert</span>}
+                  <span style={{marginLeft:'auto',fontSize:12,color:'var(--muted)'}}>{isOpen?'▲':'▼ bearbeiten'}</span>
+                </div>
+                {isOpen&&<div style={{padding:'10px 12px',display:'flex',flexDirection:'column',gap:8}}>
+                  <label style={{fontSize:11.5,fontWeight:700,color:'var(--muted)'}}>Betreff
+                    <input value={t.subject} onChange={e=>editTpl(tm.key,'subject',e.target.value)} style={{width:'100%',boxSizing:'border-box',marginTop:3,padding:'7px 9px',border:'1px solid var(--border)',borderRadius:7,fontSize:13,background:'var(--card)',color:'var(--text)'}}/></label>
+                  <label style={{fontSize:11.5,fontWeight:700,color:'var(--muted)'}}>Text (HTML)
+                    <textarea value={t.body_html} onChange={e=>editTpl(tm.key,'body_html',e.target.value)} rows={8} style={{width:'100%',boxSizing:'border-box',marginTop:3,padding:'7px 9px',border:'1px solid var(--border)',borderRadius:7,fontSize:12.5,fontFamily:'var(--mono)',lineHeight:1.5,resize:'vertical',background:'var(--card)',color:'var(--text)'}}/></label>
+                  <div style={{display:'flex',alignItems:'center',gap:10}}>
+                    <button className="btn btn-sm" onClick={()=>setPrev(p=>p===tm.key?'':tm.key)}>{prev===tm.key?'Vorschau aus':'👁 Vorschau'}</button>
+                    <button className="btn btn-sm" style={{marginLeft:'auto',background:dirty[tm.key]?'var(--blue)':'var(--surface-2)',color:dirty[tm.key]?'#fff':'var(--muted)',borderColor:dirty[tm.key]?'var(--blue)':'var(--border)'}} disabled={!dirty[tm.key]} onClick={()=>saveTpl(tm.key)}>Speichern</button>
+                  </div>
+                  {prev===tm.key&&<div style={{border:'1px solid var(--border)',borderRadius:8,overflow:'hidden'}}>
+                    <div style={{fontSize:11.5,fontWeight:700,padding:'6px 10px',background:'var(--surface-2)',borderBottom:'1px solid var(--border)'}}>Betreff: {fillVars(t.subject)}</div>
+                    <MailFrame html={fillVars(t.body_html)}/>
+                  </div>}
+                </div>}
+              </div>; })}
+          </div>
+        </div>
+        {/* Variablen-Legende */}
+        <div style={{fontSize:12,color:'var(--muted)',background:'var(--surface-2)',border:'1px solid var(--border)',borderRadius:8,padding:'10px 12px',lineHeight:1.7}}>
+          <b>Platzhalter</b> (werden beim Versand ersetzt):<br/>
+          <code>{'{{hi}}'}</code> = Anrede (z. B. „Hallo Max,") · <code>{'{{link}}'}</code> = Aktionslink (Phase 1: Profil-Vervollständigung, Phase 2: Terminbuchung) · <code>{'{{name}}'}</code> = Absenderin (Clara) · <code>{'{{disc}}'}</code> = Signatur-/Hinweiszeile
+        </div>
+      </div>)}
+  </div>;
+}
 function ApplicantLinksView({employees, showToast, team}){
   const [iv,setIv]=useState(null);      // interview_invites (roh, neueste zuerst)
   const [ev,setEv]=useState(null);      // cv_enrich_invites (roh, neueste zuerst)
@@ -40976,6 +41082,8 @@ function ApplicantLinksView({employees, showToast, team}){
              : 'Automatik ist aus, es läuft nichts von selbst. Manueller Versand ist möglich.')}
       </span>
     </div>
+
+    <ClaraSteuerung showToast={showToast} isMgmt={isMgmt}/>
 
     {showCfg&&<div className="card" style={{padding:16,marginBottom:14}}>
       <div style={{fontWeight:800,fontSize:14,marginBottom:2}}>⚙ Automatischer Mailversand</div>
