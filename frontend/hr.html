@@ -40097,7 +40097,16 @@ function WissensspeicherView({projects, team, showToast}){
   const [q,setQ]=React.useState('');
   const [asking,setAsking]=React.useState(false);
   const [ans,setAns]=React.useState(null);   // {known,answer,sources,rueckfrage,note,used}
-  const ask=async()=>{ const question=q.trim(); if(!question||!partner) return; setAsking(true); setAns(null);
+  const [fbDone,setFbDone]=React.useState(null);
+  const [qlog,setQlog]=React.useState(null);
+  const loadQlog=async(pid)=>{ if(!pid){ setQlog([]); return; } setQlog(null);
+    try{ const {data}=await sb.from('kb_queries').select('*').eq('project_id',pid).order('created_at',{ascending:false}).limit(500); setQlog(data||[]); }catch(e){ setQlog([]); }
+  };
+  const sendFb=async(helpful)=>{ if(!ans||!ans.query_id) return;
+    try{ await sb.rpc('kb_feedback',{p_query:ans.query_id, p_helpful:helpful}); setFbDone(helpful?'up':'down'); showToast&&showToast(helpful?'Danke, notiert':'Danke, wird geprüft'); }
+    catch(e){ showToast&&showToast('Rückmeldung fehlgeschlagen','error'); }
+  };
+  const ask=async()=>{ const question=q.trim(); if(!question||!partner) return; setAsking(true); setAns(null); setFbDone(null);
     try{ const {data,error}=await sb.functions.invoke('partner-knowledge',{body:{question,project_id:partner}});
       if(error){ let m=error.message||'Fehler'; try{ const j=await error.context.json(); if(j&&j.error) m=j.error; }catch(_e){} setAns({error:m}); }
       else setAns(data||{error:'Keine Antwort'});
@@ -40122,6 +40131,7 @@ function WissensspeicherView({projects, team, showToast}){
     }catch(e){ setFacts([]); showToast&&showToast('Register laden fehlgeschlagen: '+((e&&e.message)||e),'error'); }
   };
   React.useEffect(()=>{ if(partner&&mode==='register'&&facts===null) loadFacts(partner); },[partner,mode]);
+  React.useEffect(()=>{ if(partner&&mode==='gaps'&&qlog===null) loadQlog(partner); },[partner,mode]);
   const blankFact=()=>({__new:true, topic:'', zielgebiet:'', info_type:'kontakt', label:'', value:'', q_saison:'', q_veranstalter:'', valid_from:'', valid_to:''});
   const editExisting=(f)=>setEditF({...f, q_saison:(f.qualifier&&f.qualifier.saison)||'', q_veranstalter:(f.qualifier&&f.qualifier.veranstalter)||'', zielgebiet:f.zielgebiet||'', info_type:f.info_type||'sonstiges', valid_from:f.valid_from||'', valid_to:f.valid_to||''});
   const saveFact=async()=>{ const f=editF; if(!f) return;
@@ -40244,6 +40254,10 @@ function WissensspeicherView({projects, team, showToast}){
   const factGroups={}; factFiltered.forEach(f=>{ (factGroups[f.topic]=factGroups[f.topic]||[]).push(f); });
   const factTopics=Object.keys(factGroups).sort((a,b)=>a.localeCompare(b,'de'));
   const archCount=(facts||[]).filter(f=>f.status==='archived').length;
+  const qDedup=(arr)=>{ const m={}; (arr||[]).forEach(r=>{ const k=(r.question||'').trim().toLowerCase(); if(!k) return; if(!m[k]) m[k]={question:r.question,count:0,last:r.created_at}; m[k].count++; }); return Object.values(m); };
+  const qOpen=qlog? qDedup(qlog.filter(r=>!r.known&&!r.had_rueckfrage)).sort((a,b)=>b.count-a.count) : [];
+  const qFalse=qlog? qlog.filter(r=>r.helpful===false) : [];
+  const qFreq=qlog? qDedup(qlog.filter(r=>r.known)).sort((a,b)=>b.count-a.count).slice(0,15) : [];
 
   return <div style={{maxWidth:920,margin:'0 auto',padding:'8px 4px'}}>
     <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:6}}>
@@ -40252,14 +40266,14 @@ function WissensspeicherView({projects, team, showToast}){
     </div>
     {/* Partner-Auswahl */}
     <div style={{display:'flex',flexWrap:'wrap',gap:8,marginBottom:14}}>
-      {partners.map(p=>{ const on=p.id===partner; return <button key={p.id} onClick={()=>{setPartner(p.id);setPrev(null);setOpenDoc(null);setAns(null);setQ('');setFacts(null);setEditF(null);}}
+      {partners.map(p=>{ const on=p.id===partner; return <button key={p.id} onClick={()=>{setPartner(p.id);setPrev(null);setOpenDoc(null);setAns(null);setQ('');setFacts(null);setEditF(null);setQlog(null);setFbDone(null);setCatalog(null);}}
         style={{padding:'7px 14px',borderRadius:20,border:'1px solid '+(on?'var(--accent,#0F5661)':'var(--border)'),cursor:'pointer',
           background:on?'var(--accent,#0F5661)':'var(--card)',color:on?'#fff':'var(--text)',fontWeight:on?700:500,fontSize:13.5}}>{p.name}</button>; })}
     </div>
 
     {/* Unter-Tabs */}
     <div style={{display:'flex',gap:6,marginBottom:14,borderBottom:'1px solid var(--border)'}}>
-      {[['ask','Fragen'],['register','Register'],['docs','Dokumente']].map(([k,l])=>{ const on=mode===k;
+      {[['ask','Fragen'],['register','Register'],['docs','Dokumente'],['gaps','Lücken']].map(([k,l])=>{ const on=mode===k;
         return <button key={k} onClick={()=>{setMode(k);setEditF(null);}} style={{padding:'8px 14px',border:'none',borderBottom:'2px solid '+(on?'var(--accent,#0F5661)':'transparent'),background:'none',cursor:'pointer',color:on?'var(--text)':'var(--muted)',fontWeight:on?800:500,fontSize:13.5}}>{l}</button>; })}
     </div>
 
@@ -40279,6 +40293,10 @@ function WissensspeicherView({projects, team, showToast}){
          : ans.known? <div>
             <div style={{fontSize:14.5,lineHeight:1.5,whiteSpace:'pre-wrap'}}>{ans.answer}</div>
             {Array.isArray(ans.sources)&&ans.sources.length>0&&<div style={{marginTop:8,fontSize:11.5,color:'var(--muted)'}}>Quelle: {ans.sources.join(' · ')}</div>}
+            {ans.query_id&&<div style={{marginTop:10,display:'flex',gap:8,alignItems:'center'}}>
+              {fbDone? <span style={{fontSize:12,color:'var(--muted)'}}>{fbDone==='up'?'Danke für die Rückmeldung.':'Danke, wird geprüft.'}</span>
+               : <React.Fragment><span style={{fontSize:12,color:'var(--muted)'}}>War das richtig?</span><button className="btn btn-sm" onClick={()=>sendFb(true)}>👍 hat geholfen</button><button className="btn btn-sm" onClick={()=>sendFb(false)}>👎 war falsch</button></React.Fragment>}
+            </div>}
           </div>
          : <div style={{fontSize:13.5,color:'var(--muted)'}}>{ans.note||'Dazu ist nichts hinterlegt.'}</div>}
       </div>}
@@ -40429,6 +40447,33 @@ function WissensspeicherView({projects, team, showToast}){
         </div>)}</div>}
     </div>
     </React.Fragment>}
+
+    {/* Lücken & Rückmeldungen (Lern-Mechanik): das System merkt sich Fragen, damit Menschen das Register pflegen */}
+    {mode==='gaps'&&<div>
+      <div style={{fontSize:12,color:'var(--muted)',marginBottom:12}}>Das System merkt sich Fragen und Rückmeldungen, damit ihr seht, was ins Register gehört. Die KI lernt daraus nicht von selbst, besser wird der Speicher durch eure Pflege.</div>
+      {qlog===null? <div style={{padding:16,color:'var(--muted)',fontSize:13}}>Lädt…</div> : <React.Fragment>
+        <div style={{...card,borderColor:qOpen.length?'#b45309':'var(--border)'}}>
+          <div style={{fontSize:14,fontWeight:800,marginBottom:2}}>Lücken <span style={{color:'var(--muted)',fontWeight:500}}>· wonach ohne Antwort gefragt wurde ({qOpen.length})</span></div>
+          <div style={{fontSize:11.5,color:'var(--muted)',marginBottom:8}}>Das ist die To-do-Liste für den nächsten Upload oder einen Register-Eintrag.</div>
+          {!qOpen.length? <div style={{fontSize:13,color:'var(--muted)'}}>Keine offenen Fragen.</div>
+           : qOpen.map((x,i)=><div key={i} style={{borderTop:i?'1px solid var(--border)':'none',padding:'6px 0',fontSize:13.5}}>{x.question} <span style={{color:'var(--muted)',fontSize:11.5}}>· {x.count}×, zuletzt {fmtDt(x.last)}</span></div>)}
+        </div>
+        <div style={{...card,borderColor:qFalse.length?'#dc2626':'var(--border)'}}>
+          <div style={{fontSize:14,fontWeight:800,marginBottom:8}}>Als falsch gemeldet <span style={{color:'var(--muted)',fontWeight:500}}>({qFalse.length})</span></div>
+          {!qFalse.length? <div style={{fontSize:13,color:'var(--muted)'}}>Keine Widersprüche.</div>
+           : qFalse.slice(0,30).map((r,i)=><div key={r.id} style={{borderTop:i?'1px solid var(--border)':'none',padding:'7px 0'}}>
+              <div style={{fontSize:13.5,fontWeight:600}}>{r.question}</div>
+              {r.answer&&<div style={{fontSize:12.5,color:'var(--muted)',marginTop:2}}>Antwort war: {r.answer}</div>}
+              <div style={{fontSize:11,color:'var(--muted)',marginTop:2}}>gemeldet {fmtDt(r.feedback_at||r.created_at)}{r.sources&&r.sources.length?(' · Quelle: '+r.sources.join(', ')):''}</div>
+            </div>)}
+        </div>
+        <div style={card}>
+          <div style={{fontSize:14,fontWeight:800,marginBottom:8}}>Häufige Fragen <span style={{color:'var(--muted)',fontWeight:500}}>· mit Antwort</span></div>
+          {!qFreq.length? <div style={{fontSize:13,color:'var(--muted)'}}>Noch keine.</div>
+           : qFreq.map((x,i)=><div key={i} style={{borderTop:i?'1px solid var(--border)':'none',padding:'6px 0',fontSize:13.5}}>{x.question} <span style={{color:'var(--muted)',fontSize:11.5}}>· {x.count}×</span></div>)}
+        </div>
+      </React.Fragment>}
+    </div>}
   </div>;
 }
 function DataImportView({projects, employees}){

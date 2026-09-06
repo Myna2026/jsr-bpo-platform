@@ -18,6 +18,21 @@ const MODEL = "claude-sonnet-5";
 const ANTHROPIC_KEY = Deno.env.get("ANTHROPIC_API_KEY") || "";
 const SB_URL = Deno.env.get("SUPABASE_URL")!;
 const ANON = Deno.env.get("SUPABASE_ANON_KEY")!;
+const SERVICE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+
+// Jede Frage protokollieren (Lern-Mechanik S7): Lücken-Liste, häufige Fragen, "war falsch"-Rückmeldung.
+// Über Service-Role, damit es zuverlässig loggt; gibt die Query-ID zurück, damit die UI Rückmeldung anhängen kann.
+async function logQuery(projectId: string, uid: string, question: string, r: any): Promise<string | null> {
+  try {
+    const admin = createClient(SB_URL, SERVICE);
+    const { data } = await admin.from("kb_queries").insert({
+      project_id: projectId, user_id: uid, question, known: !!r.known, had_rueckfrage: !!r.rueckfrage,
+      fact_count: (r.used && r.used.facts) || 0, chunk_count: (r.used && r.used.chunks) || 0,
+      answer: r.answer || null, sources: Array.isArray(r.sources) && r.sources.length ? r.sources : null,
+    }).select("id").single();
+    return data?.id || null;
+  } catch (_e) { return null; }
+}
 
 const ANTWORT_TOOL = {
   name: "antwort",
@@ -55,6 +70,7 @@ Deno.serve(async (req) => {
 
   const { data: udata } = await sb.auth.getUser();
   if (!udata?.user?.id) return json({ error: "Sitzung ungültig." }, 401);
+  const uid = udata.user.id;
 
   let body: any = {}; try { body = await req.json(); } catch { /* egal */ }
   const question = String(body?.question || "").trim();
@@ -72,7 +88,9 @@ Deno.serve(async (req) => {
 
   // Nichts gefunden -> gar nicht erst die KI fragen. Ehrliche Fehlanzeige (spart Kosten, kein Erfinden).
   if (!facts.length && !chunks.length) {
-    return json({ known: false, answer: "", sources: [], rueckfrage: null, note: "Dazu ist im Wissensspeicher nichts hinterlegt.", used: { facts: 0, chunks: 0 } });
+    const res: any = { known: false, answer: "", sources: [], rueckfrage: null, note: "Dazu ist im Wissensspeicher nichts hinterlegt.", used: { facts: 0, chunks: 0 } };
+    res.query_id = await logQuery(projectId, uid, question, res);
+    return json(res);
   }
 
   const wissen = [
@@ -110,12 +128,14 @@ Deno.serve(async (req) => {
 
   const out = tool.input || {};
   const known = out.known === true;
-  return json({
+  const res: any = {
     known,
     answer: known ? String(out.answer || "") : "",
     sources: Array.isArray(out.sources) ? out.sources : [],
     rueckfrage: (typeof out.rueckfrage === "string" && out.rueckfrage.trim()) ? out.rueckfrage.trim() : null,
     note: known ? "" : "Dazu ist im Wissensspeicher nichts (Eindeutiges) hinterlegt.",
     used: { facts: facts.length, chunks: chunks.length },
-  });
+  };
+  res.query_id = await logQuery(projectId, uid, question, res);
+  return json(res);
 });
