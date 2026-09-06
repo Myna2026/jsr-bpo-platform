@@ -52,9 +52,9 @@ const ANTWORT_TOOL = {
         items: {
           type: "object",
           properties: {
-            kind: { type: "string", enum: ["schritt", "hinweis", "notfall", "info"], description: "schritt = konkrete Handlung; notfall = was tun, wenn es schiefgeht / Notfallkontakt; hinweis = wichtiger Zusatz; info = erklärender Teil" },
+            kind: { type: "string", enum: ["schritt", "hinweis", "notfall", "info", "kundensatz"], description: "schritt = konkrete Handlung im Ablauf; notfall = Rückfall, wenn es schiefgeht / Notfallkontakt; hinweis = wichtiger Zusatz; info = erklärender Teil; kundensatz = ein Satz, den der Bearbeiter dem Kunden WÖRTLICH vorlesen kann" },
             title: { type: ["string", "null"], description: "kurzer Titel des Blocks, optional" },
-            text: { type: "string", description: "der Inhalt, kurz und klar" },
+            text: { type: "string", description: "der Inhalt, kurz und klar; bei kundensatz der vorlesbare Satz an den Kunden" },
             source: { type: ["string", "null"], description: "Fundstelle wörtlich aus den eckigen Klammern des Wissens" },
           },
           required: ["kind", "text"],
@@ -146,13 +146,14 @@ Deno.serve(async (req) => {
     "- Deckt das Wissen die Frage ab (auch teilweise), dann ANTWORTE (known=true) und nenne die Quelle. known=false NUR, wenn das Wissen die Frage wirklich nicht enthält. Die Vorsicht bei Nummern/Zeiten bedeutet: nichts erfinden — NICHT: eine vorhandene Auskunft verweigern.\n" +
     "- Die Abschnitte können mehrere Zielgebiete/Fälle enthalten (die Unterlagen sind oft Tabellen mit einer Zeile je Ort). Nutze nur die Zeile(n), die zum gefragten Ort/Fall passen; ist der gefragte Ort dabei, beantworte die Frage daraus.\n" +
     "- Mehrdeutige Frage (Hotel oder Flughafen; welche Saison; welcher Veranstalter): known=false und stelle in 'rueckfrage' die eine nötige Rückfrage, statt zu raten.\n\n" +
-    "SO ANTWORTEST DU (wenn known=true):\n" +
-    "- BLICKWINKEL erkennen: Beschreibt die Frage eine Situation (\"Der Kunde findet seinen Transfer nicht\")? -> intent=anleitung, gib konkrete Handlungsschritte (kind='schritt'). Will sie verstehen, wie etwas abläuft (\"Wie läuft der Transfer ab\")? -> intent=erklaerung, erkläre (kind='info').\n" +
-    "- GLIEDERN: Trenne verschiedene Sachverhalte in einzelne blocks. Was zusammengehört, in einen Block; was verschieden ist, in eigene. Das Wichtigste bzw. der erste Schritt zuerst.\n" +
-    "- Was tun, wenn es schiefgeht (niemand da, Notfallkontakt): eigener Block kind='notfall'.\n" +
-    "- Jeder Block nennt in 'source' die Fundstelle wörtlich aus den eckigen Klammern.\n" +
+    "SO ANTWORTEST DU (wenn known=true) — als LEITFADEN zum Abarbeiten, nicht als Fließtext:\n" +
+    "- BLICKWINKEL erkennen: Beschreibt die Frage eine Situation (\"Der Kunde findet seinen Transfer nicht\")? -> intent=anleitung. Will sie verstehen, wie etwas abläuft? -> intent=erklaerung.\n" +
+    "- ABLAUF: Baue die Antwort als Schritte, die man am Telefon der Reihe nach durchgeht (kind='schritt'), in sinnvoller Reihenfolge. Das Wichtigste bzw. der erste Schritt zuerst. Trenne verschiedene Sachverhalte in eigene Blöcke.\n" +
+    "- RÜCKFALL: Was tun, wenn es nicht klappt (niemand da, Notfallkontakt), kommt als kind='notfall' und steht IMMER als LETZTER Block.\n" +
+    "- KUNDENSATZ: Wo es passt, füge einen Block kind='kundensatz' ein — EIN kurzer, freundlicher Satz, den der Bearbeiter dem Kunden direkt vorlesen kann (\"Sie finden den Transfer am Schalter …\"). Nur aus den Fakten formuliert, KEINE erfundene Nummer/Angabe. Nicht bei jeder Antwort nötig.\n" +
+    "- Jeder Block nennt in 'source' die Fundstelle wörtlich aus den eckigen Klammern (kundensatz braucht keine eigene Quelle, wenn er sich auf die anderen Blöcke stützt).\n" +
     "- MITDENKEN: Schlage in 'related' 0-3 verwandte Punkte vor, nach denen nicht gefragt wurde, die aber gleich gebraucht werden — NUR wenn ihre Antwort im WISSEN (v. a. Abschnitt VERWANDT) steht. Nichts erfinden.\n" +
-    "- Kurz, klar, telefontauglich. Duze die Person. Keine Zusagen, keine Ausschmückung.\n\n" +
+    "- Kurz, klar, telefontauglich. Duze die Kollegin. Keine Zusagen, keine Ausschmückung.\n\n" +
     "WISSEN (nur das zählt):\n" + wissen;
 
   let tool: any;
@@ -172,14 +173,16 @@ Deno.serve(async (req) => {
 
   const out = tool.input || {};
   const known = out.known === true;
-  const blocks = known && Array.isArray(out.blocks)
+  let blocks = known && Array.isArray(out.blocks)
     ? out.blocks.filter((b: any) => b && b.text).map((b: any) => ({
-        kind: ["schritt", "hinweis", "notfall", "info"].includes(b.kind) ? b.kind : "info",
+        kind: ["schritt", "hinweis", "notfall", "info", "kundensatz"].includes(b.kind) ? b.kind : "info",
         title: (b.title && String(b.title).trim()) || null,
         text: String(b.text).trim(),
         source: (b.source && String(b.source).trim()) || null,
       }))
     : [];
+  // Rückfall garantiert ganz hinten: Notfall-Blöcke ans Ende (stabil), Reihenfolge sonst unverändert.
+  blocks = [...blocks.filter((b: any) => b.kind !== "notfall"), ...blocks.filter((b: any) => b.kind === "notfall")];
   const relatedOut = known && Array.isArray(out.related)
     ? out.related.filter((x: any) => x && x.label && x.question).slice(0, 3).map((x: any) => ({ label: String(x.label).trim(), question: String(x.question).trim() }))
     : [];
