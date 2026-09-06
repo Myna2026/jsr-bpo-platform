@@ -18,7 +18,6 @@ const MODEL = "claude-sonnet-5";
 const ANTHROPIC_KEY = Deno.env.get("ANTHROPIC_API_KEY") || "";
 const SB_URL = Deno.env.get("SUPABASE_URL")!;
 const ANON = Deno.env.get("SUPABASE_ANON_KEY")!;
-const MAXTXT = 16000;
 
 const TOOL = {
   name: "vorschlaege",
@@ -68,41 +67,49 @@ Deno.serve(async (req) => {
   if (ce) return json({ error: "Abschnitte nicht lesbar: " + ce.message }, 502);
   if (!chunks || !chunks.length) return json({ ok: true, facts: [], note: "Keine Abschnitte gefunden." });
 
-  let txt = ""; let truncated = false;
-  for (const c of chunks) {
-    const marker = c.section ? c.section : (c.page ? "Seite " + c.page : "-");
-    const line = "[" + marker + "] " + String(c.content || "") + "\n";
-    if (txt.length + line.length > MAXTXT) { truncated = true; break; }
-    txt += line;
-  }
-
   const system =
     "Du katalogisierst Wissen für ein Kundenprojekt. Aus dem folgenden Dokument-Text ziehst du die einzelnen, " +
     "nachschlagbaren FAKTEN heraus — so, dass man sie später gezielt abfragen kann.\n\n" +
     "REGELN:\n" +
-    "- Ein Fakt = eine klar beantwortbare Angabe (eine Notfallnummer, eine Transferzeit, ein Kontakt, eine Regel, ein Preis, ein Ablaufschritt).\n" +
+    "- Ein Fakt = eine klar beantwortbare Angabe (eine Notfallnummer, eine Transferzeit, ein Kontakt, eine Regel, ein Ablaufschritt).\n" +
+    "- Enthält eine Zeile MEHRERE Angaben (z. B. je Zielgebiet: Treffpunkt UND Notfallnummer UND Rückweg), dann mach daraus MEHRERE Fakten, einen je Angabe.\n" +
     "- Erfinde NICHTS. Nimm nur, was wörtlich im Text steht. Der 'value' soll möglichst wörtlich sein.\n" +
     "- 'zielgebiet' nur, wenn ein Ort/Gebiet genannt ist. 'saison'/'veranstalter' nur, wenn der Text den Wert danach unterscheidet.\n" +
     "- 'source_locator' aus dem [..]-Marker der Zeile, aus der der Fakt stammt.\n" +
-    "- Fasse NICHT zusammen und lasse Fließtext ohne konkrete Angabe weg. Steht nichts Strukturierbares drin: leere Liste.\n\n" +
-    "DOKUMENT-TEXT:\n" + txt;
+    "- Fasse NICHT zusammen und lasse Fließtext ohne konkrete Angabe weg. Steht nichts Strukturierbares drin: leere Liste.\n\n";
 
-  let tool: any;
-  try {
+  // In kleinen Häppchen katalogisieren (~2200 Zeichen ≈ wenige Zielgebiete je Aufruf) und PARALLEL verarbeiten.
+  // Grund: bei großen Häppchen extrahiert das Modell nicht erschöpfend / läuft in die max_tokens-Grenze und
+  // liefert leer. Kleine Häppchen = vollständige Erfassung je Zeile; parallel = schnell trotz vieler Aufrufe.
+  const BATCH_CHARS = 2200, MAX_BATCHES = 24;
+  const batches: string[] = []; let cur = "";
+  for (const c of chunks) {
+    const marker = c.section ? c.section : (c.page ? "Seite " + c.page : "-");
+    const line = "[" + marker + "] " + String(c.content || "") + "\n";
+    if (cur && cur.length + line.length > BATCH_CHARS) { batches.push(cur); cur = ""; }
+    cur += line;
+  }
+  if (cur) batches.push(cur);
+  const truncated = batches.length > MAX_BATCHES;
+  const use = batches.slice(0, MAX_BATCHES);
+
+  async function catalogBatch(txt: string): Promise<any[]> {
     const resp = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-      body: JSON.stringify({ model: MODEL, max_tokens: 3000, system, tools: [TOOL], tool_choice: { type: "tool", name: "vorschlaege" }, messages: [{ role: "user", content: "Katalogisiere die Fakten." }] }),
+      body: JSON.stringify({ model: MODEL, max_tokens: 4000, system: system + "DOKUMENT-TEXT:\n" + txt, tools: [TOOL], tool_choice: { type: "tool", name: "vorschlaege" }, messages: [{ role: "user", content: "Katalogisiere die Fakten." }] }),
     });
     const data = await resp.json();
-    if (!resp.ok) return json({ error: "KI-Fehler: " + (data?.error?.message || resp.status) }, 502);
-    tool = (data.content || []).find((c: any) => c.type === "tool_use");
-    if (!tool) return json({ error: "Keine verwertbare Antwort." }, 502);
-  } catch (e) {
-    return json({ error: "Die KI ist gerade nicht erreichbar: " + (e as Error).message }, 502);
+    if (!resp.ok) throw new Error(data?.error?.message || ("HTTP " + resp.status));
+    const tool = (data.content || []).find((c: any) => c.type === "tool_use");
+    return (tool && Array.isArray(tool.input?.facts)) ? tool.input.facts : [];
   }
 
-  const raw: any[] = Array.isArray(tool.input?.facts) ? tool.input.facts : [];
+  const results = await Promise.all(use.map((t) => catalogBatch(t).then((f) => ({ f })).catch((e) => ({ e: (e as Error).message || String(e) }))));
+  let raw: any[] = []; let lastErr = "";
+  for (const r of results) { if ((r as any).f) raw = raw.concat((r as any).f); else if ((r as any).e) lastErr = (r as any).e; }
+  if (!raw.length && lastErr) return json({ error: "KI-Fehler: " + lastErr }, 502);
+
   const facts = raw.filter((f) => f && f.topic && f.label && f.value).map((f) => ({
     topic: String(f.topic).trim(),
     zielgebiet: (f.zielgebiet && String(f.zielgebiet).trim()) || null,
