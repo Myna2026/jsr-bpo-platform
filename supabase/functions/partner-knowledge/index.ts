@@ -119,9 +119,15 @@ Deno.serve(async (req) => {
   const chunks: any[] = Array.isArray(r.chunks) ? r.chunks : [];
   const related: any[] = Array.isArray(r.related) ? r.related : [];
 
+  // Partner-Agent (Name + Charakter) für Ton und Begrüßung. Nicht sensibel; RLS erlaubt select für Angemeldete.
+  const { data: pa } = await sb.from("partner_agents").select("name,character").eq("project_id", projectId).maybeSingle();
+  const agentName = (pa && pa.name) || "der Kollege";
+  const persona = (pa && pa.character) || "";
+  const MISS = "Da muss ich passen, das steht dazu nicht in meinen Unterlagen.";
+
   // Nichts gefunden -> gar nicht erst die KI fragen. Ehrliche Fehlanzeige (spart Kosten, kein Erfinden).
   if (!facts.length && !chunks.length && !related.length) {
-    const res: any = { known: false, intent: "erklaerung", title: "", blocks: [], related: [], sources: [], rueckfrage: null, note: "Dazu ist im Wissensspeicher nichts hinterlegt.", used: { facts: 0, chunks: 0 } };
+    const res: any = { known: false, intent: "erklaerung", title: "", blocks: [], related: [], sources: [], rueckfrage: null, note: MISS, used: { facts: 0, chunks: 0 } };
     res.query_id = await logQuery(projectId, uid, question, res);
     return json(res);
   }
@@ -133,7 +139,8 @@ Deno.serve(async (req) => {
   ].filter(Boolean).join("\n\n");
 
   const system =
-    "Du bist ein Wissens-Assistent für ein Kundenprojekt. Eine Kollegin im Call-Center stellt dir eine Frage, oft während ein Kunde am Telefon ist. Antworte wie ein hilfsbereiter Kollege, der die Unterlagen kennt.\n\n" +
+    "Du bist " + agentName + ", ein Kollege im Call-Center-Team. " + (persona ? persona + " " : "") +
+    "Eine Kollegin stellt dir eine Frage, oft während ein Kunde am Telefon ist. Antworte in deinem Ton, wie dieser Kollege, aber immer knapp und klar.\n\n" +
     "EISERNE REGELN:\n" +
     "- Antworte AUSSCHLIESSLICH aus dem WISSEN unten. Erfinde NICHTS, niemals — keine erfundene Nummer, Zeit oder Adresse.\n" +
     "- Deckt das Wissen die Frage ab (auch teilweise), dann ANTWORTE (known=true) und nenne die Quelle. known=false NUR, wenn das Wissen die Frage wirklich nicht enthält. Die Vorsicht bei Nummern/Zeiten bedeutet: nichts erfinden — NICHT: eine vorhandene Auskunft verweigern.\n" +
@@ -185,7 +192,7 @@ Deno.serve(async (req) => {
     related: relatedOut,
     sources,
     rueckfrage: (typeof out.rueckfrage === "string" && out.rueckfrage.trim()) ? out.rueckfrage.trim() : null,
-    note: known ? "" : "Dazu ist im Wissensspeicher nichts (Eindeutiges) hinterlegt.",
+    note: known ? "" : MISS,
     used: { facts: facts.length, chunks: chunks.length },
   };
   res.query_id = await logQuery(projectId, uid, question, res);
