@@ -40103,6 +40103,27 @@ function kbAvatarHtml(a, size){ size=size||46;
   if(a&&a.avatar_url) return '<img src="'+String(a.avatar_url).replace(/"/g,'&quot;')+'" alt="" style="width:100%;height:100%;object-fit:cover;display:block">';
   return kbFaceSvg((a&&a.face_key)||'default',(a&&a.color)||'#0F5661',size);
 }
+// Telefonnummern + Mailadressen automatisch in der Antwort erkennen (kein Markieren nötig).
+const KB_EMAIL_RE=/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+function kbContacts(ans){
+  const txt=[(ans&&ans.title)||''].concat(((ans&&ans.blocks)||[]).map(function(b){return b.text||'';})).join('   ');
+  const emails=Array.from(new Set(txt.match(KB_EMAIL_RE)||[]));
+  const noMail=txt.replace(KB_EMAIL_RE,'  ');
+  const raw=noMail.match(/(?:\+|00)?\d[\d\s().\/-]{5,}\d/g)||[];
+  const phones=Array.from(new Set(raw.map(function(s){return s.trim().replace(/[.\s]+$/,'');}).filter(function(s){ var d=s.replace(/\D/g,''); return d.length>=7&&d.length<=16; })));
+  return {phones:phones, emails:emails};
+}
+function kbAnswerText(ans){
+  const lines=[]; if(ans&&ans.title) lines.push(ans.title); let n=0;
+  ((ans&&ans.blocks)||[]).forEach(function(b){
+    if(b.kind==='schritt'){ n++; lines.push(n+'. '+(b.title?b.title+': ':'')+b.text); }
+    else if(b.kind==='notfall'){ lines.push('Notfall: '+(b.title?b.title+' - ':'')+b.text); }
+    else if(b.kind==='hinweis'){ lines.push('Hinweis: '+(b.title?b.title+' - ':'')+b.text); }
+    else if(b.kind==='kundensatz'){ lines.push('Für den Kunden: '+b.text); }
+    else lines.push((b.title?b.title+': ':'')+b.text);
+  });
+  return lines.join('\n');
+}
 // Fallback-Farben/Namen, falls partner_agents noch nicht geladen. Master ist die DB (Partner-Verwaltung, S12).
 const KB_PARTNER_AGENTS = {
   'proj_cd_c9d0e1f2': { name:'Carlos', color:'#F5B301' },   // Condor  · gelb
@@ -40150,6 +40171,13 @@ const KB_CSS = `
 .kbc-notfall{background:rgba(220,38,38,.13);border:1px solid rgba(220,38,38,.4);border-left:3px solid #f87171}
 .kbc-hinweis{background:rgba(217,119,6,.13);border:1px solid rgba(217,119,6,.38);border-left:3px solid #fbbf24}
 .kbc-caltag{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px}
+.kbc-actions{margin-top:16px;padding-top:14px;border-top:1px solid #2a3450;display:flex;flex-direction:column;gap:9px}
+.kbc-act{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.kbc-actval{font-size:14px;color:#eef1fa;font-weight:600;font-variant-numeric:tabular-nums;margin-right:2px}
+.kbc-actbtn{cursor:pointer;border-radius:9px;padding:8px 13px;font-size:13px;font-weight:600;color:color-mix(in srgb, var(--acc) 82%, #fff);background:color-mix(in srgb, var(--acc) 12%, transparent);border:1px solid color-mix(in srgb, var(--acc) 40%, transparent);text-decoration:none;display:inline-flex;align-items:center;gap:5px;min-height:38px}
+.kbc-actbtn:hover{background:color-mix(in srgb, var(--acc) 20%, transparent)}
+.kbc-copyall{cursor:pointer;border-radius:10px;padding:9px 15px;font-size:13.5px;font-weight:700;color:#c8cee0;background:rgba(255,255,255,.05);border:1px solid #34446c;min-height:40px;align-self:flex-start}
+.kbc-copyall:hover{background:rgba(255,255,255,.09)}
 .kbc-rel{margin-top:15px;display:flex;flex-wrap:wrap;gap:7px;align-items:center}
 .kbc-rellbl{font-size:12px;color:#8b93a8}
 .kbc-relbtn{cursor:pointer;border-radius:20px;padding:6px 13px;font-size:13px;font-weight:600;color:color-mix(in srgb, var(--acc) 82%, #fff);background:color-mix(in srgb, var(--acc) 12%, transparent);border:1px solid color-mix(in srgb, var(--acc) 40%, transparent)}
@@ -40196,6 +40224,7 @@ function WissensspeicherView({projects, team, showToast}){
   const loadQlog=async(pid)=>{ if(!pid){ setQlog([]); return; } setQlog(null);
     try{ const {data}=await sb.from('kb_queries').select('*').eq('project_id',pid).order('created_at',{ascending:false}).limit(500); setQlog(data||[]); }catch(e){ setQlog([]); }
   };
+  const kbCopy=(t)=>{ try{ (navigator.clipboard.writeText(t)).then(()=>showToast&&showToast('Kopiert')).catch(()=>showToast&&showToast('Kopieren nicht möglich','error')); }catch(e){ showToast&&showToast('Kopieren nicht möglich','error'); } };
   const sendFb=async(helpful)=>{ if(!ans||!ans.query_id) return;
     try{ await sb.rpc('kb_feedback',{p_query:ans.query_id, p_helpful:helpful}); setFbDone(helpful?'up':'down'); showToast&&showToast(helpful?'Danke, notiert':'Danke, wird geprüft'); }
     catch(e){ showToast&&showToast('Rückmeldung fehlgeschlagen','error'); }
@@ -40429,6 +40458,11 @@ function WissensspeicherView({projects, team, showToast}){
                   </div>
                 </div>; })}
             </div>
+            {(()=>{ const c=kbContacts(ans); return <div className="kbc-actions">
+              {c.phones.map((ph,i)=><div key={'p'+i} className="kbc-act"><span className="kbc-actval">📞 {ph}</span><button className="kbc-actbtn" onClick={()=>kbCopy(ph)}>📋 Kopieren</button><a className="kbc-actbtn" href={'tel:'+ph.replace(/[^\d+]/g,'')}>📞 Anrufen</a></div>)}
+              {c.emails.map((em,i)=><div key={'e'+i} className="kbc-act"><span className="kbc-actval">✉ {em}</span><button className="kbc-actbtn" onClick={()=>kbCopy(em)}>📋 Kopieren</button><a className="kbc-actbtn" href={'mailto:'+em}>✉ Mail</a></div>)}
+              <button className="kbc-copyall" onClick={()=>kbCopy(kbAnswerText(ans))}>📋 Ganze Antwort kopieren</button>
+            </div>; })()}
             {(ans.related||[]).length>0&&<div className="kbc-rel">
               <span className="kbc-rellbl">Dazu passt vielleicht:</span>
               {ans.related.map((r,i)=><button key={i} className="kbc-relbtn" disabled={asking} onClick={()=>ask(r.question)}>👉 {r.label}</button>)}

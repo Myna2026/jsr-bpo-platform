@@ -1863,6 +1863,26 @@ function kbFaceSvg(faceKey,color,size){ size=size||64; color=color||'#0F5661';
     +'<path d="M18 '+mic1+' Q13 '+mic2+' 25 '+mic2+'" stroke="#2b3550" stroke-width="2" fill="none"/><circle cx="25" cy="'+mic2+'" r="1.8" fill="#2b3550"/></svg>';
 }
 function kbAvatarHtml(a,size){ size=size||46; if(a&&a.avatar_url) return '<img src="'+String(a.avatar_url).replace(/"/g,'&quot;')+'" alt="" style="width:100%;height:100%;object-fit:cover;display:block">'; return kbFaceSvg((a&&a.face_key)||'default',(a&&a.color)||'#0F5661',size); }
+var KB_EMAIL_RE=/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+function kbContacts(ans){
+  var txt=[(ans&&ans.title)||''].concat(((ans&&ans.blocks)||[]).map(function(b){return b.text||'';})).join('   ');
+  var emails=Array.from(new Set(txt.match(KB_EMAIL_RE)||[]));
+  var raw=txt.replace(KB_EMAIL_RE,'  ').match(/(?:\+|00)?\d[\d\s().\/-]{5,}\d/g)||[];
+  var phones=Array.from(new Set(raw.map(function(s){return s.trim().replace(/[.\s]+$/,'');}).filter(function(s){var d=s.replace(/\D/g,'');return d.length>=7&&d.length<=16;})));
+  return {phones:phones,emails:emails};
+}
+function kbAnswerText(ans){
+  var lines=[]; if(ans&&ans.title) lines.push(ans.title); var n=0;
+  ((ans&&ans.blocks)||[]).forEach(function(b){
+    if(b.kind==='schritt'){ n++; lines.push(n+'. '+(b.title?b.title+': ':'')+b.text); }
+    else if(b.kind==='notfall'){ lines.push('Notfall: '+(b.title?b.title+' - ':'')+b.text); }
+    else if(b.kind==='hinweis'){ lines.push('Hinweis: '+(b.title?b.title+' - ':'')+b.text); }
+    else if(b.kind==='kundensatz'){ lines.push('Für den Kunden: '+b.text); }
+    else lines.push((b.title?b.title+': ':'')+b.text);
+  });
+  return lines.join('\n');
+}
+function kbDoCopy(text,btn){ try{ navigator.clipboard.writeText(text).then(function(){ if(btn){ var o=btn.textContent; btn.textContent='Kopiert ✓'; setTimeout(function(){ btn.textContent=o; },1400); } }); }catch(e){} }
 var _kbAns=null,_kbBusy=false,_kbAg=null;
 function kbInjectCss(){ if(document.getElementById('kbcss'))return; var st=document.createElement('style'); st.id='kbcss'; st.textContent=[
 '.kbc{position:relative;overflow:hidden;border-radius:16px;padding:18px;background:radial-gradient(130% 150% at 12% -10%, color-mix(in srgb, var(--acc) 22%, #0b1020) 0%, #0a0e1a 55%, #070a13 100%);border:1px solid color-mix(in srgb, var(--acc) 30%, #1a2233);box-shadow:0 12px 40px rgba(2,8,20,.4)}',
@@ -1899,6 +1919,11 @@ function kbInjectCss(){ if(document.getElementById('kbcss'))return; var st=docum
 '.kbc-notfall{background:rgba(220,38,38,.16);border:1px solid rgba(220,38,38,.45);border-left:5px solid #f87171}',
 '.kbc-hinweis{background:rgba(217,119,6,.15);border:1px solid rgba(217,119,6,.4);border-left:5px solid #fbbf24}',
 '.kbc-caltag{font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px}',
+'.kbc-actions{margin-top:16px;padding-top:15px;border-top:1px solid #2a3450;display:flex;flex-direction:column;gap:10px}',
+'.kbc-act{display:flex;align-items:center;gap:8px;flex-wrap:wrap}',
+'.kbc-actval{font-size:15.5px;color:#fff;font-weight:700;margin-right:2px}',
+'.kbc-actbtn{cursor:pointer;border-radius:11px;padding:12px 16px;font-size:15px;font-weight:700;color:color-mix(in srgb, var(--acc) 85%, #fff);background:color-mix(in srgb, var(--acc) 14%, transparent);border:1px solid color-mix(in srgb, var(--acc) 44%, transparent);text-decoration:none;display:inline-flex;align-items:center;gap:6px;min-height:48px}',
+'.kbc-copyall{cursor:pointer;border-radius:11px;padding:12px 16px;font-size:15px;font-weight:700;color:#c8cee0;background:rgba(255,255,255,.06);border:1px solid #34446c;min-height:48px;width:100%}',
 '.kbc-rel{margin-top:16px;display:flex;flex-wrap:wrap;gap:8px;align-items:center}',
 '.kbc-rellbl{font-size:12.5px;color:#8b93a8;width:100%}',
 '.kbc-relbtn{cursor:pointer;border-radius:22px;padding:10px 16px;font-size:14.5px;font-weight:600;color:color-mix(in srgb, var(--acc) 85%, #fff);background:color-mix(in srgb, var(--acc) 13%, transparent);border:1px solid color-mix(in srgb, var(--acc) 42%, transparent)}',
@@ -1959,6 +1984,11 @@ function kbRenderAns(){
     else { if(isS)stepNo++; html+='<div class="kbc-row">'+(isS?('<span class="kbc-num">'+stepNo+'</span>'):'<span class="kbc-dot"></span>')+'<div class="kbc-bt2">'+(b.title?('<div class="kbc-bttl">'+kbEsc(b.title)+'</div>'):'')+'<div class="kbc-bbody">'+kbEsc(b.text)+'</div>'+(src?('<div class="kbc-src">Quelle: '+src+'</div>'):'')+'</div></div>'; }
   }
   html+='</div>';
+  var c=kbContacts(d), acts='';
+  c.phones.forEach(function(ph){ acts+='<div class="kbc-act"><span class="kbc-actval">📞 '+kbEsc(ph)+'</span><button class="kbc-actbtn kbc-cp" data-c="'+kbEsc(ph).replace(/"/g,'&quot;')+'">📋 Kopieren</button><a class="kbc-actbtn" href="tel:'+ph.replace(/[^\d+]/g,'')+'">📞 Anrufen</a></div>'; });
+  c.emails.forEach(function(em){ acts+='<div class="kbc-act"><span class="kbc-actval">✉ '+kbEsc(em)+'</span><button class="kbc-actbtn kbc-cp" data-c="'+kbEsc(em).replace(/"/g,'&quot;')+'">📋 Kopieren</button><a class="kbc-actbtn" href="mailto:'+kbEsc(em)+'">✉ Mail</a></div>'; });
+  acts+='<button class="kbc-copyall" id="kbCopyAll">📋 Ganze Antwort kopieren</button>';
+  html+='<div class="kbc-actions">'+acts+'</div>';
   var rel=d.related||[];
   if(rel.length){ html+='<div class="kbc-rel"><span class="kbc-rellbl">Dazu passt vielleicht:</span>';
     for(var j=0;j<rel.length;j++){ html+='<button class="kbc-relbtn" data-q="'+kbEsc(rel[j].question).replace(/"/g,'&quot;')+'">👉 '+kbEsc(rel[j].label)+'</button>'; }
@@ -1968,6 +1998,8 @@ function kbRenderAns(){
   var r=document.getElementById('kbResult'); if(!r)return;
   r.querySelectorAll('.kbc-relbtn').forEach(function(btn){ btn.addEventListener('click',function(){ kbAsk(btn.getAttribute('data-q'),true); }); });
   r.querySelectorAll('.kbc-fbb').forEach(function(btn){ btn.addEventListener('click',function(){ kbSendFb(btn.getAttribute('data-fb')==='1'); }); });
+  r.querySelectorAll('.kbc-cp').forEach(function(btn){ btn.addEventListener('click',function(){ kbDoCopy(btn.getAttribute('data-c'),btn); }); });
+  var ca=document.getElementById('kbCopyAll'); if(ca) ca.addEventListener('click',function(){ kbDoCopy(kbAnswerText(d),ca); });
 }
 function kbSendFb(helpful){ if(!_kbAns||!_kbAns.query_id)return;
   try{ sb.rpc('kb_feedback',{p_query:_kbAns.query_id,p_helpful:helpful}); }catch(e){}
