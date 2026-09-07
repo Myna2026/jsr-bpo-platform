@@ -34,7 +34,6 @@ const EXTRACT_TOOL = {
           type: "object",
           properties: {
             text: { type: "string", description: "der Punkt kurz und klar (was ist zu tun / was wurde vorgenommen), aus dem Protokoll" },
-            quote: { type: "string", description: "die Fundstelle: das WÖRTLICHE, zusammenhängende Textstück aus dem Freitext, aus dem dieser Punkt stammt — Zeichen für Zeichen exakt kopiert (damit es im Text markiert werden kann). Kein Umschreiben, keine Auslassungen." },
             bereich: { type: "string", description: "die sinnvolle Gruppe. Bevorzugt eine aus der vorgegebenen Liste; passt keine, bilde eine kurze eigene. Nie leer, wenn eine Gruppe erkennbar ist." },
             owner: { type: ["string", "null"], description: "die zuständige Person genau so, wie im Text genannt (z. B. 'Edi'), falls für DIESE Aufgabe jemand als zuständig genannt ist; sonst null (dann bleibt der Punkt allgemein für die Runde). Achtung: eine Person, die BEARBEITET wird (Bewerber, der kontaktiert/eingesetzt wird), ist NICHT der owner." },
             due_date: { type: ["string", "null"], description: "Fälligkeit als YYYY-MM-DD, aus einer Frist im Text (auch relativ: 'bis Freitag', 'Monatsende', 'nächste Woche') relativ zu HEUTE aufgelöst; sonst null" },
@@ -74,6 +73,27 @@ const ANALYZE_TOOL = {
       },
     },
     required: ["ueberblick"],
+  },
+};
+
+// Getrennter, unkritischer Schritt: Fundstellen fürs Markieren. Bewusst NICHT im Extract-Tool — dort
+// destabilisierte das die Ausgabe (Modell stringifizierte das items-Array). Fällt dieser Aufruf aus, bleibt
+// die Extraktion unberührt und die Markierung fehlt nur.
+const MARK_TOOL = {
+  name: "fundstellen",
+  description: "Zu jedem gegebenen Punkt die wörtliche Fundstelle im Freitext.",
+  input_schema: {
+    type: "object",
+    properties: {
+      marks: {
+        type: "array", description: "je Punkt (per Index) die wörtliche Textstelle; Punkte ohne passende Stelle weglassen",
+        items: { type: "object", properties: {
+          i: { type: "integer", description: "0-basierter Index des Punkts aus der Liste" },
+          quote: { type: "string", description: "das WÖRTLICHE, zusammenhängende Textstück aus dem Freitext, aus dem der Punkt stammt — Zeichen für Zeichen exakt kopiert" },
+        }, required: ["i", "quote"] },
+      },
+    },
+    required: ["marks"],
   },
 };
 
@@ -131,7 +151,6 @@ Deno.serve(async (req) => {
       "- Nimm NUR, was im Text steht. Erfinde nichts, keine Namen, Fristen oder Zahlen, die nicht dastehen.\n" +
       "- Gruppiere sinnvoll: bevorzugt eine Gruppe aus dieser Liste — " + (bereiche.length ? bereiche.join(", ") : "(keine Liste vorgegeben)") + " —, " +
       "passt keine, bilde eine kurze eigene Gruppe. Verwandte Punkte in dieselbe Gruppe.\n" +
-      "- FUNDSTELLE: Gib zu jedem Punkt in 'quote' das wörtliche, zusammenhängende Textstück aus dem Freitext an, aus dem er stammt — Zeichen für Zeichen exakt kopiert (für die Markierung im Text). Nicht umschreiben.\n" +
       "- ZUSTÄNDIGKEIT: Wird für eine Aufgabe eine zuständige Person genannt ('Edi macht das', 'Ylli klärt das'), setze owner auf den Namen " +
       "wie geschrieben. Wird eine Person nur BEARBEITET (Bewerber, der kontaktiert oder eingesetzt wird), ist sie NICHT owner -> owner=null. " +
       "Steht keine zuständige Person, owner=null (Punkt bleibt allgemein). Der Abgleich mit den Mitarbeiterdaten geschieht danach automatisch.\n" +
@@ -162,17 +181,21 @@ Deno.serve(async (req) => {
       if (firstTok.length >= 3) { m = roster.filter((r) => norm(r.first) === firstTok || norm(r.first).startsWith(firstTok)); if (m.length === 1) return m[0]; }
       return null;
     };
-    const items = (Array.isArray(out.items) ? out.items : [])
+    // Robustheit: das Modell liefert 'items' bei komplexen Feldern (quote) manchmal als JSON-STRING statt Array.
+    // Dann parsen, sonst käme fälschlich ein leeres Ergebnis heraus.
+    let rawItems: any = out.items;
+    if (typeof rawItems === "string") { try { rawItems = JSON.parse(rawItems); } catch (_e) { rawItems = []; } }
+    const zus = (typeof out.zusammenfassung === "string" && !out.zusammenfassung.trim().startsWith("[")) ? out.zusammenfassung.trim() : "";
+    const items = (Array.isArray(rawItems) ? rawItems : [])
       .filter((it: any) => it && String(it.text || "").trim())
       .map((it: any) => {
         const ber = (it.bereich && String(it.bereich).trim()) || "";
         const due = typeof it.due_date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(it.due_date) ? it.due_date : null;
         const rawOwner = (it.owner && String(it.owner).trim()) || null;
         const hit = rawOwner ? matchOwner(rawOwner) : null;
-        const quote = (typeof it.quote === "string" && it.quote.trim()) ? it.quote.trim() : null;
-        return { text: String(it.text).trim(), quote, bereich: ber, owner: hit ? hit.full : rawOwner, owner_employee_id: hit ? hit.id : null, due_date: due, target_n: num(it.target_n), actual_n: num(it.actual_n) };
+        return { text: String(it.text).trim(), bereich: ber, owner: hit ? hit.full : rawOwner, owner_employee_id: hit ? hit.id : null, due_date: due, target_n: num(it.target_n), actual_n: num(it.actual_n) };
       });
-    return json({ ok: true, summary: String(out.zusammenfassung || "").trim(), items });
+    return json({ ok: true, summary: zus, items });
   }
 
   // ── M4: Auswertung über alle Calls (Daten serverseitig über RLS lesen) ────
@@ -217,6 +240,27 @@ Deno.serve(async (req) => {
       im_kreis: arr(out.im_kreis).filter((x: any) => x && x.thema).map((x: any) => ({ thema: String(x.thema).trim(), hinweis: String(x.hinweis || "").trim() })),
       bilanz: arr(out.bilanz).filter((x: any) => x && x.vorgenommen).map((x: any) => ({ vorgenommen: String(x.vorgenommen).trim(), geworden: String(x.geworden || "").trim() })),
     });
+  }
+
+  // ── Markierung: Fundstellen im Freitext (getrennt von der Extraktion, unkritisch) ──
+  if (mode === "mark") {
+    const text = String(body?.text || "").trim();
+    const its: string[] = Array.isArray(body?.items) ? body.items.map((x: any) => String(x || "")) : [];
+    if (!text || !its.length) return json({ ok: true, marks: [] });
+    const system =
+      "Du bekommst einen Freitext und eine nummerierte Liste von Punkten, die daraus abgeleitet wurden. " +
+      "Gib zu jedem Punkt (per Index) die WÖRTLICHE, zusammenhängende Fundstelle im Freitext an — Zeichen für Zeichen exakt kopiert, kein Umschreiben. " +
+      "Findest du zu einem Punkt keine passende Stelle, lass ihn weg.";
+    const userText = "FREITEXT:\n" + text.slice(0, 12000) + "\n\nPUNKTE:\n" + its.map((t, i) => i + ". " + t).join("\n");
+    let out: any;
+    try { out = await callClaude(system, userText, MARK_TOOL, "fundstellen", 3000); }
+    catch (_e) { return json({ ok: true, marks: [] }); }   // Markierung ist unkritisch
+    let rawMarks: any = out.marks;
+    if (typeof rawMarks === "string") { try { rawMarks = JSON.parse(rawMarks); } catch (_e) { rawMarks = []; } }
+    const marks = (Array.isArray(rawMarks) ? rawMarks : [])
+      .filter((m: any) => m && typeof m.i === "number" && typeof m.quote === "string" && m.quote.trim())
+      .map((m: any) => ({ i: m.i, quote: String(m.quote).trim() }));
+    return json({ ok: true, marks });
   }
 
   return json({ error: "Unbekannter Modus." }, 400);
