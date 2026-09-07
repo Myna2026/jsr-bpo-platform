@@ -35,8 +35,7 @@ const EXTRACT_TOOL = {
           properties: {
             text: { type: "string", description: "der Punkt kurz und klar (was ist zu tun / was wurde vorgenommen), aus dem Protokoll" },
             bereich: { type: "string", description: "die sinnvolle Gruppe. Bevorzugt eine aus der vorgegebenen Liste; passt keine, bilde eine kurze eigene. Nie leer, wenn eine Gruppe erkennbar ist." },
-            owner: { type: ["string", "null"], description: "die zuständige Person genau so, wie im Text genannt (z. B. 'Edi'), falls jemand genannt ist; sonst null (dann bleibt der Punkt allgemein für die Runde)" },
-            owner_ref: { type: ["integer", "null"], description: "die NUMMER der zugeordneten Person aus der MITARBEITER-Liste, wenn der genannte Name (auch Kurzform wie 'Edi' für 'Edinela') eindeutig einer Person entspricht; sonst 0/null. Rate nicht bei mehreren möglichen." },
+            owner: { type: ["string", "null"], description: "die zuständige Person genau so, wie im Text genannt (z. B. 'Edi'), falls für DIESE Aufgabe jemand als zuständig genannt ist; sonst null (dann bleibt der Punkt allgemein für die Runde). Achtung: eine Person, die BEARBEITET wird (Bewerber, der kontaktiert/eingesetzt wird), ist NICHT der owner." },
             due_date: { type: ["string", "null"], description: "Fälligkeit als YYYY-MM-DD, aus einer Frist im Text (auch relativ: 'bis Freitag', 'Monatsende', 'nächste Woche') relativ zu HEUTE aufgelöst; sonst null" },
             target_n: { type: ["number", "null"], description: "ZIEL als Zahl, wenn ein Mengenziel genannt ist (z. B. '10 Leute einstellen' -> 10); sonst null" },
             actual_n: { type: ["number", "null"], description: "IST/geschafft als Zahl, wenn genannt (z. B. 'es wurden 6' -> 6); sonst null. So erkennt das System: offen = Ziel minus Ist." },
@@ -83,6 +82,7 @@ function todayIso(): string {
   return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate());
 }
 
+let LAST_STOP = "";
 async function callClaude(system: string, userText: string, tool: any, toolName: string, maxTokens: number) {
   const resp = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -91,6 +91,7 @@ async function callClaude(system: string, userText: string, tool: any, toolName:
   });
   const data = await resp.json();
   if (!resp.ok) throw new Error(data?.error?.message || ("HTTP " + resp.status));
+  LAST_STOP = String(data?.stop_reason || "");
   const t = (data.content || []).find((c: any) => c.type === "tool_use");
   if (!t) throw new Error("Keine verwertbare Antwort.");
   return t.input || {};
@@ -120,15 +121,7 @@ Deno.serve(async (req) => {
     const bereiche: string[] = Array.isArray(body?.bereiche) ? body.bereiche.filter((x: any) => typeof x === "string") : [];
     if (!text) return json({ error: "Kein Protokoll übergeben." }, 400);
 
-    // Mitarbeiter-Roster für den Namensabgleich (über RLS des angemeldeten Users, maskierte Lite-View).
-    // Beendete/abgelehnte raus, damit die Zuordnung eindeutiger bleibt. 1-basierte Nummern statt uuid (keine Halluzination).
-    const EXCLUDED = new Set(["rejected_by_us", "rejected_by_employee", "rejected_by_client", "blacklist", "terminated_by_us", "terminated_by_employee", "parking"]);
-    const { data: emps } = await sb.from("employees_masked_lite").select("id,first_name,last_name,status").limit(1000);
-    const roster = (Array.isArray(emps) ? emps : [])
-      .filter((e: any) => e && (e.first_name || e.last_name) && !EXCLUDED.has(String(e.status || "")))
-      .map((e: any, i: number) => ({ n: i + 1, id: e.id, name: ((e.first_name || "") + " " + (e.last_name || "")).trim() }));
-    const rosterTxt = roster.length ? roster.map((r) => r.n + ") " + r.name).join("\n") : "(keine Mitarbeiterliste verfügbar)";
-
+    // Extraktion OHNE Roster im Prompt (schlank und zuverlässig). Der Namensabgleich passiert danach serverseitig.
     const system =
       "Du bereitest den Freitext eines Management-Calls auf. Das ist die EINZIGE Eingabe des Teams — alles andere " +
       "leitest du ab. Mach daraus: (1) eine kurze Zusammenfassung, (2) die nachverfolgbaren Punkte (Aufgaben, " +
@@ -137,30 +130,44 @@ Deno.serve(async (req) => {
       "- Nimm NUR, was im Text steht. Erfinde nichts, keine Namen, Fristen oder Zahlen, die nicht dastehen.\n" +
       "- Gruppiere sinnvoll: bevorzugt eine Gruppe aus dieser Liste — " + (bereiche.length ? bereiche.join(", ") : "(keine Liste vorgegeben)") + " —, " +
       "passt keine, bilde eine kurze eigene Gruppe. Verwandte Punkte in dieselbe Gruppe.\n" +
-      "- ZUSTÄNDIGKEIT: Erkenne aus dem Text, wer zuständig ist ('Edi macht das', 'Ylli klärt das', 'Shkurte prüft das'). " +
-      "Setze owner auf den Namen wie geschrieben. Gleiche ihn gegen die MITARBEITER-Liste ab (auch Kurzformen, z. B. 'Edi' -> 'Edinela …') " +
-      "und setze owner_ref auf die passende NUMMER. Nur bei eindeutiger Zuordnung; bei mehreren Möglichen owner_ref=0. " +
-      "Steht KEIN Name, bleibt der Punkt allgemein (owner=null, owner_ref=0) — das ist richtig so.\n" +
-      "- ZAHLEN erkennen: Steht ein Mengenziel und ein Ergebnis (z. B. '10 Leute einstellen, es wurden 6'), setze " +
-      "target_n=10 und actual_n=6. Das System rechnet daraus den Rest (4 offen). Nur wenn die Zahlen wirklich dastehen.\n" +
-      "- FRISTEN: Wandle auch relative Angaben in ein Datum (YYYY-MM-DD), relativ zu HEUTE = " + todayIso() + ". " +
-      "Beispiele: 'bis Freitag' = der kommende Freitag; 'nächste Woche' = Montag der Folgewoche; 'Monatsende' = letzter Tag des aktuellen Monats; " +
-      "'in zwei Wochen' = HEUTE + 14 Tage. Ohne Frist im Text: due_date=null.\n\n" +
-      "MITARBEITER (für owner_ref, Nummer -> Person):\n" + rosterTxt;
+      "- ZUSTÄNDIGKEIT: Wird für eine Aufgabe eine zuständige Person genannt ('Edi macht das', 'Ylli klärt das'), setze owner auf den Namen " +
+      "wie geschrieben. Wird eine Person nur BEARBEITET (Bewerber, der kontaktiert oder eingesetzt wird), ist sie NICHT owner -> owner=null. " +
+      "Steht keine zuständige Person, owner=null (Punkt bleibt allgemein). Der Abgleich mit den Mitarbeiterdaten geschieht danach automatisch.\n" +
+      "- ZAHLEN: Mengenziel + Ergebnis ('10 einstellen, es wurden 6') -> target_n=10, actual_n=6 (System rechnet 4 offen). Nur wenn Zahlen dastehen.\n" +
+      "- FRISTEN: Auch relative Angaben in ein Datum (YYYY-MM-DD) wandeln, relativ zu HEUTE = " + todayIso() + ". " +
+      "'bis Freitag' = kommender Freitag; 'nächste Woche' = Montag der Folgewoche; 'Monatsende' = letzter Tag des aktuellen Monats; " +
+      "'in zwei Wochen' = HEUTE + 14 Tage. Ohne Frist: due_date=null.";
     let out: any;
-    try { out = await callClaude(system, "FREITEXT DES CALLS:\n" + text.slice(0, 12000), EXTRACT_TOOL, "punkte", 2800); }
+    try { out = await callClaude(system, "FREITEXT DES CALLS:\n" + text.slice(0, 12000), EXTRACT_TOOL, "punkte", 8000); }
     catch (e) { return json({ error: "Die KI ist gerade nicht erreichbar: " + (e as Error).message }, 502); }
+    if (LAST_STOP === "max_tokens") return json({ error: "Der Text war für einen Durchgang zu lang. Bitte etwas kürzen oder in zwei Calls aufteilen." }, 502);
     const num = (v: any) => (typeof v === "number" && isFinite(v)) ? v : null;
-    const byN = new Map(roster.map((r) => [r.n, r]));
+
+    // Namensabgleich serverseitig (deterministisch, kein LLM): owner-Name -> Mitarbeiter-Datensatz.
+    const EXCLUDED = new Set(["rejected_by_us", "rejected_by_employee", "rejected_by_client", "blacklist", "terminated_by_us", "terminated_by_employee", "parking"]);
+    const { data: emps } = await sb.from("employees_masked_lite").select("id,first_name,last_name,status").limit(2000);
+    const roster = (Array.isArray(emps) ? emps : [])
+      .filter((e: any) => e && (e.first_name || e.last_name) && !EXCLUDED.has(String(e.status || "")))
+      .map((e: any) => ({ id: e.id, first: String(e.first_name || ""), last: String(e.last_name || ""), full: ((e.first_name || "") + " " + (e.last_name || "")).trim() }));
+    const norm = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim();
+    const matchOwner = (raw: string) => {
+      const q = norm(raw); if (!q) return null;
+      let m = roster.filter((r) => norm(r.full) === q); if (m.length === 1) return m[0];   // ganzer Name
+      m = roster.filter((r) => norm(r.first) === q); if (m.length === 1) return m[0];        // exakter Vorname
+      if (q.length >= 3) { m = roster.filter((r) => norm(r.first).startsWith(q)); if (m.length === 1) return m[0]; }  // Kurzform 'Edi'->'Edinela', nur eindeutig
+      // Vorname als erstes Wort der Nennung (z. B. 'Edi Krasniqi' -> Vorname 'Edi')
+      const firstTok = q.split(" ")[0];
+      if (firstTok.length >= 3) { m = roster.filter((r) => norm(r.first) === firstTok || norm(r.first).startsWith(firstTok)); if (m.length === 1) return m[0]; }
+      return null;
+    };
     const items = (Array.isArray(out.items) ? out.items : [])
       .filter((it: any) => it && String(it.text || "").trim())
       .map((it: any) => {
         const ber = (it.bereich && String(it.bereich).trim()) || "";
         const due = typeof it.due_date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(it.due_date) ? it.due_date : null;
-        const ref = (typeof it.owner_ref === "number" && it.owner_ref > 0) ? byN.get(it.owner_ref) : null;
         const rawOwner = (it.owner && String(it.owner).trim()) || null;
-        // Bei Treffer: kanonischer Name + verknüpfte Mitarbeiter-ID. Sonst: Name wie geschrieben, kein Link.
-        return { text: String(it.text).trim(), bereich: ber, owner: ref ? ref.name : rawOwner, owner_employee_id: ref ? ref.id : null, due_date: due, target_n: num(it.target_n), actual_n: num(it.actual_n) };
+        const hit = rawOwner ? matchOwner(rawOwner) : null;
+        return { text: String(it.text).trim(), bereich: ber, owner: hit ? hit.full : rawOwner, owner_employee_id: hit ? hit.id : null, due_date: due, target_n: num(it.target_n), actual_n: num(it.actual_n) };
       });
     return json({ ok: true, summary: String(out.zusammenfassung || "").trim(), items });
   }
@@ -196,7 +203,7 @@ Deno.serve(async (req) => {
       "OFFENE / TEILWEISE PUNKTE:\n" + (openTxt || "(keine)") + "\n\n" +
       "ERLEDIGTE PUNKTE:\n" + (doneTxt || "(keine)");
     let out: any;
-    try { out = await callClaude(system, userText.slice(0, 26000), ANALYZE_TOOL, "auswertung", 1900); }
+    try { out = await callClaude(system, userText.slice(0, 26000), ANALYZE_TOOL, "auswertung", 3000); }
     catch (e) { return json({ error: "Die KI ist gerade nicht erreichbar: " + (e as Error).message }, 502); }
     const arr = (v: any) => Array.isArray(v) ? v : [];
     return json({
