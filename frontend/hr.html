@@ -39632,6 +39632,7 @@ function UploadMatrixView({team, projects}){
 const UPLOAD_LABEL={}; UPLOAD_SOURCES.forEach(s=>{ UPLOAD_LABEL[s.key]=s.label; });
 const UPLOAD_FILE={}; UPLOAD_SOURCES.forEach(s=>{ UPLOAD_FILE[s.key]=s.file; });
 let UPLOAD_JUMP=null;   // {projId, source} — Upload-Status → Datenimport (Projekt/Quelle vorwählen)
+let MGMTCALL_JUMP=null; // {date, title} — Kalendertermin → Management-Calls (passenden Call öffnen/anlegen)
 const UPLOAD_BUCKET_META={
   overdue:{label:'Überfällig',          dot:'#dc2626', bg:'#fef2f2', bd:'#fecaca'},
   today:  {label:'Heute fällig',        dot:'#d97706', bg:'#fffbeb', bd:'#fde68a'},
@@ -42670,7 +42671,7 @@ function MaxDaySummary({team, employees, events, overrides}){
     </div>
   </div>;
 }
-function CalendarView({team, projects, employees, showToast, isMobileW, jumpTo, onJumpConsumed}){
+function CalendarView({team, projects, employees, showToast, isMobileW, jumpTo, onJumpConsumed, onNavigate}){
   const [events,setEvents]=useState([]);
   const [overrides,setOverrides]=useState({});   // `${event_id}|${date}` -> row
   const [loading,setLoading]=useState(true);
@@ -42920,6 +42921,11 @@ function CalendarView({team, projects, employees, showToast, isMobileW, jumpTo, 
             {it.ev.meeting_url&&<a href={it.ev.meeting_url} target="_blank" rel="noopener noreferrer"
               style={{display:'inline-flex',alignItems:'center',gap:8,marginBottom:12,padding:'10px 16px',borderRadius:8,background:'#5059C9',color:'#fff',fontSize:14,fontWeight:700,textDecoration:'none'}}>
               🎥 Meeting beitreten</a>}
+            {/* Zweiter Weg zu den Management-Call-Notizen: direkt aus dem Termin (nur die 4er-Freigabeliste, nur Management-Weekly). */}
+            {!!(team&&team.isMgmtCall)&&it.ev.title&&/management\s*weekly/i.test(it.ev.title)&&<button
+              onClick={()=>{ MGMTCALL_JUMP={date:String(it.date).slice(0,10), title:it.ev.title}; setDetail(null); onNavigate&&onNavigate({kind:'view',view:'mgmtcalls'}); }}
+              style={{display:'inline-flex',alignItems:'center',gap:8,marginLeft:it.ev.meeting_url?8:0,marginBottom:12,padding:'10px 16px',borderRadius:8,background:'#0F5661',color:'#fff',fontSize:14,fontWeight:700,border:'none',cursor:'pointer'}}>
+              📝 Notizen öffnen</button>}
             {dn&&<div style={{fontSize:12,color:'#15803d',marginBottom:10}}>✓ erledigt von {it.ov.done_by_name||'jemandem'}</div>}
             <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
               <button className="btn btn-sm" style={dn?{}:{background:'#0F5661',color:'#fff'}} disabled={busy} onClick={()=>toggleDone(it.ev,it.date,it.ov)}>{dn?'✓ Erledigt':'○ Erledigen'}</button>
@@ -44921,11 +44927,17 @@ function MgmtCallsView({team, showToast}){
   const MON=['Januar','Februar','März','April','Mai','Juni','Juli','August','September','Oktober','November','Dezember'];
   const monLabel=k=>{ const [y,m]=k.split('-'); return MON[(+m)-1]+' '+y; };
   const isOverdue=it=> it.status!=='done' && it.due_date && it.due_date < TODAY;
-  const loadCalls=async()=>{ try{ const {data}=await sb.from('mgmt_calls').select('id,call_date,title,body,created_by_name,created_at').order('call_date',{ascending:false}).order('created_at',{ascending:false}); setCalls(data||[]); }catch(e){ setCalls([]); } };
+  const loadCalls=async()=>{ try{ const {data}=await sb.from('mgmt_calls').select('id,call_date,title,body,summary,created_by_name,created_at').order('call_date',{ascending:false}).order('created_at',{ascending:false}); setCalls(data||[]); }catch(e){ setCalls([]); } };
   const loadItems=async()=>{ try{ const {data}=await sb.from('mgmt_call_items').select('*').order('seq',{ascending:true}).order('created_at',{ascending:true}); setItems(data||[]); }catch(e){ setItems([]); } };
   React.useEffect(()=>{ if(!allowed) return;
     loadCalls(); loadItems();
     (async()=>{ try{ const {data}=await sb.from('app_config').select('value').eq('key','jsr_mgmt_bereiche_v1').maybeSingle(); const b=data&&data.value&&Array.isArray(data.value.bereiche)?data.value.bereiche:null; if(b&&b.length) setBereiche(b); }catch(e){} })();
+    // Sprung aus dem Kalendertermin: passenden Call öffnen — oder mit Datum/Titel vorbelegt anlegen.
+    const j=MGMTCALL_JUMP; if(j){ MGMTCALL_JUMP=null; (async()=>{
+      try{ const {data}=await sb.from('mgmt_calls').select('id,call_date,title,body,summary,created_by_name,created_at').eq('call_date',j.date).order('created_at',{ascending:false}).limit(1);
+        if(data&&data.length) setSel(data[0]); else setSel({__new:true, call_date:j.date, title:j.title||'', body:''});
+      }catch(e){ setSel({__new:true, call_date:j.date, title:j.title||'', body:''}); }
+    })(); }
   },[]);
   if(!allowed) return <div style={{padding:24,color:'var(--muted)'}}>Dieser Bereich ist der Management-Call-Freigabeliste vorbehalten.</div>;
 
@@ -45027,8 +45039,10 @@ function MgmtCallsView({team, showToast}){
       if(error){ let m=error.message||'Fehler'; try{ const j=await error.context.json(); if(j&&j.error) m=j.error; }catch(_e){} throw new Error(m); }
       if(!data||data.ok!==true) throw new Error((data&&data.error)||'Fehlgeschlagen');
       const items=(data.items||[]).filter(it=>it&&(it.text||'').trim()).map(it=>({...it, owner:it.owner||'', due_date:it.due_date||'', target_n:it.target_n==null?'':it.target_n, actual_n:it.actual_n==null?'':it.actual_n, __pick:true}));
-      setSugg({busy:false, items, summary:data.summary||''});
-      if(!items.length&&!data.summary) showToast&&showToast('Kein verwertbarer Inhalt erkannt.','info');
+      const summary=(data.summary||'').trim();
+      // Nichts Verwertbares (leere KI-Antwort) -> Panel gar nicht öffnen, sondern zum erneuten Verarbeiten auffordern.
+      if(!items.length&&!summary){ setSugg(null); showToast&&showToast('Kein verwertbarer Inhalt erkannt. Bitte „Text verarbeiten" nochmal anklicken.','info'); return; }
+      setSugg({busy:false, items, summary});
     }catch(e){ setSugg(null); showToast&&showToast('KI: '+((e&&e.message)||e),'error'); }
   };
   const acceptSugg=async()=>{
@@ -46275,7 +46289,7 @@ function App(){
           {VIEW_AGENT[view]&&<AgentPresence agentKey={VIEW_AGENT[view]} onOpen={()=>setView('agents')}/>}
           {view==='start'&&<WelcomePage firstName={firstName}/>}
           {view==='daily_tasks'&&<DailyTasksView employees={employees} projects={projects} plans={plans} team={team} onNavigate={dqNavigate} isMobileW={isMobileW} catalog={taskCatalog}/>}
-          {view==='calendar'&&<CalendarView team={team} projects={projects} employees={employees} showToast={showToast} isMobileW={isMobileW} jumpTo={calNav} onJumpConsumed={()=>setCalNav(null)}/>}
+          {view==='calendar'&&<CalendarView team={team} projects={projects} employees={employees} showToast={showToast} isMobileW={isMobileW} jumpTo={calNav} onJumpConsumed={()=>setCalNav(null)} onNavigate={dqNavigate}/>}
           {view==='meetingnotes'&&<MeetingNotesView team={team} projects={projects} employees={employees} showToast={showToast} isMobileW={isMobileW}/>}
           {view==='agents'&&<AgentsView team={team} onNavigate={dqNavigate}/>}
           {view==='cockpit'&&<Cockpit employees={employees} projects={projects} team={team} plans={plans} forecast={forecast} onAbsence={e=>setAbsenceModal(e)} onNavigate={dqNavigate} isMobileW={isMobileW} setEmployees={setEmployees} showToast={showToast}/>}
