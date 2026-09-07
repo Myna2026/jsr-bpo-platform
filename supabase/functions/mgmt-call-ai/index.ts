@@ -34,6 +34,7 @@ const EXTRACT_TOOL = {
           type: "object",
           properties: {
             text: { type: "string", description: "der Punkt kurz und klar (was ist zu tun / was wurde vorgenommen), aus dem Protokoll" },
+            quote: { type: "string", description: "die Fundstelle: das WÖRTLICHE, zusammenhängende Textstück aus dem Freitext, aus dem dieser Punkt stammt — Zeichen für Zeichen exakt kopiert (damit es im Text markiert werden kann). Kein Umschreiben, keine Auslassungen." },
             bereich: { type: "string", description: "die sinnvolle Gruppe. Bevorzugt eine aus der vorgegebenen Liste; passt keine, bilde eine kurze eigene. Nie leer, wenn eine Gruppe erkennbar ist." },
             owner: { type: ["string", "null"], description: "die zuständige Person genau so, wie im Text genannt (z. B. 'Edi'), falls für DIESE Aufgabe jemand als zuständig genannt ist; sonst null (dann bleibt der Punkt allgemein für die Runde). Achtung: eine Person, die BEARBEITET wird (Bewerber, der kontaktiert/eingesetzt wird), ist NICHT der owner." },
             due_date: { type: ["string", "null"], description: "Fälligkeit als YYYY-MM-DD, aus einer Frist im Text (auch relativ: 'bis Freitag', 'Monatsende', 'nächste Woche') relativ zu HEUTE aufgelöst; sonst null" },
@@ -130,6 +131,7 @@ Deno.serve(async (req) => {
       "- Nimm NUR, was im Text steht. Erfinde nichts, keine Namen, Fristen oder Zahlen, die nicht dastehen.\n" +
       "- Gruppiere sinnvoll: bevorzugt eine Gruppe aus dieser Liste — " + (bereiche.length ? bereiche.join(", ") : "(keine Liste vorgegeben)") + " —, " +
       "passt keine, bilde eine kurze eigene Gruppe. Verwandte Punkte in dieselbe Gruppe.\n" +
+      "- FUNDSTELLE: Gib zu jedem Punkt in 'quote' das wörtliche, zusammenhängende Textstück aus dem Freitext an, aus dem er stammt — Zeichen für Zeichen exakt kopiert (für die Markierung im Text). Nicht umschreiben.\n" +
       "- ZUSTÄNDIGKEIT: Wird für eine Aufgabe eine zuständige Person genannt ('Edi macht das', 'Ylli klärt das'), setze owner auf den Namen " +
       "wie geschrieben. Wird eine Person nur BEARBEITET (Bewerber, der kontaktiert oder eingesetzt wird), ist sie NICHT owner -> owner=null. " +
       "Steht keine zuständige Person, owner=null (Punkt bleibt allgemein). Der Abgleich mit den Mitarbeiterdaten geschieht danach automatisch.\n" +
@@ -167,7 +169,8 @@ Deno.serve(async (req) => {
         const due = typeof it.due_date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(it.due_date) ? it.due_date : null;
         const rawOwner = (it.owner && String(it.owner).trim()) || null;
         const hit = rawOwner ? matchOwner(rawOwner) : null;
-        return { text: String(it.text).trim(), bereich: ber, owner: hit ? hit.full : rawOwner, owner_employee_id: hit ? hit.id : null, due_date: due, target_n: num(it.target_n), actual_n: num(it.actual_n) };
+        const quote = (typeof it.quote === "string" && it.quote.trim()) ? it.quote.trim() : null;
+        return { text: String(it.text).trim(), quote, bereich: ber, owner: hit ? hit.full : rawOwner, owner_employee_id: hit ? hit.id : null, due_date: due, target_n: num(it.target_n), actual_n: num(it.actual_n) };
       });
     return json({ ok: true, summary: String(out.zusammenfassung || "").trim(), items });
   }
