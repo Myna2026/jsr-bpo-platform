@@ -7980,6 +7980,11 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW, catal
 
   const [done,setDone] = useState({});     // {task_key:{done_by_name,done_at}}
   const [uid,setUid]   = useState(null);
+  const [myAssigned,setMyAssigned] = useState(null);   // direkt an mich verteilte Einzelaufgaben (mgmt_task_out); neutral, ohne Herkunft
+  useEffect(()=>{ if(!uid) return; let a=true;
+    (async()=>{ try{ const {data}=await sb.from('mgmt_task_out').select('id,text,context,due_date,status').eq('assignee_user',uid).eq('status','open').order('due_date',{ascending:true}); if(a) setMyAssigned(data||[]); }catch(e){ if(a) setMyAssigned([]); } })();
+    return ()=>{a=false;}; },[uid]);
+  const markAssignedDone=async(t)=>{ try{ const {error}=await sb.from('mgmt_task_out').update({status:'done'}).eq('id',t.id); if(error) throw error; setMyAssigned(l=>(l||[]).filter(x=>x.id!==t.id)); }catch(e){} };
   const [cvCount,setCvCount] = useState(null);        // gesamter CV-Funnel
   const [cvInbound,setCvInbound] = useState(null);    // nur Posteingang (cv_inbound)
   const [cvInterview,setCvInterview] = useState(null);// eingeladen + Gespräch
@@ -8190,6 +8195,24 @@ function DailyTasksView({employees, projects, onNavigate, team, isMobileW, catal
       </div>
       {/* Meine Upload-Pflichten (nur wo ich zuständig bin) — zuoberst, weil zeitkritisch. */}
       <UploadDutyPanel projects={projects} onNavigate={onNavigate}/>
+      {/* Direkt an mich verteilte Einzelaufgaben. Neutral, ohne Herkunft. */}
+      {myAssigned&&myAssigned.length>0&&<div className="card" style={{marginBottom:28,padding:0,overflow:'hidden'}}>
+        <div style={{padding:'12px 16px',borderBottom:'1px solid var(--border)',display:'flex',alignItems:'center',gap:8}}>
+          <span style={{fontSize:15,fontWeight:800}}>📌 Direkt an dich</span>
+          <span style={{fontSize:12,fontWeight:700,color:'#fff',background:'#4338ca',borderRadius:20,padding:'1px 9px'}}>{myAssigned.length}</span>
+        </div>
+        <div style={{padding:'4px 16px 10px'}}>
+          {myAssigned.map((t,i)=>{ const od=t.due_date&&t.due_date<today;
+            return <div key={t.id} style={{display:'flex',gap:12,alignItems:'flex-start',padding:'11px 0',borderTop:i?'1px solid var(--border)':'none'}}>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontSize:14.5,fontWeight:600}}>{t.text}</div>
+                {t.context&&<div style={{fontSize:12.5,color:'var(--muted)',marginTop:2}}>{t.context}</div>}
+                {t.due_date&&<div style={{fontSize:12,marginTop:3,color:od?'#dc2626':'var(--muted)',fontWeight:od?700:400}}>📅 bis {new Date(t.due_date+'T00:00:00').toLocaleDateString('de-DE')}{od?' · überfällig':''}</div>}
+              </div>
+              <button className="btn btn-sm" style={{background:'#0F5661',color:'#fff',flexShrink:0}} onClick={()=>markAssignedDone(t)}>○ Erledigen</button>
+            </div>; })}
+        </div>
+      </div>}
       {/* MANAGER: Zusammenschau ganz oben, groß und präsent — womit man morgens den Stand erfasst. */}
       {isManager&&(
         <div style={{marginBottom:TASKS.length>0?28:8}}>
@@ -44920,6 +44943,9 @@ function MgmtCallsView({team, showToast}){
   const [ni,setNi]=React.useState({bereich:'',text:'',owner:'',due_date:''});   // Entwurf neuer Punkt
   const [sugg,setSugg]=React.useState(null);      // M3: KI-Vorschläge aus dem Protokoll {busy, items[]}
   const [ana,setAna]=React.useState(null);        // M4: KI-Auswertung {busy, data, err}
+  const [assignees,setAssignees]=React.useState([]);   // app_users, an die man Aufgaben verteilen kann
+  const [taskOut,setTaskOut]=React.useState([]);       // mgmt_task_out (verteilte Aufgaben)
+  const [assignFor,setAssignFor]=React.useState(null); // {itemId, assignee_user, text, context, due_date} während des Zuweisens
   const p2=n=>String(n).padStart(2,'0');
   const isoToday=()=>{ const d=new Date(); return d.getFullYear()+'-'+p2(d.getMonth()+1)+'-'+p2(d.getDate()); };
   const TODAY=isoToday();
@@ -44929,8 +44955,10 @@ function MgmtCallsView({team, showToast}){
   const isOverdue=it=> it.status!=='done' && it.due_date && it.due_date < TODAY;
   const loadCalls=async()=>{ try{ const {data}=await sb.from('mgmt_calls').select('id,call_date,title,body,summary,created_by_name,created_at').order('call_date',{ascending:false}).order('created_at',{ascending:false}); setCalls(data||[]); }catch(e){ setCalls([]); } };
   const loadItems=async()=>{ try{ const {data}=await sb.from('mgmt_call_items').select('*').order('seq',{ascending:true}).order('created_at',{ascending:true}); setItems(data||[]); }catch(e){ setItems([]); } };
+  const loadTaskOut=async()=>{ try{ const {data}=await sb.from('mgmt_task_out').select('id,item_id,assignee_user,status,text,due_date,created_at').order('created_at',{ascending:false}); setTaskOut(data||[]); }catch(e){ setTaskOut([]); } };
+  const loadAssignees=async()=>{ try{ const {data}=await sb.from('app_users').select('user_id,full_name,role_keys').eq('active',true).order('full_name'); setAssignees((data||[]).filter(u=>u.full_name)); }catch(e){ setAssignees([]); } };
   React.useEffect(()=>{ if(!allowed) return;
-    loadCalls(); loadItems();
+    loadCalls(); loadItems(); loadTaskOut(); loadAssignees();
     (async()=>{ try{ const {data}=await sb.from('app_config').select('value').eq('key','jsr_mgmt_bereiche_v1').maybeSingle(); const b=data&&data.value&&Array.isArray(data.value.bereiche)?data.value.bereiche:null; if(b&&b.length) setBereiche(b); }catch(e){} })();
     // Sprung aus dem Kalendertermin: passenden Call öffnen — oder mit Datum/Titel vorbelegt anlegen.
     const j=MGMTCALL_JUMP; if(j){ MGMTCALL_JUMP=null; (async()=>{
@@ -45008,6 +45036,22 @@ function MgmtCallsView({team, showToast}){
     if(error){ showToast&&showToast('Fehler: '+((error&&error.message)||error),'error'); return; }
     await loadItems();
   };
+  // T2/T3: Aufgabe aus einem Punkt an eine Person verteilen. Nur die Aufgabe geht raus (neutral, kein Herkunftshinweis).
+  const assigneeName=uid=>{ const u=assignees.find(a=>a.user_id===uid); return u?u.full_name:'jemand'; };
+  const openAssign=it=>setAssignFor({itemId:it.id, assignee_user:'', text:it.text||'', context:'', due_date:it.due_date||''});
+  const saveAssign=async()=>{
+    const a=assignFor; if(!a) return;
+    if(!a.assignee_user){ showToast&&showToast('Bitte eine Person wählen.','error'); return; }
+    if(!(a.text||'').trim()){ showToast&&showToast('Bitte den Aufgabentext angeben.','error'); return; }
+    setBusy('assign');
+    try{ const uid=(team&&team.user_id)||null, nm=(team&&team.name)||null;
+      const {error}=await sb.from('mgmt_task_out').insert({ item_id:a.itemId, assignee_user:a.assignee_user, text:a.text.trim(), context:(a.context||'').trim()||null, due_date:a.due_date||null, created_by:uid, created_by_name:nm });
+      if(error) throw error;
+      setAssignFor(null); await loadTaskOut(); showToast&&showToast('Aufgabe an '+assigneeName(a.assignee_user)+' verteilt','success');
+    }catch(e){ showToast&&showToast('Fehler: '+((e&&e.message)||e),'error'); }
+    setBusy('');
+  };
+  const unassign=async(t)=>{ if(!(await uiConfirm('Diese zugewiesene Aufgabe zurückziehen?'))) return; try{ const {error}=await sb.from('mgmt_task_out').delete().eq('id',t.id); if(error) throw error; await loadTaskOut(); showToast&&showToast('Zurückgezogen'); }catch(e){ showToast&&showToast('Fehler','error'); } };
   // R4 Wiedervorlage: die offenen/teilweisen Punkte der letzten Sitzung in diesen Call holen (mit Herkunftskette).
   const carryForward=async()=>{
     if(!sel||sel.__new){ showToast&&showToast('Erst den Call anlegen.','error'); return; }
@@ -45132,6 +45176,32 @@ function MgmtCallsView({team, showToast}){
             {showCall&&call&&<span onClick={()=>openCall(call)} style={{cursor:'pointer',textDecoration:'underline'}}>aus Call {fmtDate(call.call_date)}</span>}
           </div>
           {progressBlock(it)}
+          {/* T2: verteilte Aufgaben + zuweisen. Nur die Aufgabe geht raus, nie die Notiz. */}
+          {(()=>{ const mine=taskOut.filter(t=>t.item_id===it.id);
+            return <div style={{marginTop:6,display:'flex',gap:7,flexWrap:'wrap',alignItems:'center'}}>
+              {mine.map(t=><span key={t.id} style={{display:'inline-flex',alignItems:'center',gap:5,fontSize:11.5,fontWeight:700,padding:'2px 8px',borderRadius:8,background:t.status==='done'?'#ecfdf5':'#eef2ff',color:t.status==='done'?'#059669':'#4338ca'}}>→ {assigneeName(t.assignee_user)} · {t.status==='done'?'erledigt':'offen'}<span onClick={()=>unassign(t)} title="zurückziehen" style={{cursor:'pointer',opacity:.6}}>✕</span></span>)}
+              {!done&&<button onClick={()=>openAssign(it)} style={{border:'none',background:'transparent',color:'var(--accent,#2563eb)',cursor:'pointer',fontSize:12,fontWeight:700,padding:0}}>→ Aufgabe zuweisen</button>}
+            </div>; })()}
+          {assignFor&&assignFor.itemId===it.id&&<div style={{marginTop:8,padding:12,border:'1px dashed var(--accent,#2563eb)',borderRadius:9,background:'color-mix(in srgb, var(--accent,#2563eb) 5%, var(--card))'}}>
+            <div style={{fontSize:12,fontWeight:800,marginBottom:2}}>Aufgabe verteilen</div>
+            <div style={{fontSize:11,color:'var(--muted)',marginBottom:8}}>Der Empfänger sieht nur diese Aufgabe in seinen Tagesaufgaben, ohne Herkunft. Text neutral halten (z. B. „Elvis Bajrami kontaktieren").</div>
+            <div style={{display:'flex',flexDirection:'column',gap:7}}>
+              <select value={assignFor.assignee_user} onChange={e=>setAssignFor({...assignFor,assignee_user:e.target.value})} style={inp}>
+                <option value="">Person wählen…</option>
+                {assignees.map(u=><option key={u.user_id} value={u.user_id}>{u.full_name}</option>)}
+              </select>
+              <input value={assignFor.text} onChange={e=>setAssignFor({...assignFor,text:e.target.value})} placeholder="Aufgabentext (neutral)" style={{...inp,fontWeight:600}}/>
+              <div style={{display:'flex',gap:7,flexWrap:'wrap',alignItems:'center'}}>
+                <input value={assignFor.context} onChange={e=>setAssignFor({...assignFor,context:e.target.value})} placeholder="Kontext (optional, so weit nötig)" style={{...inp,flex:'1 1 200px'}}/>
+                <label style={{fontSize:12,color:'var(--muted)'}}>bis</label>
+                <input type="date" value={assignFor.due_date} onChange={e=>setAssignFor({...assignFor,due_date:e.target.value})} style={{...inp,flex:'0 0 160px',width:160}}/>
+              </div>
+              <div style={{display:'flex',gap:8}}>
+                <button onClick={saveAssign} disabled={busy==='assign'} style={btn('var(--accent,#2563eb)','#fff')}>{busy==='assign'?'Verteile…':'Verteilen'}</button>
+                <button onClick={()=>setAssignFor(null)} style={btn('transparent','var(--fg)')}>Abbrechen</button>
+              </div>
+            </div>
+          </div>}
         </div>
         <div style={{flexShrink:0,display:'flex',flexDirection:'column',gap:6,alignItems:'flex-end'}}>
           {statusPick(it)}
