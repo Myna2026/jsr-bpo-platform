@@ -40113,6 +40113,20 @@ function kbContacts(ans){
   const phones=Array.from(new Set(raw.map(function(s){return s.trim().replace(/[.\s]+$/,'');}).filter(function(s){ var d=s.replace(/\D/g,''); return d.length>=7&&d.length<=16; })));
   return {phones:phones, emails:emails};
 }
+// Ort -> Land, für die Zielgebiet-Gruppierung (Reiseziele der Partner). Neue Orte hier ergänzen; Unbekannte
+// bleiben eigene Top-Gruppe. Steht im zielgebiet schon „Land / Ort", wird das direkt genutzt (kbZgParse).
+const KB_COUNTRY = { rhodos:'Griechenland', kos:'Griechenland', korfu:'Griechenland', kefalonia:'Griechenland', zakynthos:'Griechenland', samos:'Griechenland', chalkidiki:'Griechenland', heraklion:'Griechenland', kreta:'Griechenland', thassos:'Griechenland', 'santorini':'Griechenland',
+  mallorca:'Spanien', ibiza:'Spanien', menorca:'Spanien', teneriffa:'Spanien', 'gran canaria':'Spanien', fuerteventura:'Spanien', lanzarote:'Spanien', 'la palma':'Spanien', barcelona:'Spanien', jerez:'Spanien', malaga:'Spanien', alicante:'Spanien',
+  hurghada:'Ägypten', 'marsa alam':'Ägypten', 'sharm el sheikh':'Ägypten',
+  funchal:'Portugal', algarve:'Portugal', faro:'Portugal', madeira:'Portugal',
+  agadir:'Marokko', marrakesch:'Marokko',
+  antalya:'Türkei', bodrum:'Türkei', dalaman:'Türkei', izmir:'Türkei',
+  cancun:'Mexiko', 'puerto plata':'Dominikanische Republik', 'punta cana':'Dominikanische Republik', 'santo domingo':'Dominikanische Republik',
+  'montego bay':'Jamaika', 'montego bey':'Jamaika', sal:'Kap Verde', 'boa vista':'Kap Verde', djerba:'Tunesien', enfidha:'Tunesien' };
+function kbZgParse(zg){ const s=(zg==null?'':String(zg)).trim(); if(!s) return {country:'Ohne Zielgebiet', place:'Ohne Zielgebiet'};
+  if(s.indexOf('/')>=0){ const parts=s.split('/').map(x=>x.trim()).filter(Boolean); if(parts.length>=2) return {country:parts[0], place:parts.slice(1).join(' / ')}; }
+  const c=KB_COUNTRY[s.toLowerCase()]; return {country:c||s, place:s};
+}
 function kbAnswerText(ans){
   const lines=[]; if(ans&&ans.title) lines.push(ans.title); let n=0;
   ((ans&&ans.blocks)||[]).forEach(function(b){
@@ -40259,6 +40273,8 @@ function WissensspeicherView({projects, team, showToast}){
   const [fq,setFq]=React.useState('');
   const [showArch,setShowArch]=React.useState(false);
   const [editF,setEditF]=React.useState(null);
+  const [regView,setRegView]=React.useState('zielgebiet');   // zielgebiet | thema
+  const [regOpen,setRegOpen]=React.useState({});             // aufgeklappte Gruppen
   const [names,setNames]=React.useState({});
   const KB_INFO_TYPES=[['kontakt','Kontakt / Nummer'],['zeit','Zeit / Dauer'],['ablauf','Ablauf'],['regel','Regel'],['preis','Preis'],['sonstiges','Sonstiges']];
   React.useEffect(()=>{ sb.from('app_users').select('user_id,full_name').then(({data})=>{ const m={}; (data||[]).forEach(u=>{ m[u.user_id]=u.full_name; }); setNames(m); }).catch(()=>{}); },[]);
@@ -40406,9 +40422,41 @@ function WissensspeicherView({projects, team, showToast}){
 
   const factList=(facts||[]).filter(f=> showArch? f.status==='archived' : f.status==='active');
   const factFiltered=factList.filter(f=> !fq.trim() || (((f.topic||'')+' '+(f.zielgebiet||'')+' '+(f.label||'')+' '+(f.value||'')).toLowerCase().includes(fq.trim().toLowerCase())));
-  const factGroups={}; factFiltered.forEach(f=>{ (factGroups[f.topic]=factGroups[f.topic]||[]).push(f); });
-  const factTopics=Object.keys(factGroups).sort((a,b)=>a.localeCompare(b,'de'));
   const archCount=(facts||[]).filter(f=>f.status==='archived').length;
+  // Übersicht (aus allen aktiven Fakten, unabhängig von Suche): Gesamt, je Thema, Zielgebiete
+  const activeFacts=(facts||[]).filter(f=>f.status==='active');
+  const themeCounts={}; activeFacts.forEach(f=>{ const t=f.topic||'Sonstiges'; themeCounts[t]=(themeCounts[t]||0)+1; });
+  const themeList=Object.keys(themeCounts).sort((a,b)=>themeCounts[b]-themeCounts[a]||a.localeCompare(b,'de'));
+  const zgSet={}; activeFacts.forEach(f=>{ const p=kbZgParse(f.zielgebiet).place; if(p!=='Ohne Zielgebiet') zgSet[p]=1; });
+  const zgTotal=Object.keys(zgSet).length;
+  // Thema-Ansicht: gefilterte Fakten je Thema
+  const thGroups={}; factFiltered.forEach(f=>{ const t=f.topic||'Sonstiges'; (thGroups[t]=thGroups[t]||[]).push(f); });
+  const thTopics=Object.keys(thGroups).sort((a,b)=>a.localeCompare(b,'de'));
+  // Zielgebiet-Ansicht: Land -> Ort -> Fakten
+  const zgTree={};
+  factFiltered.forEach(f=>{ const {country,place}=kbZgParse(f.zielgebiet); if(!zgTree[country]) zgTree[country]={count:0,places:{}}; if(!zgTree[country].places[place]) zgTree[country].places[place]=[]; zgTree[country].places[place].push(f); zgTree[country].count++; });
+  const zgCountries=Object.keys(zgTree).sort((a,b)=>a.localeCompare(b,'de'));
+  const isOpen=(k)=> fq.trim()? true : !!regOpen[k];
+  const toggleOpen=(k)=> setRegOpen(o=>({...o,[k]:!o[k]}));
+  const grpHead=(k,name,count,extra)=><div onClick={()=>toggleOpen(k)} style={{display:'flex',alignItems:'center',gap:8,padding:'9px 4px',cursor:'pointer',borderTop:'1px solid var(--border)'}}>
+    <span style={{width:14,color:'var(--muted)',fontSize:11}}>{isOpen(k)?'▾':'▸'}</span>
+    <span style={{fontWeight:700,fontSize:13.5,flex:1,minWidth:0}}>{name}{extra}</span>
+    <span style={{fontSize:11.5,fontWeight:700,color:'var(--muted)',background:'var(--bg)',border:'1px solid var(--border)',borderRadius:20,padding:'1px 9px'}}>{count}</span>
+  </div>;
+  const renderFact=(f)=><div key={f.id} style={{borderTop:'1px solid var(--border)',padding:'8px 0 8px 22px',opacity:showArch?0.75:1}}>
+    <div style={{display:'flex',gap:10,alignItems:'flex-start'}}>
+      <div style={{flex:1,minWidth:0}}>
+        <div style={{fontSize:13.5}}>{f.zielgebiet&&<span style={{background:'var(--bg)',border:'1px solid var(--border)',borderRadius:6,padding:'1px 7px',fontSize:11.5,marginRight:6}}>{f.zielgebiet}</span>}<span style={{fontWeight:700}}>{f.label}</span></div>
+        <div style={{fontSize:13.5,marginTop:2,whiteSpace:'pre-wrap',wordBreak:'break-word'}}>{f.value}</div>
+        {(f.qualifier&&(f.qualifier.saison||f.qualifier.veranstalter))&&<div style={{fontSize:11.5,color:'#b45309',marginTop:2}}>{[f.qualifier.saison&&('Saison: '+f.qualifier.saison), f.qualifier.veranstalter&&('Veranstalter: '+f.qualifier.veranstalter)].filter(Boolean).join(' · ')}</div>}
+        <div style={{fontSize:11,color:'var(--muted)',marginTop:3}}>{factProv(f)}</div>
+      </div>
+      {canEdit&&<div style={{flex:'0 0 auto',display:'flex',gap:6}}>
+        {showArch? <React.Fragment><button className="btn btn-sm" onClick={()=>setFactStatus(f,'active')}>Wiederherstellen</button><button className="btn btn-sm" onClick={()=>purgeFact(f)}>Endgültig</button></React.Fragment>
+         : <React.Fragment><button className="btn btn-sm" onClick={()=>editExisting(f)}>Bearbeiten</button><button className="btn btn-sm" onClick={()=>delFact(f)}>Löschen</button></React.Fragment>}
+      </div>}
+    </div>
+  </div>;
   const qDedup=(arr)=>{ const m={}; (arr||[]).forEach(r=>{ const k=(r.question||'').trim().toLowerCase(); if(!k) return; if(!m[k]) m[k]={question:r.question,count:0,last:r.created_at}; m[k].count++; }); return Object.values(m); };
   const qOpen=qlog? qDedup(qlog.filter(r=>!r.known&&!r.had_rueckfrage)).sort((a,b)=>b.count-a.count) : [];
   const qFalse=qlog? qlog.filter(r=>r.helpful===false) : [];
@@ -40506,9 +40554,12 @@ function WissensspeicherView({projects, team, showToast}){
     {/* Register: durchsehen nach Thema/Zielgebiet, öffnen, korrigieren, von Hand anlegen, löschen, Herkunft sichtbar */}
     {mode==='register'&&<div>
       <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center',marginBottom:12}}>
-        <input value={fq} onChange={e=>setFq(e.target.value)} placeholder="Register durchsuchen (Thema, Zielgebiet, Wert)…" style={{flex:'1 1 260px',padding:'8px 11px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)',fontSize:13.5}}/>
+        <div style={{display:'inline-flex',border:'1px solid var(--border)',borderRadius:8,overflow:'hidden'}}>
+          {[['zielgebiet','Nach Zielgebiet'],['thema','Nach Thema']].map(([k,l])=>{ const on=regView===k; return <button key={k} onClick={()=>setRegView(k)} style={{padding:'8px 12px',border:'none',cursor:'pointer',fontSize:13,fontWeight:on?800:500,background:on?'var(--accent,#0F5661)':'var(--card)',color:on?'#fff':'var(--text)'}}>{l}</button>; })}
+        </div>
+        <input value={fq} onChange={e=>setFq(e.target.value)} placeholder="Suchen (Thema, Zielgebiet, Wert)…" style={{flex:'1 1 220px',padding:'8px 11px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)',fontSize:13.5}}/>
         {canEdit&&<button className="btn btn-primary" onClick={()=>setEditF(blankFact())}>+ Neuer Eintrag</button>}
-        <label style={{fontSize:12.5,color:'var(--muted)',display:'flex',alignItems:'center',gap:6,cursor:'pointer'}}><input type="checkbox" checked={showArch} onChange={e=>{setShowArch(e.target.checked);setEditF(null);}}/> Gelöschte anzeigen{archCount?(' ('+archCount+')'):''}</label>
+        <label style={{fontSize:12.5,color:'var(--muted)',display:'flex',alignItems:'center',gap:6,cursor:'pointer'}}><input type="checkbox" checked={showArch} onChange={e=>{setShowArch(e.target.checked);setEditF(null);}}/> Gelöschte{archCount?(' ('+archCount+')'):''}</label>
       </div>
       {editF&&<div style={{...card,borderColor:'var(--accent,#0F5661)'}}>
         <div style={{fontSize:14,fontWeight:800,marginBottom:10}}>{editF.__new?'Neuer Eintrag':'Eintrag bearbeiten'}</div>
@@ -40531,26 +40582,36 @@ function WissensspeicherView({projects, team, showToast}){
           <button className="btn" disabled={busy==='fact'} onClick={()=>setEditF(null)}>Abbrechen</button>
         </div>
       </div>}
+      {/* Übersicht: Gesamt, je Thema, Zielgebiete */}
+      {!showArch&&activeFacts.length>0&&<div style={{...card,padding:'14px 16px'}}>
+        <div style={{display:'flex',alignItems:'baseline',gap:10,flexWrap:'wrap',marginBottom:10}}>
+          <span style={{fontSize:26,fontWeight:800,color:'var(--text)'}}>{activeFacts.length}</span>
+          <span style={{fontSize:13,color:'var(--muted)'}}>Einträge · {themeList.length} Themen · {zgTotal} Zielgebiete</span>
+        </div>
+        <div style={{display:'flex',flexWrap:'wrap',gap:6}}>
+          {themeList.map(t=><button key={t} onClick={()=>{ setRegView('thema'); setRegOpen(o=>({...o,['th:'+t]:true})); setFq(''); }} title="Zu diesem Thema"
+            style={{fontSize:12,padding:'4px 10px',borderRadius:20,border:'1px solid var(--border)',background:'var(--bg)',color:'var(--text)',cursor:'pointer'}}>{t} <b style={{color:'var(--muted)'}}>{themeCounts[t]}</b></button>)}
+        </div>
+      </div>}
+      {/* Gruppierte, aufklappbare Liste */}
       <div style={card}>
         {facts===null? <div style={{color:'var(--muted)',fontSize:13}}>Lädt…</div>
-         : !factTopics.length? <div style={{color:'var(--muted)',fontSize:13}}>{showArch?'Keine gelöschten Einträge.':(fq.trim()?'Nichts gefunden.':'Noch keine Einträge. Lege den ersten von Hand an oder speise eine Datei ein.')}</div>
-         : factTopics.map(t=><div key={t}>
-            <div style={{fontSize:12,fontWeight:800,textTransform:'uppercase',letterSpacing:'.04em',color:'var(--muted)',marginTop:14,marginBottom:2}}>{t}</div>
-            {factGroups[t].map(f=><div key={f.id} style={{borderTop:'1px solid var(--border)',padding:'8px 0',opacity:showArch?0.75:1}}>
-              <div style={{display:'flex',gap:10,alignItems:'flex-start'}}>
-                <div style={{flex:1,minWidth:0}}>
-                  <div style={{fontSize:13.5}}>{f.zielgebiet&&<span style={{background:'var(--bg)',border:'1px solid var(--border)',borderRadius:6,padding:'1px 7px',fontSize:11.5,marginRight:6}}>{f.zielgebiet}</span>}<span style={{fontWeight:700}}>{f.label}</span></div>
-                  <div style={{fontSize:13.5,marginTop:2,whiteSpace:'pre-wrap',wordBreak:'break-word'}}>{f.value}</div>
-                  {(f.qualifier&&(f.qualifier.saison||f.qualifier.veranstalter))&&<div style={{fontSize:11.5,color:'#b45309',marginTop:2}}>{[f.qualifier.saison&&('Saison: '+f.qualifier.saison), f.qualifier.veranstalter&&('Veranstalter: '+f.qualifier.veranstalter)].filter(Boolean).join(' · ')}</div>}
-                  <div style={{fontSize:11,color:'var(--muted)',marginTop:3}}>{factProv(f)}</div>
-                </div>
-                {canEdit&&<div style={{flex:'0 0 auto',display:'flex',gap:6}}>
-                  {showArch? <React.Fragment><button className="btn btn-sm" onClick={()=>setFactStatus(f,'active')}>Wiederherstellen</button><button className="btn btn-sm" onClick={()=>purgeFact(f)}>Endgültig</button></React.Fragment>
-                   : <React.Fragment><button className="btn btn-sm" onClick={()=>editExisting(f)}>Bearbeiten</button><button className="btn btn-sm" onClick={()=>delFact(f)}>Löschen</button></React.Fragment>}
-                </div>}
-              </div>
-            </div>)}
-          </div>)}
+         : !factFiltered.length? <div style={{color:'var(--muted)',fontSize:13}}>{showArch?'Keine gelöschten Einträge.':(fq.trim()?'Nichts gefunden.':'Noch keine Einträge. Lege den ersten von Hand an oder speise eine Datei ein.')}</div>
+         : regView==='thema'? thTopics.map(t=>{ const k='th:'+t; return <div key={k}>
+             {grpHead(k,t,thGroups[t].length)}
+             {isOpen(k)&&<div>{thGroups[t].map(renderFact)}</div>}
+           </div>; })
+         : zgCountries.map(cn=>{ const ck='zg:'+cn; const places=Object.keys(zgTree[cn].places).sort((a,b)=>a.localeCompare(b,'de')); const single=places.length===1&&places[0]===cn;
+             return <div key={ck}>
+               {grpHead(ck,cn,zgTree[cn].count)}
+               {isOpen(ck)&&<div style={{paddingLeft:14}}>
+                 {single? zgTree[cn].places[places[0]].map(renderFact)
+                  : places.map(pl=>{ const pk=ck+'/'+pl; return <div key={pk}>
+                      {grpHead(pk,pl,zgTree[cn].places[pl].length)}
+                      {isOpen(pk)&&<div>{zgTree[cn].places[pl].map(renderFact)}</div>}
+                    </div>; })}
+               </div>}
+             </div>; })}
       </div>
     </div>}
 
