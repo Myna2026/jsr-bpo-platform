@@ -40313,15 +40313,29 @@ function WissensspeicherView({projects, team, showToast}){
   };
   // Selbst-Katalog (Schnitt 5): nach dem Speichern schlägt kb-catalog Register-Fakten vor, der Mensch bestätigt.
   const [catalog,setCatalog]=React.useState(null);   // {docId,docTitle,loading,proposals,res,truncated,error}
-  const runCatalog=async(docId,docTitle)=>{ setCatalog({docId,docTitle,loading:true,proposals:null});
-    try{ const [cat,ex]=await Promise.all([
-        sb.functions.invoke('kb-catalog',{body:{document_id:docId}}),
+  // Katalog mit sichtbarem Fortschritt: Abschnitte laden -> in Häppchen zerlegen -> je Häppchen einzeln durch die
+  // KI (begrenzt parallel), Fortschritt live anzeigen -> Vorschläge sammeln. So sieht man der KI bei der Arbeit zu.
+  const runCatalog=async(docId,docTitle)=>{ setCatalog({docId,docTitle,loading:true,proposals:null,phase:'lese',done:0,total:0,factCount:0});
+    try{
+      const [chunkRes,ex]=await Promise.all([
+        sb.from('kb_chunks').select('section,page,content').eq('document_id',docId).order('ord'),
         sb.from('kb_facts').select('id,topic,zielgebiet,label,value,qualifier').eq('project_id',partner).eq('status','active')
       ]);
-      if(cat.error){ let m=cat.error.message||'Fehler'; try{ const j=await cat.error.context.json(); if(j&&j.error) m=j.error; }catch(_e){} setCatalog({docId,docTitle,loading:false,proposals:[],error:m}); return; }
-      const props=(cat.data&&cat.data.facts)||[]; const existing=(ex&&ex.data)||[];
+      const chunks=(chunkRes&&chunkRes.data)||[]; const existing=(ex&&ex.data)||[];
+      if(!chunks.length){ setCatalog({docId,docTitle,loading:false,proposals:[],error:'Keine Abschnitte gefunden.'}); return; }
+      // Häppchen bilden (wie im Backend, ~2200 Zeichen)
+      const batches=[]; let curB='';
+      chunks.forEach(c=>{ const marker=c.section||(c.page?('Seite '+c.page):'-'); const line='['+marker+'] '+(c.content||'')+'\n'; if(curB && curB.length+line.length>2200){ batches.push(curB); curB=''; } curB+=line; });
+      if(curB) batches.push(curB);
+      setCatalog(cx=>({...cx, phase:'katalog', chunkCount:chunks.length, total:batches.length, done:0, factCount:0}));
+      // begrenzt parallel, Fortschritt zählt pro fertigem Häppchen hoch
+      const out=new Array(batches.length); let done=0, idx=0; const CONC=Math.min(3,batches.length);
+      const worker=async()=>{ while(idx<batches.length){ const i=idx++; try{ const {data}=await sb.functions.invoke('kb-catalog',{body:{project_id:partner, text:batches[i]}}); out[i]=(data&&Array.isArray(data.facts))?data.facts:[]; }catch(e){ out[i]=[]; }
+        done++; const fc=out.reduce((s,a)=>s+((a&&a.length)||0),0); setCatalog(cx=>(cx&&cx.docId===docId?{...cx,done,factCount:fc}:cx)); } };
+      await Promise.all(Array.from({length:CONC},()=>worker()));
+      const props=[].concat.apply([],out.filter(Boolean));
       const res=props.map(p=>{ const m=kbMatchFact(p,existing); return {status:m.status, match:m.match, choice:'ersetzen', include:m.status==='new', saison:p.saison||'', veranstalter:p.veranstalter||''}; });
-      setCatalog({docId,docTitle,loading:false,proposals:props, res, truncated:!!(cat.data&&cat.data.truncated)});
+      setCatalog({docId,docTitle,loading:false,proposals:props, res, truncated:false});
     }catch(e){ setCatalog({docId,docTitle,loading:false,proposals:[],error:(e&&e.message)||String(e)}); }
   };
   const setRes=(i,patch)=>setCatalog(c=>({...c, res:c.res.map((r,j)=>j===i?{...r,...patch}:r)}));
@@ -40620,7 +40634,12 @@ function WissensspeicherView({projects, team, showToast}){
     {/* Einspeisen */}
     {canEdit ? <div style={card}>
       <div style={{fontSize:14,fontWeight:800,marginBottom:4}}>Datei einspeisen</div>
-      <div style={{fontSize:12.5,color:'var(--muted)',marginBottom:12}}>Excel, CSV, PDF, Word oder Text. Die Datei wird in durchsuchbare Abschnitte zerlegt, du siehst vor dem Speichern die Vorschau. (PDF/Word bis ca. 10 MB; gescannte PDFs ohne Textebene können nicht gelesen werden.)</div>
+      <div style={{fontSize:12.5,color:'var(--muted)',marginBottom:8}}>Excel, CSV, PDF, Word oder Text. (PDF/Word bis ca. 10 MB; gescannte PDFs ohne Textebene können nicht gelesen werden.)</div>
+      <div style={{display:'flex',flexWrap:'wrap',gap:'4px 14px',fontSize:12,color:'var(--muted)',marginBottom:12}}>
+        <span><b style={{color:'var(--text)'}}>1.</b> Datei wählen und Vorschau prüfen</span>
+        <span><b style={{color:'var(--text)'}}>2.</b> Speichern, dann liest Claude die Datei</span>
+        <span><b style={{color:'var(--text)'}}>3.</b> Vorschläge prüfen und ins Register übernehmen</span>
+      </div>
       {!prev ? <div>
         <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv,.txt,.pdf,.docx" onChange={onPick} style={{display:'none'}}/>
         <button className="btn" disabled={busy==='parse'} onClick={()=>fileRef.current&&fileRef.current.click()}>{busy==='parse'?'Lese Datei…':'Datei wählen'}</button>
@@ -40646,9 +40665,22 @@ function WissensspeicherView({projects, team, showToast}){
 
     {/* Selbst-Katalog: Vorschläge fürs Register nach dem Speichern */}
     {catalog&&<div style={{...card,borderColor:'var(--accent,#0F5661)'}}>
-      <div style={{fontSize:14,fontWeight:800,marginBottom:2}}>Vorschläge fürs Register</div>
-      <div style={{fontSize:12.5,color:'var(--muted)',marginBottom:10}}>aus „{catalog.docTitle}" · du entscheidest, was übernommen wird{catalog.truncated?' (großes Dokument, nur der Anfang wurde katalogisiert)':''}</div>
-      {catalog.loading? <div style={{color:'var(--muted)',fontSize:13}}>Claude liest das Dokument…</div>
+      <div style={{fontSize:14,fontWeight:800,marginBottom:2}}>{catalog.loading?'Claude katalogisiert…':((catalog.proposals?catalog.proposals.length:0)+' Fakten erkannt')}</div>
+      <div style={{fontSize:12.5,color:'var(--muted)',marginBottom:10}}>aus „{catalog.docTitle}"{catalog.loading?'':' · du entscheidest, was ins Register übernommen wird'}</div>
+      {catalog.loading? (()=>{ const tot=catalog.total||0, dn=catalog.done||0, pct=tot?Math.round(dn/tot*100):(catalog.phase==='lese'?8:0);
+         return <div style={{padding:'4px 0'}}>
+           <div style={{display:'flex',alignItems:'center',gap:8,fontSize:13.5,marginBottom:8}}>
+             <span style={{width:9,height:9,borderRadius:'50%',background:'var(--accent,#0F5661)',boxShadow:'0 0 8px var(--accent,#0F5661)'}}/>
+             <span style={{fontWeight:700}}>{catalog.phase==='lese'? 'Datei wird gelesen…' : ('Claude liest Abschnitt '+Math.min(dn+1,tot)+' von '+tot)}</span>
+           </div>
+           <div style={{height:8,borderRadius:6,background:'var(--bg)',border:'1px solid var(--border)',overflow:'hidden'}}>
+             <div style={{height:'100%',width:pct+'%',background:'var(--accent,#0F5661)',transition:'width .3s'}}/>
+           </div>
+           <div style={{display:'flex',justifyContent:'space-between',marginTop:6,fontSize:12,color:'var(--muted)'}}>
+             <span>{catalog.chunkCount? (catalog.chunkCount+' Abschnitte gefunden'):'Abschnitte werden gezählt…'}</span>
+             <span>{catalog.factCount||0} Fakten erkannt{tot?(' · '+dn+'/'+tot):''}</span>
+           </div>
+         </div>; })()
        : catalog.error? <div style={{color:'#dc2626',fontSize:13}}>{catalog.error}</div>
        : !catalog.proposals.length? <div style={{color:'var(--muted)',fontSize:13}}>Keine klaren Fakten erkannt. Du kannst Einträge im Register von Hand anlegen.</div>
        : <div>

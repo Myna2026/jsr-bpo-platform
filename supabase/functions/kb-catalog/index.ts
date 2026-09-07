@@ -60,12 +60,8 @@ Deno.serve(async (req) => {
 
   let body: any = {}; try { body = await req.json(); } catch { /* egal */ }
   const documentId = String(body?.document_id || "").trim();
-  if (!documentId) return json({ error: "Kein Dokument angegeben." }, 400);
-
-  // Abschnitte über den User-Client lesen -> RLS/Perm entscheidet über Zugriff (kein Leak über Partnergrenzen).
-  const { data: chunks, error: ce } = await sb.from("kb_chunks").select("section,page,content").eq("document_id", documentId).order("ord");
-  if (ce) return json({ error: "Abschnitte nicht lesbar: " + ce.message }, 502);
-  if (!chunks || !chunks.length) return json({ ok: true, facts: [], note: "Keine Abschnitte gefunden." });
+  const providedText = String(body?.text || "").trim();
+  const projectId = String(body?.project_id || "").trim();
 
   const system =
     "Du katalogisierst Wissen für ein Kundenprojekt. Aus dem folgenden Dokument-Text ziehst du die einzelnen, " +
@@ -78,9 +74,41 @@ Deno.serve(async (req) => {
     "- 'source_locator' aus dem [..]-Marker der Zeile, aus der der Fakt stammt.\n" +
     "- Fasse NICHT zusammen und lasse Fließtext ohne konkrete Angabe weg. Steht nichts Strukturierbares drin: leere Liste.\n\n";
 
-  // In kleinen Häppchen katalogisieren (~2200 Zeichen ≈ wenige Zielgebiete je Aufruf) und PARALLEL verarbeiten.
-  // Grund: bei großen Häppchen extrahiert das Modell nicht erschöpfend / läuft in die max_tokens-Grenze und
-  // liefert leer. Kleine Häppchen = vollständige Erfassung je Zeile; parallel = schnell trotz vieler Aufrufe.
+  async function catalogBatch(txt: string): Promise<any[]> {
+    const resp = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+      body: JSON.stringify({ model: MODEL, max_tokens: 4000, system: system + "DOKUMENT-TEXT:\n" + txt, tools: [TOOL], tool_choice: { type: "tool", name: "vorschlaege" }, messages: [{ role: "user", content: "Katalogisiere die Fakten." }] }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data?.error?.message || ("HTTP " + resp.status));
+    const tool = (data.content || []).find((c: any) => c.type === "tool_use");
+    return (tool && Array.isArray(tool.input?.facts)) ? tool.input.facts : [];
+  }
+  const validate = (raw: any[]) => raw.filter((f) => f && f.topic && f.label && f.value).map((f) => ({
+    topic: String(f.topic).trim(),
+    zielgebiet: (f.zielgebiet && String(f.zielgebiet).trim()) || null,
+    info_type: ["kontakt", "zeit", "ablauf", "regel", "preis", "sonstiges"].includes(f.info_type) ? f.info_type : "sonstiges",
+    label: String(f.label).trim(),
+    value: String(f.value).trim(),
+    saison: (f.saison && String(f.saison).trim()) || null,
+    veranstalter: (f.veranstalter && String(f.veranstalter).trim()) || null,
+    source_locator: (f.source_locator && String(f.source_locator).trim()) || null,
+  }));
+
+  // Text-Modus: EIN Häppchen katalogisieren (das Frontend ruft je Abschnitt einzeln auf -> sichtbarer Fortschritt).
+  if (providedText) {
+    if (projectId) { const { data: chk } = await sb.rpc("kb_retrieve", { p_project: projectId, p_q: "x", p_limit: 1 }); if (chk && chk.ok === false) return json({ error: "Kein Zugriff auf diesen Partner." }, 403); }
+    try { return json({ ok: true, facts: validate(await catalogBatch(providedText)) }); }
+    catch (e) { return json({ error: "KI-Fehler: " + ((e as Error).message || String(e)) }, 502); }
+  }
+
+  // Dokument-Modus (Fallback): ganzes Dokument in Häppchen, parallel.
+  if (!documentId) return json({ error: "Kein Dokument angegeben." }, 400);
+  const { data: chunks, error: ce } = await sb.from("kb_chunks").select("section,page,content").eq("document_id", documentId).order("ord");
+  if (ce) return json({ error: "Abschnitte nicht lesbar: " + ce.message }, 502);
+  if (!chunks || !chunks.length) return json({ ok: true, facts: [], note: "Keine Abschnitte gefunden." });
+
   const BATCH_CHARS = 2200, MAX_BATCHES = 24;
   const batches: string[] = []; let cur = "";
   for (const c of chunks) {
@@ -93,32 +121,9 @@ Deno.serve(async (req) => {
   const truncated = batches.length > MAX_BATCHES;
   const use = batches.slice(0, MAX_BATCHES);
 
-  async function catalogBatch(txt: string): Promise<any[]> {
-    const resp = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: { "x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-      body: JSON.stringify({ model: MODEL, max_tokens: 4000, system: system + "DOKUMENT-TEXT:\n" + txt, tools: [TOOL], tool_choice: { type: "tool", name: "vorschlaege" }, messages: [{ role: "user", content: "Katalogisiere die Fakten." }] }),
-    });
-    const data = await resp.json();
-    if (!resp.ok) throw new Error(data?.error?.message || ("HTTP " + resp.status));
-    const tool = (data.content || []).find((c: any) => c.type === "tool_use");
-    return (tool && Array.isArray(tool.input?.facts)) ? tool.input.facts : [];
-  }
-
   const results = await Promise.all(use.map((t) => catalogBatch(t).then((f) => ({ f })).catch((e) => ({ e: (e as Error).message || String(e) }))));
   let raw: any[] = []; let lastErr = "";
   for (const r of results) { if ((r as any).f) raw = raw.concat((r as any).f); else if ((r as any).e) lastErr = (r as any).e; }
   if (!raw.length && lastErr) return json({ error: "KI-Fehler: " + lastErr }, 502);
-
-  const facts = raw.filter((f) => f && f.topic && f.label && f.value).map((f) => ({
-    topic: String(f.topic).trim(),
-    zielgebiet: (f.zielgebiet && String(f.zielgebiet).trim()) || null,
-    info_type: ["kontakt", "zeit", "ablauf", "regel", "preis", "sonstiges"].includes(f.info_type) ? f.info_type : "sonstiges",
-    label: String(f.label).trim(),
-    value: String(f.value).trim(),
-    saison: (f.saison && String(f.saison).trim()) || null,
-    veranstalter: (f.veranstalter && String(f.veranstalter).trim()) || null,
-    source_locator: (f.source_locator && String(f.source_locator).trim()) || null,
-  }));
-  return json({ ok: true, facts, truncated });
+  return json({ ok: true, facts: validate(raw), truncated });
 });
