@@ -44,7 +44,7 @@ const ANTWORT_TOOL = {
     type: "object",
     properties: {
       known: { type: "boolean", description: "true, wenn die Antwort im Wissen steht; false, wenn nicht (dann nichts erfinden)" },
-      intent: { type: "string", enum: ["anleitung", "erklaerung"], description: "anleitung = die Person (oder ihr Kunde am Telefon) steht in einer Situation und braucht Handlungsschritte; erklaerung = sie will verstehen, wie etwas abläuft" },
+      intent: { type: "string", enum: ["anleitung", "erklaerung", "uebersicht"], description: "anleitung = die Person (oder ihr Kunde am Telefon) steht in einer Situation und braucht Handlungsschritte; erklaerung = sie will verstehen, wie etwas abläuft; uebersicht = die Frage ist vage (nur ein Ort/Thema), du zeigst, WAS du dazu hast, und fragst nach" },
       title: { type: "string", description: "kurze Überschrift der Antwort (wenige Worte), das Wichtigste zuerst" },
       blocks: {
         type: "array",
@@ -93,6 +93,10 @@ function relatedLine(f: any): string {
   const head = f.topic + (f.zielgebiet ? " / " + f.zielgebiet : "");
   return "- [" + head + "] " + f.label + ": " + f.value;
 }
+function overviewLine(f: any): string {
+  const head = f.topic + (f.zielgebiet ? " / " + f.zielgebiet : "");
+  return "- [" + head + "] " + f.label + ": " + f.value;
+}
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
@@ -118,6 +122,8 @@ Deno.serve(async (req) => {
   const facts: any[] = Array.isArray(r.facts) ? r.facts : [];
   const chunks: any[] = Array.isArray(r.chunks) ? r.chunks : [];
   const related: any[] = Array.isArray(r.related) ? r.related : [];
+  const overview: any[] = Array.isArray(r.overview) ? r.overview : [];
+  const overviewZg: string[] = Array.isArray(r.overview_zg) ? r.overview_zg : [];
 
   // Partner-Agent (Name + Charakter) für Ton und Begrüßung. Nicht sensibel; RLS erlaubt select für Angemeldete.
   const { data: pa } = await sb.from("partner_agents").select("name,character").eq("project_id", projectId).maybeSingle();
@@ -126,7 +132,7 @@ Deno.serve(async (req) => {
   const MISS = "Da muss ich passen, das steht dazu nicht in meinen Unterlagen.";
 
   // Nichts gefunden -> gar nicht erst die KI fragen. Ehrliche Fehlanzeige (spart Kosten, kein Erfinden).
-  if (!facts.length && !chunks.length && !related.length) {
+  if (!facts.length && !chunks.length && !related.length && !overview.length) {
     const res: any = { known: false, intent: "erklaerung", title: "", blocks: [], related: [], sources: [], rueckfrage: null, note: MISS, used: { facts: 0, chunks: 0 } };
     res.query_id = await logQuery(projectId, uid, question, res);
     return json(res);
@@ -136,6 +142,7 @@ Deno.serve(async (req) => {
     facts.length ? "REGISTER-FAKTEN:\n" + facts.map(factLine).join("\n") : "",
     chunks.length ? "DOKUMENT-ABSCHNITTE:\n" + chunks.map(chunkLine).join("\n") : "",
     related.length ? "VERWANDT (nicht gefragt, aber evtl. als Nächstes nützlich — nur hieraus related vorschlagen):\n" + related.map(relatedLine).join("\n") : "",
+    overview.length ? ("ÜBERSICHT ZUM ZIELGEBIET" + (overviewZg.length ? " (" + overviewZg.join(", ") + ")" : "") + " — ALLES, was zu diesem Zielgebiet hinterlegt ist. Nutze das, wenn die Frage vage ist, um zu zeigen, was du hast:\n" + overview.map(overviewLine).join("\n")) : "",
   ].filter(Boolean).join("\n\n");
 
   const system =
@@ -145,7 +152,8 @@ Deno.serve(async (req) => {
     "- Antworte AUSSCHLIESSLICH aus dem WISSEN unten. Erfinde NICHTS, niemals — keine erfundene Nummer, Zeit oder Adresse.\n" +
     "- Deckt das Wissen die Frage ab (auch teilweise), dann ANTWORTE (known=true) und nenne die Quelle. known=false NUR, wenn das Wissen die Frage wirklich nicht enthält. Die Vorsicht bei Nummern/Zeiten bedeutet: nichts erfinden — NICHT: eine vorhandene Auskunft verweigern.\n" +
     "- Die Abschnitte können mehrere Zielgebiete/Fälle enthalten (die Unterlagen sind oft Tabellen mit einer Zeile je Ort). Nutze nur die Zeile(n), die zum gefragten Ort/Fall passen; ist der gefragte Ort dabei, beantworte die Frage daraus.\n" +
-    "- Mehrdeutige Frage (Hotel oder Flughafen; welche Saison; welcher Veranstalter): known=false und stelle in 'rueckfrage' die eine nötige Rückfrage, statt zu raten.\n\n" +
+    "- Mehrdeutige Frage (Hotel oder Flughafen; welche Saison; welcher Veranstalter): known=false und stelle in 'rueckfrage' die eine nötige Rückfrage, statt zu raten.\n" +
+    "- VAGE FRAGE = ÜBERSICHT: Nennt die Frage nur einen Ort oder ein Thema ohne konkreten Bedarf (\"Problem Rhodos\", \"Frage zu Mallorca\", \"was gibt es zu Kos\") UND es gibt unten einen Abschnitt ÜBERSICHT ZUM ZIELGEBIET: sag NIEMALS 'steht nicht drin'. Antworte dann known=true, intent='uebersicht'. Sag in einem kurzen info-Block, WAS du zu dem Zielgebiet hast, nach Art gruppiert (z. B. Notfallnummer, örtliche Agentur, Treffpunkt am Flughafen, Rücktransfer/Abläufe). Lege für die einzelnen Kategorien 'related'-Punkte an (je ein anklickbarer Punkt mit der konkreten Frage, z. B. label 'Notfallnummer', question 'Notfallnummer Rhodos'). Stelle in 'rueckfrage' die eine Frage, worum es genau geht. Genau wie ein Kollege: \"Zu Rhodos habe ich das und das, was brauchst du?\" Nenne nur Kategorien, die wirklich in der ÜBERSICHT stehen, und nur bei uebersicht: gib KEINE konkreten Nummern/Werte im Block aus (die kommen erst auf die konkrete Rückfrage).\n\n" +
     "SO ANTWORTEST DU (wenn known=true) — als LEITFADEN zum Abarbeiten, nicht als Fließtext:\n" +
     "- BLICKWINKEL erkennen: Beschreibt die Frage eine Situation (\"Der Kunde findet seinen Transfer nicht\")? -> intent=anleitung. Will sie verstehen, wie etwas abläuft? -> intent=erklaerung.\n" +
     "- ABLAUF: Baue die Antwort als Schritte, die man am Telefon der Reihe nach durchgeht (kind='schritt'), in sinnvoller Reihenfolge. Das Wichtigste bzw. der erste Schritt zuerst. Trenne verschiedene Sachverhalte in eigene Blöcke.\n" +
@@ -189,14 +197,14 @@ Deno.serve(async (req) => {
   const sources = [...new Set(blocks.map((b: any) => b.source).filter(Boolean))];
   const res: any = {
     known,
-    intent: out.intent === "anleitung" ? "anleitung" : "erklaerung",
+    intent: ["anleitung", "erklaerung", "uebersicht"].includes(out.intent) ? out.intent : "erklaerung",
     title: known ? String(out.title || "").trim() : "",
     blocks,
     related: relatedOut,
     sources,
     rueckfrage: (typeof out.rueckfrage === "string" && out.rueckfrage.trim()) ? out.rueckfrage.trim() : null,
     note: known ? "" : MISS,
-    used: { facts: facts.length, chunks: chunks.length },
+    used: { facts: facts.length, chunks: chunks.length, overview: overview.length },
   };
   res.query_id = await logQuery(projectId, uid, question, res);
   return json(res);
