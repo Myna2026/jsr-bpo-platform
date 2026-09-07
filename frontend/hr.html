@@ -1256,7 +1256,7 @@ const MENU_BADGE_MAIN_ITEMS = [
   {key:'performance',label:'Performance'},{key:'auswertung',label:'Auswertung'},{key:'callqa',label:'Call-Qualität'},{key:'shiftplan',label:'Schichtplanung'},{key:'checkin',label:'Check-in'},{key:'workforce',label:'Workforce (Beta)'},{key:'employees',label:'Mitarbeiter'},
   {key:'timetracking',label:'Zeiterfassung'},{key:'locations',label:'Standorte'},{key:'spaces',label:'Spaces & Seats'},
   {key:'payroll',label:'Löhne'},{key:'orgchart',label:'Organigramm'},{key:'absences',label:'Abwesenheiten'},{key:'calendar',label:'Kalender'},
-  {key:'urlaubantraege',label:'Urlaubsanträge'},{key:'feedback',label:'Feedbackgespräche'},{key:'kanban',label:'Recruiting'},{key:'funnel',label:'Bewerber-Trichter'},{key:'onboarding',label:'Onboarding'},
+  {key:'urlaubantraege',label:'Urlaubsanträge'},{key:'feedback',label:'Feedbackgespräche'},{key:'kanban',label:'Recruiting'},{key:'funnel',label:'Bewerber-Trichter'},{key:'onboarding',label:'Onboarding'},{key:'langarchiv',label:'Aussortiert (Sprache)'},
   {key:'cvs',label:'CVs & Bewerber'},{key:'postfach',label:'Postfach'},{key:'bewerberlinks',label:'Bewerber-Links'},{key:'dubletten',label:'Dubletten'},{key:'showcase',label:'Showcases'},{key:'training_plans',label:'Schulungsplanung'},
   {key:'timeline',label:'Timeline'},{key:'projects',label:'Projekte'},{key:'forecast',label:'Forecast'},{key:'fcist',label:'Forecast vs. Ist'},{key:'vorschau',label:'Personal-Vorschau'},
   {key:'profitability',label:'Wirtschaftlichkeit'},{key:'praesentation',label:'Präsentationen'},{key:'termin',label:'Termin vorbereiten'},{key:'uploads',label:'Uploads'},{key:'dataimport',label:'Datenimport'},{key:'uploadplan',label:'Upload-Plan'},{key:'recmkt',label:'Recruiting Marketing'},{key:'nlquery',label:'Datenabfrage'},
@@ -7589,6 +7589,7 @@ function buildNavSections(f){
       ...(_isMgmtHr ? [{key:'postfach',label:'Postfach',icon:'📬'}] : []),   // HR + Management: Recruiting-Sammelpostfach
       ...(_isMgmtHr ? [{key:'bewerberlinks',label:'Bewerber-Links',icon:'🔗'}] : []),   // HR + Management
       ...(_isMgmtHr ? [{key:'dubletten',label:'Dubletten',icon:'📑'}] : []),   // HR + Management
+      ...(_isMgmtHr ? [{key:'langarchiv',label:'Aussortiert (Sprache)',icon:'🗂'}] : []),   // Clara-Sprachgate-Archiv, durchsuchbar
       ...(_isMgmt ? [{key:'recmkt',label:'Recruiting Marketing',icon:'📣'}] : []),   // Management-only
     ]},
     {sec:'Qualität', items:[   // Leistung + Qualitätssicherung
@@ -41747,6 +41748,16 @@ function ClaraSteuerung({showToast, isMgmt, employees}){
   const setWin=(k,v)=>{ const n=clone(); n.windows[k]=Math.max(0,parseInt(v,10)||0); saveCfg(n); };
   const setRej=(v)=>{ const n=clone(); n.reject_delay_hours=Math.max(0,parseInt(v,10)||0); saveCfg(n); };
   const setMax=(v)=>{ const n=clone(); n.max_sends_per_run=Math.max(1,parseInt(v,10)||1); saveCfg(n); };
+  // Sprachniveau-Gate: Einschalten setzt activated_at=jetzt (gilt nur ab dann, Bestand unberührt).
+  const toggleLangGate=()=>{ const n=clone(); if(!n.language_gate) n.language_gate={min_level:'B2',max_new_per_run:5}; const now=!n.language_gate.enabled; n.language_gate.enabled=now; if(now) n.language_gate.activated_at=new Date().toISOString(); saveCfg(n); };
+  const setLangLevel=(v)=>{ const n=clone(); if(!n.language_gate) n.language_gate={enabled:false,max_new_per_run:5}; n.language_gate.min_level=v; saveCfg(n); };
+  const setLangMax=(v)=>{ const n=clone(); if(!n.language_gate) n.language_gate={enabled:false,min_level:'B2'}; n.language_gate.max_new_per_run=Math.min(10,Math.max(1,parseInt(v,10)||5)); saveCfg(n); };
+  const [langOld,setLangOld]=React.useState(null);   // Bestandsbewerber unter der Schwelle (Info, nicht betroffen)
+  const _lgMin=cfg&&cfg.language_gate&&cfg.language_gate.min_level;
+  React.useEffect(()=>{ if(!open||!cfg) return; const ORD=['A1','A2','B1','B2','C1','C2']; const mi=ORD.indexOf(_lgMin||'B2'); const below=ORD.slice(0,Math.max(0,mi));
+    if(!below.length){ setLangOld(0); return; }
+    sb.from('cvs').select('id',{count:'exact',head:true}).eq('status','cv_inbound').in('language_level',below).then(({count})=>setLangOld(count||0)).catch(()=>setLangOld(null));
+  },[open,_lgMin]);
   const p2get=(f,def)=>{ const p=cfg&&cfg.phases&&cfg.phases.phase2; return (p&&p[f]!==undefined)?p[f]:def; };
   const setP2=(f,v)=>{ const n=clone(); if(!n.phases.phase2) n.phases.phase2={}; n.phases.phase2[f]=v; saveCfg(n); };
   const toggleInterviewer=(id)=>{ const cur=p2get('participant_ids',[])||[]; setP2('participant_ids', cur.includes(id)?cur.filter(x=>x!==id):[...cur,id]); };
@@ -41781,6 +41792,29 @@ function ClaraSteuerung({showToast, isMgmt, employees}){
           </div>
           <div style={{fontSize:11.5,color:'var(--muted)',marginTop:8}}>Ist ein Schalter aus, läuft der manuelle Prozess unverändert weiter. „Absage Mitarbeiter" und „Blacklist" bekommen nie eine Mail.</div>
         </div>
+        {/* Sprachniveau-Gate */}
+        {(()=>{ const lg=(cfg.language_gate)||{enabled:false,min_level:'B2',max_new_per_run:5};
+          const LANG_ORDER=['A1','A2','B1','B2','C1','C2'];
+          return <div>
+          <div style={{fontSize:12,fontWeight:800,textTransform:'uppercase',letterSpacing:'.05em',color:'var(--muted)',marginBottom:8}}>Nach Sprachniveau aussortieren</div>
+          <div style={{display:'flex',alignItems:'center',gap:10,fontSize:13.5,marginBottom:8}}>
+            {chk(!!lg.enabled,toggleLangGate)}
+            <span>Bewerber unter dem Niveau automatisch aussortieren (freundliche Absage, Archiv)</span>
+          </div>
+          <div style={{display:'flex',flexWrap:'wrap',gap:16,alignItems:'center',fontSize:13.5,marginBottom:8}}>
+            <label style={{display:'flex',alignItems:'center',gap:7}}>Nur ab Niveau
+              <select value={lg.min_level||'B2'} onChange={e=>setLangLevel(e.target.value)} style={{padding:'4px 8px',border:'1px solid var(--border)',borderRadius:7,fontSize:13,background:'var(--card)',color:'var(--text)'}}>
+                {['A2','B1','B2','C1'].map(l=><option key={l} value={l}>{l} und höher</option>)}
+              </select>
+            </label>
+            <label style={{display:'flex',alignItems:'center',gap:7}}>Höchstens pro Lauf {numIn(lg.max_new_per_run==null?5:lg.max_new_per_run,setLangMax)}</label>
+          </div>
+          {lg.enabled&&<div style={{fontSize:12,color:'#16a34a',fontWeight:600,marginBottom:4}}>Aktiv seit {lg.activated_at?new Date(lg.activated_at).toLocaleString('de-DE'):'—'}. Gilt nur für Bewerbungen ab diesem Zeitpunkt.</div>}
+          <div style={{fontSize:11.5,color:'var(--muted)',lineHeight:1.5}}>
+            Gilt <b>nur für neue Bewerber</b> ab dem Einschalten — der Bestand bleibt unberührt{langOld!=null?<span> ({langOld} Bestandsbewerber unter der Schwelle sind <b>nicht</b> betroffen; die entscheidest du getrennt)</span>:null}.<br/>
+            Kein Sprachniveau im Datensatz → wird <b>nie</b> aussortiert (Mensch entscheidet). Kein Stapelversand: höchstens {Math.min(10,Number(lg.max_new_per_run)||5)} pro Lauf (harte Grenze 10) im Rahmen von Claras Sende-Budget.
+          </div>
+        </div>; })()}
         {/* Wartefenster */}
         <div>
           <div style={{fontSize:12,fontWeight:800,textTransform:'uppercase',letterSpacing:'.05em',color:'var(--muted)',marginBottom:8}}>Wartefenster (Werktage)</div>
@@ -42187,6 +42221,50 @@ function ApplicantLinksView({employees, showToast, team}){
 // Schnitt 4: Dubletten-Center (HR/Management). Zwei Bereiche:
 // 1) Telefon-Kollisionen Meta ↔ Bestand (zurückgehaltene Leads) — HR: Meta übernehmen (ersetzt) oder verwerfen.
 // 2) Name+Datum-Gruppen im Bestand (mehrere CVs gleicher Person) — HR löscht die überflüssige. Kein Auto-Löschen.
+// Archiv der von Clara nach Sprachniveau Aussortierten. Nicht gelöscht — hier durchsuchbar (Recruiting-Leads),
+// mit Niveau + Herkunft. Wer sich später mit besserem Deutsch meldet, ist wiederauffindbar/zurückholbar.
+function LangArchiveView({showToast}){
+  const [rows,setRows]=React.useState(null);
+  const [q,setQ]=React.useState('');
+  const load=async()=>{ try{ const {data}=await sb.from('cvs').select('id,first_name,last_name,phone,email,language_level,source,location,status,extra,created_at').not('extra->lang_sortout','is',null).order('created_at',{ascending:false}).limit(2000); setRows(data||[]); }catch(e){ setRows([]); } };
+  React.useEffect(()=>{ load(); },[]);
+  const norm=s=>String(s==null?'':s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'');
+  const fmt=s=>{ if(!s) return ''; const d=new Date(s); const p=n=>String(n).padStart(2,'0'); return p(d.getDate())+'.'+p(d.getMonth()+1)+'.'+d.getFullYear(); };
+  const SRC={meta:'Meta',list:'Liste',manual:'Manuell',cv:'CV',apollo:'Apollo'};
+  const filtered=(rows||[]).filter(r=>{ const t=norm(q).trim(); if(!t) return true; return norm((r.first_name||'')+' '+(r.last_name||'')).includes(t)||norm(r.phone||'').includes(t)||norm(r.email||'').includes(t); });
+  const restore=async(r)=>{ if(!(await uiConfirm('„'+((r.first_name||'')+' '+(r.last_name||'')).trim()+'" zurück in den Trichter holen? Die Aussortier-Markierung wird entfernt und eine noch nicht gesendete Absage abgebrochen.'))) return;
+    try{ const ex={...(r.extra&&typeof r.extra==='object'?r.extra:{})}; delete ex.lang_sortout;
+      await sb.from('cvs').update({status:'cv_inbound',extra:ex}).eq('id',r.id);
+      await sb.from('clara_rejections').update({cancelled_at:new Date().toISOString(),cancel_reason:'zurueckgeholt'}).eq('cv_id',r.id).is('sent_at',null).is('cancelled_at',null);
+      showToast&&showToast('Zurück im Trichter'); load();
+    }catch(e){ showToast&&showToast('Fehlgeschlagen: '+((e&&e.message)||e),'error'); } };
+  const th={textAlign:'left',fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.04em',color:'var(--muted)',padding:'6px 10px',borderBottom:'1px solid var(--border)'};
+  const td={fontSize:13,padding:'8px 10px',borderBottom:'1px solid var(--border)',verticalAlign:'top'};
+  return <div style={{maxWidth:1040,padding:'4px 2px'}}>
+    <div style={{fontSize:20,fontWeight:800}}>Aussortiert nach Sprachniveau</div>
+    <div style={{fontSize:13,color:'var(--muted)',marginTop:3,marginBottom:12}}>Von Clara wegen zu niedrigem Deutsch aussortiert. Nicht gelöscht, hier als Recruiting-Leads durchsuchbar. Meldet sich jemand später mit besserem Deutsch, kannst du ihn zurückholen.</div>
+    <div style={{display:'flex',gap:10,alignItems:'center',marginBottom:12,flexWrap:'wrap'}}>
+      <input value={q} onChange={e=>setQ(e.target.value)} placeholder="🔍 Suchen (Name, Telefon, Mail)…" style={{flex:'1 1 280px',maxWidth:380,padding:'7px 11px',border:'1px solid var(--border)',borderRadius:8,fontSize:13,background:'var(--card)',color:'var(--text)'}}/>
+      <span style={{fontSize:12,color:'var(--muted)',fontWeight:700}}>{rows===null?'…':filtered.length+' von '+(rows||[]).length}</span>
+    </div>
+    {rows===null && <div style={{color:'var(--muted)',fontSize:14,padding:'20px 0'}}>Lädt…</div>}
+    {rows!==null && !rows.length && <div style={{color:'var(--muted)',fontSize:14,padding:'24px 0'}}>Noch niemand aussortiert. Sobald Claras Sprachniveau-Gate läuft, erscheinen hier die betroffenen Bewerber.</div>}
+    {rows!==null && !!rows.length && <div style={{overflowX:'auto',border:'1px solid var(--border)',borderRadius:10}}>
+      <table style={{width:'100%',borderCollapse:'collapse',minWidth:720}}>
+        <thead><tr><th style={th}>Name</th><th style={th}>Sprachniveau</th><th style={th}>Herkunft</th><th style={th}>Aussortiert am</th><th style={th}>Kontakt</th><th style={th}></th></tr></thead>
+        <tbody>{filtered.map(r=>{ const so=(r.extra&&r.extra.lang_sortout)||{}; const lvl=so.level||r.language_level||'—';
+          return <tr key={r.id}>
+            <td style={{...td,fontWeight:700}}>{((r.first_name||'')+' '+(r.last_name||'')).trim()||'—'}</td>
+            <td style={td}><span style={{fontSize:11,fontWeight:800,padding:'1px 8px',borderRadius:8,background:'#fef2f2',color:'#dc2626'}}>{lvl}</span></td>
+            <td style={{...td,color:'var(--muted)'}}>{[SRC[r.source]||r.source,r.location].filter(Boolean).join(' · ')||'—'}</td>
+            <td style={{...td,color:'var(--muted)',whiteSpace:'nowrap'}}>{fmt(so.at)||'—'}</td>
+            <td style={{...td,color:'var(--muted)',fontSize:12}}>{[r.phone,r.email].filter(Boolean).join('  ·  ')||'—'}</td>
+            <td style={td}><button onClick={()=>restore(r)} className="btn btn-sm" style={{whiteSpace:'nowrap'}}>↩ Zurückholen</button></td>
+          </tr>; })}</tbody>
+      </table>
+    </div>}
+  </div>;
+}
 function DuplicatesView({team, setCvList}){
   const roles=(team&&team.role_keys)||[]; const allow=roles.some(r=>r==='management'||r==='hr');
   const [pairs,setPairs]=useState(null); const [groups,setGroups]=useState(null); const [busy,setBusy]=useState('');
@@ -45964,6 +46042,7 @@ function App(){
       'knowledge':'<path d="M12 .75a8.25 8.25 0 0 0-4.135 15.39c.686.398 1.115 1.008 1.134 1.623a.75.75 0 0 0 .577.706c.352.083.71.148 1.074.195.323.041.6-.218.6-.544v-4.661a6.714 6.714 0 0 1-.937-.171.75.75 0 1 1 .374-1.453 5.261 5.261 0 0 0 2.626 0 .75.75 0 1 1 .374 1.452 6.712 6.712 0 0 1-.937.172v4.66c0 .327.277.586.6.545.364-.047.722-.112 1.074-.195a.75.75 0 0 0 .577-.706c.02-.615.448-1.225 1.134-1.623A8.25 8.25 0 0 0 12 .75Z"/> <path fill-rule="evenodd" d="M9.013 19.9a.75.75 0 0 1 .877-.597 11.319 11.319 0 0 0 4.22 0 .75.75 0 1 1 .28 1.473 12.819 12.819 0 0 1-4.78 0 .75.75 0 0 1-.597-.876ZM9.754 22.344a.75.75 0 0 1 .824-.668 13.682 13.682 0 0 0 2.844 0 .75.75 0 1 1 .156 1.492 15.156 15.156 0 0 1-3.156 0 .75.75 0 0 1-.668-.824Z" clip-rule="evenodd"/>',
       'wissensspeicher':'<path d="M4.913 2.658c2.075-.27 4.19-.408 6.337-.408 2.147 0 4.262.139 6.337.408 1.922.25 3.291 1.861 3.405 3.727a4.403 4.403 0 0 0-1.032-.211 50.89 50.89 0 0 0-8.42 0c-2.358.196-4.04 2.19-4.04 4.434v4.286a4.47 4.47 0 0 0 2.433 3.984L7.28 21.53A.75.75 0 0 1 6 21v-4.03a48.527 48.527 0 0 1-1.087-.128C2.905 16.58 1.5 14.833 1.5 12.862V6.638c0-1.97 1.405-3.718 3.413-3.98Z"/><path d="M15.75 7.5c-1.376 0-2.739.057-4.086.169C10.124 7.797 9 9.103 9 10.609v4.285c0 1.507 1.128 2.814 2.67 2.94 1.243.102 2.5.157 3.768.165l2.782 2.781a.75.75 0 0 0 1.28-.53v-2.39l.33-.026c1.542-.125 2.67-1.433 2.67-2.94v-4.286c0-1.505-1.125-2.811-2.664-2.94A49.392 49.392 0 0 0 15.75 7.5Z"/>',
       'mgmtcalls':'<path fill-rule="evenodd" d="M7.502 6h7.128A3.375 3.375 0 0 1 18 9.375v9.375a3 3 0 0 0 3-3V6.108c0-1.505-1.125-2.811-2.664-2.94a48.972 48.972 0 0 0-.673-.05A3 3 0 0 0 15 1.5h-1.5a3 3 0 0 0-2.663 1.618c-.225.015-.45.032-.673.05C8.662 3.295 7.554 4.542 7.502 6ZM13.5 3A1.5 1.5 0 0 0 12 4.5h4.5A1.5 1.5 0 0 0 15 3h-1.5Z" clip-rule="evenodd"/><path fill-rule="evenodd" d="M3 9.375C3 8.339 3.84 7.5 4.875 7.5h9.75c1.036 0 1.875.84 1.875 1.875v11.25c0 1.035-.84 1.875-1.875 1.875h-9.75A1.875 1.875 0 0 1 3 20.625V9.375Zm4.125 2.625a.75.75 0 0 0 0 1.5h.008a.75.75 0 0 0 0-1.5H7.125Zm-.75 3.375a.75.75 0 0 1 .75-.75h.008a.75.75 0 0 1 0 1.5H7.125a.75.75 0 0 1-.75-.75Zm.75 2.625a.75.75 0 0 0 0 1.5h.008a.75.75 0 0 0 0-1.5H7.125ZM9 12a.75.75 0 0 1 .75-.75h3a.75.75 0 0 1 0 1.5h-3A.75.75 0 0 1 9 12Zm.75 2.25a.75.75 0 0 0 0 1.5h3a.75.75 0 0 0 0-1.5h-3ZM9 17.25a.75.75 0 0 1 .75-.75h3a.75.75 0 0 1 0 1.5h-3a.75.75 0 0 1-.75-.75Z" clip-rule="evenodd"/>',
+      'langarchiv':'<path d="M2.25 6a3 3 0 0 1 3-3h13.5a3 3 0 0 1 3 3v1.5a1.5 1.5 0 0 1-1.5 1.5H3.75a1.5 1.5 0 0 1-1.5-1.5V6Z"/><path fill-rule="evenodd" d="M3.75 10.5h16.5v7.5a3 3 0 0 1-3 3H6.75a3 3 0 0 1-3-3v-7.5Zm5.25 3a.75.75 0 0 1 .75-.75h4.5a.75.75 0 0 1 0 1.5h-4.5a.75.75 0 0 1-.75-.75Z" clip-rule="evenodd"/>',
       'projects':'<path d="M19.5 21a3 3 0 0 0 3-3v-4.5a3 3 0 0 0-3-3h-15a3 3 0 0 0-3 3V18a3 3 0 0 0 3 3h15ZM1.5 10.146V6a3 3 0 0 1 3-3h5.379a2.25 2.25 0 0 1 1.59.659l2.122 2.121c.14.141.331.22.53.22H19.5a3 3 0 0 1 3 3v1.146A4.483 4.483 0 0 0 19.5 9h-15a4.483 4.483 0 0 0-3 1.146Z"/>',
       'forecast':'<path d="M18.375 2.25c-1.035 0-1.875.84-1.875 1.875v15.75c0 1.035.84 1.875 1.875 1.875h.75c1.035 0 1.875-.84 1.875-1.875V4.125c0-1.036-.84-1.875-1.875-1.875h-.75ZM9.75 8.625c0-1.036.84-1.875 1.875-1.875h.75c1.036 0 1.875.84 1.875 1.875v11.25c0 1.035-.84 1.875-1.875 1.875h-.75a1.875 1.875 0 0 1-1.875-1.875V8.625ZM3 13.125c0-1.036.84-1.875 1.875-1.875h.75c1.036 0 1.875.84 1.875 1.875v6.75c0 1.035-.84 1.875-1.875 1.875h-.75A1.875 1.875 0 0 1 3 19.875v-6.75Z"/>',
       'fcist':'<path fill-rule="evenodd" d="M15.22 6.268a.75.75 0 0 1 .968-.432l5.942 2.28a.75.75 0 0 1 .431.97l-2.28 5.941a.75.75 0 1 1-1.4-.537l1.63-4.251-1.086.483a11.2 11.2 0 0 0-5.45 5.174.75.75 0 0 1-1.199.19L9 12.31l-6.22 6.22a.75.75 0 1 1-1.06-1.06l6.75-6.75a.75.75 0 0 1 1.06 0l3.606 3.605a12.694 12.694 0 0 1 5.68-4.973l1.086-.483-4.251-1.632a.75.75 0 0 1-.432-.97Z" clip-rule="evenodd"/>',
@@ -46240,6 +46319,7 @@ function App(){
           {view==='cvsync'&&(<div><CvSyncView setCvList={setCvList} projects={projects}/><MetaImportPanel setCvList={setCvList}/></div>)}
           {view==='bewerberlinks'&&<ApplicantLinksView employees={employees} showToast={showToast} team={team}/>}
           {view==='dubletten'&&<DuplicatesView team={team} setCvList={setCvList}/>}
+          {view==='langarchiv'&&<LangArchiveView showToast={showToast}/>}
           {view==='postfach'&&<MailboxView team={team} showToast={showToast}/>}
           {view==='feedback'&&<FeedbackView employees={employees} projects={projects} team={team} showToast={showToast} nav={feedbackNav} onNavConsumed={()=>setFeedbackNav(null)}/>}
           {view==='spaces'&&(

@@ -22,6 +22,17 @@ const TEST_KEY = Deno.env.get("MAILER_TEST_KEY") || "";
 const CAMPAIGN_KEY = Deno.env.get("CAMPAIGN_KEY") || "";
 const PUBLIC_BASE = "https://client.tive360.de";   // oeffentliche Anreicherungsseite
 
+// CEFR-Rang für das Sprachniveau-Gate. Unbekannt/leer -> null (nicht aussortieren, Mensch entscheidet).
+const LANG_RANK: Record<string, number> = { a1: 1, a2: 2, b1: 3, b2: 4, c1: 5, c2: 6, muttersprache: 7, native: 7 };
+function langRank(lvl: string | null): number | null {
+  if (!lvl) return null;
+  const k = String(lvl).toLowerCase().trim();
+  return (k in LANG_RANK) ? LANG_RANK[k] : null;
+}
+// HARTE Obergrenze, wie viele Bewerber pro Lauf ins Aussortieren gehen dürfen — greift auch, wenn die Config
+// versehentlich hochgesetzt wird. Zusammen mit "nur neue ab Einschalten" + Claras Sende-Budget: nie ein Stapel.
+const LANG_GATE_HARD_CAP = 10;
+
 const cors = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -258,21 +269,60 @@ async function runPhase(phaseKey: string, status: string, ph: any, sender: any, 
   }
   return r;
 }
+// Sprachniveau-Gate: neue Bewerber unter der Schwelle aussortieren (Status -> abgelehnt + Marker) und eine
+// freundliche Absage terminieren (Versand throttled über runDueRejections). NUR neue ab Einschalten
+// (created_at >= activated_at); Bestand unberührt. Kein Niveau -> nicht aussortieren (Mensch entscheidet).
+// Harte Obergrenze pro Lauf: nie ein Stapel, auch bei versehentlicher Fehlkonfiguration.
+async function runLanguageGate(cfg2: any, dry: boolean) {
+  const g = cfg2.language_gate;
+  const r: any = { scheduled: 0, no_level: 0, capped: 0, examined: 0, cap: LANG_GATE_HARD_CAP };
+  if (!g || !g.enabled || !g.activated_at) { r.off = true; return r; }
+  const minRank = langRank(g.min_level) || 4;   // Default B2
+  const cap = Math.min(Number(g.max_new_per_run) || 5, LANG_GATE_HARD_CAP);
+  r.cap = cap;
+  const { data: cand } = await sb.from("cvs")
+    .select("id,language_level,status,extra")
+    .eq("status", "cv_inbound")
+    .gte("created_at", g.activated_at)     // nur NEUE ab Einschalten — Bestand bleibt aussen vor
+    .not("language_level", "is", null)
+    .order("created_at", { ascending: true })
+    .limit(300);
+  for (const cv of (cand || [])) {
+    if (r.scheduled >= cap) { r.capped++; continue; }   // harte Obergrenze
+    const rank = langRank(cv.language_level);
+    if (rank == null) { r.no_level++; continue; }        // unbekanntes Niveau -> Mensch entscheidet
+    if (rank >= minRank) continue;                        // B2+ bleibt im Trichter
+    if (cv.extra && cv.extra.lang_sortout) continue;      // schon aussortiert
+    r.examined++;
+    if (dry) { r.scheduled++; continue; }
+    const marker = { ...(cv.extra && typeof cv.extra === "object" ? cv.extra : {}), lang_sortout: { at: new Date().toISOString(), level: cv.language_level, min_level: g.min_level } };
+    // Race-sicher: nur aussortieren, solange noch cv_inbound.
+    const { error: e1, data: upd } = await sb.from("cvs").update({ status: "rejected_by_us", extra: marker }).eq("id", cv.id).eq("status", "cv_inbound").select("id");
+    if (e1 || !upd || !upd.length) continue;
+    await sb.from("clara_rejections").insert({ cv_id: cv.id, reject_status: "rejected_by_us", scheduled_at: new Date().toISOString(), due_at: new Date().toISOString() });
+    r.scheduled++;
+  }
+  return r;
+}
+
 // Fällige Absagen versenden (48h abgelaufen). Prüft den Status ERNEUT: hat HR revidiert -> abbrechen, nichts raus.
 // Ist die Automatik für den Ausgang aus, bleibt die Absage liegen (skipped), sie wird nie ohne Schalter versendet.
 async function runDueRejections(cfg2: any, sender: any, dry: boolean, budget: { left: number }) {
   const r = { sent: 0, cancelled: 0, skipped: 0, failed: 0, capped: 0 };
   const { data: due } = await sb.from("clara_rejections").select("*").is("sent_at", null).is("cancelled_at", null).lte("due_at", new Date().toISOString()).limit(200);
   for (const rej of (due || [])) {
-    const rc = cfg2.rejects && cfg2.rejects[rej.reject_status];
-    const enabled = !!(rc && rc.enabled);
-    const { data: cv } = await sb.from("cvs").select("id,first_name,email,status").eq("id", rej.cv_id).maybeSingle();
+    const { data: cv } = await sb.from("cvs").select("id,first_name,email,status,extra").eq("id", rej.cv_id).maybeSingle();
     if (!cv || cv.status !== rej.reject_status) { if (!dry) await sb.from("clara_rejections").update({ cancelled_at: new Date().toISOString(), cancel_reason: "status_geaendert" }).eq("id", rej.id); r.cancelled++; continue; }
-    if (!enabled) { r.skipped++; continue; }
+    // Sprachniveau-Aussortierung? Eigene Vorlage + eigener Schalter (language_gate), unabhängig vom generischen Absage-Schalter.
+    const langGate = !!(cv.extra && cv.extra.lang_sortout);
+    const rc = cfg2.rejects && cfg2.rejects[rej.reject_status];
+    const enabled = langGate ? !!(cfg2.language_gate && cfg2.language_gate.enabled) : !!(rc && rc.enabled);
+    const tplKey = langGate ? "reject_language" : (rc && rc.template);
+    if (!enabled || !tplKey) { r.skipped++; continue; }
     if (!cv.email || !String(cv.email).includes("@")) { if (!dry) await sb.from("clara_rejections").update({ cancelled_at: new Date().toISOString(), cancel_reason: "keine_mail" }).eq("id", rej.id); r.cancelled++; continue; }
     if (dry) { r.sent++; continue; }
     if (budget.left <= 0) { r.capped++; continue; }
-    const res = await sendPhaseMail(cv, rc.template, "", sender, "reject_" + rej.reject_status, "auto");
+    const res = await sendPhaseMail(cv, tplKey, "", sender, langGate ? "reject_language" : ("reject_" + rej.reject_status), "auto");
     if (res.ok) budget.left--;
     if (res.ok) { await sb.from("clara_rejections").update({ sent_at: new Date().toISOString(), message_id: res.messageId || null, error: null }).eq("id", rej.id); r.sent++; }
     else { await sb.from("clara_rejections").update({ error: res.error || "fehler" }).eq("id", rej.id); r.failed++; }
@@ -326,6 +376,9 @@ Deno.serve(async (req) => {
     // die Absender-Reputation. dry rechnet ohne Deckel. 0/leer -> Default 25.
     const budget = { left: dry ? 999999 : (Number(cfg2.max_sends_per_run) || 25) };
     const out: any = { ok: true, dry, budget_start: budget.left };
+
+    // Sprachniveau-Gate zuerst: aussortierte Bewerber verlassen cv_inbound, bekommen also keine Phase-1-Einladung mehr.
+    if (cfg2.language_gate && cfg2.language_gate.enabled) out.language_gate = await runLanguageGate(cfg2, dry);
 
     const p1 = cfg2.phases && cfg2.phases.phase1;
     if (p1 && p1.enabled) {
