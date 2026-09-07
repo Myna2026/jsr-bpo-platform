@@ -35,8 +35,9 @@ const EXTRACT_TOOL = {
           properties: {
             text: { type: "string", description: "der Punkt kurz und klar (was ist zu tun / was wurde vorgenommen), aus dem Protokoll" },
             bereich: { type: "string", description: "die sinnvolle Gruppe. Bevorzugt eine aus der vorgegebenen Liste; passt keine, bilde eine kurze eigene. Nie leer, wenn eine Gruppe erkennbar ist." },
-            owner: { type: ["string", "null"], description: "die zuständige Person, falls im Text genannt; sonst null" },
-            due_date: { type: ["string", "null"], description: "Fälligkeit als YYYY-MM-DD, falls ein Datum/Frist genannt ist (relativ zu HEUTE auflösen); sonst null" },
+            owner: { type: ["string", "null"], description: "die zuständige Person genau so, wie im Text genannt (z. B. 'Edi'), falls jemand genannt ist; sonst null (dann bleibt der Punkt allgemein für die Runde)" },
+            owner_ref: { type: ["integer", "null"], description: "die NUMMER der zugeordneten Person aus der MITARBEITER-Liste, wenn der genannte Name (auch Kurzform wie 'Edi' für 'Edinela') eindeutig einer Person entspricht; sonst 0/null. Rate nicht bei mehreren möglichen." },
+            due_date: { type: ["string", "null"], description: "Fälligkeit als YYYY-MM-DD, aus einer Frist im Text (auch relativ: 'bis Freitag', 'Monatsende', 'nächste Woche') relativ zu HEUTE aufgelöst; sonst null" },
             target_n: { type: ["number", "null"], description: "ZIEL als Zahl, wenn ein Mengenziel genannt ist (z. B. '10 Leute einstellen' -> 10); sonst null" },
             actual_n: { type: ["number", "null"], description: "IST/geschafft als Zahl, wenn genannt (z. B. 'es wurden 6' -> 6); sonst null. So erkennt das System: offen = Ziel minus Ist." },
           },
@@ -118,6 +119,16 @@ Deno.serve(async (req) => {
     const text = String(body?.text || "").trim();
     const bereiche: string[] = Array.isArray(body?.bereiche) ? body.bereiche.filter((x: any) => typeof x === "string") : [];
     if (!text) return json({ error: "Kein Protokoll übergeben." }, 400);
+
+    // Mitarbeiter-Roster für den Namensabgleich (über RLS des angemeldeten Users, maskierte Lite-View).
+    // Beendete/abgelehnte raus, damit die Zuordnung eindeutiger bleibt. 1-basierte Nummern statt uuid (keine Halluzination).
+    const EXCLUDED = new Set(["rejected_by_us", "rejected_by_employee", "rejected_by_client", "blacklist", "terminated_by_us", "terminated_by_employee", "parking"]);
+    const { data: emps } = await sb.from("employees_masked_lite").select("id,first_name,last_name,status").limit(1000);
+    const roster = (Array.isArray(emps) ? emps : [])
+      .filter((e: any) => e && (e.first_name || e.last_name) && !EXCLUDED.has(String(e.status || "")))
+      .map((e: any, i: number) => ({ n: i + 1, id: e.id, name: ((e.first_name || "") + " " + (e.last_name || "")).trim() }));
+    const rosterTxt = roster.length ? roster.map((r) => r.n + ") " + r.name).join("\n") : "(keine Mitarbeiterliste verfügbar)";
+
     const system =
       "Du bereitest den Freitext eines Management-Calls auf. Das ist die EINZIGE Eingabe des Teams — alles andere " +
       "leitest du ab. Mach daraus: (1) eine kurze Zusammenfassung, (2) die nachverfolgbaren Punkte (Aufgaben, " +
@@ -126,19 +137,30 @@ Deno.serve(async (req) => {
       "- Nimm NUR, was im Text steht. Erfinde nichts, keine Namen, Fristen oder Zahlen, die nicht dastehen.\n" +
       "- Gruppiere sinnvoll: bevorzugt eine Gruppe aus dieser Liste — " + (bereiche.length ? bereiche.join(", ") : "(keine Liste vorgegeben)") + " —, " +
       "passt keine, bilde eine kurze eigene Gruppe. Verwandte Punkte in dieselbe Gruppe.\n" +
+      "- ZUSTÄNDIGKEIT: Erkenne aus dem Text, wer zuständig ist ('Edi macht das', 'Ylli klärt das', 'Shkurte prüft das'). " +
+      "Setze owner auf den Namen wie geschrieben. Gleiche ihn gegen die MITARBEITER-Liste ab (auch Kurzformen, z. B. 'Edi' -> 'Edinela …') " +
+      "und setze owner_ref auf die passende NUMMER. Nur bei eindeutiger Zuordnung; bei mehreren Möglichen owner_ref=0. " +
+      "Steht KEIN Name, bleibt der Punkt allgemein (owner=null, owner_ref=0) — das ist richtig so.\n" +
       "- ZAHLEN erkennen: Steht ein Mengenziel und ein Ergebnis (z. B. '10 Leute einstellen, es wurden 6'), setze " +
       "target_n=10 und actual_n=6. Das System rechnet daraus den Rest (4 offen). Nur wenn die Zahlen wirklich dastehen.\n" +
-      "- owner nur bei genannter Person; due_date nur bei genanntem Datum/Frist (relativ zu HEUTE = " + todayIso() + ", Format YYYY-MM-DD).\n";
+      "- FRISTEN: Wandle auch relative Angaben in ein Datum (YYYY-MM-DD), relativ zu HEUTE = " + todayIso() + ". " +
+      "Beispiele: 'bis Freitag' = der kommende Freitag; 'nächste Woche' = Montag der Folgewoche; 'Monatsende' = letzter Tag des aktuellen Monats; " +
+      "'in zwei Wochen' = HEUTE + 14 Tage. Ohne Frist im Text: due_date=null.\n\n" +
+      "MITARBEITER (für owner_ref, Nummer -> Person):\n" + rosterTxt;
     let out: any;
-    try { out = await callClaude(system, "FREITEXT DES CALLS:\n" + text.slice(0, 12000), EXTRACT_TOOL, "punkte", 2600); }
+    try { out = await callClaude(system, "FREITEXT DES CALLS:\n" + text.slice(0, 12000), EXTRACT_TOOL, "punkte", 2800); }
     catch (e) { return json({ error: "Die KI ist gerade nicht erreichbar: " + (e as Error).message }, 502); }
     const num = (v: any) => (typeof v === "number" && isFinite(v)) ? v : null;
+    const byN = new Map(roster.map((r) => [r.n, r]));
     const items = (Array.isArray(out.items) ? out.items : [])
       .filter((it: any) => it && String(it.text || "").trim())
       .map((it: any) => {
         const ber = (it.bereich && String(it.bereich).trim()) || "";
         const due = typeof it.due_date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(it.due_date) ? it.due_date : null;
-        return { text: String(it.text).trim(), bereich: ber, owner: (it.owner && String(it.owner).trim()) || null, due_date: due, target_n: num(it.target_n), actual_n: num(it.actual_n) };
+        const ref = (typeof it.owner_ref === "number" && it.owner_ref > 0) ? byN.get(it.owner_ref) : null;
+        const rawOwner = (it.owner && String(it.owner).trim()) || null;
+        // Bei Treffer: kanonischer Name + verknüpfte Mitarbeiter-ID. Sonst: Name wie geschrieben, kein Link.
+        return { text: String(it.text).trim(), bereich: ber, owner: ref ? ref.name : rawOwner, owner_employee_id: ref ? ref.id : null, due_date: due, target_n: num(it.target_n), actual_n: num(it.actual_n) };
       });
     return json({ ok: true, summary: String(out.zusammenfassung || "").trim(), items });
   }
