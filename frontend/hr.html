@@ -44826,15 +44826,17 @@ function MgmtCallsView({team, showToast}){
   const [bereiche,setBereiche]=React.useState(['Personal','Recruiting','Projekte','Kunden','Finanzen','System']);
   const [sel,setSel]=React.useState(null);        // aktuell bearbeiteter/angesehener Call (oder Neuanlage {__new:true})
   const [busy,setBusy]=React.useState('');
-  const [tab,setTab]=React.useState('calls');     // Übersicht: 'calls' | 'open'
+  const [tab,setTab]=React.useState('calls');     // Übersicht: 'calls' | 'open' | 'analyze'
   const [ni,setNi]=React.useState({bereich:'',text:'',owner:'',due_date:''});   // Entwurf neuer Punkt
+  const [sugg,setSugg]=React.useState(null);      // M3: KI-Vorschläge aus dem Protokoll {busy, items[]}
+  const [ana,setAna]=React.useState(null);        // M4: KI-Auswertung {busy, data, err}
   const p2=n=>String(n).padStart(2,'0');
   const isoToday=()=>{ const d=new Date(); return d.getFullYear()+'-'+p2(d.getMonth()+1)+'-'+p2(d.getDate()); };
   const TODAY=isoToday();
   const fmtDate=s=>{ if(!s) return ''; const d=new Date(s+'T00:00:00'); return p2(d.getDate())+'.'+p2(d.getMonth()+1)+'.'+d.getFullYear(); };
   const MON=['Januar','Februar','März','April','Mai','Juni','Juli','August','September','Oktober','November','Dezember'];
   const monLabel=k=>{ const [y,m]=k.split('-'); return MON[(+m)-1]+' '+y; };
-  const isOverdue=it=> it.status==='open' && it.due_date && it.due_date < TODAY;
+  const isOverdue=it=> it.status!=='done' && it.due_date && it.due_date < TODAY;
   const loadCalls=async()=>{ try{ const {data}=await sb.from('mgmt_calls').select('id,call_date,title,body,created_by_name,created_at').order('call_date',{ascending:false}).order('created_at',{ascending:false}); setCalls(data||[]); }catch(e){ setCalls([]); } };
   const loadItems=async()=>{ try{ const {data}=await sb.from('mgmt_call_items').select('*').order('seq',{ascending:true}).order('created_at',{ascending:true}); setItems(data||[]); }catch(e){ setItems([]); } };
   React.useEffect(()=>{ if(!allowed) return;
@@ -44847,13 +44849,19 @@ function MgmtCallsView({team, showToast}){
   const openNew=()=> openCall({__new:true, call_date:isoToday(), title:'', body:''});
 
   // Offenen Punkt einfügen (an einen bestehenden Call gehängt). uid/nm zur Nachvollziehbarkeit.
+  const numOrNull=v=>{ if(v===''||v==null) return null; const n=Number(v); return isFinite(n)?n:null; };
   const addItemTo=async(callId, draft)=>{
     const text=(draft.text||'').trim(); if(!text) return true;   // nichts zu tun
     const uid=(team&&team.user_id)||null, nm=(team&&team.name)||null;
     const seq=items.filter(x=>x.call_id===callId).length;
+    const tn=numOrNull(draft.target_n), an=numOrNull(draft.actual_n);
+    // Status aus Zahlen ableiten, wenn nicht explizit gesetzt: Ist>=Ziel = erledigt, 0<Ist<Ziel = teilweise, sonst offen.
+    const status=draft.status||((tn!=null&&an!=null)?(an>=tn?'done':(an>0?'partial':'open')):'open');
     const {error}=await sb.from('mgmt_call_items').insert({
       call_id:callId, bereich:draft.bereich||null, text:text, owner:(draft.owner||'').trim()||null,
-      due_date:draft.due_date||null, status:'open', seq, created_by:uid, created_by_name:nm });
+      due_date:draft.due_date||null, status, target_n:tn, actual_n:an,
+      progress_note:(draft.progress_note||'').trim()||null, carried_from_item_id:draft.carried_from_item_id||null,
+      done_at:status==='done'?new Date().toISOString():null, seq, created_by:uid, created_by_name:nm });
     if(error){ showToast&&showToast('Punkt: '+((error&&error.message)||error),'error'); return false; }
     return true;
   };
@@ -44894,11 +44902,30 @@ function MgmtCallsView({team, showToast}){
     if(!(ni.text||'').trim()){ showToast&&showToast('Bitte den Punkt beschreiben.','error'); return; }
     setBusy('item'); const ok=await addItemTo(callId, ni); if(ok){ setNi({bereich:'',text:'',owner:'',due_date:''}); await loadItems(); } setBusy('');
   };
-  const toggleItemDone=async(it)=>{
-    const done = it.status!=='done';
-    const {error}=await sb.from('mgmt_call_items').update({status:done?'done':'open', done_at:done?new Date().toISOString():null, updated_at:new Date().toISOString()}).eq('id',it.id);
+  // Status je Punkt: 'done' erledigt | 'open' offen | 'partial' teilweise (mit „wie weit").
+  const setItemStatus=async(it, status, extra)=>{
+    const patch={ status, done_at: status==='done'?new Date().toISOString():null, updated_at:new Date().toISOString() };
+    if(extra&&'actual_n' in extra) patch.actual_n=numOrNull(extra.actual_n);
+    if(extra&&'progress_note' in extra) patch.progress_note=(extra.progress_note||'').trim()||null;
+    const {error}=await sb.from('mgmt_call_items').update(patch).eq('id',it.id);
     if(error){ showToast&&showToast('Fehler: '+((error&&error.message)||error),'error'); return; }
     await loadItems();
+  };
+  // R4 Wiedervorlage: die offenen/teilweisen Punkte der letzten Sitzung in diesen Call holen (mit Herkunftskette).
+  const carryForward=async()=>{
+    if(!sel||sel.__new){ showToast&&showToast('Erst den Call anlegen.','error'); return; }
+    const prior=(calls||[]).filter(c=>c.id!==sel.id && (c.call_date||'')<=(sel.call_date||''))
+      .sort((a,b)=>(b.call_date||'').localeCompare(a.call_date||'')||(b.created_at||'').localeCompare(a.created_at||''))[0];
+    if(!prior){ showToast&&showToast('Keine frühere Sitzung gefunden.','info'); return; }
+    const carry=items.filter(x=>x.call_id===prior.id && (x.status==='open'||x.status==='partial'));
+    const already=new Set(items.filter(x=>x.call_id===sel.id&&x.carried_from_item_id).map(x=>x.carried_from_item_id));
+    const todo=carry.filter(x=>!already.has(x.id));
+    if(!carry.length){ showToast&&showToast('In der letzten Sitzung ('+fmtDate(prior.call_date)+') sind keine offenen Punkte.','info'); return; }
+    if(!todo.length){ showToast&&showToast('Die offenen Punkte der letzten Sitzung sind schon geholt.','info'); return; }
+    setBusy('carry'); let ok=0;
+    for(const p of todo){ const done=await addItemTo(sel.id,{ bereich:p.bereich, text:p.text, owner:p.owner, due_date:p.due_date, target_n:p.target_n, actual_n:p.actual_n, progress_note:p.progress_note, status:'open', carried_from_item_id:p.id }); if(done) ok++; }
+    await loadItems(); setBusy('');
+    showToast&&showToast(ok+' Punkt'+(ok===1?'':'e')+' aus '+fmtDate(prior.call_date)+' geholt','success');
   };
   const delItem=async(it)=>{
     const ok=await uiConfirm('Diesen Punkt löschen?'); if(!ok) return;
@@ -44906,32 +44933,93 @@ function MgmtCallsView({team, showToast}){
     if(error){ showToast&&showToast('Fehler: '+((error&&error.message)||error),'error'); return; }
     await loadItems();
   };
+  // R3: die KI verarbeitet den Freitext -> Zusammenfassung + Punkte in Gruppen (mit Ziel/Ist-Zahlen). Mensch bestätigt.
+  const suggestItems=async()=>{
+    if(!sel||sel.__new){ showToast&&showToast('Erst den Call speichern, dann den Text verarbeiten.','error'); return; }
+    if(!(sel.body||'').trim()){ showToast&&showToast('Kein Text zum Verarbeiten.','error'); return; }
+    setSugg({busy:true,items:null});
+    try{ const {data,error}=await sb.functions.invoke('mgmt-call-ai',{body:{mode:'extract', text:sel.body, bereiche}});
+      if(error){ let m=error.message||'Fehler'; try{ const j=await error.context.json(); if(j&&j.error) m=j.error; }catch(_e){} throw new Error(m); }
+      if(!data||data.ok!==true) throw new Error((data&&data.error)||'Fehlgeschlagen');
+      const items=(data.items||[]).map(it=>({...it, owner:it.owner||'', due_date:it.due_date||'', target_n:it.target_n==null?'':it.target_n, actual_n:it.actual_n==null?'':it.actual_n, __pick:true}));
+      setSugg({busy:false, items, summary:data.summary||''});
+      if(!items.length&&!data.summary) showToast&&showToast('Kein verwertbarer Inhalt erkannt.','info');
+    }catch(e){ setSugg(null); showToast&&showToast('KI: '+((e&&e.message)||e),'error'); }
+  };
+  const acceptSugg=async()=>{
+    if(!sugg||!sugg.items) return;
+    const picks=sugg.items.filter(i=>i.__pick&&(i.text||'').trim());
+    setBusy('sugg'); let ok=0;
+    for(const p of picks){ const done=await addItemTo(sel.id,{bereich:p.bereich,text:p.text,owner:p.owner,due_date:p.due_date,target_n:p.target_n,actual_n:p.actual_n}); if(done) ok++; }
+    // Zusammenfassung am Call speichern.
+    if((sugg.summary||'').trim()){ try{ await sb.from('mgmt_calls').update({summary:sugg.summary.trim(),updated_at:new Date().toISOString()}).eq('id',sel.id); setSel(s=>s?{...s,summary:sugg.summary.trim()}:s); }catch(_e){} }
+    await loadCalls(); await loadItems(); setSugg(null); setBusy('');
+    showToast&&showToast((ok?ok+' Punkte übernommen':'Übernommen')+((sugg.summary||'').trim()?', Zusammenfassung gespeichert':''),'success');
+  };
+  // R5: KI wertet die Calls eines Zeitraums aus (Daten serverseitig über RLS). Wiederholung / liegen geblieben / im Kreis / Bilanz.
+  const anaFrom=(weeks)=>{ if(!weeks) return null; const d=new Date(); d.setDate(d.getDate()-weeks*7); return d.getFullYear()+'-'+p2(d.getMonth()+1)+'-'+p2(d.getDate()); };
+  const analyzeNow=async(weeks)=>{
+    setAna({busy:true,weeks});
+    const from=anaFrom(weeks);
+    try{ const {data,error}=await sb.functions.invoke('mgmt-call-ai',{body:{mode:'analyze', from}});
+      if(error){ let m=error.message||'Fehler'; try{ const j=await error.context.json(); if(j&&j.error) m=j.error; }catch(_e){} throw new Error(m); }
+      if(!data||data.ok!==true) throw new Error((data&&data.error)||'Fehlgeschlagen');
+      setAna({busy:false,data,weeks});
+    }catch(e){ setAna({busy:false,err:(e&&e.message)||String(e),weeks}); }
+  };
 
   const inp={width:'100%',padding:'9px 11px',border:'1px solid var(--line)',borderRadius:8,fontSize:14,background:'var(--card)',color:'var(--fg)',boxSizing:'border-box'};
   const btn=(bg,fg)=>({padding:'9px 16px',borderRadius:8,border:'1px solid '+(bg==='transparent'?'var(--line)':bg),background:bg,color:fg,fontSize:14,fontWeight:700,cursor:'pointer'});
   const berColor=b=>{ const map={Personal:'#0891b2',Recruiting:'#7c3aed',Projekte:'#d97706',Kunden:'#16a34a',Finanzen:'#0F5661',System:'#64748b'}; return map[b]||'#64748b'; };
   const berChip=b=> b?<span style={{fontSize:10,fontWeight:700,padding:'1px 7px',borderRadius:8,background:berColor(b)+'1c',color:berColor(b)}}>{b}</span>:null;
 
-  // Eine Zeile für einen offenen/erledigten Punkt.
+  // Status-Umschalter (erledigt / offen / teilweise) für einen Punkt.
+  const statusPick=it=>{
+    const opts=[['done','erledigt','#16a34a'],['open','offen','#64748b'],['partial','teilweise','#d97706']];
+    return <div style={{display:'flex',gap:4,flexShrink:0}}>
+      {opts.map(([k,l,c])=>{ const on=(it.status||'open')===k;
+        return <button key={k} onClick={()=>setItemStatus(it,k)} title={l}
+          style={{padding:'3px 8px',borderRadius:7,fontSize:10.5,fontWeight:700,cursor:'pointer',border:'1px solid '+(on?c:'var(--line)'),background:on?c:'var(--card)',color:on?'#fff':'var(--muted)'}}>{l}</button>; })}
+    </div>;
+  };
+  // Fortschritt anzeigen/erfassen: bei Zahlen Ziel/Ist (offen = Ziel-Ist), sonst „wie weit"-Text. Nur bei teilweise editierbar.
+  const progressBlock=it=>{
+    const hasNum=it.target_n!=null;
+    const rest=(it.target_n!=null&&it.actual_n!=null)?Math.max(0,Number(it.target_n)-Number(it.actual_n)):null;
+    return <div style={{marginTop:6,display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
+      {hasNum
+        ? <span style={{fontSize:12.5,fontWeight:600}}>{it.actual_n!=null?it.actual_n:'?'} von {it.target_n} {rest!=null&&rest>0&&<span style={{color:'#d97706'}}>· {rest} offen</span>}{rest===0&&<span style={{color:'#16a34a'}}>· geschafft</span>}</span>
+        : (it.progress_note?<span style={{fontSize:12.5,color:'var(--muted)'}}>Stand: {it.progress_note}</span>:null)}
+      {it.status==='partial'&&(hasNum
+        ? <span style={{display:'inline-flex',alignItems:'center',gap:5,fontSize:12}}>geschafft: <input type="number" defaultValue={it.actual_n==null?'':it.actual_n} onBlur={e=>{ const v=e.target.value; if(String(v)!==String(it.actual_n==null?'':it.actual_n)) setItemStatus(it,'partial',{actual_n:v}); }} style={{width:64,padding:'3px 6px',border:'1px solid var(--line)',borderRadius:6,fontSize:12}}/> / {it.target_n}</span>
+        : <input defaultValue={it.progress_note||''} onBlur={e=>{ if((e.target.value||'')!==(it.progress_note||'')) setItemStatus(it,'partial',{progress_note:e.target.value}); }} placeholder="wie weit? (z. B. 6 von 10)" style={{flex:'1 1 200px',padding:'4px 8px',border:'1px solid var(--line)',borderRadius:6,fontSize:12.5}}/>)}
+    </div>;
+  };
+  // Eine Zeile für einen Punkt (mit Status-Umschalter + Fortschritt).
   const itemRow=(it,{showCall}={})=>{
-    const od=isOverdue(it); const done=it.status==='done';
+    const od=isOverdue(it); const done=it.status==='done'; const part=it.status==='partial';
     const call=(calls||[]).find(c=>c.id===it.call_id);
-    return <div key={it.id} style={{display:'flex',alignItems:'flex-start',gap:8,padding:'8px 10px',border:'1px solid '+(od?'#fca5a5':'var(--line)'),borderRadius:9,background:done?'var(--surface-2,#f8fafc)':(od?'#fef2f2':'var(--card)'),opacity:done?0.65:1}}>
-      <button onClick={()=>toggleItemDone(it)} title={done?'Wieder öffnen':'Als erledigt markieren'}
-        style={{flexShrink:0,width:22,height:22,borderRadius:6,marginTop:1,cursor:'pointer',border:'1.5px solid '+(done?'#16a34a':'var(--line)'),background:done?'#16a34a':'transparent',color:'#fff',fontSize:13,fontWeight:800,lineHeight:1,padding:0}}>{done?'✓':''}</button>
-      <div style={{flex:1,minWidth:0}}>
-        <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap',marginBottom:2}}>
-          {berChip(it.bereich)}
-          {od&&<span style={{fontSize:10,fontWeight:800,padding:'1px 7px',borderRadius:8,background:'#dc2626',color:'#fff'}}>überfällig</span>}
+    return <div key={it.id} style={{padding:'9px 11px',border:'1px solid '+(od?'#fca5a5':'var(--line)'),borderRadius:9,background:done?'var(--surface-2,#f8fafc)':(od?'#fef2f2':(part?'#fffbeb':'var(--card)')),opacity:done?0.7:1}}>
+      <div style={{display:'flex',alignItems:'flex-start',gap:8}}>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap',marginBottom:2}}>
+            {berChip(it.bereich)}
+            {od&&<span style={{fontSize:10,fontWeight:800,padding:'1px 7px',borderRadius:8,background:'#dc2626',color:'#fff'}}>überfällig</span>}
+            {it.carried_from_item_id&&<span style={{fontSize:10,fontWeight:700,padding:'1px 7px',borderRadius:8,background:'var(--surface-2,#f1f5f9)',color:'var(--muted)'}} title="aus einer früheren Sitzung übernommen">↩ übernommen</span>}
+          </div>
+          <div style={{fontSize:14,fontWeight:600,textDecoration:done?'line-through':'none'}}>{it.text}</div>
+          <div style={{fontSize:12,color:'var(--muted)',marginTop:2,display:'flex',gap:10,flexWrap:'wrap'}}>
+            {it.owner&&<span>👤 {it.owner}</span>}
+            {it.due_date&&<span style={od?{color:'#dc2626',fontWeight:700}:{}}>📅 bis {fmtDate(it.due_date)}</span>}
+            {showCall&&call&&<span onClick={()=>openCall(call)} style={{cursor:'pointer',textDecoration:'underline'}}>aus Call {fmtDate(call.call_date)}</span>}
+          </div>
+          {progressBlock(it)}
         </div>
-        <div style={{fontSize:14,fontWeight:600,textDecoration:done?'line-through':'none'}}>{it.text}</div>
-        <div style={{fontSize:12,color:'var(--muted)',marginTop:2,display:'flex',gap:10,flexWrap:'wrap'}}>
-          {it.owner&&<span>👤 {it.owner}</span>}
-          {it.due_date&&<span style={od?{color:'#dc2626',fontWeight:700}:{}}>📅 bis {fmtDate(it.due_date)}</span>}
-          {showCall&&call&&<span onClick={()=>openCall(call)} style={{cursor:'pointer',textDecoration:'underline'}}>aus Call {fmtDate(call.call_date)}</span>}
+        <div style={{flexShrink:0,display:'flex',flexDirection:'column',gap:6,alignItems:'flex-end'}}>
+          {statusPick(it)}
+          <button onClick={()=>delItem(it)} title="Punkt löschen" style={{border:'none',background:'transparent',color:'var(--muted)',cursor:'pointer',fontSize:13,padding:0}}>✕ löschen</button>
         </div>
       </div>
-      <button onClick={()=>delItem(it)} title="Punkt löschen" style={{flexShrink:0,border:'none',background:'transparent',color:'var(--muted)',cursor:'pointer',fontSize:14,padding:2}}>✕</button>
     </div>;
   };
 
@@ -44939,51 +45027,96 @@ function MgmtCallsView({team, showToast}){
   if(sel){
     const callId=sel.__new?null:sel.id;
     const myItems=callId?items.filter(x=>x.call_id===callId):[];
-    const openN=myItems.filter(x=>x.status==='open').length;
+    const openN=myItems.filter(x=>x.status!=='done').length;
     return <div style={{padding:'4px 2px',maxWidth:860}}>
       <button onClick={()=>setSel(null)} style={{...btn('transparent','var(--fg)'),marginBottom:14}}>← Übersicht</button>
       <div style={{fontSize:20,fontWeight:800}}>{sel.__new?'Neuer Management-Call':'Management-Call'}</div>
-      <div style={{fontSize:13,color:'var(--muted)',marginTop:3,marginBottom:16}}>Protokoll erfassen oder einfügen, offene Punkte festhalten. Vertraulich, nur für die Leitung.</div>
+      <div style={{fontSize:13,color:'var(--muted)',marginTop:3,marginBottom:16}}>Freitext schreiben, den Rest macht die KI: Zusammenfassung und nachverfolgbare Punkte. Vertraulich, nur für die Leitung.</div>
       <div style={{display:'grid',gridTemplateColumns:'160px 1fr',gap:12,alignItems:'center',marginBottom:12}}>
         <label style={{fontSize:13,fontWeight:600}}>Datum</label>
         <input type="date" value={sel.call_date||''} onChange={e=>setSel({...sel,call_date:e.target.value})} style={{...inp,maxWidth:200}}/>
         <label style={{fontSize:13,fontWeight:600}}>Titel (optional)</label>
         <input value={sel.title||''} onChange={e=>setSel({...sel,title:e.target.value})} placeholder="z. B. Wochenstart, KW 37" style={inp}/>
       </div>
-      <label style={{fontSize:13,fontWeight:600,display:'block',marginBottom:6}}>Protokoll</label>
-      <textarea value={sel.body||''} onChange={e=>setSel({...sel,body:e.target.value})} rows={12} placeholder="Protokoll hier einfügen oder tippen…" style={{...inp,fontFamily:'inherit',lineHeight:1.5,resize:'vertical'}}/>
-      <div style={{display:'flex',gap:10,marginTop:16}}>
+      <label style={{fontSize:13,fontWeight:600,display:'block',marginBottom:6}}>Freitext</label>
+      <textarea value={sel.body||''} onChange={e=>setSel({...sel,body:e.target.value})} rows={11} placeholder="Was ist zu klären, was zu erledigen, wie ist der Stand… einfach schreiben." style={{...inp,fontFamily:'inherit',lineHeight:1.5,resize:'vertical'}}/>
+      <div style={{display:'flex',gap:10,marginTop:16,flexWrap:'wrap'}}>
         <button onClick={saveCall} disabled={busy==='save'} style={btn('var(--accent,#2563eb)','#fff')}>{busy==='save'?'Speichert…':(sel.__new?'Call anlegen':'Speichern')}</button>
         {!sel.__new&&<button onClick={delCall} disabled={busy==='del'} style={btn('transparent','var(--red)')}>{busy==='del'?'Löscht…':'Löschen'}</button>}
+        {!sel.__new&&(sel.body||'').trim()&&<button onClick={suggestItems} disabled={!!(sugg&&sugg.busy)} style={{...btn('var(--accent,#2563eb)','#fff'),marginLeft:'auto'}}>{sugg&&sugg.busy?'KI liest…':'✨ Text verarbeiten'}</button>}
       </div>
+      {sel.summary&&<div style={{marginTop:16,padding:'12px 14px',borderRadius:10,background:'color-mix(in srgb, var(--accent,#2563eb) 6%, var(--card))',border:'1px solid color-mix(in srgb, var(--accent,#2563eb) 22%, var(--line))'}}>
+        <div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.05em',color:'var(--muted)',marginBottom:4}}>Zusammenfassung</div>
+        <div style={{fontSize:14,lineHeight:1.5}}>{sel.summary}</div>
+      </div>}
+
+      {/* R3: KI hat den Text verarbeitet — Zusammenfassung + Punkte in Gruppen, zum Bestätigen. */}
+      {sugg&&sugg.items&&<div style={{marginTop:16,border:'1px solid var(--accent,#2563eb)',borderRadius:12,padding:14,background:'color-mix(in srgb, var(--accent,#2563eb) 6%, var(--card))'}}>
+        <div style={{fontSize:13.5,fontWeight:800,marginBottom:2}}>Die KI hat den Text verarbeitet</div>
+        <div style={{fontSize:12,color:'var(--muted)',marginBottom:10}}>Zusammenfassung und Punkte prüfen, dann übernehmen. Erkannte Zahlen (Ziel/Ist) stehen dabei. Nichts wird ohne dein Zutun gespeichert.</div>
+        <div style={{marginBottom:10}}>
+          <div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.05em',color:'var(--muted)',marginBottom:4}}>Zusammenfassung</div>
+          <textarea value={sugg.summary||''} onChange={e=>setSugg(s=>({...s,summary:e.target.value}))} rows={2} placeholder="(keine Zusammenfassung)" style={{...inp,resize:'vertical'}}/>
+        </div>
+        <div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.05em',color:'var(--muted)',marginBottom:6}}>Punkte</div>
+        {!sugg.items.length&&<div style={{fontSize:13,color:'var(--muted)'}}>Keine Punkte erkannt.</div>}
+        <div style={{display:'flex',flexDirection:'column',gap:8}}>
+          {sugg.items.map((it,idx)=>{ const set=(k,v)=>setSugg(s=>({...s,items:s.items.map((x,i)=>i===idx?{...x,[k]:v}:x)}));
+            return <div key={idx} style={{display:'flex',gap:9,alignItems:'flex-start',padding:'9px 10px',background:'var(--card)',border:'1px solid var(--line)',borderRadius:9,opacity:it.__pick?1:0.5}}>
+              <input type="checkbox" checked={!!it.__pick} onChange={e=>set('__pick',e.target.checked)} style={{marginTop:4,flexShrink:0}}/>
+              <div style={{flex:1,minWidth:0,display:'flex',flexDirection:'column',gap:6}}>
+                <input value={it.text} onChange={e=>set('text',e.target.value)} style={{...inp,fontWeight:600}}/>
+                <div style={{display:'flex',gap:7,flexWrap:'wrap',alignItems:'center'}}>
+                  <input value={it.bereich} onChange={e=>set('bereich',e.target.value)} list="mgmt-bereiche" placeholder="Gruppe" style={{...inp,flex:'0 0 150px',width:150,...(it.bereich?{}:{borderColor:'#f59e0b'})}}/>
+                  <input value={it.owner} onChange={e=>set('owner',e.target.value)} placeholder="Wer?" style={{...inp,flex:'0 0 130px',width:130}}/>
+                  <input type="date" value={it.due_date} onChange={e=>set('due_date',e.target.value)} style={{...inp,flex:'0 0 150px',width:150}}/>
+                  <span style={{fontSize:12,color:'var(--muted)',display:'inline-flex',alignItems:'center',gap:4}}>Ziel<input type="number" value={it.target_n} onChange={e=>set('target_n',e.target.value)} style={{width:58,padding:'6px',border:'1px solid var(--line)',borderRadius:6,fontSize:13}}/> Ist<input type="number" value={it.actual_n} onChange={e=>set('actual_n',e.target.value)} style={{width:58,padding:'6px',border:'1px solid var(--line)',borderRadius:6,fontSize:13}}/></span>
+                </div>
+              </div>
+            </div>; })}
+        </div>
+        <datalist id="mgmt-bereiche">{bereiche.map(b=><option key={b} value={b}/>)}</datalist>
+        <div style={{display:'flex',gap:10,marginTop:12}}>
+          <button onClick={acceptSugg} disabled={busy==='sugg'} style={btn('var(--accent,#2563eb)','#fff')}>{busy==='sugg'?'Übernehme…':'Übernehmen'}</button>
+          <button onClick={()=>setSugg(null)} style={btn('transparent','var(--fg)')}>Verwerfen</button>
+        </div>
+      </div>}
 
       {/* Offene Punkte — erst wenn der Call angelegt ist (braucht eine ID). */}
       <div style={{marginTop:26,borderTop:'1px solid var(--line)',paddingTop:18}}>
-        <div style={{fontSize:16,fontWeight:800,marginBottom:2}}>Offene Punkte {openN>0&&<span style={{fontSize:12,fontWeight:700,color:'var(--muted)'}}>· {openN} offen</span>}</div>
-        <div style={{fontSize:12,color:'var(--muted)',marginBottom:12}}>Wer macht was bis wann. Nicht erledigte Punkte bleiben in der Wiedervorlage sichtbar, bis sie abgehakt sind.</div>
+        <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',marginBottom:2}}>
+          <div style={{fontSize:16,fontWeight:800}}>Punkte {openN>0&&<span style={{fontSize:12,fontWeight:700,color:'var(--muted)'}}>· {openN} offen</span>}</div>
+          {!sel.__new&&<button onClick={carryForward} disabled={busy==='carry'} style={{...btn('transparent','var(--accent,#2563eb)'),marginLeft:'auto',padding:'6px 12px',fontSize:13}}>{busy==='carry'?'Hole…':'↩ Punkte aus letzter Sitzung holen'}</button>}
+        </div>
+        <div style={{fontSize:12,color:'var(--muted)',marginBottom:12}}>Je Punkt: erledigt, offen oder teilweise (mit „wie weit"). Offene und teilweise Punkte holst du beim nächsten Call wieder rein.</div>
         {sel.__new
-          ? <div style={{fontSize:13,color:'var(--muted)',fontStyle:'italic'}}>Erst den Call anlegen, dann lassen sich offene Punkte hinzufügen.</div>
+          ? <div style={{fontSize:13,color:'var(--muted)',fontStyle:'italic'}}>Erst den Call anlegen, dann Text verarbeiten oder Punkte aus der letzten Sitzung holen.</div>
           : <>
-            <div style={{display:'flex',flexDirection:'column',gap:7,marginBottom:14}}>
-              {myItems.length===0&&<div style={{fontSize:13,color:'var(--muted)'}}>Noch keine Punkte erfasst.</div>}
-              {myItems.map(it=>itemRow(it))}
-            </div>
-            {/* Neuer Punkt */}
-            <div style={{border:'1px dashed var(--line)',borderRadius:10,padding:12,background:'var(--surface-2,#f8fafc)'}}>
-              <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:8}}>
-                <select value={ni.bereich} onChange={e=>setNi({...ni,bereich:e.target.value})} style={{...inp,flex:'0 0 160px',width:160}}>
-                  <option value="">Bereich…</option>
-                  {bereiche.map(b=><option key={b} value={b}>{b}</option>)}
-                </select>
-                <input value={ni.text} onChange={e=>setNi({...ni,text:e.target.value})} placeholder="Was ist zu tun?" style={{...inp,flex:'1 1 220px'}}/>
+            {myItems.length===0&&<div style={{fontSize:13,color:'var(--muted)',marginBottom:12}}>Noch keine Punkte. „Text verarbeiten" lässt die KI sie aus dem Freitext ziehen.</div>}
+            {(()=>{ const g={}; myItems.forEach(it=>{ const k=it.bereich||'—'; (g[k]=g[k]||[]).push(it); });
+              const keys=Object.keys(g).sort((a,b)=>a==='—'?1:b==='—'?-1:a.localeCompare(b,'de'));
+              return <div style={{display:'flex',flexDirection:'column',gap:14,marginBottom:14}}>{keys.map(k=>
+                <div key={k}>
+                  <div style={{display:'flex',alignItems:'center',gap:7,marginBottom:6}}>{k==='—'?<span style={{fontSize:11,fontWeight:700,color:'var(--muted)'}}>OHNE GRUPPE</span>:berChip(k)}<span style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>{g[k].length}</span></div>
+                  <div style={{display:'flex',flexDirection:'column',gap:7}}>{g[k].map(it=>itemRow(it))}</div>
+                </div>)}</div>;
+            })()}
+            {/* Punkt von Hand ergänzen (Korrektur/Nachtrag, der Hauptweg ist „Text verarbeiten"). */}
+            <details style={{marginTop:4}}>
+              <summary style={{fontSize:12.5,color:'var(--muted)',cursor:'pointer'}}>Punkt von Hand ergänzen</summary>
+              <div style={{border:'1px dashed var(--line)',borderRadius:10,padding:12,background:'var(--surface-2,#f8fafc)',marginTop:8}}>
+                <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:8}}>
+                  <input value={ni.bereich} onChange={e=>setNi({...ni,bereich:e.target.value})} list="mgmt-bereiche" placeholder="Gruppe" style={{...inp,flex:'0 0 160px',width:160}}/>
+                  <input value={ni.text} onChange={e=>setNi({...ni,text:e.target.value})} placeholder="Was ist zu tun?" style={{...inp,flex:'1 1 220px'}}/>
+                </div>
+                <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
+                  <input value={ni.owner} onChange={e=>setNi({...ni,owner:e.target.value})} placeholder="Wer? (optional)" style={{...inp,flex:'0 0 180px',width:180}}/>
+                  <label style={{fontSize:12,color:'var(--muted)'}}>bis</label>
+                  <input type="date" value={ni.due_date} onChange={e=>setNi({...ni,due_date:e.target.value})} style={{...inp,flex:'0 0 170px',width:170}}/>
+                  <button onClick={()=>addItemNow(callId)} disabled={busy==='item'} style={{...btn('var(--accent,#2563eb)','#fff'),marginLeft:'auto'}}>{busy==='item'?'…':'+ Punkt'}</button>
+                </div>
               </div>
-              <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
-                <input value={ni.owner} onChange={e=>setNi({...ni,owner:e.target.value})} placeholder="Wer? (optional)" style={{...inp,flex:'0 0 180px',width:180}}/>
-                <label style={{fontSize:12,color:'var(--muted)'}}>bis</label>
-                <input type="date" value={ni.due_date} onChange={e=>setNi({...ni,due_date:e.target.value})} style={{...inp,flex:'0 0 170px',width:170}}/>
-                <button onClick={()=>addItemNow(callId)} disabled={busy==='item'} style={{...btn('var(--accent,#2563eb)','#fff'),marginLeft:'auto'}}>{busy==='item'?'…':'+ Punkt'}</button>
-              </div>
-            </div>
+            </details>
           </>}
       </div>
     </div>;
@@ -44993,10 +45126,12 @@ function MgmtCallsView({team, showToast}){
   const groups={};
   (calls||[]).forEach(c=>{ const k=(c.call_date||'').slice(0,7); (groups[k]=groups[k]||[]).push(c); });
   const months=Object.keys(groups).sort().reverse();
-  const openItems=items.filter(x=>x.status==='open');
-  // Nach Bereich gruppieren (Bereichs-Reihenfolge + „Ohne Bereich" zuletzt), überfällige je Gruppe oben.
-  const berOrder=[...bereiche,'']; const openByBer={};
-  openItems.forEach(it=>{ const b=bereiche.includes(it.bereich)?it.bereich:''; (openByBer[b]=openByBer[b]||[]).push(it); });
+  const openItems=items.filter(x=>x.status!=='done');   // offen + teilweise (alles Nicht-Erledigte, wandert mit)
+  // Nach Gruppe gruppieren (KI-Gruppen frei). Reihenfolge: konfigurierte Bereiche zuerst, dann weitere, „ohne" zuletzt. Überfällige je Gruppe oben.
+  const openByBer={};
+  openItems.forEach(it=>{ const b=(it.bereich||'').trim(); (openByBer[b]=openByBer[b]||[]).push(it); });
+  const extraBer=Object.keys(openByBer).filter(b=>b&&!bereiche.includes(b)).sort((a,b)=>a.localeCompare(b,'de'));
+  const berOrder=[...bereiche,...extraBer,''];
   Object.values(openByBer).forEach(arr=>arr.sort((a,b)=>{ const ao=isOverdue(a)?0:1, bo=isOverdue(b)?0:1; if(ao!==bo) return ao-bo; return (a.due_date||'9999').localeCompare(b.due_date||'9999'); }));
   const overdueCount=openItems.filter(isOverdue).length;
   const tabBtn=(k,label,count)=>{ const on=tab===k; return <button onClick={()=>setTab(k)} style={{padding:'7px 14px',borderRadius:8,border:'1px solid '+(on?'var(--accent,#2563eb)':'var(--line)'),background:on?'var(--accent,#2563eb)':'var(--card)',color:on?'#fff':'var(--fg)',fontSize:13,fontWeight:700,cursor:'pointer'}}>{label}{count!=null?' · '+count:''}</button>; };
@@ -45012,6 +45147,7 @@ function MgmtCallsView({team, showToast}){
     <div style={{display:'flex',gap:8,marginTop:14,flexWrap:'wrap',alignItems:'center'}}>
       {tabBtn('calls','Protokolle',calls?calls.length:null)}
       {tabBtn('open','Offene Punkte',openItems.length)}
+      {tabBtn('analyze','Auswertung')}
       {overdueCount>0&&<span style={{fontSize:12,fontWeight:800,color:'#dc2626'}}>{overdueCount} überfällig</span>}
     </div>
 
@@ -45024,7 +45160,7 @@ function MgmtCallsView({team, showToast}){
           <div style={{display:'flex',flexDirection:'column',gap:8}}>
             {groups[mk].map(c=>{
               const snip=(c.body||'').replace(/\s+/g,' ').trim().slice(0,120);
-              const co=items.filter(x=>x.call_id===c.id&&x.status==='open').length;
+              const co=items.filter(x=>x.call_id===c.id&&x.status!=='done').length;
               return <div key={c.id} onClick={()=>openCall(c)} style={{border:'1px solid var(--line)',borderRadius:10,padding:'12px 14px',cursor:'pointer',background:'var(--card)'}}>
                 <div style={{display:'flex',justifyContent:'space-between',gap:12,alignItems:'baseline'}}>
                   <div style={{fontWeight:700,fontSize:15}}>{c.title||fmtDate(c.call_date)}</div>
@@ -45056,6 +45192,46 @@ function MgmtCallsView({team, showToast}){
         </div>
       ))}
     </div>}
+
+    {tab==='analyze' && (()=>{
+      const d=ana&&ana.data; const acc='var(--accent,#2563eb)';
+      const anaSec=(title,rows,keyName,color)=> rows&&rows.length? <div style={{marginBottom:16}}>
+        <div style={{fontSize:12,fontWeight:800,letterSpacing:'.06em',textTransform:'uppercase',color:color||'var(--muted)',marginBottom:8}}>{title}</div>
+        <div style={{display:'flex',flexDirection:'column',gap:8}}>{rows.map((r,i)=>
+          <div key={i} style={{padding:'10px 12px',background:'var(--card)',border:'1px solid var(--line)',borderRadius:10}}>
+            <div style={{fontSize:14,fontWeight:700}}>{r[keyName]}</div>
+            {r.hinweis&&<div style={{fontSize:12.5,color:'var(--muted)',marginTop:2}}>{r.hinweis}</div>}
+          </div>)}</div>
+      </div> : null;
+      const RANGES=[[4,'4 Wochen'],[12,'3 Monate'],[26,'6 Monate'],[0,'Alles']];
+      const curW=ana?ana.weeks:4;
+      return <div style={{marginTop:18}}>
+        <div style={{fontSize:13,color:'var(--muted)',marginBottom:10}}>Die KI liest die Protokolle des Zeitraums und zeigt: was sich wiederholt, was liegen bleibt, wo man sich im Kreis dreht, und was aus den Vorhaben wurde. Nur Beobachtung, keine Wertung.</div>
+        <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap',marginBottom:16}}>
+          <span style={{fontSize:12,fontWeight:700,color:'var(--muted)'}}>Zeitraum:</span>
+          {RANGES.map(([w,l])=><button key={w} onClick={()=>analyzeNow(w)} disabled={!!(ana&&ana.busy)}
+            style={{padding:'6px 12px',borderRadius:8,fontSize:13,fontWeight:700,cursor:'pointer',border:'1px solid '+((ana&&ana.busy&&ana.weeks===w)||(d&&curW===w)?'var(--accent,#2563eb)':'var(--line)'),background:(d&&curW===w)?'var(--accent,#2563eb)':'var(--card)',color:(d&&curW===w)?'#fff':'var(--fg)'}}>{l}</button>)}
+        </div>
+        {ana&&ana.err&&<div style={{padding:'12px 14px',borderRadius:10,background:'rgba(220,38,38,.07)',border:'1px solid rgba(220,38,38,.3)',color:'#b91c1c',fontSize:13.5}}>{ana.err}</div>}
+        {ana&&ana.busy&&<div style={{color:'var(--muted)',fontSize:14,padding:'20px 0'}}>Die KI liest die Protokolle…</div>}
+        {d&&<div>
+          {d.ueberblick&&<div style={{padding:'14px 16px',borderRadius:12,background:'color-mix(in srgb, '+acc+' 7%, var(--card))',border:'1px solid color-mix(in srgb, '+acc+' 25%, var(--line))',fontSize:14.5,lineHeight:1.55,marginBottom:16}}>{d.ueberblick}</div>}
+          {d.bilanz&&d.bilanz.length>0&&<div style={{marginBottom:16}}>
+            <div style={{fontSize:12,fontWeight:800,letterSpacing:'.06em',textTransform:'uppercase',color:'#0891b2',marginBottom:8}}>Vorgenommen → geworden</div>
+            <div style={{display:'flex',flexDirection:'column',gap:8}}>{d.bilanz.map((r,i)=>
+              <div key={i} style={{padding:'10px 12px',background:'var(--card)',border:'1px solid var(--line)',borderRadius:10}}>
+                <div style={{fontSize:14,fontWeight:700}}>{r.vorgenommen}</div>
+                <div style={{fontSize:13,color:'#0891b2',marginTop:2}}>→ {r.geworden}</div>
+              </div>)}</div>
+          </div>}
+          {anaSec('Wiederkehrende Themen', d.wiederkehrend, 'thema', '#7c3aed')}
+          {anaSec('Bleibt liegen', d.liegen_geblieben, 'punkt', '#b45309')}
+          {anaSec('Dreht sich im Kreis', d.im_kreis, 'thema', '#dc2626')}
+          {!(d.wiederkehrend&&d.wiederkehrend.length)&&!(d.liegen_geblieben&&d.liegen_geblieben.length)&&!(d.im_kreis&&d.im_kreis.length)&&!(d.bilanz&&d.bilanz.length)&&<div style={{color:'var(--muted)',fontSize:13,marginTop:4}}>Keine auffälligen Muster erkannt.</div>}
+        </div>}
+        {!ana&&<div style={{color:'var(--muted)',fontSize:14,padding:'20px 0'}}>Noch keine Auswertung. Zeitraum wählen, um sie zu erstellen.</div>}
+      </div>;
+    })()}
   </div>;
 }
 
