@@ -32,6 +32,7 @@ async function logQuery(projectId: string, uid: string, question: string, r: any
       project_id: projectId, user_id: uid, question, known: !!r.known, had_rueckfrage: !!r.rueckfrage,
       fact_count: (r.used && r.used.facts) || 0, chunk_count: (r.used && r.used.chunks) || 0,
       answer: answerText, sources: Array.isArray(r.sources) && r.sources.length ? r.sources : null,
+      gap_topic: (typeof r.luecke === "string" && r.luecke.trim()) ? r.luecke.trim().slice(0, 120) : null,
     }).select("id").single();
     return data?.id || null;
   } catch (_e) { return null; }
@@ -73,6 +74,7 @@ const ANTWORT_TOOL = {
         },
       },
       rueckfrage: { type: ["string", "null"], description: "wenn die Frage mehrdeutig ist: die kurze Rückfrage statt zu raten (dann known=false, blocks leer); sonst null" },
+      luecke: { type: ["string", "null"], description: "das konkrete Sachthema, zu dem im Wissen NICHTS steht — auch wenn du zum genannten Ort eine Übersicht zeigen kannst. Kurz, z. B. 'Waldbrand / Naturereignisse'. Generische Füllwörter (Problem, Frage, Hilfe) sind KEINE Lücke -> null. Steht das Thema im Wissen -> null." },
     },
     required: ["known"],
   },
@@ -153,6 +155,7 @@ Deno.serve(async (req) => {
     "- Deckt das Wissen die Frage ab (auch teilweise), dann ANTWORTE (known=true) und nenne die Quelle. known=false NUR, wenn das Wissen die Frage wirklich nicht enthält. Die Vorsicht bei Nummern/Zeiten bedeutet: nichts erfinden — NICHT: eine vorhandene Auskunft verweigern.\n" +
     "- Die Abschnitte können mehrere Zielgebiete/Fälle enthalten (die Unterlagen sind oft Tabellen mit einer Zeile je Ort). Nutze nur die Zeile(n), die zum gefragten Ort/Fall passen; ist der gefragte Ort dabei, beantworte die Frage daraus.\n" +
     "- Mehrdeutige Frage (Hotel oder Flughafen; welche Saison; welcher Veranstalter): known=false und stelle in 'rueckfrage' die eine nötige Rückfrage, statt zu raten.\n" +
+    "- LÜCKE ERKENNEN: Nennt die Frage ein KONKRETES Sachthema, zu dem im WISSEN nichts steht (z. B. Waldbrand, Unwetter, Streik, Erdbeben, andere Naturereignisse oder Sonderlagen) — AUCH wenn du zum genannten Ort eine Übersicht zeigen kannst — dann trage dieses fehlende Thema kurz in 'luecke' ein (z. B. 'Waldbrand / Naturereignisse'). So landet es auf der Lückenliste und wir wissen, was wir beim Partner anfragen müssen. Generische Füllwörter (Problem, Frage, Hilfe, Info) sind KEINE Lücke -> luecke=null. Steht das Thema im Wissen -> null. Das gilt UNABHÄNGIG davon, ob du sonst antwortest oder eine Übersicht zeigst.\n" +
     "- VAGE FRAGE = ÜBERSICHT: Nennt die Frage nur einen Ort oder ein Thema ohne konkreten Bedarf (\"Problem Rhodos\", \"Frage zu Mallorca\", \"was gibt es zu Kos\") UND es gibt unten einen Abschnitt ÜBERSICHT ZUM ZIELGEBIET: sag NIEMALS 'steht nicht drin'. Antworte dann known=true, intent='uebersicht'. Sag in einem kurzen info-Block, WAS du zu dem Zielgebiet hast, nach Art gruppiert (z. B. Notfallnummer, örtliche Agentur, Treffpunkt am Flughafen, Rücktransfer/Abläufe). Lege für die einzelnen Kategorien 'related'-Punkte an (je ein anklickbarer Punkt mit der konkreten Frage, z. B. label 'Notfallnummer', question 'Notfallnummer Rhodos'). Stelle in 'rueckfrage' die eine Frage, worum es genau geht. Genau wie ein Kollege: \"Zu Rhodos habe ich das und das, was brauchst du?\" Nenne nur Kategorien, die wirklich in der ÜBERSICHT stehen, und nur bei uebersicht: gib KEINE konkreten Nummern/Werte im Block aus (die kommen erst auf die konkrete Rückfrage).\n\n" +
     "SO ANTWORTEST DU (wenn known=true) — als LEITFADEN zum Abarbeiten, nicht als Fließtext:\n" +
     "- BLICKWINKEL erkennen: Beschreibt die Frage eine Situation (\"Der Kunde findet seinen Transfer nicht\")? -> intent=anleitung. Will sie verstehen, wie etwas abläuft? -> intent=erklaerung.\n" +
@@ -203,6 +206,7 @@ Deno.serve(async (req) => {
     related: relatedOut,
     sources,
     rueckfrage: (typeof out.rueckfrage === "string" && out.rueckfrage.trim()) ? out.rueckfrage.trim() : null,
+    luecke: (typeof out.luecke === "string" && out.luecke.trim()) ? out.luecke.trim().slice(0, 120) : null,
     note: known ? "" : MISS,
     used: { facts: facts.length, chunks: chunks.length, overview: overview.length },
   };
