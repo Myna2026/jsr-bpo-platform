@@ -40317,6 +40317,9 @@ function WissensspeicherView({projects, team, showToast}){
   const [editF,setEditF]=React.useState(null);
   const [regView,setRegView]=React.useState('zielgebiet');   // zielgebiet | thema
   const [regOpen,setRegOpen]=React.useState({});             // aufgeklappte Gruppen
+  const [regions,setRegions]=React.useState(null);           // geografische Zuordnung (kb_regions)
+  const [geoBusy,setGeoBusy]=React.useState(false);
+  const [geoShow,setGeoShow]=React.useState(false);
   const [names,setNames]=React.useState({});
   const KB_INFO_TYPES=[['kontakt','Kontakt / Nummer'],['zeit','Zeit / Dauer'],['ablauf','Ablauf'],['regel','Regel'],['preis','Preis'],['sonstiges','Sonstiges']];
   React.useEffect(()=>{ sb.from('app_users').select('user_id,full_name').then(({data})=>{ const m={}; (data||[]).forEach(u=>{ m[u.user_id]=u.full_name; }); setNames(m); }).catch(()=>{}); },[]);
@@ -40327,7 +40330,11 @@ function WissensspeicherView({projects, team, showToast}){
       if(dids.length){ const {data:dd}=await sb.from('kb_documents').select('id,title').in('id',dids); const m={}; (dd||[]).forEach(d=>{ m[d.id]=d.title; }); setFactDocs(m); } else setFactDocs({});
     }catch(e){ setFacts([]); showToast&&showToast('Register laden fehlgeschlagen: '+((e&&e.message)||e),'error'); }
   };
+  const loadRegions=async(pid)=>{ if(!pid){ setRegions([]); return; } try{ const {data}=await sb.from('kb_regions').select('*').eq('project_id',pid).eq('status','active').order('name'); setRegions(data||[]); }catch(e){ setRegions([]); } };
+  const runGeo=async()=>{ if(!partner) return; setGeoBusy(true); try{ const {data,error}=await sb.functions.invoke('kb-geo',{body:{project_id:partner}}); if(error) throw error; if(data&&data.error) throw new Error(data.error); showToast&&showToast('Geografische Zuordnung aktualisiert: '+((data&&data.regions)||0)+' Regionen'); await loadRegions(partner); setGeoShow(true); }catch(e){ showToast&&showToast('Zuordnung fehlgeschlagen: '+((e&&e.message)||e),'error'); } finally{ setGeoBusy(false); } };
+  const delRegion=async(r)=>{ if(!(await uiConfirm({title:'Region entfernen', text:'"'+r.name+'" aus der geografischen Zuordnung entfernen?', confirmLabel:'Entfernen', danger:true}))) return; try{ const {error}=await sb.from('kb_regions').delete().eq('id',r.id); if(error) throw error; loadRegions(partner); }catch(e){ showToast&&showToast('Fehlgeschlagen: '+((e&&e.message)||e),'error'); } };
   React.useEffect(()=>{ if(partner&&mode==='register'&&facts===null) loadFacts(partner); },[partner,mode]);
+  React.useEffect(()=>{ if(partner&&mode==='register'&&regions===null) loadRegions(partner); },[partner,mode]);
   React.useEffect(()=>{ if(partner&&mode==='gaps'&&qlog===null) loadQlog(partner); },[partner,mode]);
   // Vollansicht (Steckbrief) braucht Register + Anfragen für „was er weiß" und „seine Bilanz".
   React.useEffect(()=>{ if(partner&&mode==='agent'){ if(facts===null) loadFacts(partner); if(qlog===null) loadQlog(partner); } },[partner,mode]);
@@ -40402,6 +40409,8 @@ function WissensspeicherView({projects, team, showToast}){
       if(archiveIds.length){ const {error}=await sb.from('kb_facts').update({status:'archived',updated_by:uid,updated_at:now}).in('id',archiveIds); if(error) throw error; }
       for(let i=0;i<inserts.length;i+=200){ const {error}=await sb.from('kb_facts').insert(inserts.slice(i,i+200)); if(error) throw error; }
       showToast&&showToast('Register aktualisiert: '+inserts.length+' neu'+(archiveIds.length?(', '+archiveIds.length+' ersetzt'):'')); setCatalog(null); if(facts!==null) loadFacts(partner);
+      // Neue Zielgebiete geografisch mitkartieren (im Hintergrund, ohne den Ablauf zu blockieren).
+      if(inserts.length){ sb.functions.invoke('kb-geo',{body:{project_id:partner}}).then(()=>loadRegions(partner)).catch(()=>{}); }
     }catch(e){ showToast&&showToast('Übernehmen fehlgeschlagen: '+((e&&e.message)||e),'error'); }
     setBusy('');
   };
@@ -40529,7 +40538,7 @@ function WissensspeicherView({projects, team, showToast}){
     </div>
     {/* Partner-Auswahl */}
     <div style={{display:'flex',flexWrap:'wrap',gap:8,marginBottom:14}}>
-      {partners.map(p=>{ const on=p.id===partner; const pc=agentOf(p.id).color; return <button key={p.id} onClick={()=>{setPartner(p.id);setPrev(null);setOpenDoc(null);setAns(null);setQ('');setFacts(null);setEditF(null);setQlog(null);setFbDone(null);setCatalog(null);}}
+      {partners.map(p=>{ const on=p.id===partner; const pc=agentOf(p.id).color; return <button key={p.id} onClick={()=>{setPartner(p.id);setPrev(null);setOpenDoc(null);setAns(null);setQ('');setFacts(null);setEditF(null);setQlog(null);setFbDone(null);setCatalog(null);setRegions(null);setGeoShow(false);}}
         style={{padding:'7px 14px',borderRadius:20,border:'1px solid '+(on?pc:'var(--border)'),cursor:'pointer',
           background:on?('color-mix(in srgb, '+pc+' 15%, var(--card))'):'var(--card)',color:on?pc:'var(--text)',fontWeight:on?800:500,fontSize:13.5}}>{p.name}</button>; })}
     </div>
@@ -40621,6 +40630,33 @@ function WissensspeicherView({projects, team, showToast}){
         <input value={fq} onChange={e=>setFq(e.target.value)} placeholder="Suchen (Thema, Zielgebiet, Wert)…" style={{flex:'1 1 220px',padding:'8px 11px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)',fontSize:13.5}}/>
         {canEdit&&<button className="btn btn-primary" onClick={()=>setEditF(blankFact())}>+ Neuer Eintrag</button>}
         <label style={{fontSize:12.5,color:'var(--muted)',display:'flex',alignItems:'center',gap:6,cursor:'pointer'}}><input type="checkbox" checked={showArch} onChange={e=>{setShowArch(e.target.checked);setEditF(null);}}/> Gelöschte{archCount?(' ('+archCount+')'):''}</label>
+      </div>
+      {/* Geografische Zuordnung: Insel/Region ↔ Ort. Von der KI aus den echten Zielgebieten gebaut, damit
+          "Problem auf Kreta" die Heraklion-Fakten findet. Deterministisch gespeichert, nachvollziehbar. */}
+      <div style={{...card,padding:'12px 14px',marginBottom:12}}>
+        <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+          <button onClick={()=>setGeoShow(s=>!s)} style={{border:'none',background:'none',cursor:'pointer',color:'var(--text)',fontWeight:800,fontSize:14,display:'flex',alignItems:'center',gap:6,padding:0}}>
+            <span style={{color:'var(--muted)',fontSize:12}}>{geoShow?'▾':'▸'}</span>🗺 Geografische Zuordnung
+            <span style={{fontWeight:600,color:'var(--muted)',fontSize:12.5}}>{regions?('· '+regions.length+' Regionen'):'· lädt…'}</span>
+          </button>
+          <div style={{flex:1}}/>
+          {canEdit&&<button className="btn" disabled={geoBusy} onClick={runGeo}>{geoBusy?'Erkenne…':'↻ Aktualisieren (KI)'}</button>}
+        </div>
+        <div style={{fontSize:12,color:'var(--muted)',marginTop:6}}>Erkennt Insel↔Ort, Region↔Stadt, Land↔Gebiet, damit die Suche geografische Zusammenhänge kennt. Die KI baut die Zuordnung aus den echten Zielgebieten, neue kommen beim Katalogisieren automatisch dazu.</div>
+        {geoShow&&<div style={{marginTop:10}}>
+          {regions===null? <div style={{fontSize:13,color:'var(--muted)'}}>lädt…</div>
+           : !regions.length? <div style={{fontSize:13,color:'var(--muted)'}}>Noch keine Zuordnung. {canEdit?'Klick „Aktualisieren (KI)", um sie aus den Zielgebieten zu bauen.':'Ein Verwalter kann sie über „Aktualisieren" bauen.'}</div>
+           : <div style={{display:'flex',flexDirection:'column',gap:7}}>
+              {regions.map(r=><div key={r.id} style={{display:'flex',alignItems:'flex-start',gap:8,padding:'8px 10px',border:'1px solid var(--border)',borderRadius:8,background:'var(--bg,transparent)'}}>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontSize:13.5,fontWeight:700}}>{r.name} <span style={{fontWeight:500,color:'var(--muted)',fontSize:11.5,textTransform:'uppercase',letterSpacing:'.04em'}}>{r.kind}</span>{r.source==='manuell'&&<span style={{marginLeft:6,fontSize:10.5,color:'var(--accent,#0F5661)',border:'1px solid var(--border)',borderRadius:10,padding:'1px 6px'}}>von Hand</span>}</div>
+                  {(r.aliases&&r.aliases.length)?<div style={{fontSize:11.5,color:'var(--muted)',marginTop:1}}>auch: {r.aliases.join(', ')}</div>:null}
+                  <div style={{fontSize:12,color:'var(--text)',marginTop:3}}>{(r.members||[]).join(' · ')}</div>
+                </div>
+                {canEdit&&<button onClick={()=>delRegion(r)} title="Entfernen" style={{border:'none',background:'none',cursor:'pointer',color:'var(--muted)',fontSize:15,lineHeight:1,padding:2}}>✕</button>}
+              </div>)}
+            </div>}
+        </div>}
       </div>
       {editF&&<div style={{...card,borderColor:'var(--accent,#0F5661)'}}>
         <div style={{fontSize:14,fontWeight:800,marginBottom:10}}>{editF.__new?'Neuer Eintrag':'Eintrag bearbeiten'}</div>
