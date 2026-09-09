@@ -34333,6 +34333,7 @@ function CallQaCatalog({projects, showToast}){
   const projSkills=(selProj&&Array.isArray(selProj.skills)&&selProj.skills.length)
     ? selProj.skills.map(s=>({key:String((s&&s.key)||s).toLowerCase(),label:(s&&s.label)||(s&&s.key)||s})) : [];
   const [selSkill,setSelSkill]=useState('__all__');        // '__all__' = Projekt-Standard (skill-loser Bogen)
+  const [raterKind,setRaterKind]=useState('intern');       // intern (Ardita/HR) | extern (Kunden-Bogen, z. B. Condor)
   // Beim Projektwechsel auf den ERSTEN Skill defaulten, wenn das Projekt Skills hat — sonst blieb der Bogen leer,
   // weil '__all__' auf skill=null filtert und skill-spezifische Bögen (z.B. HolidayCheck Sales) so nie erschienen.
   useEffect(()=>{ setSelSkill(projSkills.length ? projSkills[0].key : '__all__'); },[selProjId]);
@@ -34356,6 +34357,7 @@ function CallQaCatalog({projects, showToast}){
     let q=sb.from('call_criteria').select('*');
     q = projId==null ? q.is('project_id',null) : q.eq('project_id',projId);
     q = skill==null  ? q.is('skill',null)      : q.eq('skill',skill);
+    q = q.eq('rater_kind', raterKind);
     const {data,error}=await q.order('order_index',{ascending:true});
     if(error){ showToast&&showToast('⚠ Bogen laden fehlgeschlagen: '+(error.message||''),'error'); setRows([]); return; }
     setRows(data||[]);
@@ -34364,13 +34366,14 @@ function CallQaCatalog({projects, showToast}){
     let q=sb.from('call_score_config').select('*');
     q = projId==null ? q.is('project_id',null) : q.eq('project_id',projId);
     q = skill==null  ? q.is('skill',null)      : q.eq('skill',skill);
+    q = q.eq('rater_kind', raterKind);
     const {data}=await q.limit(1); const row=(data&&data[0])||null; setCfgRow(row);
     setCfg(row?{threshold_unit:row.threshold_unit||'percent',green_min:row.green_min,yellow_min:row.yellow_min,feedback_green:row.feedback_green||'',feedback_amber:row.feedback_amber||'',feedback_red:row.feedback_red||''}
       :{threshold_unit:'percent',green_min:90,yellow_min:75,feedback_green:'',feedback_amber:'',feedback_red:''});
   }
-  useEffect(()=>{ setRows(null); setCfgRow(undefined); load(); loadCfg(); },[selProjId,selSkill]);
+  useEffect(()=>{ setRows(null); setCfgRow(undefined); load(); loadCfg(); },[selProjId,selSkill,raterKind]);
   async function saveCfg(){
-    const payload={ project_id:projId, skill:skill, threshold_unit:cfg.threshold_unit, green_min:Number(cfg.green_min), yellow_min:Number(cfg.yellow_min),
+    const payload={ project_id:projId, skill:skill, rater_kind:raterKind, threshold_unit:cfg.threshold_unit, green_min:Number(cfg.green_min), yellow_min:Number(cfg.yellow_min),
       feedback_green:cfg.feedback_green.trim()||null, feedback_amber:cfg.feedback_amber.trim()||null, feedback_red:cfg.feedback_red.trim()||null, updated_at:new Date().toISOString() };
     let error;
     if(cfgRow&&cfgRow.id){ ({error}=await sb.from('call_score_config').update(payload).eq('id',cfgRow.id)); }
@@ -34389,7 +34392,7 @@ function CallQaCatalog({projects, showToast}){
     const compCrit = !!form.compliance_critical && (form.type==='tristate'||form.type==='yesno');
     const lh = form.type==='tristate' ? {yes:form.lh_yes.trim()||null, partial:compCrit?null:(form.lh_partial.trim()||null), no:form.lh_no.trim()||null} : null;
     const anyLh = lh && (lh.yes||lh.partial||lh.no);
-    const payload={ project_id:projId, skill:skill, category:form.category.trim()||null, prompt:form.prompt.trim(),
+    const payload={ project_id:projId, skill:skill, rater_kind:raterKind, category:form.category.trim()||null, prompt:form.prompt.trim(),
       type:form.type, max_points:cqTypeMax(form.type,form.max_points), weight:Number(form.weight)||1,
       allow_na: compCrit?false:!!form.allow_na, hint:form.hint.trim()||null, agent_hint:form.agent_hint.trim()||null, level_hints: anyLh?lh:null,
       compliance_critical: compCrit,
@@ -34415,9 +34418,10 @@ function CallQaCatalog({projects, showToast}){
     await sb.from('call_criteria').update({order_index:a.order_index}).eq('id',b.id);
     await load();
   }
-  const scopeLabel = projId==null ? 'Standard-Bogen (greift, wenn für eine Projekt/Skill-Kombination nichts gepflegt ist)'
+  const scopeLabel = (raterKind==='extern'?'Kunden-Bogen (extern) · ':'')
+    + (projId==null ? 'Standard-Bogen (greift, wenn für eine Projekt/Skill-Kombination nichts gepflegt ist)'
     : (skill==null ? (selProj?selProj.name:'')+' · alle Skills'
-                   : (selProj?selProj.name:'')+' · '+((projSkills.find(s=>s.key===skill)||{}).label||skill));
+                   : (selProj?selProj.name:'')+' · '+((projSkills.find(s=>s.key===skill)||{}).label||skill)));
 
   return (
     <div>
@@ -34432,6 +34436,9 @@ function CallQaCatalog({projects, showToast}){
             {projSkills.map(s=><option key={s.key} value={s.key}>{s.label}</option>)}
           </select>
         )}
+        <div style={{display:'inline-flex',border:'1px solid var(--border)',borderRadius:8,overflow:'hidden'}} title="Interner Bogen = wir/Ardita. Kunden-Bogen = extern, damit der Kunde (z. B. Condor) im Kundenportal bewertet.">
+          {[['intern','Interner Bogen'],['extern','Kunden-Bogen']].map(([k,l])=>{ const on=raterKind===k; return <button key={k} onClick={()=>setRaterKind(k)} style={{padding:'7px 12px',border:'none',cursor:'pointer',fontSize:12.5,fontWeight:on?800:500,background:on?(k==='extern'?'#7c3aed':'var(--accent,#0F5661)'):'var(--card)',color:on?'#fff':'var(--text)'}}>{l}</button>; })}
+        </div>
         <div style={{flex:1}}/>
         <label style={{fontSize:12,display:'flex',alignItems:'center',gap:6,color:'var(--muted)',cursor:'pointer'}}><input type="checkbox" checked={showArchived} onChange={e=>setShowArchived(e.target.checked)}/>Archivierte zeigen</label>
         <button className="btn btn-primary btn-sm" onClick={openNew}>+ Neues Kriterium</button>
