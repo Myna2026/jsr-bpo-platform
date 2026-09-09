@@ -34595,7 +34595,7 @@ function impOverdue(d,status){ if(!d||status==='erledigt') return false; try{ re
 function ImprovementPlanView({team, projects, showToast}){
   const projList=(projects||[]).filter(p=>p&&p.id).slice().sort((a,b)=>String(a.name).localeCompare(String(b.name),'de'));
   const [proj,setProj]=React.useState(''); const [items,setItems]=React.useState(null); const [comments,setComments]=React.useState({});
-  const [expand,setExpand]=React.useState({}); const [edit,setEdit]=React.useState(null); const [ef,setEf]=React.useState({}); const [cmt,setCmt]=React.useState({}); const [busy,setBusy]=React.useState(false);
+  const [expand,setExpand]=React.useState({}); const [edit,setEdit]=React.useState(null); const [ef,setEf]=React.useState({}); const [cmt,setCmt]=React.useState({}); const [busy,setBusy]=React.useState(false); const [mode,setMode]=React.useState('baum'); const [watch,setWatch]=React.useState(null); const [watchBusy,setWatchBusy]=React.useState(false);
   const cardS={border:'1px solid var(--border)',borderRadius:12,padding:'14px 16px',background:'var(--card)',marginBottom:12};
   const uname=(team&&team.full_name)||'Team'; const uid=(team&&team.user_id)||null;
   const load=async(pid)=>{ if(!pid){ setItems([]); return; } setItems(null);
@@ -34624,6 +34624,7 @@ function ImprovementPlanView({team, projects, showToast}){
   }
   async function delItem(it){ if(!(await uiConfirm({title:'Punkt löschen', text:'"'+it.title+'"'+(kidsOf(it.id).length?' inkl. Unterpunkte':'')+' löschen?', confirmLabel:'Löschen', danger:true}))) return; const {error}=await sb.from('improvement_items').delete().eq('id',it.id); if(error){ showToast&&showToast('Fehlgeschlagen: '+((error&&error.message)||''),'error'); return; } load(proj); }
   async function addComment(itemId){ const b=(cmt[itemId]||'').trim(); if(!b) return; const {error}=await sb.from('improvement_comments').insert({item_id:itemId, project_id:proj, side:'team', author_uid:uid, author_name:uname, body:b}); if(error){ showToast&&showToast('Kommentar fehlgeschlagen: '+((error&&error.message)||''),'error'); return; } setCmt(c=>({...c,[itemId]:''})); load(proj); }
+  async function runWatch(){ if(!proj||watchBusy) return; setWatchBusy(true); try{ const {data,error}=await sb.functions.invoke('plan-watch',{body:{project_id:proj}}); if(error) throw error; if(data&&data.error) throw new Error(data.error); setWatch(data); }catch(e){ showToast&&showToast('KI-Aufsicht fehlgeschlagen: '+((e&&e.message)||e),'error'); } finally{ setWatchBusy(false); } }
   const bar=(pct,color)=><div style={{height:8,background:'#eef2f4',borderRadius:5,overflow:'hidden',flex:1,minWidth:80}}><div style={{width:pct+'%',height:'100%',background:color||'#0F5661'}}/></div>;
   const editForm=(parentLabel)=><div style={{border:'1px dashed var(--accent,#0F5661)',borderRadius:10,padding:'12px 14px',margin:'8px 0',background:'var(--surface-2)'}}>
     <div style={{fontSize:12,fontWeight:800,marginBottom:8}}>{String(edit).startsWith('new:')?(parentLabel?'Neuer Unterpunkt':'Neuer Punkt'):'Punkt bearbeiten'}</div>
@@ -34662,15 +34663,44 @@ function ImprovementPlanView({team, projects, showToast}){
     <div style={{display:'flex',alignItems:'center',gap:12,flexWrap:'wrap',marginBottom:6}}>
       <div style={{fontSize:20,fontWeight:700}}>📋 Arbeitsplan</div>
       <select value={proj} onChange={e=>setProj(e.target.value)} style={{padding:'7px 10px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)',fontWeight:600}}>{projList.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select>
+      <div style={{display:'inline-flex',border:'1px solid var(--border)',borderRadius:8,overflow:'hidden'}}>
+        {[['baum','Baum'],['zeitleiste','Zeitleiste']].map(([k,l])=>{ const on=mode===k; return <button key={k} onClick={()=>setMode(k)} style={{padding:'6px 12px',border:'none',cursor:'pointer',fontSize:12.5,fontWeight:on?800:500,background:on?'var(--accent,#0F5661)':'var(--card)',color:on?'#fff':'var(--text)'}}>{l}</button>; })}
+      </div>
       <div style={{flex:1}}/>
+      <button className="btn btn-sm" disabled={watchBusy} onClick={runWatch}>{watchBusy?'Prüft…':'🔍 KI-Aufsicht'}</button>
       <button className="btn btn-primary btn-sm" onClick={()=>openNew(null)}>+ Punkt</button>
     </div>
     <div style={{fontSize:13,color:'var(--muted)',marginBottom:14}}>Gemeinsamer Plan mit dem Kunden. Der Kunde nennt Punkte, wir hinterlegen Maßnahmen; beide kommentieren. Fortschritt der Hauptpunkte rollt aus den Unterpunkten hoch.</div>
+    {watch&&watch.report&&<div style={{border:'1px solid #7c3aed',borderRadius:12,padding:'14px 16px',marginBottom:12,background:'color-mix(in srgb, #7c3aed 6%, var(--card))'}}>
+      <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:6,flexWrap:'wrap'}}><span style={{fontSize:14,fontWeight:800}}>🔍 KI-Aufsicht</span>
+        {watch.signals&&<span style={{fontSize:11.5,color:'var(--muted)'}}>{watch.signals.overdue} überfällig · {watch.signals.stalled} ohne Fortschritt · {watch.signals.noMeasure} ohne Maßnahme</span>}
+        <div style={{flex:1}}/><button onClick={()=>setWatch(null)} style={{border:'none',background:'none',cursor:'pointer',color:'var(--muted)',fontSize:16}}>✕</button></div>
+      <div style={{fontSize:13.5,lineHeight:1.5}}>{watch.report.summary}</div>
+      {(watch.report.attention||[]).length>0&&<div style={{marginTop:10}}><div style={{fontSize:12,fontWeight:800,marginBottom:4}}>Braucht Aufmerksamkeit</div>
+        {watch.report.attention.map((a,i)=><div key={i} style={{fontSize:12.5,marginBottom:3}}>• <b>{a.title}:</b> {a.reason}</div>)}</div>}
+      {(watch.report.recommendations||[]).length>0&&<div style={{marginTop:10}}><div style={{fontSize:12,fontWeight:800,marginBottom:4}}>Nächste Schritte</div>
+        {watch.report.recommendations.map((r,i)=><div key={i} style={{fontSize:12.5,marginBottom:3}}>→ {r}</div>)}</div>}
+    </div>}
     {items===null? <div style={{color:'var(--muted)'}}>Lädt…</div>
      : <React.Fragment>
         <div style={{...cardS,display:'flex',alignItems:'center',gap:12}}><span style={{fontSize:13,fontWeight:800}}>Gesamt</span>{bar(overall,'#0F5661')}<span style={{fontSize:16,fontWeight:800}}>{overall}%</span><span style={{fontSize:12,color:'var(--muted)'}}>· {tops.length} Punkte</span></div>
+        {mode==='zeitleiste' && (()=>{ const dated=(items||[]).filter(i=>i.due_date).slice().sort((a,b)=>String(a.due_date).localeCompare(String(b.due_date))); const undated=(items||[]).filter(i=>!i.due_date);
+          const titleOf=i=>{ const p=(items||[]).find(x=>x.id===i.parent_id); return (p?p.title+' › ':'')+i.title; };
+          return <div style={cardS}>
+            <div style={{fontSize:13,fontWeight:800,marginBottom:8}}>Zeitleiste nach Frist</div>
+            {dated.length===0? <div style={{fontSize:13,color:'var(--muted)'}}>Noch keine Fristen gesetzt. Setze bei den Punkten eine Frist, dann erscheinen sie hier chronologisch.</div>
+             : dated.map(i=>{ const pr=impPrio(i.priority); const od=impOverdue(i.due_date,i.status); const prog=i.parent_id?(i.progress||0):rollup(i);
+               return <div key={i.id} style={{display:'flex',alignItems:'center',gap:10,padding:'7px 0',borderTop:'1px solid var(--border)'}}>
+                 <span style={{fontSize:12.5,fontWeight:800,width:90,color:od?'#dc2626':'var(--text)'}}>{impFmtD(i.due_date)}</span>
+                 <span style={{width:9,height:9,borderRadius:'50%',background:pr.c,flexShrink:0}} title={pr.l}/>
+                 <span style={{flex:'1 1 160px',minWidth:0,fontSize:13.5,fontWeight:600}}>{titleOf(i)}{od&&<span style={{color:'#dc2626',fontWeight:800,marginLeft:6,fontSize:11}}>überfällig</span>}</span>
+                 {bar(prog,pr.c)}<span style={{fontSize:12,fontWeight:700,width:38,textAlign:'right'}}>{prog}%</span>
+                 <span style={{fontSize:11,color:'var(--muted)'}}>{impStatL(i.status)}</span>
+               </div>; })}
+            {undated.length>0 && <div style={{fontSize:11.5,color:'var(--muted)',marginTop:10}}>{undated.length} Punkt(e) ohne Frist.</div>}
+          </div>; })()}
         {String(edit).startsWith('new:')&&String(edit)==='new:'&&editForm(false)}
-        {tops.map(it=>{ const pr=impPrio(it.priority); const rp=rollup(it); const ks=kidsOf(it.id); const od=impOverdue(it.due_date,it.status);
+        {mode==='baum' && tops.map(it=>{ const pr=impPrio(it.priority); const rp=rollup(it); const ks=kidsOf(it.id); const od=impOverdue(it.due_date,it.status);
           return <div key={it.id} style={cardS}>
             {edit===it.id? editForm(false) : <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
               <span style={{width:11,height:11,borderRadius:'50%',background:pr.c,flexShrink:0}} title={pr.l}/>
