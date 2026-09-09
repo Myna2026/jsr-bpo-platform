@@ -1251,7 +1251,7 @@ const MENU_BADGES_DEFAULT = { assignments:{
 }, custom:[] };
 // Hauptmenü-Items für den Badge-Admin (Keys müssen zu navSections passen).
 const MENU_BADGE_MAIN_ITEMS = [
-  {key:'start',label:'Start'},{key:'daily_tasks',label:'Tagesaufgaben'},{key:'meetingnotes',label:'Besprechungen'},{key:'clientmsgs',label:'Kundennachrichten'},{key:'agents',label:'AI Kollegen'},{key:'datacheck',label:'Daten-Checks'},
+  {key:'start',label:'Start'},{key:'daily_tasks',label:'Tagesaufgaben'},{key:'meetingnotes',label:'Besprechungen'},{key:'clientmsgs',label:'Kundennachrichten'},{key:'arbeitsplan',label:'Arbeitsplan'},{key:'agents',label:'AI Kollegen'},{key:'datacheck',label:'Daten-Checks'},
   {key:'wissen_system',label:'Wissen System'},{key:'wissensspeicher',label:'Partner fragen'},{key:'cockpit',label:'Cockpit'},{key:'productivity',label:'Produktivität'},
   {key:'performance',label:'Performance'},{key:'auswertung',label:'Auswertung'},{key:'callqa',label:'Call-Qualität'},{key:'shiftplan',label:'Schichtplanung'},{key:'checkin',label:'Check-in'},{key:'workforce',label:'Workforce (Beta)'},{key:'employees',label:'Mitarbeiter'},
   {key:'timetracking',label:'Zeiterfassung'},{key:'locations',label:'Standorte'},{key:'spaces',label:'Spaces & Seats'},
@@ -1292,7 +1292,7 @@ const HR_DEFAULT_LOCKED_TABS = ['workforce'];
 // Führungs-Set: reine Leads (projektleiter/teamlead, NICHT auch management/hr/finance) sehen NUR diese Tabs
 // (harte Obergrenze in hasAccess — auch die „always"-Admin-Tabs superadmin/appusers/hraccess/tabperms bleiben aus).
 // Recruiting = kanban+cvs+funnel (der Workflow braucht alle drei). Management kann darunter weiter einzeln sperren.
-const LEAD_ALLOWED_TABS = ['start','cockpit','shiftplan','checkin','absences','urlaubantraege','employees','performance','calendar','callqa','feedback','praesentation','dataimport','kanban','cvs','funnel','training_plans','wissensspeicher','clientmsgs'];
+const LEAD_ALLOWED_TABS = ['start','cockpit','shiftplan','checkin','absences','urlaubantraege','employees','performance','calendar','callqa','feedback','praesentation','dataimport','kanban','cvs','funnel','training_plans','wissensspeicher','clientmsgs','arbeitsplan'];
 const isLeadOnlyRoles = rk => { const r=rk||[]; return (r.includes('projektleiter')||r.includes('teamlead')) && !r.some(x=>x==='management'||x==='hr'||x==='finance'); };
 // Sperrbarer Katalog = alle Menue-Tabs ausser always-Tabs. workforce ist normal sperrbar.
 const HR_LOCKABLE_TABS = [...MENU_BADGE_MAIN_ITEMS.filter(t=>HR_ALWAYS_TABS.indexOf(t.key)<0)];
@@ -7564,6 +7564,7 @@ function buildNavSections(f){
       {key:'calendar',label:'Kalender',icon:'📆'},
       ...(_isOverhead ? [{key:'meetingnotes',label:'Besprechungen',icon:'📝'}] : []),   // Management+Overhead
       ...((_isMgmtHr||_isOverhead) ? [{key:'clientmsgs',label:'Kundennachrichten',icon:'📨'}] : []),   // Kunde ↔ Teamleitung (RLS scopt)
+      ...((_isMgmtHr||_isOverhead) ? [{key:'arbeitsplan',label:'Arbeitsplan',icon:'📋'}] : []),   // gemeinsamer Verbesserungsplan (RLS scopt)
       {key:'agents',label:'AI Kollegen',icon:'🤖'},   // für alle (RLS blendet Maya aus dem Register)
       {key:'cockpit',label:'Cockpit',icon:'⊞'},
     ]},
@@ -34583,6 +34584,117 @@ function CallQaCatalog({projects, showToast}){
   );
 }
 
+// Arbeitsplan (Verbesserungsplan) — Baum, Priorität-Ampel, Fortschritt-Rollup aus Unterpunkten, Fristen,
+// Kommentare beidseitig, Herkunft (Condor/wir). Team-Seite: voller Zugriff (RLS scopt aufs Projekt).
+const IMP_PRIO=[{k:'sehr_wichtig',l:'sehr wichtig',c:'#dc2626'},{k:'wichtig',l:'wichtig',c:'#ea580c'},{k:'notwendig',l:'notwendig',c:'#ca8a04'},{k:'schoen',l:'wäre schön',c:'#64748b'}];
+const IMP_STAT=[{k:'offen',l:'offen'},{k:'laeuft',l:'läuft'},{k:'erledigt',l:'erledigt'},{k:'zurueckgestellt',l:'zurückgestellt'}];
+function impPrio(k){ return IMP_PRIO.find(p=>p.k===k)||IMP_PRIO[1]; }
+function impStatL(k){ return (IMP_STAT.find(s=>s.k===k)||IMP_STAT[0]).l; }
+function impFmtD(d){ if(!d) return ''; const p=String(d).slice(0,10).split('-'); return p.length===3?p[2]+'.'+p[1]+'.'+p[0]:String(d); }
+function impOverdue(d,status){ if(!d||status==='erledigt') return false; try{ return new Date(String(d).slice(0,10))<new Date(new Date().toISOString().slice(0,10)); }catch(e){ return false; } }
+function ImprovementPlanView({team, projects, showToast}){
+  const projList=(projects||[]).filter(p=>p&&p.id).slice().sort((a,b)=>String(a.name).localeCompare(String(b.name),'de'));
+  const [proj,setProj]=React.useState(''); const [items,setItems]=React.useState(null); const [comments,setComments]=React.useState({});
+  const [expand,setExpand]=React.useState({}); const [edit,setEdit]=React.useState(null); const [ef,setEf]=React.useState({}); const [cmt,setCmt]=React.useState({}); const [busy,setBusy]=React.useState(false);
+  const cardS={border:'1px solid var(--border)',borderRadius:12,padding:'14px 16px',background:'var(--card)',marginBottom:12};
+  const uname=(team&&team.full_name)||'Team'; const uid=(team&&team.user_id)||null;
+  const load=async(pid)=>{ if(!pid){ setItems([]); return; } setItems(null);
+    try{ const {data}=await sb.from('improvement_items').select('*').eq('project_id',pid).order('sort_order',{ascending:true});
+      const its=data||[]; setItems(its); const ids=its.map(i=>i.id);
+      if(ids.length){ const {data:cs}=await sb.from('improvement_comments').select('*').in('item_id',ids).order('created_at',{ascending:true}); const m={}; (cs||[]).forEach(c=>{ (m[c.item_id]=m[c.item_id]||[]).push(c); }); setComments(m); } else setComments({});
+    }catch(e){ setItems([]); }
+  };
+  React.useEffect(()=>{ if(!proj && projList.length) setProj(projList[0].id); },[]);
+  React.useEffect(()=>{ if(proj) load(proj); },[proj]);
+  const tops=(items||[]).filter(i=>!i.parent_id).sort((a,b)=>(a.sort_order||0)-(b.sort_order||0));
+  const kidsOf=id=>(items||[]).filter(i=>i.parent_id===id).sort((a,b)=>(a.sort_order||0)-(b.sort_order||0));
+  const rollup=it=>{ const ks=kidsOf(it.id); return ks.length? Math.round(ks.reduce((s,k)=>s+(k.progress||0),0)/ks.length) : (it.progress||0); };
+  const overall=tops.length? Math.round(tops.reduce((s,t)=>s+rollup(t),0)/tops.length) : 0;
+  const projName=id=>{ const p=projList.find(x=>x.id===id); return p?p.name:id; };
+  function openEdit(it){ setEf({title:it.title||'',measures:it.measures||'',priority:it.priority||'wichtig',status:it.status||'offen',progress:it.progress||0,due_date:it.due_date?String(it.due_date).slice(0,10):''}); setEdit(it.id); }
+  function openNew(parentId){ setEf({title:'',measures:'',priority:'wichtig',status:'offen',progress:0,due_date:''}); setEdit('new:'+(parentId||'')); }
+  async function saveItem(){ const t=(ef.title||'').trim(); if(!t||busy) return; setBusy(true);
+    const base={ title:t, measures:(ef.measures||'').trim()||null, priority:ef.priority, status:ef.status, progress:Math.max(0,Math.min(100,parseInt(ef.progress)||0)), due_date:ef.due_date||null, updated_at:new Date().toISOString() };
+    let error;
+    if(String(edit).startsWith('new:')){ const parentId=String(edit).slice(4)||null;
+      const sibs=parentId?kidsOf(parentId):tops; const ord=Math.max(0,...sibs.map(s=>s.sort_order||0))+1;
+      ({error}=await sb.from('improvement_items').insert({...base, project_id:proj, parent_id:parentId, origin:'intern', sort_order:ord, created_by:uid, created_by_name:uname})); }
+    else { ({error}=await sb.from('improvement_items').update(base).eq('id',edit)); }
+    setBusy(false); if(error){ showToast&&showToast('Nicht gespeichert: '+((error&&error.message)||''),'error'); return; } setEdit(null); load(proj);
+  }
+  async function delItem(it){ if(!(await uiConfirm({title:'Punkt löschen', text:'"'+it.title+'"'+(kidsOf(it.id).length?' inkl. Unterpunkte':'')+' löschen?', confirmLabel:'Löschen', danger:true}))) return; const {error}=await sb.from('improvement_items').delete().eq('id',it.id); if(error){ showToast&&showToast('Fehlgeschlagen: '+((error&&error.message)||''),'error'); return; } load(proj); }
+  async function addComment(itemId){ const b=(cmt[itemId]||'').trim(); if(!b) return; const {error}=await sb.from('improvement_comments').insert({item_id:itemId, project_id:proj, side:'team', author_uid:uid, author_name:uname, body:b}); if(error){ showToast&&showToast('Kommentar fehlgeschlagen: '+((error&&error.message)||''),'error'); return; } setCmt(c=>({...c,[itemId]:''})); load(proj); }
+  const bar=(pct,color)=><div style={{height:8,background:'#eef2f4',borderRadius:5,overflow:'hidden',flex:1,minWidth:80}}><div style={{width:pct+'%',height:'100%',background:color||'#0F5661'}}/></div>;
+  const editForm=(parentLabel)=><div style={{border:'1px dashed var(--accent,#0F5661)',borderRadius:10,padding:'12px 14px',margin:'8px 0',background:'var(--surface-2)'}}>
+    <div style={{fontSize:12,fontWeight:800,marginBottom:8}}>{String(edit).startsWith('new:')?(parentLabel?'Neuer Unterpunkt':'Neuer Punkt'):'Punkt bearbeiten'}</div>
+    <input value={ef.title} onChange={e=>setEf(f=>({...f,title:e.target.value}))} placeholder="Titel *" style={{width:'100%',padding:'7px 9px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)',boxSizing:'border-box',marginBottom:8}}/>
+    <textarea value={ef.measures} onChange={e=>setEf(f=>({...f,measures:e.target.value}))} rows={2} placeholder="Maßnahmen (was wir tun)" style={{width:'100%',padding:'7px 9px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)',boxSizing:'border-box',resize:'vertical',marginBottom:8}}/>
+    <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
+      <select value={ef.priority} onChange={e=>setEf(f=>({...f,priority:e.target.value}))} style={{padding:'6px 8px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)'}}>{IMP_PRIO.map(p=><option key={p.k} value={p.k}>{p.l}</option>)}</select>
+      <select value={ef.status} onChange={e=>setEf(f=>({...f,status:e.target.value}))} style={{padding:'6px 8px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)'}}>{IMP_STAT.map(s=><option key={s.k} value={s.k}>{s.l}</option>)}</select>
+      <label style={{fontSize:12,color:'var(--muted)'}}>Fortschritt <input type="number" min="0" max="100" value={ef.progress} onChange={e=>setEf(f=>({...f,progress:e.target.value}))} style={{width:64,padding:'6px 8px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)'}}/> %</label>
+      <label style={{fontSize:12,color:'var(--muted)'}}>Frist <input type="date" value={ef.due_date} onChange={e=>setEf(f=>({...f,due_date:e.target.value}))} style={{padding:'6px 8px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)'}}/></label>
+    </div>
+    <div style={{display:'flex',gap:8,marginTop:10}}><button className="btn btn-primary btn-sm" disabled={busy} onClick={saveItem}>Speichern</button><button className="btn btn-sm" onClick={()=>setEdit(null)}>Abbrechen</button></div>
+  </div>;
+  const commentBlock=it=>{ const cs=comments[it.id]||[]; const open=expand[it.id]; return <div style={{marginTop:8}}>
+    <button onClick={()=>setExpand(x=>({...x,[it.id]:!open}))} style={{border:'none',background:'none',cursor:'pointer',color:'var(--muted)',fontSize:12,padding:0}}>{open?'▾':'▸'} Kommentare ({cs.length})</button>
+    {open&&<div style={{marginTop:6,paddingLeft:8,borderLeft:'2px solid var(--border)'}}>
+      {cs.map(c=><div key={c.id} style={{fontSize:12.5,marginBottom:5}}><b style={{color:c.side==='client'?'#7c3aed':'var(--accent,#0F5661)'}}>{c.side==='client'?'Kunde':(c.author_name||'Team')}:</b> {c.body} <span style={{color:'var(--muted)',fontSize:10.5}}>· {impFmtD(c.created_at)}</span></div>)}
+      <div style={{display:'flex',gap:6,marginTop:4}}><input value={cmt[it.id]||''} onChange={e=>setCmt(c=>({...c,[it.id]:e.target.value}))} placeholder="Kommentar…" style={{flex:1,padding:'6px 8px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)',fontSize:12.5}}/><button className="btn btn-sm" onClick={()=>addComment(it.id)}>Senden</button></div>
+    </div>}
+  </div>; };
+  const subRow=k=>{ const pr=impPrio(k.priority); const od=impOverdue(k.due_date,k.status); return <div key={k.id} style={{padding:'8px 0',borderTop:'1px solid var(--border)'}}>
+    {edit===k.id? editForm(true) : <React.Fragment>
+      <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+        <span style={{width:8,height:8,borderRadius:'50%',background:pr.c,flexShrink:0}} title={pr.l}/>
+        <span style={{fontSize:13.5,fontWeight:600,flex:'1 1 200px'}}>{k.title}</span>
+        {bar(k.progress||0,pr.c)}<span style={{fontSize:12,fontWeight:700,width:38,textAlign:'right'}}>{k.progress||0}%</span>
+        <span style={{fontSize:11,color:'var(--muted)'}}>{impStatL(k.status)}</span>
+        {k.due_date&&<span style={{fontSize:11,color:od?'#dc2626':'var(--muted)',fontWeight:od?800:500}}>bis {impFmtD(k.due_date)}</span>}
+        <button className="btn btn-sm" onClick={()=>openEdit(k)}>✎</button><button className="btn btn-sm" onClick={()=>delItem(k)}>✕</button>
+      </div>
+      {k.measures&&<div style={{fontSize:12,color:'var(--muted)',margin:'3px 0 0 16px'}}>Maßnahme: {k.measures}</div>}
+      {commentBlock(k)}
+    </React.Fragment>}
+  </div>; };
+  return <div style={{maxWidth:900,margin:'0 auto',padding:'8px 4px'}}>
+    <div style={{display:'flex',alignItems:'center',gap:12,flexWrap:'wrap',marginBottom:6}}>
+      <div style={{fontSize:20,fontWeight:700}}>📋 Arbeitsplan</div>
+      <select value={proj} onChange={e=>setProj(e.target.value)} style={{padding:'7px 10px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)',fontWeight:600}}>{projList.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select>
+      <div style={{flex:1}}/>
+      <button className="btn btn-primary btn-sm" onClick={()=>openNew(null)}>+ Punkt</button>
+    </div>
+    <div style={{fontSize:13,color:'var(--muted)',marginBottom:14}}>Gemeinsamer Plan mit dem Kunden. Der Kunde nennt Punkte, wir hinterlegen Maßnahmen; beide kommentieren. Fortschritt der Hauptpunkte rollt aus den Unterpunkten hoch.</div>
+    {items===null? <div style={{color:'var(--muted)'}}>Lädt…</div>
+     : <React.Fragment>
+        <div style={{...cardS,display:'flex',alignItems:'center',gap:12}}><span style={{fontSize:13,fontWeight:800}}>Gesamt</span>{bar(overall,'#0F5661')}<span style={{fontSize:16,fontWeight:800}}>{overall}%</span><span style={{fontSize:12,color:'var(--muted)'}}>· {tops.length} Punkte</span></div>
+        {String(edit).startsWith('new:')&&String(edit)==='new:'&&editForm(false)}
+        {tops.map(it=>{ const pr=impPrio(it.priority); const rp=rollup(it); const ks=kidsOf(it.id); const od=impOverdue(it.due_date,it.status);
+          return <div key={it.id} style={cardS}>
+            {edit===it.id? editForm(false) : <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+              <span style={{width:11,height:11,borderRadius:'50%',background:pr.c,flexShrink:0}} title={pr.l}/>
+              <span style={{fontSize:15,fontWeight:800,flex:'1 1 240px'}}>{it.title}</span>
+              <span style={{fontSize:10.5,fontWeight:700,padding:'1px 7px',borderRadius:10,background:it.origin==='client'?'#f3e8ff':'#ecfeff',color:it.origin==='client'?'#7c3aed':'#0e7490'}}>{it.origin==='client'?'von Condor':'von uns'}</span>
+              {bar(rp,pr.c)}<span style={{fontSize:14,fontWeight:800,width:44,textAlign:'right'}}>{rp}%</span>
+              <span style={{fontSize:11.5,color:'var(--muted)'}}>{impStatL(it.status)}</span>
+              {it.due_date&&<span style={{fontSize:11.5,color:od?'#dc2626':'var(--muted)',fontWeight:od?800:600}}>bis {impFmtD(it.due_date)}</span>}
+              <button className="btn btn-sm" onClick={()=>openEdit(it)}>✎</button><button className="btn btn-sm" onClick={()=>delItem(it)}>✕</button>
+            </div>}
+            {it.measures&&edit!==it.id&&<div style={{fontSize:12.5,color:'var(--muted)',margin:'6px 0 0 19px'}}>Maßnahme: {it.measures}</div>}
+            {ks.length>0&&<div style={{marginLeft:19,marginTop:8}}>{ks.map(subRow)}</div>}
+            <div style={{marginLeft:19,marginTop:8,display:'flex',gap:10,alignItems:'center'}}>
+              <button className="btn btn-sm" onClick={()=>openNew(it.id)}>+ Unterpunkt</button>
+              {ks.length===0&&commentBlock(it)}
+            </div>
+            {String(edit)==='new:'+it.id&&<div style={{marginLeft:19}}>{editForm(true)}</div>}
+            {ks.length>0&&<div style={{marginLeft:19,marginTop:6}}>{commentBlock(it)}</div>}
+          </div>; })}
+        {tops.length===0&&<div style={cardS}>Noch keine Punkte. Über „+ Punkt" anlegen.</div>}
+      </React.Fragment>}
+  </div>;
+}
+
 // S6: Kundennachrichten — Kanal Kunde ↔ Teamleitung (client_team_messages). RLS scopt: Teamleitung sieht nur
 // ihr Projekt, Management/HR alle. Antworten schreiben from_side='team'.
 function ClientMessagesView({team, projects, showToast}){
@@ -46279,6 +46391,7 @@ function App(){
       'calendar':'<path fill-rule="evenodd" d="M6.75 2.25A.75.75 0 0 1 7.5 3v1.5h9V3a.75.75 0 0 1 1.5 0v1.5h.75a3 3 0 0 1 3 3v11.25a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3V7.5a3 3 0 0 1 3-3H6V3a.75.75 0 0 1 .75-.75Zm13.5 9a1.5 1.5 0 0 0-1.5-1.5H5.25a1.5 1.5 0 0 0-1.5 1.5v7.5a1.5 1.5 0 0 0 1.5 1.5h13.5a1.5 1.5 0 0 0 1.5-1.5v-7.5Z" clip-rule="evenodd"/>',
       'meetingnotes':'<path fill-rule="evenodd" d="M4.848 2.771A49.144 49.144 0 0 1 12 2.25c2.43 0 4.817.178 7.152.52 1.978.292 3.348 2.024 3.348 3.97v6.02c0 1.946-1.37 3.678-3.348 3.97a48.901 48.901 0 0 1-3.476.383.39.39 0 0 0-.297.17l-2.755 4.133a.75.75 0 0 1-1.248 0l-2.755-4.133a.39.39 0 0 0-.297-.17 48.9 48.9 0 0 1-3.476-.384c-1.978-.29-3.348-2.024-3.348-3.97V6.741c0-1.946 1.37-3.68 3.348-3.97Z" clip-rule="evenodd"/>',
       'clientmsgs':'<path d="M1.5 8.67v8.58a3 3 0 0 0 3 3h15a3 3 0 0 0 3-3V8.67l-8.928 5.493a3 3 0 0 1-3.144 0L1.5 8.67Z"/><path d="M22.5 6.908V6.75a3 3 0 0 0-3-3h-15a3 3 0 0 0-3 3v.158l9.714 5.978a1.5 1.5 0 0 0 1.572 0L22.5 6.908Z"/>',
+      'arbeitsplan':'<path fill-rule="evenodd" d="M7.502 6h7.128A3.375 3.375 0 0 1 18 9.375v9.375a3 3 0 0 0 3-3V6.108c0-1.505-1.125-2.811-2.664-2.94a48.972 48.972 0 0 0-.673-.05A3 3 0 0 0 15 1.5h-1.5a3 3 0 0 0-2.663 1.618c-.225.015-.45.032-.673.05C8.662 3.295 7.554 4.542 7.502 6ZM13.5 3A1.5 1.5 0 0 0 12 4.5h4.5A1.5 1.5 0 0 0 15 3h-1.5Z" clip-rule="evenodd"/><path fill-rule="evenodd" d="M3 9.375C3 8.339 3.84 7.5 4.875 7.5h9.75c1.036 0 1.875.84 1.875 1.875v11.25c0 1.035-.84 1.875-1.875 1.875h-9.75A1.875 1.875 0 0 1 3 20.625V9.375Zm9.586 4.594a.75.75 0 0 0-1.172-.938l-2.476 3.096-.908-.907a.75.75 0 0 0-1.06 1.06l1.5 1.5a.75.75 0 0 0 1.116-.062l3-3.75Z" clip-rule="evenodd"/>',
       'agents':'<path d="M16.5 7.5h-9v9h9v-9Z"/><path fill-rule="evenodd" d="M8.25 2.25A.75.75 0 0 1 9 3v.75h2.25V3a.75.75 0 0 1 1.5 0v.75H15V3a.75.75 0 0 1 1.5 0v.75h.75a3 3 0 0 1 3 3v.75h.75a.75.75 0 0 1 0 1.5h-.75v2.25h.75a.75.75 0 0 1 0 1.5h-.75v2.25h.75a.75.75 0 0 1 0 1.5h-.75v.75a3 3 0 0 1-3 3h-.75v.75a.75.75 0 0 1-1.5 0v-.75h-2.25v.75a.75.75 0 0 1-1.5 0v-.75H9v.75a.75.75 0 0 1-1.5 0v-.75h-.75a3 3 0 0 1-3-3v-.75H3a.75.75 0 0 1 0-1.5h.75v-2.25H3a.75.75 0 0 1 0-1.5h.75V9H3a.75.75 0 0 1 0-1.5h.75v-.75a3 3 0 0 1 3-3h.75V3a.75.75 0 0 1 .75-.75ZM6 6.75A.75.75 0 0 1 6.75 6h10.5a.75.75 0 0 1 .75.75v10.5a.75.75 0 0 1-.75.75H6.75a.75.75 0 0 1-.75-.75V6.75Z" clip-rule="evenodd"/>',
       'workforce':'<path d="M12.75 12.75a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM7.5 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM8.25 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM9.75 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM10.5 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM12 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM12.75 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM14.25 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM15 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM16.5 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM15 12.75a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM16.5 13.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Z"/> <path fill-rule="evenodd" d="M6.75 2.25A.75.75 0 0 1 7.5 3v1.5h9V3A.75.75 0 0 1 18 3v1.5h.75a3 3 0 0 1 3 3v11.25a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3V7.5a3 3 0 0 1 3-3H6V3a.75.75 0 0 1 .75-.75Zm13.5 9a1.5 1.5 0 0 0-1.5-1.5H5.25a1.5 1.5 0 0 0-1.5 1.5v7.5a1.5 1.5 0 0 0 1.5 1.5h13.5a1.5 1.5 0 0 0 1.5-1.5v-7.5Z" clip-rule="evenodd"/>',
       'employees':'<path d="M4.5 6.375a4.125 4.125 0 1 1 8.25 0 4.125 4.125 0 0 1-8.25 0ZM14.25 8.625a3.375 3.375 0 1 1 6.75 0 3.375 3.375 0 0 1-6.75 0ZM1.5 19.125a7.125 7.125 0 0 1 14.25 0v.003l-.001.119a.75.75 0 0 1-.363.63 13.067 13.067 0 0 1-6.761 1.873c-2.472 0-4.786-.684-6.76-1.873a.75.75 0 0 1-.364-.63l-.001-.122ZM17.25 19.128l-.001.144a2.25 2.25 0 0 1-.233.96 10.088 10.088 0 0 0 5.06-1.01.75.75 0 0 0 .42-.643 4.875 4.875 0 0 0-6.957-4.611 8.586 8.586 0 0 1 1.71 5.157v.003Z"/>',
@@ -46533,6 +46646,7 @@ function App(){
           {view==='calendar'&&<CalendarView team={team} projects={projects} employees={employees} showToast={showToast} isMobileW={isMobileW} jumpTo={calNav} onJumpConsumed={()=>setCalNav(null)} onNavigate={dqNavigate}/>}
           {view==='meetingnotes'&&<MeetingNotesView team={team} projects={projects} employees={employees} showToast={showToast} isMobileW={isMobileW}/>}
           {view==='clientmsgs'&&<ClientMessagesView team={team} projects={projects} showToast={showToast}/>}
+          {view==='arbeitsplan'&&<ImprovementPlanView team={team} projects={projects} showToast={showToast}/>}
           {view==='agents'&&<AgentsView team={team} onNavigate={dqNavigate}/>}
           {view==='cockpit'&&<Cockpit employees={employees} projects={projects} team={team} plans={plans} forecast={forecast} onAbsence={e=>setAbsenceModal(e)} onNavigate={dqNavigate} isMobileW={isMobileW} setEmployees={setEmployees} showToast={showToast}/>}
           {view==='datacheck'&&<DataQualityPanel employees={employees} projects={projects} plans={plans} onNavigate={dqNavigate}/>}
