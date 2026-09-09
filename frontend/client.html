@@ -1273,37 +1273,38 @@ function InvoicesView({client}){
 }
 
 // ── Messages ──────────────────────────────────────────────
+// S6: echter Kanal Kunde ↔ Teamleitung (client_team_messages, DB-backed statt localStorage).
 function MessagesView({client}){
-  const [messages, setMessages]=useState(()=>{
-    try{return JSON.parse(localStorage.getItem(`jsr_msgs_${client.id}`)||'null')||INIT_MESSAGES[client.project_id]||[];}
-    catch{return INIT_MESSAGES[client.project_id]||[];}
-  });
-  const [newMsg, setNewMsg]=useState('');
-
-  useEffect(()=>{localStorage.setItem(`jsr_msgs_${client.id}`,JSON.stringify(messages));},[messages]);
-
-  function send(){
-    if(!newMsg.trim()) return;
-    setMessages(m=>[...m,{id:'m'+Date.now(),from:'client',text:newMsg,date:new Date().toISOString().slice(0,10),author:client.name}]);
-    setNewMsg('');
+  const [messages,setMessages]=useState(null);
+  const [newMsg,setNewMsg]=useState('');
+  const [busy,setBusy]=useState(false);
+  const load=async()=>{ try{ const {data}=await sb.from('client_team_messages').select('*').eq('project_id',client.project_id).order('sent_at',{ascending:true}); setMessages(data||[]); }catch(e){ setMessages([]); } };
+  useEffect(()=>{ load(); const t=setInterval(load,20000); return ()=>clearInterval(t); },[]);
+  async function send(){
+    const txt=newMsg.trim(); if(!txt||busy) return; setBusy(true);
+    const {error}=await sb.from('client_team_messages').insert({project_id:client.project_id, from_side:'client', author_name:client.name||'', body:txt});
+    setBusy(false);
+    if(error){ window.alert('Nicht gesendet: '+(error.message||'')); return; }
+    setNewMsg(''); load();
   }
-
   return(
     <div>
       <div className="card">
-        <div className="card-header"><span className="card-title">💬 Nachrichten an TIVE 360° Management</span></div>
+        <div className="card-header"><span className="card-title">💬 Nachrichten an die Teamleitung</span></div>
         <div className="card-body">
-          <div className="msg-list" style={{marginBottom:16,maxHeight:400,overflowY:'auto',padding:'4px 0'}}>
-            {messages.map(m=>(
-              <div key={m.id} className={`msg ${m.from==='client'?'msg-from-client':'msg-from-jsr'}`}>
-                <div style={{fontSize:13,lineHeight:1.6}}>{m.text}</div>
-                <div className="msg-meta">{m.author} · {new Date(m.date).toLocaleDateString('de-DE')}</div>
+          <div className="msg-list" style={{marginBottom:16,maxHeight:440,overflowY:'auto',padding:'4px 0'}}>
+            {messages===null ? <div style={{color:'#94a3b8',fontSize:13}}>Lädt…</div>
+             : messages.length===0 ? <div style={{color:'#94a3b8',fontSize:13}}>Noch keine Nachrichten. Schreiben Sie der Teamleitung Ihres Teams.</div>
+             : messages.map(m=>(
+              <div key={m.id} className={`msg ${m.from_side==='client'?'msg-from-client':'msg-from-jsr'}`}>
+                <div style={{fontSize:13,lineHeight:1.6,whiteSpace:'pre-wrap'}}>{m.body}</div>
+                <div className="msg-meta">{m.from_side==='client'?(m.author_name||client.name):(m.author_name||'Teamleitung')} · {new Date(m.sent_at).toLocaleDateString('de-DE')}</div>
               </div>
             ))}
           </div>
           <div style={{display:'flex',gap:10}}>
-            <textarea className="form-input" style={{flex:1,resize:'none',height:80}} placeholder="Nachricht an TIVE 360° Management..." value={newMsg} onChange={e=>setNewMsg(e.target.value)}/>
-            <button className="btn btn-primary" style={{alignSelf:'flex-end'}} onClick={send}>Senden →</button>
+            <textarea className="form-input" style={{flex:1,resize:'none',height:80}} placeholder="Nachricht an die Teamleitung..." value={newMsg} onChange={e=>setNewMsg(e.target.value)}/>
+            <button className="btn btn-primary" style={{alignSelf:'flex-end'}} disabled={busy} onClick={send}>Senden →</button>
           </div>
         </div>
       </div>
