@@ -35077,6 +35077,8 @@ function CallQaSuggestions({projects, employees, showToast}){
   const [cand,setCand]=useState(null);
   const [reload,setReload]=useState(0);
   const [sampleFor,setSampleFor]=useState(null);
+  const [dirEmp,setDirEmp]=useState('');
+  const [lastMap,setLastMap]=useState({});
   const projList=(projects||[]).filter(p=>p&&p.id).slice().sort((a,b)=>String(a.name).localeCompare(String(b.name),'de'));
   const projName=id=>{const p=projList.find(x=>x.id===id);return p?p.name:(id||'—');};
   useEffect(()=>{ let alive=true; (async()=>{ setCand(null);
@@ -35104,16 +35106,17 @@ function CallQaSuggestions({projects, employees, showToast}){
     const perf={}; Object.keys(combos).forEach(c=>{ const i=c.indexOf('|'); const pid=c.slice(0,i),sk=c.slice(i+1);
       const ranked=skillRanking(pid,sk,activeEmps,entries); const len=ranked.length;
       ranked.forEach((r,idx)=>{ perf[r.emp.id]={worst:len>1?idx/(len-1):0,rank:idx+1,size:len}; }); });
-    const from=isoLocal(new Date(now.getTime()-27*864e5));
-    const list=activeEmps.filter(e=>!(lastBy[e.id]&&String(lastBy[e.id])>=from)).map(e=>{
+    // Bereits bewertete NICHT mehr ausblenden — sie sinken über die Priorität (rec) nach unten, verschwinden aber nie.
+    const list=activeEmps.map(e=>{
       const last=lastBy[e.id]||null; const weeks=last?Math.floor((now-new Date(last))/(7*864e5)):null;
       const p=perf[e.id]||null; const worst=p?p.worst:null; const wp=worst==null?0.5:worst; const rec=last?Math.min(1,(weeks||0)/8):1;
       const prio=0.6*wp+0.4*rec;
       return {emp:e,last,weeks,perf:p,worst,prio};
     }).sort((a,b)=>b.prio-a.prio);
-    if(alive) setCand(list);
+    if(alive){ setCand(list); setLastMap(lastBy); }
   })(); return ()=>{alive=false;}; },[projFilter,reload]);
 
+  const dirList=(employees||[]).filter(e=>e&&['active','training'].includes(e.status)&&(projFilter==='all'||e.project_id===projFilter)).slice().sort((a,b)=>String((a.last_name||'')+' '+(a.first_name||'')).localeCompare(String((b.last_name||'')+' '+(b.first_name||'')),'de'));
   const tier=prio=>prio>=0.66?{c:'#dc2626',bg:'#fef2f2',l:'hoch'}:prio>=0.45?{c:'#d97706',bg:'#fffbeb',l:'mittel'}:{c:'#64748b',bg:'#f1f5f9',l:'niedrig'};
 
   return <div>
@@ -35123,12 +35126,24 @@ function CallQaSuggestions({projects, employees, showToast}){
         {projList.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
       </select>
     </div>
-    <div style={{fontSize:12,color:'var(--muted)',marginBottom:14,lineHeight:1.5}}>Vorschläge nach Priorität: <b>schwächere Leistung</b> (KPI letzte 2 Wochen) und <b>wer in den letzten 4 Wochen keine Stichprobe</b> hatte, zuerst. Bereits getestete MA erscheinen nicht. Mitarbeiter <b>ohne Bewertungsbogen</b> für ihre Projekt/Skill-Kombination erscheinen ebenfalls nicht (nicht bewertbar).</div>
+    {/* Direkte Auswahl: jeden Mitarbeiter jederzeit bewerten, unabhängig von den Vorschlägen. */}
+    <div style={{border:'1px solid var(--border)',borderRadius:12,padding:'12px 14px',background:'var(--card)',marginBottom:14}}>
+      <div style={{fontSize:13,fontWeight:800,marginBottom:6}}>Direkt bewerten</div>
+      <div style={{fontSize:11.5,color:'var(--muted)',marginBottom:10}}>Mitarbeiter wählen und sofort bewerten, unabhängig von den Vorschlägen. Jeder kann jederzeit bewertet werden.{projFilter==='all'?' Tipp: oben ein Team wählen, um die Liste einzugrenzen.':''}</div>
+      <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
+        <select className="form-select" style={{width:'auto',minWidth:260}} value={dirEmp} onChange={e=>setDirEmp(e.target.value)}>
+          <option value="">Mitarbeiter wählen…</option>
+          {dirList.map(e=><option key={e.id} value={e.id}>{e.last_name} {e.first_name} · {projName(e.project_id)}{lastMap[e.id]?(' · zuletzt '+fmtDate(lastMap[e.id])):' · noch nie'}</option>)}
+        </select>
+        <button className="btn btn-sm btn-primary" disabled={!dirEmp} onClick={()=>{ const e=(employees||[]).find(x=>x.id===dirEmp); if(e) setSampleFor(e); }}>Bewerten</button>
+      </div>
+    </div>
+    <div style={{fontSize:12,color:'var(--muted)',marginBottom:14,lineHeight:1.5}}>Vorschläge nach Priorität: <b>schwächere Leistung</b> (KPI letzte 2 Wochen) und <b>wer in den letzten 4 Wochen keine Stichprobe</b> hatte, zuerst. Bereits bewertete erscheinen <b>nachrangig</b> mit Datum der letzten Bewertung. Mitarbeiter <b>ohne Bewertungsbogen</b> für ihre Projekt/Skill-Kombination erscheinen nicht (nicht bewertbar).</div>
 
     {cand===null ? <div className="sp-empty">Berechne Vorschläge…</div>
-      : cand.length===0 ? <div className="sp-empty">Keine offenen Vorschläge (bereits getestet oder kein Bewertungsbogen für die Kombination).</div>
+      : cand.length===0 ? <div className="sp-empty">Keine Vorschläge (kein Bewertungsbogen für die Projekt/Skill-Kombination). Über „Direkt bewerten" oben kannst du trotzdem jederzeit jemanden auswählen.</div>
       : <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(280px,1fr))',gap:12}}>
-        {cand.slice(0,30).map(c=>{ const t=tier(c.prio); const e=c.emp; const sk=(e.project_skill||e.primary_skill||'').toLowerCase();
+        {cand.slice(0,50).map(c=>{ const t=tier(c.prio); const e=c.emp; const sk=(e.project_skill||e.primary_skill||'').toLowerCase();
           return <div key={e.id} style={{border:'1px solid var(--border)',borderLeft:'4px solid '+t.c,borderRadius:12,padding:'12px 14px',background:'var(--card)'}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:8}}>
               <div style={{minWidth:0}}>
@@ -35140,14 +35155,14 @@ function CallQaSuggestions({projects, employees, showToast}){
             <div style={{display:'flex',gap:6,flexWrap:'wrap',margin:'10px 0'}}>
               {c.worst!=null&&c.worst>=0.6 && <span style={{fontSize:10,fontWeight:700,padding:'2px 7px',borderRadius:10,background:'#fef2f2',color:'#dc2626'}}>schwache Leistung</span>}
               {!c.last && <span style={{fontSize:10,fontWeight:700,padding:'2px 7px',borderRadius:10,background:'#eff6ff',color:'#2563eb'}}>noch nie getestet</span>}
-              {c.last && <span style={{fontSize:10,fontWeight:700,padding:'2px 7px',borderRadius:10,background:'#f1f5f9',color:'#64748b'}}>seit {c.weeks} Wo kein Test</span>}
+              {c.last && <span style={{fontSize:10,fontWeight:700,padding:'2px 7px',borderRadius:10,background:'#f1f5f9',color:'#64748b'}}>zuletzt bewertet am {fmtDate(c.last)}</span>}
               {c.perf && <span style={{fontSize:10,fontWeight:600,padding:'2px 7px',borderRadius:10,background:'#f8fafc',color:'#475569'}}>Leistung Rang {c.perf.rank}/{c.perf.size}</span>}
             </div>
             <button className="btn btn-sm btn-primary" style={{width:'100%'}} onClick={()=>setSampleFor(e)}>+ Stichprobe erfassen</button>
           </div>;
         })}
       </div>}
-    {cand&&cand.length>30 && <div style={{fontSize:12,color:'var(--muted)',marginTop:10}}>… und {cand.length-30} weitere Vorschläge.</div>}
+    {cand&&cand.length>50 && <div style={{fontSize:12,color:'var(--muted)',marginTop:10}}>… und {cand.length-50} weitere. Für gezielte Auswahl oben „Direkt bewerten" nutzen.</div>}
     {sampleFor && <CallSampleModal emp={sampleFor} onClose={()=>setSampleFor(null)} onSaved={()=>{ setSampleFor(null); setReload(r=>r+1); showToast&&showToast('Stichprobe gespeichert','success'); }}/>}
   </div>;
 }
