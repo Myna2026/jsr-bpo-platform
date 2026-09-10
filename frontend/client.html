@@ -162,6 +162,12 @@ td{padding:8px 12px;font-size:12px;vertical-align:middle}
   .staff-grid{grid-template-columns:1fr 1fr!important}
   .topbar{height:44px;padding:0 14px}
 }
+@media print {
+  .sidebar,.topbar,.no-print{display:none!important}
+  .layout,.main,.content{display:block!important;height:auto!important;overflow:visible!important}
+  body{background:#fff!important}
+  .card{box-shadow:none!important;border:1px solid #e5e7eb!important;break-inside:avoid}
+}
 
 .cal-grid { display:grid; grid-template-columns:repeat(7,1fr); gap:4px; }
 .cal-cell { min-height:64px; border-radius:8px; padding:6px 8px; background:var(--bg); border:1px solid var(--border); cursor:pointer; transition:background .12s; }
@@ -247,6 +253,8 @@ const PORTAL = 'client';
 const PORTAL_LABELS = {client:'Client Portal', mitarbeiter:'Mitarbeiter Portal', hr:'HR Portal'};
 const PORTAL_URLS   = {client:'https://client.tive360.de/', mitarbeiter:'https://mitarbeiter.tive360.de/', hr:'https://hr.tive360.de/'};
 const sb = window.supabase.createClient(SB_URL, SB_KEY);
+// Nur in der Reisewelt-Demo (Myna-Projekt) aktiv — steuert demo-exklusive Ansichten (erweiterter Schichtplan).
+const IS_DEMO = SB_URL.indexOf('ggznzbfauuqljoefwwop') >= 0;
 
 // ── Heroicons Solid (modul-global; Overview/Topbar haben keinen Zugriff auf getIcon) ──
 function heroicon(name, size){
@@ -1155,6 +1163,158 @@ function DienstplanView({client, employees, posCats}){
       {renderDay(day)}
     </div>
   );
+}
+
+// ── Demo-Schichtplan (nur Reisewelt-Demo): Balkenplan über 4 Wochen, umschaltbar Tag/Woche/Monat,
+//    mit Live-Check-in-Status (grün leuchtend = eingecheckt, amber = verspätet, hohl = geplant/nicht
+//    eingecheckt) und Ausgabe als PDF (Druck) oder Excel (CSV). Liest shifts_client_view + checkins_client_view.
+const DS_SHIFT_COL = {'Früh':'#0ea5b7','Mitte':'#6366f1','Spät':'#d97706'};
+function dsShiftColor(lbl){ return DS_SHIFT_COL[lbl] || '#64748b'; }
+function DemoShiftView({client, employees}){
+  const [mode,setMode]=useState('monat');   // tag | woche | monat
+  const [anchor,setAnchor]=useState(()=>{ const d=new Date(); d.setHours(0,0,0,0); return d; });
+  const [shifts,setShifts]=useState(null);
+  const [checkins,setCheckins]=useState({});
+  const iso=d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+  const todayIso=iso(new Date());
+  const DOW=['Mo','Di','Mi','Do','Fr','Sa','So'];
+  const MON=['Jan','Feb','März','Apr','Mai','Jun','Jul','Aug','Sep','Okt','Nov','Dez'];
+  const mondayOf=d=>{ const x=new Date(d); const off=(x.getDay()+6)%7; x.setDate(x.getDate()-off); x.setHours(0,0,0,0); return x; };
+  const isoWeek=d=>{ const t=new Date(Date.UTC(d.getFullYear(),d.getMonth(),d.getDate())); const dn=(t.getUTCDay()+6)%7; t.setUTCDate(t.getUTCDate()-dn+3); const f=new Date(Date.UTC(t.getUTCFullYear(),0,4)); return 1+Math.round(((t-f)/86400000-3+((f.getUTCDay()+6)%7))/7); };
+  const range=React.useMemo(()=>{
+    if(mode==='tag') return {start:new Date(anchor), n:1};
+    if(mode==='woche') return {start:mondayOf(anchor), n:7};
+    return {start:mondayOf(anchor), n:28};
+  },[mode,anchor]);
+  const days=React.useMemo(()=>{ const out=[]; for(let i=0;i<range.n;i++){ const d=new Date(range.start); d.setDate(range.start.getDate()+i); out.push(d); } return out; },[range]);
+  const rStart=iso(days[0]), rEnd=iso(days[days.length-1]);
+  useEffect(()=>{ let alive=true; setShifts(null); (async()=>{
+    const {data}=await sb.from('shifts_client_view').select('*').gte('work_date',rStart).lte('work_date',rEnd);
+    if(!alive) return; setShifts(data||[]);
+    try{ const {data:ci}=await sb.from('checkins_client_view').select('*').gte('work_date',rStart).lte('work_date',rEnd);
+      const m={}; (ci||[]).forEach(c=>{ m[c.employee_id+'|'+String(c.work_date).slice(0,10)]=c; }); if(alive) setCheckins(m);
+    }catch(e){}
+  })(); return ()=>{alive=false;}; },[rStart,rEnd]);
+  const empById=React.useMemo(()=>{ const m={}; (employees||[]).forEach(e=>{ m[e.id]=e; }); return m; },[employees]);
+  const shiftFor=(empId,ds)=>(shifts||[]).find(s=>s.employee_id===empId && String(s.work_date).slice(0,10)===ds);
+  // Mitarbeiter mit Schicht im Bereich, nach Name.
+  const empIds=React.useMemo(()=>{ const set=new Set((shifts||[]).map(s=>s.employee_id).filter(id=>empById[id]));
+    return [...set].sort((a,b)=>String((empById[a]||{}).first_name+(empById[a]||{}).last_name).localeCompare(String((empById[b]||{}).first_name+(empById[b]||{}).last_name),'de')); },[shifts,empById]);
+  const empName=id=>{ const e=empById[id]||{}; return ((e.first_name||'')+' '+(e.last_name||'')).trim()||'MA'; };
+  // Check-in-Punkt für heute: grün=present, amber=late, hohl=geplant/nicht eingecheckt.
+  function checkDot(empId){
+    const s=shiftFor(empId,todayIso); if(!s) return null;
+    const ci=checkins[empId+'|'+todayIso];
+    let c,glow,title;
+    if(ci&&ci.status==='present'){ c='#16a34a'; glow=true; title='Eingecheckt '+String(ci.arrival||'').slice(0,5); }
+    else if(ci&&ci.status==='late'){ c='#d97706'; glow=true; title='Verspätet eingecheckt '+String(ci.arrival||'').slice(0,5); }
+    else { c='#cbd5e1'; glow=false; title='Eingeplant, noch nicht eingecheckt'; }
+    return <span title={title} style={{width:10,height:10,borderRadius:'50%',flexShrink:0,display:'inline-block',
+      background:glow?c:'#fff', border:glow?('1px solid '+c):('2px solid '+c),
+      boxShadow:glow?('0 0 0 2px #fff, 0 0 7px 1px '+c):'none'}}/>;
+  }
+  function exportCsv(){
+    const rows=[['Mitarbeiter','Datum','Wochentag','Schicht','Zeit','Check-in']];
+    days.forEach(d=>{ const ds=iso(d); const dow=DOW[(d.getDay()+6)%7]; empIds.forEach(id=>{ const s=shiftFor(id,ds); if(!s) return;
+      const ci=ds===todayIso?checkins[id+'|'+ds]:null;
+      rows.push([empName(id),ds,dow,s.label||'',s.shift_value||'',ci?(ci.status==='present'?'eingecheckt '+String(ci.arrival||'').slice(0,5):ci.status):'']); }); });
+    const csv='﻿'+rows.map(r=>r.map(c=>'"'+String(c).replace(/"/g,'""')+'"').join(';')).join('\n');
+    const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));
+    a.download='Schichtplan_Reisewelt_'+rStart+'_'+rEnd+'.csv'; a.click();
+  }
+  const btnS=(on)=>({padding:'6px 13px',border:'1px solid '+(on?'#0F5661':'#cbd5e1'),background:on?'#0F5661':'#fff',color:on?'#fff':'#334155',fontSize:12.5,fontWeight:on?700:500,cursor:'pointer'});
+  const navBtn={padding:'6px 10px',border:'1px solid #cbd5e1',background:'#fff',borderRadius:8,cursor:'pointer',fontSize:13,color:'#334155'};
+  const step=dir=>{ const d=new Date(anchor); d.setDate(d.getDate()+dir*(mode==='tag'?1:mode==='woche'?7:28)); setAnchor(d); };
+  const periodLbl=mode==='tag'
+    ? days[0].getDate()+'. '+MON[days[0].getMonth()]+' '+days[0].getFullYear()
+    : ('KW '+isoWeek(days[0])+(mode==='monat'?('–'+isoWeek(days[days.length-1])):'')+' · '+days[0].getDate()+'.'+MON[days[0].getMonth()]+'–'+days[days.length-1].getDate()+'.'+MON[days[days.length-1].getMonth()]);
+
+  const legend=<div style={{display:'flex',gap:14,flexWrap:'wrap',alignItems:'center',fontSize:11.5,color:'#64748b',marginTop:2}}>
+    {['Früh','Mitte','Spät'].map(l=><span key={l} style={{display:'inline-flex',alignItems:'center',gap:5}}><span style={{width:11,height:11,borderRadius:3,background:dsShiftColor(l)}}/>{l}</span>)}
+    <span style={{width:1,height:14,background:'#e5e7eb'}}/>
+    <span style={{display:'inline-flex',alignItems:'center',gap:5}}><span style={{width:10,height:10,borderRadius:'50%',background:'#16a34a',boxShadow:'0 0 6px 1px #16a34a'}}/>eingecheckt</span>
+    <span style={{display:'inline-flex',alignItems:'center',gap:5}}><span style={{width:10,height:10,borderRadius:'50%',background:'#d97706',boxShadow:'0 0 6px 1px #d97706'}}/>verspätet</span>
+    <span style={{display:'inline-flex',alignItems:'center',gap:5}}><span style={{width:10,height:10,borderRadius:'50%',background:'#fff',border:'2px solid #cbd5e1'}}/>nicht eingecheckt</span>
+  </div>;
+
+  // ── Monat: Balkenplan (Mitarbeiter × 28 Tage) ──
+  const NAMEW=168, DAYW=26;
+  const renderMonat=()=>{
+    return <div style={{overflowX:'auto'}}><div style={{minWidth:NAMEW+range.n*DAYW}}>
+      <div style={{display:'flex',borderBottom:'1px solid #e5e7eb'}}>
+        <div style={{width:NAMEW,minWidth:NAMEW,padding:'4px 8px',fontSize:11,fontWeight:700,color:'#64748b'}}>Mitarbeiter</div>
+        <div style={{display:'flex',flex:1}}>{days.map((d,i)=>{ const wknd=((d.getDay()+6)%7)>=5; const today=iso(d)===todayIso; const first=((d.getDay()+6)%7)===0;
+          return <div key={i} style={{width:DAYW,minWidth:DAYW,textAlign:'center',padding:'3px 0',borderLeft:first?'2px solid #cbd5e1':'1px solid #f1f5f9',background:today?'#ecfeff':(wknd?'#f8fafc':'#fff')}}>
+            <div style={{fontSize:9.5,color:'#94a3b8'}}>{DOW[(d.getDay()+6)%7]}</div>
+            <div style={{fontSize:10.5,fontWeight:today?800:600,color:today?'#0e7490':'#334155'}}>{d.getDate()}</div>
+          </div>; })}</div>
+      </div>
+      {empIds.map(id=><div key={id} style={{display:'flex',borderBottom:'1px solid #f1f5f9',minHeight:26}}>
+        <div style={{width:NAMEW,minWidth:NAMEW,display:'flex',alignItems:'center',gap:7,padding:'2px 8px',fontSize:12.5,fontWeight:600,color:'#0f172a',overflow:'hidden'}}>{checkDot(id)}<span style={{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{empName(id)}</span></div>
+        <div style={{display:'flex',flex:1}}>{days.map((d,i)=>{ const ds=iso(d); const s=shiftFor(id,ds); const wknd=((d.getDay()+6)%7)>=5; const today=ds===todayIso; const first=((d.getDay()+6)%7)===0;
+          return <div key={i} style={{width:DAYW,minWidth:DAYW,borderLeft:first?'2px solid #e2e8f0':'1px solid #f8fafc',background:today?'#ecfeff':(wknd?'#f8fafc':'#fff'),display:'flex',alignItems:'center',justifyContent:'center',padding:'2px 2px'}}>
+            {s&&<div title={empName(id)+' · '+ds+' · '+(s.label||'')+' '+(s.shift_value||'')} style={{width:'100%',height:15,borderRadius:4,background:dsShiftColor(s.label)}}/>}
+          </div>; })}</div>
+      </div>)}
+    </div></div>;
+  };
+  // ── Woche: 7 Tage × Mitarbeiter, Schichtzeit je Zelle ──
+  const renderWoche=()=>{
+    return <div style={{overflowX:'auto'}}><div style={{minWidth:NAMEW+7*104}}>
+      <div style={{display:'flex',borderBottom:'1px solid #e5e7eb'}}>
+        <div style={{width:NAMEW,minWidth:NAMEW,padding:'6px 8px',fontSize:11,fontWeight:700,color:'#64748b'}}>Mitarbeiter</div>
+        {days.map((d,i)=>{ const wknd=((d.getDay()+6)%7)>=5; const today=iso(d)===todayIso;
+          return <div key={i} style={{flex:1,minWidth:104,textAlign:'center',padding:'6px 0',borderLeft:'1px solid #f1f5f9',background:today?'#ecfeff':(wknd?'#f8fafc':'#fff'),fontSize:11.5,fontWeight:today?800:600,color:today?'#0e7490':'#334155'}}>{DOW[(d.getDay()+6)%7]} {d.getDate()}.{d.getMonth()+1}</div>; })}
+      </div>
+      {empIds.map(id=><div key={id} style={{display:'flex',borderBottom:'1px solid #f1f5f9',minHeight:34}}>
+        <div style={{width:NAMEW,minWidth:NAMEW,display:'flex',alignItems:'center',gap:7,padding:'4px 8px',fontSize:13,fontWeight:600,color:'#0f172a'}}>{checkDot(id)}<span style={{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{empName(id)}</span></div>
+        {days.map((d,i)=>{ const ds=iso(d); const s=shiftFor(id,ds); const today=ds===todayIso;
+          return <div key={i} style={{flex:1,minWidth:104,borderLeft:'1px solid #f8fafc',background:today?'#f0fdff':'#fff',display:'flex',alignItems:'center',justifyContent:'center',padding:'3px'}}>
+            {s?<div style={{width:'100%',borderRadius:6,background:dsShiftColor(s.label),color:'#fff',fontSize:11,fontWeight:700,textAlign:'center',padding:'4px 2px'}} title={s.label}>{s.shift_value}</div>:<span style={{color:'#e2e8f0',fontSize:12}}>–</span>}
+          </div>; })}
+      </div>)}
+    </div></div>;
+  };
+  // ── Tag: Liste mit Check-in + Schichtzeit ──
+  const renderTag=()=>{
+    const ds=iso(days[0]);
+    const list=empIds.map(id=>({id,s:shiftFor(id,ds)})).filter(x=>x.s);
+    if(!list.length) return <div style={{padding:30,textAlign:'center',color:'#94a3b8'}}>Am {DOW[(days[0].getDay()+6)%7]}, {days[0].getDate()}. {MON[days[0].getMonth()]} ist niemand eingeteilt.</div>;
+    return <div>{list.map(({id,s})=><div key={id} style={{display:'flex',alignItems:'center',gap:12,padding:'10px 8px',borderTop:'1px solid #f1f5f9'}}>
+      {ds===todayIso?checkDot(id):<span style={{width:10,height:10,borderRadius:'50%',background:'#f1f5f9',flexShrink:0}}/>}
+      <span style={{flex:1,minWidth:0,fontSize:14,fontWeight:600,color:'#0f172a'}}>{empName(id)}</span>
+      <span style={{fontSize:11,fontWeight:700,color:'#fff',background:dsShiftColor(s.label),borderRadius:6,padding:'3px 9px'}}>{s.label}</span>
+      <span style={{fontSize:13,fontFamily:'var(--mono,monospace)',color:'#334155',minWidth:104,textAlign:'right'}}>{s.shift_value}</span>
+    </div>)}</div>;
+  };
+
+  return <div>
+    <div className="card no-print" style={{marginBottom:14}}><div className="card-body" style={{display:'flex',flexWrap:'wrap',gap:12,alignItems:'center'}}>
+      <div style={{display:'inline-flex',border:'1px solid #cbd5e1',borderRadius:9,overflow:'hidden'}}>
+        <button style={btnS(mode==='tag')} onClick={()=>setMode('tag')}>Tag</button>
+        <button style={{...btnS(mode==='woche'),borderLeft:'1px solid #cbd5e1',borderRight:'1px solid #cbd5e1'}} onClick={()=>setMode('woche')}>Woche</button>
+        <button style={btnS(mode==='monat')} onClick={()=>setMode('monat')}>Monat</button>
+      </div>
+      <div style={{display:'inline-flex',gap:6,alignItems:'center'}}>
+        <button style={navBtn} onClick={()=>step(-1)}>‹</button>
+        <button style={{...navBtn,fontWeight:700}} onClick={()=>{ const d=new Date(); d.setHours(0,0,0,0); setAnchor(d); }}>Heute</button>
+        <button style={navBtn} onClick={()=>step(1)}>›</button>
+      </div>
+      <span style={{fontSize:13,color:'#64748b',fontWeight:600}}>{periodLbl}</span>
+      <div style={{flex:1}}/>
+      <button className="btn" style={{padding:'7px 13px'}} onClick={()=>window.print()}>Als PDF</button>
+      <button className="btn" style={{padding:'7px 13px'}} onClick={exportCsv}>Als Excel</button>
+    </div></div>
+    <div className="card"><div className="card-body">
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',flexWrap:'wrap',gap:8,marginBottom:10}}>
+        <div><div style={{fontSize:16,fontWeight:800,color:'#0f172a'}}>Schichtplan Reisewelt</div><div style={{fontSize:12.5,color:'#64748b'}}>{empIds.length} Mitarbeiter · {periodLbl}</div></div>
+        {legend}
+      </div>
+      {shifts===null? <div style={{padding:30,textAlign:'center',color:'#94a3b8'}}>Lädt…</div>
+       : !empIds.length? <EmptyHint icon="🗓" text="Für diesen Zeitraum ist noch keine Einteilung hinterlegt." />
+       : mode==='monat'? renderMonat() : mode==='woche'? renderWoche() : renderTag()}
+    </div></div>
+  </div>;
 }
 
 // ── Document Upload ──────────────────────────────────────
@@ -2163,7 +2323,7 @@ function App(){
           {view==='overview'&&<Overview client={client} onOpenTeam={()=>setView('staff')} employees={employees} posCats={posCats}/>}
           {view==='staff'&&<StaffView client={client} employees={employees} posCats={posCats}/>}
           {view==='orgchart'&&<OrgView client={client} employees={employees} posCats={posCats}/>}
-          {view==='shifts'&&<DienstplanView client={client} employees={employees} posCats={posCats}/>}
+          {view==='shifts'&&(IS_DEMO ? <DemoShiftView client={client} employees={employees}/> : <DienstplanView client={client} employees={employees} posCats={posCats}/>)}
           {view==='invoices'&&<InvoicesView client={client}/>}
           {view==='messages'&&<MessagesView client={client} onMsgRead={()=>setMsgReadTick(t=>t+1)}/>}
           {view==='calendar'&&<CalendarView client={client}/>}
