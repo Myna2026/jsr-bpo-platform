@@ -1053,6 +1053,7 @@ const STATUS_FLOW = [
   {key:'incomplete',    label:'Bewerbung unbrauchbar', icon:'📄', color:'#a16207', kanban:false, terminal:true, reject:true},
   {key:'blacklist',     label:'Blacklist',           icon:'⛔', color:'#7f1d1d', kanban:false, terminal:true, reject:true},
   {key:'already_employee', label:'Bereits Mitarbeiter', icon:'👤', color:'#0891b2', kanban:false, terminal:true, reject:true},   // vom cvs-Trigger gesetzt: Telefon/Mail trifft einen Mitarbeiter → zurückgehalten, nicht anrufen
+  {key:'converted',     label:'Übernommen',          icon:'🎉', color:'#0d9488', kanban:false, terminal:true},   // erfolgreich zum Mitarbeiter geworden; CV bleibt als Verlauf erhalten, employee_id verweist auf den MA. KEIN reject (kein Absage-Zähler).
   {key:'selected',      label:'Selektiert',          icon:'✅', color:'#059669', kanban:false, terminal:false},
   {key:'terminated',    label:'Gekündigt',           icon:'🚫', color:'#dc2626', kanban:false, terminal:true},
   {key:'inactive',      label:'Inaktiv',             icon:'⏸', color:'#6b7280', kanban:false, terminal:false},
@@ -20621,7 +20622,7 @@ function CVModal({cv, projects, team, onSave, onClose, initialTab}){
               <div style={{paddingTop:12,borderTop:'1px solid var(--border)'}}>
                 <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em',marginBottom:8}}>Abschluss</div>
                 <div style={{display:'flex',flexWrap:'wrap',gap:6}}>
-                  {STATUS_FLOW.filter(s=>s.terminal && !['contract','training_planned','training','active','inactive','terminated','freigestellt_bezahlt','freigestellt_unbezahlt'].includes(s.key)).map(s=>{
+                  {STATUS_FLOW.filter(s=>s.terminal && !['contract','training_planned','training','active','inactive','terminated','freigestellt_bezahlt','freigestellt_unbezahlt','converted'].includes(s.key)).map(s=>{
                     const isActive=form.status===s.key;
                     return(
                       <button key={s.key} type="button" onClick={()=>set('status',s.key)}
@@ -31416,7 +31417,7 @@ const EMP_COLS = new Set([
   'absences','audios','videos','warnings','project_assignments','allowed_shifts',
   'bank','contract','status_changed_at','extra',
   'abilities','bonuses','referrals','quality_ratings','hardware',
-  'position','city','id_number',
+  'position','city','id_number','source_cv_id',
   // Steckbrief/Profil (analog cvs, Migration 2026-07-20) — vorher via extra:
   'age','birthday','gender','education','education_level','experience_years','language_level','writing_level','languages_str','dream','hobbies','favorite_food','travel_wish',
   'project_skill','primary_skill','photo_color',
@@ -32129,6 +32130,18 @@ async function claraAssessCv(cvId){
 async function deleteCvFromDB(id){
   if(!id) throw new Error('id required');
   const {error} = await sb.from('cvs').delete().eq('id', id);
+  if(error) throw error;
+  return true;
+}
+
+// Übernahme: CV NICHT löschen, sondern als 'converted' markieren und mit dem entstandenen Mitarbeiter verknüpfen.
+// So bleibt der Recruiting-Verlauf (Mails via mail_messages.cv_id, Termine via interview_invites.cv_id) an der
+// Person haengen. Gezielter Update (kein saveCvToDB) — keine Phone-Normalisierung, kein Clara-Re-Trigger.
+async function markCvConvertedInDB(cvId, employeeId){
+  if(!cvId) throw new Error('cvId required');
+  const {error} = await sb.from('cvs')
+    .update({status:'converted', employee_id:employeeId||null, converted_at:new Date().toISOString()})
+    .eq('id', cvId);
   if(error) throw error;
   return true;
 }
@@ -46392,6 +46405,7 @@ function App(){
       // 4a-2-fix: keine Frontend-id — die DB vergibt die uuid (id gehört der DB, wie beim saveCvToDB-Insert).
       staff_number:String(nextNum),
       source:'cv',   // Funnel: markiert Übernahme aus dem Bewerber-Trichter (letzte Stufe „Eingestellt" zählbar). Bestand hat es nicht.
+      source_cv_id:cv.id,   // dauerhafter Verweis auf den Ursprungs-Bewerber (Stufe A). Bleibt über den ganzen Lebenszyklus stabil.
       // Personal data from CV
       first_name:cv.first_name||'', last_name:cv.last_name||'',
       email:cv.email||'', phone:cv.phone||'', city:cv.city||'',
@@ -46471,15 +46485,16 @@ function App(){
     try{ saved = await saveEmployeeToDB(newEmp); }   // self-routing (Admin=upsert, Lead=promote_employee-RPC)
     catch(e){ showToast('⚠ Mitarbeiter anlegen fehlgeschlagen: '+dbErrMsg(e),'error'); return; }
     setEmployees(es=>es.some(x=>x.id===saved.id)?es:[...es,saved]);
-    // Archive CV before removing (for audit trail)
+    // Lokales Archiv (abwärtskompatibel) — die DB-Wahrheit ist jetzt der erhaltene CV mit status='converted'.
     try{
       const arch=JSON.parse(localStorage.getItem('jsr_cv_archive_v1')||'[]');
       arch.push({...cv,_archived_at:new Date().toISOString(),_employee_id:saved.id,_staff_number:saved.staff_number});
       localStorage.setItem('jsr_cv_archive_v1',JSON.stringify(arch));
     }catch(e){}
-    // 4a-2: CV erst NACH erfolgreichem Employee-Save löschen (Realtime entfernt aus Liste).
-    try{ await deleteCvFromDB(cv.id); }
-    catch(e){ showToast('⚠ CV-Löschen fehlgeschlagen (Mitarbeiter #'+nextNum+' wurde angelegt): '+(e.message||'DB'),'error'); return; }
+    // Stufe A: CV NICHT löschen, sondern als 'converted' markieren + Rückverweis auf den Mitarbeiter setzen.
+    // Der Recruiting-Verlauf (Mails/Termine an cv_id) bleibt damit an der Person erhalten.
+    try{ await markCvConvertedInDB(cv.id, saved.id); }
+    catch(e){ showToast('⚠ CV-Verknüpfung fehlgeschlagen (Mitarbeiter #'+nextNum+' wurde angelegt): '+(e.message||'DB'),'error'); return; }
     alert('✅ Mitarbeiter #'+nextNum+' angelegt!\n\nPortal-Login:\nMitarbeiternummer: '+nextNum+'\nPasswort: jsr'+nextNum+'\n\n(Passwort bitte beim ersten Login ändern)');
   }
 
