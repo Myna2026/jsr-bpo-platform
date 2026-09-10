@@ -630,6 +630,59 @@ function LoginPage({authMsg, portalDenied, myPortals}){
 
 // ── Demo-Cockpit (nur Reisewelt-Demo): CSAT/AHT/Conversion, umschaltbar KW/laufender Monat,
 //    Teamdurchschnitt mit Vergleich zur Vorperiode (Richtungspfeil). Aus kpi_config + kpi_entries.
+// ── Zustands-Punkt (Schichtplan + Mitarbeiterliste, gleiche Farben) ───────────
+const CP_ABS_COL={sick:{bg:'#fee2e2',fg:'#dc2626',lbl:'krank',ic:'🤒'},vacation:{bg:'#dbeafe',fg:'#2563eb',lbl:'Urlaub',ic:'🏖'},unpaid:{bg:'#f1f5f9',fg:'#64748b',lbl:'frei',ic:'•'}};
+function cpTodayIso(){ const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+function cpAbsenceOn(emp, ds){ const arr=(emp&&emp.absences)||[]; return arr.find(a=>a&&a.from&&a.to && String(a.from).slice(0,10)<=ds && ds<=String(a.to).slice(0,10)); }
+// kind: null (kein Punkt) | 'present' | 'late' | 'hollow' | 'sick' | 'vacation' | 'unpaid'
+function cpStatusKind(hasShift, ciStatus, absence, hasCheckinLayer){
+  if(absence) return absence.type;
+  if(!hasShift) return null;                       // heute nicht eingeplant → kein Punkt
+  if(ciStatus==='present') return 'present';
+  if(ciStatus==='late') return 'late';
+  return hasCheckinLayer ? 'hollow' : null;        // hohl nur, wenn heute überhaupt Check-ins laufen
+}
+function cpDot(kind, size){
+  size=size||14; const base={width:size,height:size,borderRadius:'50%',flexShrink:0,display:'inline-block',boxSizing:'border-box'};
+  if(kind==='sick'||kind==='vacation'||kind==='unpaid'){ const a=CP_ABS_COL[kind]; return <span title={a.lbl} style={{...base,background:a.bg,border:'2px solid '+a.fg}}/>; }
+  if(kind==='present') return <span title="Eingecheckt" style={{...base,background:'#16a34a',border:'2px solid #16a34a',boxShadow:'0 0 9px 2px #16a34a',animation:'dsPulseG 1.5s infinite'}}/>;
+  if(kind==='late') return <span title="Verspätet eingecheckt" style={{...base,background:'#d97706',border:'2px solid #d97706',boxShadow:'0 0 9px 2px #d97706',animation:'dsPulseA 1.5s infinite'}}/>;
+  if(kind==='hollow') return <span title="Eingeplant, nicht eingecheckt" style={{...base,background:'#fff',border:'2px solid #cbd5e1'}}/>;
+  return null;
+}
+// Status-Legende (Mitarbeiterliste + Kacheln), gleiche Farben wie der Schichtplan.
+function cpLegendSwatch(kind){
+  const base={width:12,height:12,borderRadius:'50%',display:'inline-block',boxSizing:'border-box',flexShrink:0};
+  if(kind==='present') return <span style={{...base,background:'#16a34a',border:'2px solid #16a34a',boxShadow:'0 0 5px 1px #16a34a'}}/>;
+  if(kind==='late') return <span style={{...base,background:'#d97706',border:'2px solid #d97706',boxShadow:'0 0 5px 1px #d97706'}}/>;
+  if(kind==='hollow') return <span style={{...base,background:'#fff',border:'2px solid #cbd5e1'}}/>;
+  const a=CP_ABS_COL[kind]||CP_ABS_COL.unpaid; return <span style={{...base,background:a.bg,border:'2px solid '+a.fg}}/>;
+}
+function cpStatusLegend(){
+  const it=(k,l)=><span style={{display:'inline-flex',alignItems:'center',gap:6}}>{cpLegendSwatch(k)}<span>{l}</span></span>;
+  return <div style={{display:'flex',flexWrap:'wrap',gap:16,fontSize:11.5,color:'#64748b',alignItems:'center'}}>
+    {it('present','eingecheckt')}{it('late','verspätet')}{it('hollow','nicht eingecheckt')}
+    <span style={{width:1,height:14,background:'#e5e7eb'}}/>
+    {it('sick','krank')}{it('vacation','Urlaub')}
+  </div>;
+}
+// Heutiger Schicht-/Check-in-Status fürs Projekt (Mitarbeiterliste). Leer, wenn keine Daten → keine Punkte.
+function useTodayStatus(projectId){
+  const [st,setSt]=useState({shiftSet:new Set(), ci:{}, hasCheckinLayer:false, ready:false});
+  useEffect(()=>{ if(!projectId){ setSt({shiftSet:new Set(),ci:{},hasCheckinLayer:false,ready:true}); return; } let alive=true; (async()=>{
+    const ds=cpTodayIso();
+    try{ const [sh,ck]=await Promise.all([
+        sb.from('shifts_client_view').select('employee_id').eq('work_date',ds),
+        sb.from('checkins_client_view').select('employee_id,status').eq('work_date',ds)
+      ]);
+      if(!alive) return;
+      const ci={}; (ck.data||[]).forEach(c=>{ ci[c.employee_id]=c.status; });
+      setSt({shiftSet:new Set((sh.data||[]).map(r=>r.employee_id)), ci, hasCheckinLayer:(ck.data||[]).length>0, ready:true});
+    }catch(e){ if(alive) setSt({shiftSet:new Set(),ci:{},hasCheckinLayer:false,ready:true}); }
+  })(); return ()=>{alive=false;}; },[projectId]);
+  return st;
+}
+
 function DemoCockpit({client}){
   const [mode,setMode]=useState('kw');
   const [cfg,setCfg]=useState([]); const [ent,setEnt]=useState([]);
@@ -640,16 +693,21 @@ function DemoCockpit({client}){
     ]);
     if(!alive) return; setCfg(c.data||[]); setEnt(e.data||[]);
   })(); return ()=>{alive=false;}; },[client.project_id]);
-  const idsByName=n=>cfg.filter(c=>c.name===n).map(c=>c.id);
+  const MON=['Januar','Februar','März','April','Mai','Juni','Juli','August','September','Oktober','November','Dezember'];
+  const kwMonday=(kw,year)=>{ const jan4=new Date(Date.UTC(year,0,4)); const dow=(jan4.getUTCDay()+6)%7; const w1=new Date(jan4); w1.setUTCDate(jan4.getUTCDate()-dow); const m=new Date(w1); m.setUTCDate(w1.getUTCDate()+(kw-1)*7); return m; };
+  const kwMonth=(kw,year)=>{ const mon=kwMonday(kw,year); const thu=new Date(mon); thu.setUTCDate(mon.getUTCDate()+3); return {m:thu.getUTCMonth(),y:thu.getUTCFullYear()}; };
+  const idsFor=names=>cfg.filter(c=>names.includes(c.name)).map(c=>c.id);
   const ourIds=new Set(cfg.map(c=>c.id));
   const rows=ent.filter(r=>ourIds.has(r.kpi_id));
-  const avg=(ids,weeks)=>{ const set=new Set(ids); const vs=rows.filter(r=>set.has(r.kpi_id)&&weeks.includes(r.kw)).map(r=>Number(r.value)).filter(v=>!isNaN(v)); return vs.length? vs.reduce((a,b)=>a+b,0)/vs.length : null; };
-  const allKw=[...new Set(rows.map(r=>r.kw))].sort((a,b)=>a-b);
-  const maxKw=allKw.length?allKw[allKw.length-1]:37;
-  const periods = mode==='kw'
-    ? { now:[maxKw], prev:[maxKw-1], nowLbl:'KW '+maxKw, prevLbl:'KW '+(maxKw-1) }
-    : { now:allKw.filter(k=>k>=36), prev:allKw.filter(k=>k<36), nowLbl:'September', prevLbl:'August' };
-  const KPIS=[{name:'CSAT',unit:'%',better:'up'},{name:'AHT',unit:'min',better:'down'},{name:'Conversion',unit:'%',better:'up'}];
+  const avg=(ids,keys)=>{ const set=new Set(ids); const kk=new Set(keys.map(x=>x.y+'-'+x.kw)); const vs=rows.filter(r=>set.has(r.kpi_id)&&kk.has(r.year+'-'+r.kw)).map(r=>Number(r.value)).filter(v=>!isNaN(v)); return vs.length? vs.reduce((a,b)=>a+b,0)/vs.length : null; };
+  const yk=[...new Set(rows.map(r=>r.year+'|'+r.kw))].map(s=>{const p=s.split('|');return {y:+p[0],kw:+p[1]};}).sort((a,b)=>b.y-a.y||b.kw-a.kw);
+  const KPIS=[{name:'CSAT',names:['CSAT'],unit:'%',better:'up'},{name:'AHT',names:['AHT'],unit:'min',better:'down'},{name:'Conversion',names:['Conversion','CR'],unit:'%',better:'up'}];
+  const anyData = rows.length>0 && KPIS.some(k=>idsFor(k.names).length>0);
+  if(!anyData) return null;   // Kein KPI-Datenbestand fürs Projekt → Cockpit weglassen (nichts Leeres zeigen)
+  let periods;
+  if(mode==='kw'){ const cur=yk[0]||{y:2026,kw:1}, prv=yk[1]||cur; periods={ now:[cur], prev:[prv], nowLbl:'KW '+cur.kw, prevLbl:'KW '+prv.kw }; }
+  else { const cur=yk[0]||{y:2026,kw:1}; const cm=kwMonth(cur.kw,cur.y); const pmD=new Date(Date.UTC(cm.y,cm.m-1,15)); const pm={m:pmD.getUTCMonth(),y:pmD.getUTCFullYear()};
+    periods={ now:yk.filter(x=>{const z=kwMonth(x.kw,x.y);return z.m===cm.m&&z.y===cm.y;}), prev:yk.filter(x=>{const z=kwMonth(x.kw,x.y);return z.m===pm.m&&z.y===pm.y;}), nowLbl:MON[cm.m], prevLbl:MON[pm.m] }; }
   const tglS=on=>({padding:'5px 12px',border:'none',cursor:'pointer',fontSize:12.5,fontWeight:on?700:500,background:on?'#0F5661':'#fff',color:on?'#fff':'#334155'});
   return <div className="card" style={{marginBottom:20}}>
     <div className="card-header"><span className="card-title" style={{display:'inline-flex',alignItems:'center',gap:7}}><span style={{display:'inline-flex',color:'var(--blue)'}} dangerouslySetInnerHTML={{__html:heroicon('chart-bar',18)}} />Cockpit</span>
@@ -659,7 +717,7 @@ function DemoCockpit({client}){
     </div>
     <div className="card-body">
       <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:14}}>
-        {KPIS.map(k=>{ const ids=idsByName(k.name); const now=avg(ids,periods.now), prev=avg(ids,periods.prev);
+        {KPIS.map(k=>{ const ids=idsFor(k.names); const now=avg(ids,periods.now), prev=avg(ids,periods.prev);
           const delta=(now!=null&&prev!=null)?now-prev:null;
           const good=delta==null?null:(Math.abs(delta)<0.05?null:(k.better==='up'?delta>0:delta<0));
           const arrow=delta==null?'':(delta>0.05?'▲':delta<-0.05?'▼':'▬');
@@ -683,6 +741,9 @@ function Overview({client, onOpenTeam, employees, posCats}){
   const staff = (employees||[]).map(empToCard);
   const active = staff.length;
   const skills = [...new Set(staff.map(s=>s.skill).filter(Boolean))];   // Projekt-Skills (Sales/Support)
+  const today = useTodayStatus(client.project_id);
+  const empRaw = React.useMemo(()=>{ const m={}; (employees||[]).forEach(e=>{ m[e.id]=e; }); return m; },[employees]);
+  const statusDot = id => { const kind=cpStatusKind(today.shiftSet.has(id), today.ci[id], cpAbsenceOn(empRaw[id],cpTodayIso()), today.hasCheckinLayer); return kind?cpDot(kind,14):null; };
   const invoices = INVOICES[client.project_id]||[];
   const openInv = invoices.filter(i=>i.status==='offen');
   const byName = (a,b)=>(a.first_name+' '+a.last_name).localeCompare(b.first_name+' '+b.last_name,'de');
@@ -706,7 +767,7 @@ function Overview({client, onOpenTeam, employees, posCats}){
       onMouseEnter={e=>{e.currentTarget.style.boxShadow='0 4px 14px rgba(15,86,97,.10)';}}
       onMouseLeave={e=>{e.currentTarget.style.boxShadow='none';}}>
       <div style={{padding:'16px 12px 14px'}}>
-        <div style={{display:'flex',justifyContent:'center',marginBottom:8}}><Avatar emp={s} size={48} color={fcol}/></div>
+        <div style={{display:'flex',justifyContent:'center',marginBottom:8}}><div style={{position:'relative',display:'inline-block'}}><Avatar emp={s} size={48} color={fcol}/>{(()=>{ const d=statusDot(s.id); return d?<span style={{position:'absolute',top:-2,right:-2,background:'#fff',borderRadius:'50%',padding:2,lineHeight:0,boxShadow:'0 1px 3px rgba(0,0,0,.25)'}}>{d}</span>:null; })()}</div></div>
         <div style={{fontWeight:600,fontSize:13,lineHeight:1.2}}>{s.first_name} {s.last_name}</div>
         <div style={{marginTop:7,display:'flex',justifyContent:'center'}}><FuncBadge position={s.role} cats={posCats}/></div>
         {s.city&&<div style={{fontSize:10.5,color:'var(--muted)',marginTop:5,display:'flex',alignItems:'center',justifyContent:'center',gap:3}}><span style={{opacity:.6}}>📍</span>{s.city}</div>}
@@ -730,7 +791,7 @@ function Overview({client, onOpenTeam, employees, posCats}){
         </div>
       </div>
 
-      {IS_DEMO && <DemoCockpit client={client}/>}
+      <DemoCockpit client={client}/>{/* zeigt sich nur, wenn KPI-Daten vorliegen (sonst null) */}
 
       <div className="grid-4">
         {[
@@ -771,6 +832,7 @@ function Overview({client, onOpenTeam, employees, posCats}){
           <span className="badge badge-blue">{staff.length} Mitarbeiter</span>
         </div>
         <div className="card-body">
+          {staff.some(s=>statusDot(s.id)) && <div style={{marginBottom:12}}>{cpStatusLegend()}</div>}
           <div ref={gridRef}>
             {[
               {label:'Projektleitung',        list:projektleitung, accent:true},
@@ -860,6 +922,9 @@ function MediaSection({staffId, employees}){
 // Nur Zusammenarbeits-Felder: Name, Rolle (Position), Projekt-Skill (Filter), Stadt, Deutsch-Niveau, Foto.
 function StaffView({client, employees, posCats}){
   const staff = (employees||[]).map(empToCard);
+  const today = useTodayStatus(client.project_id);   // heutige Schicht/Check-ins (leer → keine Punkte)
+  const empRaw = React.useMemo(()=>{ const m={}; (employees||[]).forEach(e=>{ m[e.id]=e; }); return m; },[employees]);
+  const statusDot = id => { const kind=cpStatusKind(today.shiftSet.has(id), today.ci[id], cpAbsenceOn(empRaw[id],cpTodayIso()), today.hasCheckinLayer); return kind?cpDot(kind,16):null; };
   const [selected, setSelected] = useState(null);
   const [fSkill, setFSkill] = useState('all');
   const [fFunc, setFFunc]   = useState('all');
@@ -940,7 +1005,7 @@ function StaffView({client, employees, posCats}){
         {anyFilter&&<button onClick={resetFilters} style={{padding:'8px 14px',borderRadius:8,border:'1px solid #0F5661',background:'#fff',color:'#0F5661',fontSize:12,fontWeight:700,fontFamily:'var(--font)',cursor:'pointer',height:36}}>Zurücksetzen</button>}
       </div>
       <div style={{marginBottom:16,fontSize:13,color:'var(--muted)',display:'flex',justifyContent:'space-between',alignItems:'center',gap:10,flexWrap:'wrap'}}>
-        <span>Klicken Sie auf eine Karte für Details</span>
+        {filteredStaff.some(s=>statusDot(s.id)) ? cpStatusLegend() : <span>Klicken Sie auf eine Karte für Details</span>}
         <span style={{fontWeight:700,color:'var(--blue)'}}>{filteredStaff.length} von {staff.length} Mitarbeitern</span>
       </div>
       {filteredStaff.length===0&&(
@@ -950,7 +1015,10 @@ function StaffView({client, employees, posCats}){
         {filteredStaff.map(s=>(
           <div key={s.id} className="staff-card" onClick={()=>setSelected(s)} style={{cursor:'pointer'}}>
             <div style={{padding:'22px 0 10px',display:'flex',justifyContent:'center',background:'#f9fafb',borderBottom:'1px solid #e5e7eb'}}>
-              <Avatar emp={s} size={110} color={posColorFor(s.role, posCats)} ring/>
+              <div style={{position:'relative',display:'inline-block'}}>
+                <Avatar emp={s} size={110} color={posColorFor(s.role, posCats)} ring/>
+                {(()=>{ const d=statusDot(s.id); return d?<span style={{position:'absolute',top:4,right:4,background:'#fff',borderRadius:'50%',padding:2,lineHeight:0,boxShadow:'0 1px 4px rgba(0,0,0,.25)'}}>{d}</span>:null; })()}
+              </div>
             </div>
             <div className="staff-body">
               <div className="staff-name">{s.first_name} {s.last_name}</div>
@@ -1251,25 +1319,19 @@ function DemoShiftView({client, employees}){
   })(); return ()=>{alive=false;}; },[rStart,rEnd]);
   const empById=React.useMemo(()=>{ const m={}; (employees||[]).forEach(e=>{ m[e.id]=e; }); return m; },[employees]);
   const shiftFor=(empId,ds)=>(shifts||[]).find(s=>s.employee_id===empId && String(s.work_date).slice(0,10)===ds);
-  const ABS_COL={sick:{bg:'#fee2e2',fg:'#dc2626',lbl:'krank',ic:'🤒'},vacation:{bg:'#dbeafe',fg:'#2563eb',lbl:'Urlaub',ic:'🏖'},unpaid:{bg:'#f1f5f9',fg:'#64748b',lbl:'frei',ic:'•'}};
-  const absenceFor=(empId,ds)=>{ const e=empById[empId]; const arr=(e&&e.absences)||[]; return arr.find(a=>a&&a.from&&a.to && String(a.from).slice(0,10)<=ds && ds<=String(a.to).slice(0,10)); };
+  const ABS_COL=CP_ABS_COL;
+  const hasCheckinLayer=Object.keys(checkins).some(k=>k.endsWith('|'+todayIso));
+  const absenceFor=(empId,ds)=>cpAbsenceOn(empById[empId],ds);
   // Mitarbeiter mit Schicht ODER Abwesenheit im Bereich, nach Name.
   const empIds=React.useMemo(()=>{ const set=new Set((shifts||[]).map(s=>s.employee_id).filter(id=>empById[id]));
     (employees||[]).forEach(e=>{ if(e&&(e.absences||[]).some(a=>a&&a.from&&a.to && String(a.from).slice(0,10)<=rEnd && String(a.to).slice(0,10)>=rStart)) set.add(e.id); });
     return [...set].sort((a,b)=>String((empById[a]||{}).first_name+(empById[a]||{}).last_name).localeCompare(String((empById[b]||{}).first_name+(empById[b]||{}).last_name),'de')); },[shifts,empById,employees,rStart,rEnd]);
   const empName=id=>{ const e=empById[id]||{}; return ((e.first_name||'')+' '+(e.last_name||'')).trim()||'MA'; };
-  // Check-in-Punkt für heute: grün=present, amber=late, hohl=geplant/nicht eingecheckt.
+  // Check-in-/Abwesenheits-Punkt für heute (gemeinsame Logik mit der Mitarbeiterliste).
   function checkDot(empId){
-    const s=shiftFor(empId,todayIso); const ab=absenceFor(empId,todayIso); if(!s&&!ab) return <span style={{width:14,height:14,flexShrink:0}}/>;
-    if(ab) return <span title={ABS_COL[ab.type].lbl} style={{width:14,height:14,borderRadius:'50%',flexShrink:0,display:'inline-block',background:ABS_COL[ab.type].bg,border:'2px solid '+ABS_COL[ab.type].fg,boxSizing:'border-box'}}/>;
     const ci=checkins[empId+'|'+todayIso];
-    let c,glow,pulse,title;
-    if(ci&&ci.status==='present'){ c='#16a34a'; glow=true; pulse='dsPulseG'; title='Eingecheckt '+String(ci.arrival||'').slice(0,5); }
-    else if(ci&&ci.status==='late'){ c='#d97706'; glow=true; pulse='dsPulseA'; title='Verspätet eingecheckt '+String(ci.arrival||'').slice(0,5); }
-    else { c='#cbd5e1'; glow=false; pulse=null; title='Eingeplant, noch nicht eingecheckt'; }
-    return <span title={title} style={{width:14,height:14,borderRadius:'50%',flexShrink:0,display:'inline-block',boxSizing:'border-box',
-      background:glow?c:'#fff', border:'2px solid '+c,
-      boxShadow:glow?('0 0 9px 2px '+c):'none', animation:pulse?(pulse+' 1.5s infinite'):'none'}}/>;
+    const kind=cpStatusKind(!!shiftFor(empId,todayIso), ci&&ci.status, absenceFor(empId,todayIso), hasCheckinLayer);
+    return kind? cpDot(kind,14) : <span style={{width:14,height:14,flexShrink:0}}/>;
   }
   function exportCsv(){
     const rows=[['Mitarbeiter','Datum','Wochentag','Schicht','Zeit','Check-in']];
@@ -2407,7 +2469,7 @@ function App(){
           {view==='overview'&&<Overview client={client} onOpenTeam={()=>setView('staff')} employees={employees} posCats={posCats}/>}
           {view==='staff'&&<StaffView client={client} employees={employees} posCats={posCats}/>}
           {view==='orgchart'&&<OrgView client={client} employees={employees} posCats={posCats}/>}
-          {view==='shifts'&&(IS_DEMO ? <DemoShiftView client={client} employees={employees}/> : <DienstplanView client={client} employees={employees} posCats={posCats}/>)}
+          {view==='shifts'&&<DemoShiftView client={client} employees={employees}/>}
           {view==='invoices'&&<InvoicesView client={client}/>}
           {view==='messages'&&<MessagesView client={client} onMsgRead={()=>setMsgReadTick(t=>t+1)}/>}
           {view==='calendar'&&<CalendarView client={client}/>}
