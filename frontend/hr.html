@@ -34587,15 +34587,16 @@ function CallQaCatalog({projects, showToast}){
 // Arbeitsplan (Verbesserungsplan) — Baum, Priorität-Ampel, Fortschritt-Rollup aus Unterpunkten, Fristen,
 // Kommentare beidseitig, Herkunft (Condor/wir). Team-Seite: voller Zugriff (RLS scopt aufs Projekt).
 const IMP_PRIO=[{k:'sehr_wichtig',l:'sehr wichtig',c:'#dc2626'},{k:'wichtig',l:'wichtig',c:'#ea580c'},{k:'notwendig',l:'notwendig',c:'#ca8a04'},{k:'schoen',l:'wäre schön',c:'#64748b'}];
-const IMP_STAT=[{k:'offen',l:'offen'},{k:'laeuft',l:'läuft'},{k:'erledigt',l:'erledigt'},{k:'zurueckgestellt',l:'zurückgestellt'}];
+const IMP_STAT=[{k:'offen',l:'offen',c:'#94a3b8',p:0},{k:'in_arbeit',l:'in Arbeit',c:'#0ea5b7',p:50},{k:'pausiert',l:'pausiert',c:'#a1a1aa',p:50,f:'⏸'},{k:'wartet',l:'wartet auf Zulieferung',c:'#d97706',p:50,f:'⏳'},{k:'erledigt',l:'erledigt',c:'#16a34a',p:100}];
 function impPrio(k){ return IMP_PRIO.find(p=>p.k===k)||IMP_PRIO[1]; }
-function impStatL(k){ return (IMP_STAT.find(s=>s.k===k)||IMP_STAT[0]).l; }
+function impStat(k){ return IMP_STAT.find(s=>s.k===k)||IMP_STAT[0]; }
+function impAddDays(dstr,n){ const d=new Date(String(dstr).slice(0,10)); d.setDate(d.getDate()+n); return d.toISOString().slice(0,10); }
 function impFmtD(d){ if(!d) return ''; const p=String(d).slice(0,10).split('-'); return p.length===3?p[2]+'.'+p[1]+'.'+p[0]:String(d); }
 function impOverdue(d,status){ if(!d||status==='erledigt') return false; try{ return new Date(String(d).slice(0,10))<new Date(new Date().toISOString().slice(0,10)); }catch(e){ return false; } }
 function ImprovementPlanView({team, projects, showToast}){
   const projList=(projects||[]).filter(p=>p&&p.id).slice().sort((a,b)=>String(a.name).localeCompare(String(b.name),'de'));
   const [proj,setProj]=React.useState(''); const [items,setItems]=React.useState(null); const [comments,setComments]=React.useState({});
-  const [expand,setExpand]=React.useState({}); const [edit,setEdit]=React.useState(null); const [ef,setEf]=React.useState({}); const [cmt,setCmt]=React.useState({}); const [busy,setBusy]=React.useState(false); const [mode,setMode]=React.useState('baum'); const [watch,setWatch]=React.useState(null); const [watchBusy,setWatchBusy]=React.useState(false);
+  const [open,setOpen]=React.useState({}); const [edit,setEdit]=React.useState(null); const [ef,setEf]=React.useState({}); const [cmt,setCmt]=React.useState({}); const [busy,setBusy]=React.useState(false); const [watch,setWatch]=React.useState(null); const [watchBusy,setWatchBusy]=React.useState(false);
   const cardS={border:'1px solid var(--border)',borderRadius:12,padding:'14px 16px',background:'var(--card)',marginBottom:12};
   const uname=(team&&team.full_name)||'Team'; const uid=(team&&team.user_id)||null;
   const load=async(pid)=>{ if(!pid){ setItems([]); return; } setItems(null);
@@ -34608,16 +34609,26 @@ function ImprovementPlanView({team, projects, showToast}){
   React.useEffect(()=>{ if(proj) load(proj); },[proj]);
   const tops=(items||[]).filter(i=>!i.parent_id).sort((a,b)=>(a.sort_order||0)-(b.sort_order||0));
   const kidsOf=id=>(items||[]).filter(i=>i.parent_id===id).sort((a,b)=>(a.sort_order||0)-(b.sort_order||0));
-  const rollup=it=>{ const ks=kidsOf(it.id); return ks.length? Math.round(ks.reduce((s,k)=>s+(k.progress||0),0)/ks.length) : (it.progress||0); };
-  const overall=tops.length? Math.round(tops.reduce((s,t)=>s+rollup(t),0)/tops.length) : 0;
-  const projName=id=>{ const p=projList.find(x=>x.id===id); return p?p.name:id; };
-  function openEdit(it){ setEf({title:it.title||'',measures:it.measures||'',priority:it.priority||'wichtig',status:it.status||'offen',progress:it.progress||0,due_date:it.due_date?String(it.due_date).slice(0,10):''}); setEdit(it.id); }
-  function openNew(parentId){ setEf({title:'',measures:'',priority:'wichtig',status:'offen',progress:0,due_date:''}); setEdit('new:'+(parentId||'')); }
+  const prog=it=>{ const ks=kidsOf(it.id); return ks.length? Math.round(ks.reduce((s,k)=>s+impStat(k.status).p,0)/ks.length) : impStat(it.status).p; };
+  const overall=tops.length? Math.round(tops.reduce((s,t)=>s+prog(t),0)/tops.length) : 0;
+  const cLauf=tops.filter(t=>{const p=prog(t);return p>0&&p<100&&!impOverdue(t.due_date,t.status)&&t.status!=='pausiert'&&t.status!=='wartet';}).length;
+  const cSteht=tops.filter(t=>t.status==='pausiert'||t.status==='wartet').length;
+  const cOver=tops.filter(t=>impOverdue(t.due_date,t.status)).length;
+  const cFertig=tops.filter(t=>prog(t)===100).length;
+  const span=i=>{ let a=i.start_date?String(i.start_date).slice(0,10):null, b=i.due_date?String(i.due_date).slice(0,10):null; if(!a&&!b) return null; if(!a) a=impAddDays(b,-14); if(!b) b=impAddDays(a,14); return [a,b]; };
+  const nowStr=new Date().toISOString().slice(0,10);
+  const alld=(items||[]).flatMap(i=>{const s=span(i);return s?[+new Date(s[0]),+new Date(s[1])]:[];}); alld.push(+new Date(nowStr));
+  let t0=Math.min.apply(null,alld), t1=Math.max.apply(null,alld); if(!isFinite(t0)){t0=+new Date(nowStr);t1=t0+90*864e5;} if(t1<=t0)t1=t0+30*864e5;
+  const padD=Math.max(3*864e5,(t1-t0)*0.05); t0-=padD; t1+=padD;
+  const X=d=>((+new Date(String(d).slice(0,10)))-t0)/(t1-t0)*100;
+  const months=(()=>{ const out=[]; const d=new Date(t0); d.setDate(1); d.setHours(0,0,0,0); let g=0; while(+d<=t1&&g<24){ out.push({x:((+d)-t0)/(t1-t0)*100,l:d.toLocaleDateString('de-DE',{month:'short'})}); d.setMonth(d.getMonth()+1); g++; } return out; })();
+  const todayX=X(nowStr);
+  function openEdit(it){ setEf({title:it.title||'',measures:it.measures||'',priority:it.priority||'wichtig',status:it.status||'offen',start_date:it.start_date?String(it.start_date).slice(0,10):'',due_date:it.due_date?String(it.due_date).slice(0,10):''}); setEdit(it.id); }
+  function openNew(parentId){ setEf({title:'',measures:'',priority:'wichtig',status:'offen',start_date:'',due_date:''}); setEdit('new:'+(parentId||'')); }
   async function saveItem(){ const t=(ef.title||'').trim(); if(!t||busy) return; setBusy(true);
-    const base={ title:t, measures:(ef.measures||'').trim()||null, priority:ef.priority, status:ef.status, progress:Math.max(0,Math.min(100,parseInt(ef.progress)||0)), due_date:ef.due_date||null, updated_at:new Date().toISOString() };
+    const base={ title:t, measures:(ef.measures||'').trim()||null, priority:ef.priority, status:ef.status, progress:impStat(ef.status).p, start_date:ef.start_date||null, due_date:ef.due_date||null, updated_at:new Date().toISOString() };
     let error;
-    if(String(edit).startsWith('new:')){ const parentId=String(edit).slice(4)||null;
-      const sibs=parentId?kidsOf(parentId):tops; const ord=Math.max(0,...sibs.map(s=>s.sort_order||0))+1;
+    if(String(edit).startsWith('new:')){ const parentId=String(edit).slice(4)||null; const sibs=parentId?kidsOf(parentId):tops; const ord=Math.max(0,...sibs.map(s=>s.sort_order||0))+1;
       ({error}=await sb.from('improvement_items').insert({...base, project_id:proj, parent_id:parentId, origin:'intern', sort_order:ord, created_by:uid, created_by_name:uname})); }
     else { ({error}=await sb.from('improvement_items').update(base).eq('id',edit)); }
     setBusy(false); if(error){ showToast&&showToast('Nicht gespeichert: '+((error&&error.message)||''),'error'); return; } setEdit(null); load(proj);
@@ -34625,55 +34636,65 @@ function ImprovementPlanView({team, projects, showToast}){
   async function delItem(it){ if(!(await uiConfirm({title:'Punkt löschen', text:'"'+it.title+'"'+(kidsOf(it.id).length?' inkl. Unterpunkte':'')+' löschen?', confirmLabel:'Löschen', danger:true}))) return; const {error}=await sb.from('improvement_items').delete().eq('id',it.id); if(error){ showToast&&showToast('Fehlgeschlagen: '+((error&&error.message)||''),'error'); return; } load(proj); }
   async function addComment(itemId){ const b=(cmt[itemId]||'').trim(); if(!b) return; const {error}=await sb.from('improvement_comments').insert({item_id:itemId, project_id:proj, side:'team', author_uid:uid, author_name:uname, body:b}); if(error){ showToast&&showToast('Kommentar fehlgeschlagen: '+((error&&error.message)||''),'error'); return; } setCmt(c=>({...c,[itemId]:''})); load(proj); }
   async function runWatch(){ if(!proj||watchBusy) return; setWatchBusy(true); try{ const {data,error}=await sb.functions.invoke('plan-watch',{body:{project_id:proj}}); if(error) throw error; if(data&&data.error) throw new Error(data.error); setWatch(data); }catch(e){ showToast&&showToast('KI-Aufsicht fehlgeschlagen: '+((e&&e.message)||e),'error'); } finally{ setWatchBusy(false); } }
-  async function quick(it, patch){ const {error}=await sb.from('improvement_items').update({...patch, updated_at:new Date().toISOString()}).eq('id',it.id); if(error){ showToast&&showToast('Fehlgeschlagen: '+((error&&error.message)||''),'error'); return; } load(proj); }
-  const statusSel=it=><select value={it.status} onChange={e=>quick(it,{status:e.target.value})} title="Status ändern" style={{fontSize:11,padding:'3px 6px',border:'1px solid var(--border)',borderRadius:6,background:'var(--card)',color:'var(--text)',cursor:'pointer'}}>{IMP_STAT.map(s=><option key={s.k} value={s.k}>{s.l}</option>)}</select>;
-  const progInput=it=><span style={{display:'inline-flex',alignItems:'center',gap:2}}><input type="number" min="0" max="100" defaultValue={it.progress||0} key={it.id+'_'+(it.progress||0)} onBlur={e=>{ const v=Math.max(0,Math.min(100,parseInt(e.target.value)||0)); if(v!==(it.progress||0)) quick(it,{progress:v}); }} title="Fortschritt in %" style={{width:50,padding:'3px 5px',border:'1px solid var(--border)',borderRadius:6,background:'var(--card)',color:'var(--text)',fontSize:12,textAlign:'right'}}/><span style={{fontSize:11,color:'var(--muted)'}}>%</span></span>;
-  const bar=(pct,color)=><div style={{height:8,background:'#eef2f4',borderRadius:5,overflow:'hidden',flex:1,minWidth:80}}><div style={{width:pct+'%',height:'100%',background:color||'#0F5661'}}/></div>;
-  const editForm=(parentLabel)=><div style={{border:'1px dashed var(--accent,#0F5661)',borderRadius:10,padding:'12px 14px',margin:'8px 0',background:'var(--surface-2)'}}>
+  async function setStatus(it, st){ const {error}=await sb.from('improvement_items').update({status:st, progress:impStat(st).p, updated_at:new Date().toISOString()}).eq('id',it.id); if(error){ showToast&&showToast('Fehlgeschlagen: '+((error&&error.message)||''),'error'); return; } load(proj); }
+  const statusSel=it=><select value={it.status} onChange={e=>setStatus(it,e.target.value)} title="Zustand ändern — daraus ergibt sich der Fortschritt" style={{fontSize:11,padding:'2px 5px',border:'1px solid var(--border)',borderRadius:6,background:'var(--card)',color:'var(--text)',cursor:'pointer',maxWidth:132}}>{IMP_STAT.map(s=><option key={s.k} value={s.k}>{s.l}</option>)}</select>;
+  const ganttBar=(it,sub)=>{ const sp=span(it); const p=sub?impStat(it.status).p:prog(it); const od=impOverdue(it.due_date,it.status); const c=od?'#dc2626':impStat(it.status).c;
+    if(!sp) return <span style={{position:'absolute',left:8,top:'50%',transform:'translateY(-50%)',fontSize:10.5,color:'var(--muted)',fontStyle:'italic'}}>Termin setzen ↗</span>;
+    const l=Math.max(0,X(sp[0])), w=Math.max(1.2,X(sp[1])-X(sp[0]));
+    return <div style={{position:'absolute',top:'50%',transform:'translateY(-50%)',left:l+'%',width:w+'%',height:sub?11:16,borderRadius:4,background:'var(--surface-2)',boxShadow:'inset 0 0 0 1px var(--border)',overflow:'hidden'}} title={impFmtD(sp[0])+' – '+impFmtD(sp[1])+' · '+p+'%'}><div style={{width:p+'%',height:'100%',background:c,borderRadius:4}}/></div>; };
+  const gridBg=<React.Fragment>{months.map((m,i)=><div key={i} style={{position:'absolute',top:0,bottom:0,left:m.x+'%',width:1,background:'var(--border)',opacity:.5}}/>)}{todayX>=0&&todayX<=100&&<div style={{position:'absolute',top:0,bottom:0,left:todayX+'%',width:2,background:'#dc2626',opacity:.7}}/>}</React.Fragment>;
+  const LBL=360;
+  const editForm=(parentLabel)=><div style={{border:'1px dashed var(--accent,#0F5661)',borderRadius:10,padding:'12px 14px',margin:'2px 0 10px',background:'var(--surface-2)'}}>
     <div style={{fontSize:12,fontWeight:800,marginBottom:8}}>{String(edit).startsWith('new:')?(parentLabel?'Neuer Unterpunkt':'Neuer Punkt'):'Punkt bearbeiten'}</div>
     <input value={ef.title} onChange={e=>setEf(f=>({...f,title:e.target.value}))} placeholder="Titel *" style={{width:'100%',padding:'7px 9px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)',boxSizing:'border-box',marginBottom:8}}/>
     <textarea value={ef.measures} onChange={e=>setEf(f=>({...f,measures:e.target.value}))} rows={2} placeholder="Maßnahmen (was wir tun)" style={{width:'100%',padding:'7px 9px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)',boxSizing:'border-box',resize:'vertical',marginBottom:8}}/>
-    <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
-      <select value={ef.priority} onChange={e=>setEf(f=>({...f,priority:e.target.value}))} style={{padding:'6px 8px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)'}}>{IMP_PRIO.map(p=><option key={p.k} value={p.k}>{p.l}</option>)}</select>
-      <select value={ef.status} onChange={e=>setEf(f=>({...f,status:e.target.value}))} style={{padding:'6px 8px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)'}}>{IMP_STAT.map(s=><option key={s.k} value={s.k}>{s.l}</option>)}</select>
-      <label style={{fontSize:12,color:'var(--muted)'}}>Fortschritt <input type="number" min="0" max="100" value={ef.progress} onChange={e=>setEf(f=>({...f,progress:e.target.value}))} style={{width:64,padding:'6px 8px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)'}}/> %</label>
-      <label style={{fontSize:12,color:'var(--muted)'}}>Frist <input type="date" value={ef.due_date} onChange={e=>setEf(f=>({...f,due_date:e.target.value}))} style={{padding:'6px 8px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)'}}/></label>
+    <div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'center'}}>
+      <label style={{fontSize:12,color:'var(--muted)'}}>Priorität <select value={ef.priority} onChange={e=>setEf(f=>({...f,priority:e.target.value}))} style={{padding:'5px 7px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)'}}>{IMP_PRIO.map(p=><option key={p.k} value={p.k}>{p.l}</option>)}</select></label>
+      <label style={{fontSize:12,color:'var(--muted)'}}>Zustand <select value={ef.status} onChange={e=>setEf(f=>({...f,status:e.target.value}))} style={{padding:'5px 7px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)'}}>{IMP_STAT.map(s=><option key={s.k} value={s.k}>{s.l}</option>)}</select></label>
+      <label style={{fontSize:12,color:'var(--muted)'}}>Beginn <input type="date" value={ef.start_date} onChange={e=>setEf(f=>({...f,start_date:e.target.value}))} style={{padding:'5px 7px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)'}}/></label>
+      <label style={{fontSize:12,color:'var(--muted)'}}>Frist <input type="date" value={ef.due_date} onChange={e=>setEf(f=>({...f,due_date:e.target.value}))} style={{padding:'5px 7px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)'}}/></label>
     </div>
+    <div style={{fontSize:11,color:'var(--muted)',marginTop:6}}>Fortschritt ergibt sich aus dem Zustand ({impStat(ef.status).p}%), nicht getippt. Große Punkte in Unterpunkte zerlegen, dann rollt der Fortschritt hoch.</div>
     <div style={{display:'flex',gap:8,marginTop:10}}><button className="btn btn-primary btn-sm" disabled={busy} onClick={saveItem}>Speichern</button><button className="btn btn-sm" onClick={()=>setEdit(null)}>Abbrechen</button></div>
   </div>;
-  const commentBlock=it=>{ const cs=comments[it.id]||[]; const open=expand[it.id]; return <div style={{marginTop:8}}>
-    <button onClick={()=>setExpand(x=>({...x,[it.id]:!open}))} style={{border:'none',background:'none',cursor:'pointer',color:'var(--muted)',fontSize:12,padding:0}}>{open?'▾':'▸'} Kommentare ({cs.length})</button>
-    {open&&<div style={{marginTop:6,paddingLeft:8,borderLeft:'2px solid var(--border)'}}>
-      {cs.map(c=><div key={c.id} style={{fontSize:12.5,marginBottom:5}}><b style={{color:c.side==='client'?'#7c3aed':'var(--accent,#0F5661)'}}>{c.side==='client'?'Kunde':(c.author_name||'Team')}:</b> {c.body} <span style={{color:'var(--muted)',fontSize:10.5}}>· {impFmtD(c.created_at)}</span></div>)}
-      <div style={{display:'flex',gap:6,marginTop:4}}><input value={cmt[it.id]||''} onChange={e=>setCmt(c=>({...c,[it.id]:e.target.value}))} placeholder="Kommentar…" style={{flex:1,padding:'6px 8px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)',fontSize:12.5}}/><button className="btn btn-sm" onClick={()=>addComment(it.id)}>Senden</button></div>
-    </div>}
+  const commentBlock=it=>{ const cs=comments[it.id]||[]; return <div style={{marginTop:6}}>
+    {cs.map(c=><div key={c.id} style={{fontSize:12.5,marginBottom:4}}><b style={{color:c.side==='client'?'#7c3aed':'var(--accent,#0F5661)'}}>{c.side==='client'?'Kunde':(c.author_name||'Team')}:</b> {c.body} <span style={{color:'var(--muted)',fontSize:10.5}}>· {impFmtD(c.created_at)}</span></div>)}
+    <div style={{display:'flex',gap:6,marginTop:4}}><input value={cmt[it.id]||''} onChange={e=>setCmt(c=>({...c,[it.id]:e.target.value}))} placeholder="Kommentar…" style={{flex:1,padding:'6px 8px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)',fontSize:12.5}}/><button className="btn btn-sm" onClick={()=>addComment(it.id)}>Senden</button></div>
   </div>; };
-  const subRow=k=>{ const pr=impPrio(k.priority); const od=impOverdue(k.due_date,k.status); return <div key={k.id} style={{padding:'8px 0',borderTop:'1px solid var(--border)'}}>
-    {edit===k.id? editForm(true) : <React.Fragment>
-      <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
-        <span style={{width:8,height:8,borderRadius:'50%',background:pr.c,flexShrink:0}} title={pr.l}/>
-        <span style={{fontSize:13.5,fontWeight:600,flex:'1 1 200px'}}>{k.title}</span>
-        {bar(k.progress||0,pr.c)}{progInput(k)}
-        {statusSel(k)}
-        {k.due_date&&<span style={{fontSize:11,color:od?'#dc2626':'var(--muted)',fontWeight:od?800:500}}>bis {impFmtD(k.due_date)}</span>}
-        <button className="btn btn-sm" onClick={()=>openEdit(k)}>✎</button><button className="btn btn-sm" onClick={()=>delItem(k)}>✕</button>
-      </div>
-      {k.measures&&<div style={{fontSize:12,color:'var(--muted)',margin:'3px 0 0 16px'}}>Maßnahme: {k.measures}</div>}
-      {commentBlock(k)}
-    </React.Fragment>}
-  </div>; };
-  return <div style={{maxWidth:900,margin:'0 auto',padding:'8px 4px'}}>
+  const row=(it,sub)=>{ const pr=impPrio(it.priority); const st=impStat(it.status); const od=impOverdue(it.due_date,it.status); const p=sub?st.p:prog(it); const isOpen=open[it.id]; const cs=comments[it.id]||[];
+    return <React.Fragment key={it.id}>
+      {edit===it.id ? <div style={{padding:'0 8px'}}>{editForm(!!sub)}</div> : <div style={{display:'flex',alignItems:'stretch',borderTop:'1px solid var(--border)',minHeight:sub?30:36}}>
+        <div style={{width:LBL,minWidth:LBL,display:'flex',alignItems:'center',gap:6,padding:'4px 8px',paddingLeft:sub?26:8}}>
+          <button onClick={()=>setOpen(o=>({...o,[it.id]:!isOpen}))} style={{border:'none',background:'none',cursor:'pointer',color:'var(--muted)',fontSize:11,width:12,padding:0}} title="Details">{isOpen?'▾':'▸'}</button>
+          <span style={{width:sub?7:9,height:sub?7:9,borderRadius:'50%',background:pr.c,flexShrink:0}} title={'Priorität: '+pr.l}/>
+          <span style={{flex:1,minWidth:0,fontSize:sub?12.5:13.5,fontWeight:sub?600:700,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={it.title}>{it.title}</span>
+          {!sub&&<span style={{fontSize:9.5,fontWeight:700,padding:'1px 5px',borderRadius:8,background:it.origin==='client'?'#f3e8ff':'#ecfeff',color:it.origin==='client'?'#7c3aed':'#0e7490'}}>{it.origin==='client'?'Condor':'wir'}</span>}
+          <span style={{fontSize:11,fontWeight:800,color:od?'#dc2626':st.c,width:32,textAlign:'right'}}>{p}%</span>
+          {statusSel(it)}
+        </div>
+        <div style={{flex:1,position:'relative',minWidth:420,borderLeft:'1px solid var(--border)'}}>{gridBg}{ganttBar(it,sub)}</div>
+      </div>}
+      {isOpen&&edit!==it.id&&<div style={{padding:'6px 8px 10px '+(sub?34:20)+'px',background:'var(--surface-2)',borderTop:'1px solid var(--border)'}}>
+        {it.start_date&&<span style={{fontSize:11.5,color:'var(--muted)',marginRight:12}}>Beginn {impFmtD(it.start_date)}</span>}
+        {it.due_date&&<span style={{fontSize:11.5,color:od?'#dc2626':'var(--muted)',fontWeight:od?800:600,marginRight:12}}>Frist {impFmtD(it.due_date)}{od?' · überfällig':''}</span>}
+        <button className="btn btn-sm" onClick={()=>openEdit(it)}>✎ Bearbeiten</button> <button className="btn btn-sm" onClick={()=>delItem(it)}>✕ Löschen</button>{!sub&&<React.Fragment> <button className="btn btn-sm" onClick={()=>openNew(it.id)}>+ Unterpunkt</button></React.Fragment>}
+        {it.measures&&<div style={{fontSize:12.5,color:'var(--text)',marginTop:6}}><b style={{color:'var(--muted)'}}>Maßnahme:</b> {it.measures}</div>}
+        <div style={{fontSize:11,fontWeight:800,color:'var(--muted)',marginTop:8}}>Kommentare ({cs.length})</div>
+        {commentBlock(it)}
+      </div>}
+      {String(edit)==='new:'+it.id&&<div style={{padding:'0 8px 0 26px'}}>{editForm(true)}</div>}
+      {kidsOf(it.id).map(k=>row(k,true))}
+    </React.Fragment>;
+  };
+  return <div style={{maxWidth:1000,margin:'0 auto',padding:'8px 4px'}}>
     <div style={{display:'flex',alignItems:'center',gap:12,flexWrap:'wrap',marginBottom:6}}>
       <div style={{fontSize:20,fontWeight:700}}>📋 Arbeitsplan</div>
       <select value={proj} onChange={e=>setProj(e.target.value)} style={{padding:'7px 10px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)',fontWeight:600}}>{projList.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select>
-      <div style={{display:'inline-flex',border:'1px solid var(--border)',borderRadius:8,overflow:'hidden'}}>
-        {[['baum','Baum'],['zeitleiste','Zeitleiste']].map(([k,l])=>{ const on=mode===k; return <button key={k} onClick={()=>setMode(k)} style={{padding:'6px 12px',border:'none',cursor:'pointer',fontSize:12.5,fontWeight:on?800:500,background:on?'var(--accent,#0F5661)':'var(--card)',color:on?'#fff':'var(--text)'}}>{l}</button>; })}
-      </div>
       <div style={{flex:1}}/>
       <button className="btn btn-sm" disabled={watchBusy} onClick={runWatch}>{watchBusy?'Prüft…':'🔍 KI-Aufsicht'}</button>
       <button className="btn btn-primary btn-sm" onClick={()=>openNew(null)}>+ Punkt</button>
     </div>
-    <div style={{fontSize:13,color:'var(--muted)',marginBottom:14}}>Gemeinsamer Plan mit dem Kunden. Der Kunde nennt Punkte, wir hinterlegen Maßnahmen; beide kommentieren. Fortschritt der Hauptpunkte rollt aus den Unterpunkten hoch. <b>Status</b> (z. B. auf „erledigt") und <b>Fortschritt</b> änderst du direkt in der Zeile; das <b>✎</b> öffnet Titel, Maßnahmen und Frist.</div>
+    <div style={{fontSize:13,color:'var(--muted)',marginBottom:14}}>Der Kunde nennt Punkte, wir hinterlegen Maßnahmen und einen <b>Zustand</b> je Punkt — daraus wächst der Fortschritt (keine getippten Zahlen). Große Punkte in Unterpunkte zerlegen, dann rollt der Fortschritt hoch. ▸ öffnet Details, Termine und Kommentare; der Zustand steht direkt in der Zeile.</div>
     {watch&&watch.report&&<div style={{border:'1px solid #7c3aed',borderRadius:12,padding:'14px 16px',marginBottom:12,background:'color-mix(in srgb, #7c3aed 6%, var(--card))'}}>
       <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:6,flexWrap:'wrap'}}><span style={{fontSize:14,fontWeight:800}}>🔍 KI-Aufsicht</span>
         {watch.signals&&<span style={{fontSize:11.5,color:'var(--muted)'}}>{watch.signals.overdue} überfällig · {watch.signals.stalled} ohne Fortschritt · {watch.signals.noMeasure} ohne Maßnahme</span>}
@@ -34686,52 +34707,32 @@ function ImprovementPlanView({team, projects, showToast}){
     </div>}
     {items===null? <div style={{color:'var(--muted)'}}>Lädt…</div>
      : <React.Fragment>
-        <div style={{...cardS,display:'flex',alignItems:'center',gap:12}}><span style={{fontSize:13,fontWeight:800}}>Gesamt</span>{bar(overall,'#0F5661')}<span style={{fontSize:16,fontWeight:800}}>{overall}%</span><span style={{fontSize:12,color:'var(--muted)'}}>· {tops.length} Punkte</span></div>
-        {mode==='zeitleiste' && (()=>{ const dated=(items||[]).filter(i=>i.due_date).slice().sort((a,b)=>String(a.due_date).localeCompare(String(b.due_date))); const undated=(items||[]).filter(i=>!i.due_date);
-          const titleOf=i=>{ const p=(items||[]).find(x=>x.id===i.parent_id); return (p?p.title+' › ':'')+i.title; };
-          return <div style={cardS}>
-            <div style={{fontSize:13,fontWeight:800,marginBottom:8}}>Zeitleiste nach Frist</div>
-            {dated.length===0? <div style={{fontSize:13,color:'var(--muted)'}}>Noch keine Fristen gesetzt. Setze bei den Punkten eine Frist, dann erscheinen sie hier chronologisch.</div>
-             : dated.map(i=>{ const pr=impPrio(i.priority); const od=impOverdue(i.due_date,i.status); const prog=i.parent_id?(i.progress||0):rollup(i);
-               return <div key={i.id} style={{display:'flex',alignItems:'center',gap:10,padding:'7px 0',borderTop:'1px solid var(--border)'}}>
-                 <span style={{fontSize:12.5,fontWeight:800,width:90,color:od?'#dc2626':'var(--text)'}}>{impFmtD(i.due_date)}</span>
-                 <span style={{width:9,height:9,borderRadius:'50%',background:pr.c,flexShrink:0}} title={pr.l}/>
-                 <span style={{flex:'1 1 160px',minWidth:0,fontSize:13.5,fontWeight:600}}>{titleOf(i)}{od&&<span style={{color:'#dc2626',fontWeight:800,marginLeft:6,fontSize:11}}>überfällig</span>}</span>
-                 {bar(prog,pr.c)}<span style={{fontSize:12,fontWeight:700,width:38,textAlign:'right'}}>{prog}%</span>
-                 <span style={{fontSize:11,color:'var(--muted)'}}>{impStatL(i.status)}</span>
-               </div>; })}
-            {undated.length>0 && <div style={{fontSize:11.5,color:'var(--muted)',marginTop:10}}>{undated.length} Punkt(e) ohne Frist.</div>}
-          </div>; })()}
-        {String(edit).startsWith('new:')&&String(edit)==='new:'&&editForm(false)}
-        {mode==='baum' && tops.map(it=>{ const pr=impPrio(it.priority); const rp=rollup(it); const ks=kidsOf(it.id); const od=impOverdue(it.due_date,it.status);
-          return <div key={it.id} style={cardS}>
-            {edit===it.id? editForm(false) : <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
-              <span style={{width:11,height:11,borderRadius:'50%',background:pr.c,flexShrink:0}} title={pr.l}/>
-              <span style={{fontSize:15,fontWeight:800,flex:'1 1 240px'}}>{it.title}</span>
-              <span style={{fontSize:10.5,fontWeight:700,padding:'1px 7px',borderRadius:10,background:it.origin==='client'?'#f3e8ff':'#ecfeff',color:it.origin==='client'?'#7c3aed':'#0e7490'}}>{it.origin==='client'?'von Condor':'von uns'}</span>
-              {bar(rp,pr.c)}{ks.length? <span style={{fontSize:14,fontWeight:800,width:44,textAlign:'right'}} title="Fortschritt aus den Unterpunkten">{rp}%</span> : progInput(it)}
-              {statusSel(it)}
-              {it.due_date&&<span style={{fontSize:11.5,color:od?'#dc2626':'var(--muted)',fontWeight:od?800:600}}>bis {impFmtD(it.due_date)}</span>}
-              <button className="btn btn-sm" onClick={()=>openEdit(it)}>✎</button><button className="btn btn-sm" onClick={()=>delItem(it)}>✕</button>
-            </div>}
-            {it.measures&&edit!==it.id&&<div style={{fontSize:12.5,color:'var(--muted)',margin:'6px 0 0 19px'}}>Maßnahme: {it.measures}</div>}
-            {ks.length>0&&<div style={{marginLeft:19,marginTop:8}}>{ks.map(subRow)}</div>}
-            <div style={{marginLeft:19,marginTop:8,display:'flex',gap:10,alignItems:'center'}}>
-              <button className="btn btn-sm" onClick={()=>openNew(it.id)}>+ Unterpunkt</button>
-              {ks.length===0&&commentBlock(it)}
-            </div>
-            {String(edit)==='new:'+it.id&&<div style={{marginLeft:19}}>{editForm(true)}</div>}
-            {ks.length>0&&<div style={{marginLeft:19,marginTop:6}}>{commentBlock(it)}</div>}
-          </div>; })}
-        {tops.length===0&&<div style={cardS}>Noch keine Punkte. Über „+ Punkt" anlegen.</div>}
+        <div style={{...cardS,display:'flex',gap:18,flexWrap:'wrap',alignItems:'center'}}>
+          {(()=>{ const R=34,C=2*Math.PI*R,off=C*(1-overall/100); return <svg width="86" height="86" viewBox="0 0 86 86" style={{flexShrink:0}}><circle cx="43" cy="43" r={R} fill="none" stroke="var(--surface-2)" strokeWidth="9"/><circle cx="43" cy="43" r={R} fill="none" stroke="#0F5661" strokeWidth="9" strokeLinecap="round" strokeDasharray={C} strokeDashoffset={off} transform="rotate(-90 43 43)"/><text x="43" y="47" textAnchor="middle" fontSize="20" fontWeight="800" fill="var(--text)">{overall}%</text></svg>; })()}
+          <div style={{display:'flex',gap:12,flexWrap:'wrap',flex:1}}>
+            {[['läuft',cLauf,'#0ea5b7'],['steht',cSteht,'#d97706'],['überfällig',cOver,'#dc2626'],['erledigt',cFertig,'#16a34a']].map(([l,n,c])=><div key={l} style={{flex:1,minWidth:90,background:'var(--surface-2)',borderRadius:12,padding:'10px 12px'}}><div style={{fontSize:24,fontWeight:800,color:c,lineHeight:1}}>{n}</div><div style={{fontSize:12,color:'var(--muted)',marginTop:2}}>{l}</div></div>)}
+          </div>
+        </div>
+        {String(edit)==='new:'&&<div style={cardS}>{editForm(false)}</div>}
+        {tops.length===0? <div style={cardS}>Noch keine Punkte. Über „+ Punkt" den ersten anlegen.</div>
+         : <div style={{...cardS,padding:0,overflow:'hidden'}}>
+            <div style={{overflowX:'auto'}}><div style={{minWidth:800}}>
+              <div style={{display:'flex',alignItems:'stretch',background:'var(--surface-2)',borderBottom:'1px solid var(--border)'}}>
+                <div style={{width:LBL,minWidth:LBL,padding:'6px 8px',fontSize:11,fontWeight:700,color:'var(--muted)'}}>Punkt · Fortschritt · Zustand</div>
+                <div style={{flex:1,position:'relative',minWidth:420,height:24,borderLeft:'1px solid var(--border)'}}>{months.map((m,i)=><span key={i} style={{position:'absolute',left:'calc('+m.x+'% + 4px)',top:5,fontSize:10.5,fontWeight:700,color:'var(--muted)'}}>{m.l}</span>)}{todayX>=0&&todayX<=100&&<div style={{position:'absolute',top:0,bottom:0,left:todayX+'%',width:2,background:'#dc2626',opacity:.7}}/>}</div>
+              </div>
+              {tops.map(it=>row(it,false))}
+            </div></div>
+          </div>}
       </React.Fragment>}
   </div>;
 }
 
-// S6: Kundennachrichten — Kanal Kunde ↔ Teamleitung (client_team_messages). RLS scopt: Teamleitung sieht nur
-// ihr Projekt, Management/HR alle. Antworten schreiben from_side='team'.
-function ClientMessagesView({team, projects, showToast}){
-  const [msgs,setMsgs]=React.useState(null); const [proj,setProj]=React.useState(''); const [text,setText]=React.useState(''); const [busy,setBusy]=React.useState(false);
+// S6/S6b: Kundennachrichten — Kanal Kunde ↔ Team. Team-Kanal (recipient null, Kunde ↔ Teamleitung) plus
+// Direktfäden Kunde ↔ einzelner MA. RLS scopt: Teamleitung sieht nur ihr Projekt, Management/HR alle.
+// Im Direktfaden antwortet der MA selbst; die Teamleitung liest mit und kann bei Bedarf mitschreiben.
+function ClientMessagesView({team, projects, employees, showToast}){
+  const [msgs,setMsgs]=React.useState(null); const [proj,setProj]=React.useState(''); const [thread,setThread]=React.useState('team'); const [text,setText]=React.useState(''); const [busy,setBusy]=React.useState(false);
   const cardS={border:'1px solid var(--border)',borderRadius:12,padding:'16px 18px',background:'var(--card)'};
   const fmtDt2=d=>{ try{ return new Date(d).toLocaleDateString('de-DE'); }catch(e){ return ''; } };
   const load=async()=>{ try{ const {data}=await sb.from('client_team_messages').select('*').order('sent_at',{ascending:true}); setMsgs(data||[]); }catch(e){ setMsgs([]); } };
@@ -34739,26 +34740,41 @@ function ClientMessagesView({team, projects, showToast}){
   const projIds=[...new Set((msgs||[]).map(m=>m.project_id))];
   React.useEffect(()=>{ if(!proj && projIds.length) setProj(projIds[0]); },[msgs]);
   const projName=id=>{ const p=(projects||[]).find(x=>x.id===id); return p?p.name:id; };
-  const thread=(msgs||[]).filter(m=>m.project_id===proj);
+  const empName=id=>{ const e=(employees||[]).find(x=>x.id===id); return e?((e.first_name||'')+' '+(e.last_name||'')).trim():'Mitarbeiter'; };
+  const projMsgs=(msgs||[]).filter(m=>m.project_id===proj);
+  // Fäden dieses Projekts: Team-Kanal + je angeschriebenem MA (mit mindestens einer Nachricht).
+  const empIds=[...new Set(projMsgs.filter(m=>m.recipient_employee_id).map(m=>m.recipient_employee_id))];
+  const recipId=thread==='team'?null:thread;
+  const visible=projMsgs.filter(m=> recipId? m.recipient_employee_id===recipId : !m.recipient_employee_id );
+  const cntFor=id=>projMsgs.filter(m=> id? m.recipient_employee_id===id : !m.recipient_employee_id ).length;
+  React.useEffect(()=>{ setThread('team'); },[proj]);
   async function send(){ const t=text.trim(); if(!t||!proj||busy) return; setBusy(true);
-    const {error}=await sb.from('client_team_messages').insert({project_id:proj, from_side:'team', author_uid:(team&&team.user_id)||null, author_name:(team&&team.full_name)||'Teamleitung', body:t});
+    const {error}=await sb.from('client_team_messages').insert({project_id:proj, from_side:'team', author_uid:(team&&team.user_id)||null, author_name:(team&&team.full_name)||'Teamleitung', body:t, recipient_employee_id:recipId});
     setBusy(false); if(error){ showToast&&showToast('Nicht gesendet: '+((error&&error.message)||''),'error'); return; } setText(''); load();
   }
+  const authorOf=m=> m.from_side==='team'?(m.author_name||'Team') : m.from_side==='employee'?(m.author_name||empName(m.recipient_employee_id)) : (m.author_name||'Kunde');
+  const chip=(key,label,cnt,active)=><button key={key} onClick={()=>setThread(key)} style={{padding:'5px 11px',borderRadius:16,border:'1px solid '+(active?'var(--accent,#0F5661)':'var(--border)'),background:active?'var(--accent,#0F5661)':'var(--card)',color:active?'#fff':'var(--text)',fontSize:12,fontWeight:active?700:500,cursor:'pointer',whiteSpace:'nowrap'}}>{label}{cnt>0&&<span style={{marginLeft:5,fontSize:11,opacity:.85}}>{cnt}</span>}</button>;
+  const inDirect=thread!=='team';
   return <div style={{maxWidth:820,margin:'0 auto',padding:'8px 4px'}}>
     <div style={{fontSize:20,fontWeight:700,marginBottom:4}}>📨 Kundennachrichten</div>
-    <div style={{fontSize:13,color:'var(--muted)',marginBottom:14}}>Direkter Kanal mit dem Auftraggeber: Kunde ↔ Teamleitung. Nur die Teamleitung des Projekts sowie Management/HR sehen ihn, nicht das Team.</div>
+    <div style={{fontSize:13,color:'var(--muted)',marginBottom:14}}>Kanal mit dem Auftraggeber. Der Kunde schreibt der Teamleitung oder einzelnen Mitarbeitern. Direktfäden mit Mitarbeitern beantwortet der MA selbst; die Teamleitung liest hier mit und kann mitschreiben.</div>
     {msgs===null ? <div style={{color:'var(--muted)'}}>Lädt…</div>
      : projIds.length===0 ? <div style={cardS}>Noch keine Kundennachrichten.</div>
      : <div style={cardS}>
         {projIds.length>1 && <select value={proj} onChange={e=>setProj(e.target.value)} style={{marginBottom:12,padding:'8px 10px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)',fontSize:13.5}}>{projIds.map(id=><option key={id} value={id}>{projName(id)}</option>)}</select>}
-        <div style={{maxHeight:440,overflowY:'auto',display:'flex',flexDirection:'column',gap:8,marginBottom:14}}>
-          {thread.length? thread.map(m=><div key={m.id} style={{alignSelf:m.from_side==='team'?'flex-end':'flex-start',maxWidth:'80%',padding:'8px 12px',borderRadius:12,background:m.from_side==='team'?'var(--accent,#0F5661)':'var(--surface-2)',color:m.from_side==='team'?'#fff':'var(--text)'}}>
-            <div style={{fontSize:13,lineHeight:1.5,whiteSpace:'pre-wrap'}}>{m.body}</div>
-            <div style={{fontSize:10.5,opacity:.75,marginTop:3}}>{m.from_side==='team'?(m.author_name||'Team'):(m.author_name||'Kunde')} · {fmtDt2(m.sent_at)}</div>
-          </div>) : <div style={{color:'var(--muted)',fontSize:13}}>Keine Nachrichten in diesem Projekt.</div>}
+        <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:14,paddingBottom:12,borderBottom:'1px solid var(--border)'}}>
+          {chip('team','Teamleitung',cntFor(null),thread==='team')}
+          {empIds.map(id=>chip(id,empName(id),cntFor(id),thread===id))}
         </div>
+        <div style={{maxHeight:420,overflowY:'auto',display:'flex',flexDirection:'column',gap:8,marginBottom:14}}>
+          {visible.length? visible.map(m=>{ const mine=m.from_side==='team'; return <div key={m.id} style={{alignSelf:mine?'flex-end':'flex-start',maxWidth:'80%',padding:'8px 12px',borderRadius:12,background:mine?'var(--accent,#0F5661)':m.from_side==='employee'?'var(--surface-2)':'color-mix(in srgb, #7c3aed 10%, var(--card))',color:mine?'#fff':'var(--text)'}}>
+            <div style={{fontSize:13,lineHeight:1.5,whiteSpace:'pre-wrap'}}>{m.body}</div>
+            <div style={{fontSize:10.5,opacity:.75,marginTop:3}}>{authorOf(m)} · {fmtDt2(m.sent_at)}</div>
+          </div>; }) : <div style={{color:'var(--muted)',fontSize:13}}>Noch keine Nachrichten in diesem Faden.</div>}
+        </div>
+        {inDirect && <div style={{fontSize:11.5,color:'var(--muted)',marginBottom:8}}>Direktfaden mit {empName(recipId)}. In der Regel antwortet der Mitarbeiter selbst, du kannst aber mitschreiben.</div>}
         <div style={{display:'flex',gap:10}}>
-          <textarea value={text} onChange={e=>setText(e.target.value)} placeholder="Antwort an den Kunden…" style={{flex:1,resize:'none',height:72,padding:'8px 10px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)',fontSize:13.5}}/>
+          <textarea value={text} onChange={e=>setText(e.target.value)} placeholder={inDirect?('Mitschreiben an '+empName(recipId)+' / den Kunden…'):'Antwort an den Kunden…'} style={{flex:1,resize:'none',height:72,padding:'8px 10px',border:'1px solid var(--border)',borderRadius:8,background:'var(--card)',color:'var(--text)',fontSize:13.5}}/>
           <button className="btn btn-primary" style={{alignSelf:'flex-end'}} disabled={busy||!proj} onClick={send}>Senden</button>
         </div>
       </div>}
@@ -46678,7 +46694,7 @@ function App(){
           {view==='daily_tasks'&&<DailyTasksView employees={employees} projects={projects} plans={plans} team={team} onNavigate={dqNavigate} isMobileW={isMobileW} catalog={taskCatalog}/>}
           {view==='calendar'&&<CalendarView team={team} projects={projects} employees={employees} showToast={showToast} isMobileW={isMobileW} jumpTo={calNav} onJumpConsumed={()=>setCalNav(null)} onNavigate={dqNavigate}/>}
           {view==='meetingnotes'&&<MeetingNotesView team={team} projects={projects} employees={employees} showToast={showToast} isMobileW={isMobileW}/>}
-          {view==='clientmsgs'&&<ClientMessagesView team={team} projects={projects} showToast={showToast}/>}
+          {view==='clientmsgs'&&<ClientMessagesView team={team} projects={projects} employees={employees} showToast={showToast}/>}
           {view==='arbeitsplan'&&<ImprovementPlanView team={team} projects={projects} showToast={showToast}/>}
           {view==='agents'&&<AgentsView team={team} onNavigate={dqNavigate}/>}
           {view==='cockpit'&&<Cockpit employees={employees} projects={projects} team={team} plans={plans} forecast={forecast} onAbsence={e=>setAbsenceModal(e)} onNavigate={dqNavigate} isMobileW={isMobileW} setEmployees={setEmployees} showToast={showToast}/>}

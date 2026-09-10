@@ -1276,18 +1276,33 @@ function InvoicesView({client}){
 // Arbeitsplan (Kundenansicht): gemeinsamer Verbesserungsplan. Kunde nennt Punkte (origin=client) + kommentiert;
 // Maßnahmen/Fortschritt pflegt TIVE (RLS erlaubt dem Kunden nur Anlegen + Kommentieren).
 const C_IMP_PRIO=[{k:'sehr_wichtig',l:'sehr wichtig',c:'#dc2626'},{k:'wichtig',l:'wichtig',c:'#ea580c'},{k:'notwendig',l:'notwendig',c:'#ca8a04'},{k:'schoen',l:'wäre schön',c:'#64748b'}];
-const C_IMP_STAT={offen:'offen',laeuft:'läuft',erledigt:'erledigt',zurueckgestellt:'zurückgestellt'};
+const C_IMP_STAT=[{k:'offen',l:'offen',c:'#94a3b8',p:0},{k:'in_arbeit',l:'in Arbeit',c:'#0ea5b7',p:50},{k:'pausiert',l:'pausiert',c:'#a1a1aa',p:50},{k:'wartet',l:'wartet auf Zulieferung',c:'#d97706',p:50},{k:'erledigt',l:'erledigt',c:'#16a34a',p:100}];
 function cImpPrio(k){ return C_IMP_PRIO.find(p=>p.k===k)||C_IMP_PRIO[1]; }
+function cImpStat(k){ return C_IMP_STAT.find(s=>s.k===k)||C_IMP_STAT[0]; }
+function cImpAddDays(dstr,n){ const d=new Date(String(dstr).slice(0,10)); d.setDate(d.getDate()+n); return d.toISOString().slice(0,10); }
 function ClientPlanView({client}){
-  const [items,setItems]=useState(null); const [comments,setComments]=useState({}); const [expand,setExpand]=useState({}); const [cmt,setCmt]=useState({}); const [newT,setNewT]=useState(''); const [busy,setBusy]=useState(false); const [subFor,setSubFor]=useState(null); const [subT,setSubT]=useState('');
+  const [items,setItems]=useState(null); const [comments,setComments]=useState({}); const [open,setOpen]=useState({}); const [cmt,setCmt]=useState({}); const [newT,setNewT]=useState(''); const [busy,setBusy]=useState(false); const [subFor,setSubFor]=useState(null); const [subT,setSubT]=useState('');
   const load=async()=>{ try{ const {data}=await sb.from('improvement_items').select('*').eq('project_id',client.project_id).order('sort_order',{ascending:true}); const its=data||[]; setItems(its); const ids=its.map(i=>i.id); if(ids.length){ const {data:cs}=await sb.from('improvement_comments').select('*').in('item_id',ids).order('created_at',{ascending:true}); const m={}; (cs||[]).forEach(c=>{(m[c.item_id]=m[c.item_id]||[]).push(c);}); setComments(m);} else setComments({}); }catch(e){ setItems([]); } };
   useEffect(()=>{ load(); },[]);
   const tops=(items||[]).filter(i=>!i.parent_id).sort((a,b)=>(a.sort_order||0)-(b.sort_order||0));
   const kidsOf=id=>(items||[]).filter(i=>i.parent_id===id).sort((a,b)=>(a.sort_order||0)-(b.sort_order||0));
-  const rollup=it=>{ const ks=kidsOf(it.id); return ks.length?Math.round(ks.reduce((s,k)=>s+(k.progress||0),0)/ks.length):(it.progress||0); };
-  const overall=tops.length?Math.round(tops.reduce((s,t)=>s+rollup(t),0)/tops.length):0;
+  const prog=it=>{ const ks=kidsOf(it.id); return ks.length?Math.round(ks.reduce((s,k)=>s+cImpStat(k.status).p,0)/ks.length):cImpStat(it.status).p; };
+  const overall=tops.length?Math.round(tops.reduce((s,t)=>s+prog(t),0)/tops.length):0;
   const fmtD=d=>{ if(!d)return''; const p=String(d).slice(0,10).split('-'); return p.length===3?p[2]+'.'+p[1]+'.'+p[0]:String(d); };
   const overdue=(d,s)=>{ if(!d||s==='erledigt')return false; try{return new Date(String(d).slice(0,10))<new Date(new Date().toISOString().slice(0,10));}catch(e){return false;} };
+  const cLauf=tops.filter(t=>{const p=prog(t);return p>0&&p<100&&!overdue(t.due_date,t.status)&&t.status!=='pausiert'&&t.status!=='wartet';}).length;
+  const cSteht=tops.filter(t=>t.status==='pausiert'||t.status==='wartet').length;
+  const cOver=tops.filter(t=>overdue(t.due_date,t.status)).length;
+  const cFertig=tops.filter(t=>prog(t)===100).length;
+  const span=i=>{ let a=i.start_date?String(i.start_date).slice(0,10):null, b=i.due_date?String(i.due_date).slice(0,10):null; if(!a&&!b) return null; if(!a) a=cImpAddDays(b,-14); if(!b) b=cImpAddDays(a,14); return [a,b]; };
+  const nowStr=new Date().toISOString().slice(0,10);
+  const alld=(items||[]).flatMap(i=>{const s=span(i);return s?[+new Date(s[0]),+new Date(s[1])]:[];}); alld.push(+new Date(nowStr));
+  let t0=Math.min.apply(null,alld), t1=Math.max.apply(null,alld); if(!isFinite(t0)){t0=+new Date(nowStr);t1=t0+90*864e5;} if(t1<=t0)t1=t0+30*864e5;
+  const padD=Math.max(3*864e5,(t1-t0)*0.05); t0-=padD; t1+=padD;
+  const X=d=>((+new Date(String(d).slice(0,10)))-t0)/(t1-t0)*100;
+  const months=(()=>{ const out=[]; const d=new Date(t0); d.setDate(1); d.setHours(0,0,0,0); let g=0; while(+d<=t1&&g<24){ out.push({x:((+d)-t0)/(t1-t0)*100,l:d.toLocaleDateString('de-DE',{month:'short'})}); d.setMonth(d.getMonth()+1); g++; } return out; })();
+  const todayX=X(nowStr);
+  const anyDated=(items||[]).some(i=>span(i));
   async function addItem(parentId, title){ const t=(title||'').trim(); if(!t||busy)return false; setBusy(true);
     const sibs=parentId?kidsOf(parentId):tops; const ord=Math.max(0,...sibs.map(s=>s.sort_order||0))+1;
     const {error}=await sb.from('improvement_items').insert({project_id:client.project_id, parent_id:parentId||null, title:t, origin:'client', priority:'wichtig', status:'offen', progress:0, sort_order:ord, created_by_name:client.name||'Kunde'}); setBusy(false);
@@ -1295,79 +1310,115 @@ function ClientPlanView({client}){
   async function addPoint(){ if(await addItem(null,newT)) setNewT(''); }
   async function addSub(parentId){ if(await addItem(parentId,subT)){ setSubT(''); setSubFor(null); } }
   async function addComment(itemId){ const b=(cmt[itemId]||'').trim(); if(!b)return; const {error}=await sb.from('improvement_comments').insert({item_id:itemId, project_id:client.project_id, side:'client', author_name:client.name||'Kunde', body:b}); if(error){ window.alert('Kommentar fehlgeschlagen: '+(error.message||'')); return; } setCmt(c=>({...c,[itemId]:''})); load(); }
-  const bar=(pct,color)=><div style={{height:8,background:'#eef2f4',borderRadius:5,overflow:'hidden',flex:1,minWidth:80}}><div style={{width:pct+'%',height:'100%',background:color||'#0f172a'}}/></div>;
-  const commentBlock=it=>{ const cs=comments[it.id]||[]; const open=expand[it.id]; return <div style={{marginTop:8}}>
-    <button onClick={()=>setExpand(x=>({...x,[it.id]:!open}))} style={{border:'none',background:'none',cursor:'pointer',color:'#64748b',fontSize:12,padding:0}}>{open?'▾':'▸'} Kommentare ({cs.length})</button>
-    {open&&<div style={{marginTop:6,paddingLeft:8,borderLeft:'2px solid #e5e7eb'}}>
-      {cs.map(c=><div key={c.id} style={{fontSize:12.5,marginBottom:5}}><b style={{color:c.side==='client'?'#7c3aed':'#0f172a'}}>{c.side==='client'?'Sie':(c.author_name||'TIVE 360°')}:</b> {c.body} <span style={{color:'#94a3b8',fontSize:10.5}}>· {fmtD(c.created_at)}</span></div>)}
-      <div style={{display:'flex',gap:6,marginTop:4}}><input value={cmt[it.id]||''} onChange={e=>setCmt(c=>({...c,[it.id]:e.target.value}))} placeholder="Kommentar…" style={{flex:1,padding:'6px 8px',border:'1px solid #cbd5e1',borderRadius:8,fontSize:12.5}}/><button className="btn btn-primary" style={{padding:'6px 12px'}} onClick={()=>addComment(it.id)}>Senden</button></div>
-    </div>}
+  const ganttBar=(it,sub)=>{ const sp=span(it); const p=sub?cImpStat(it.status).p:prog(it); const od=overdue(it.due_date,it.status); const c=od?'#dc2626':cImpStat(it.status).c;
+    if(!sp) return <span style={{position:'absolute',left:8,top:'50%',transform:'translateY(-50%)',fontSize:10.5,color:'#94a3b8',fontStyle:'italic'}}>kein Termin</span>;
+    const l=Math.max(0,X(sp[0])), w=Math.max(1.2,X(sp[1])-X(sp[0]));
+    return <div style={{position:'absolute',top:'50%',transform:'translateY(-50%)',left:l+'%',width:w+'%',height:sub?11:16,borderRadius:4,background:'#f1f5f9',boxShadow:'inset 0 0 0 1px #e2e8f0',overflow:'hidden'}} title={fmtD(sp[0])+' – '+fmtD(sp[1])+' · '+p+'%'}><div style={{width:p+'%',height:'100%',background:c,borderRadius:4}}/></div>; };
+  const gridBg=<React.Fragment>{months.map((m,i)=><div key={i} style={{position:'absolute',top:0,bottom:0,left:m.x+'%',width:1,background:'#e5e7eb'}}/>)}{todayX>=0&&todayX<=100&&<div style={{position:'absolute',top:0,bottom:0,left:todayX+'%',width:2,background:'#dc2626',opacity:.7}}/>}</React.Fragment>;
+  const LBL=340;
+  const commentBlock=it=>{ const cs=comments[it.id]||[]; return <div style={{marginTop:6}}>
+    {cs.map(c=><div key={c.id} style={{fontSize:12.5,marginBottom:4}}><b style={{color:c.side==='client'?'#7c3aed':'#0f172a'}}>{c.side==='client'?'Sie':(c.author_name||'TIVE 360°')}:</b> {c.body} <span style={{color:'#94a3b8',fontSize:10.5}}>· {fmtD(c.created_at)}</span></div>)}
+    <div style={{display:'flex',gap:6,marginTop:4}}><input value={cmt[it.id]||''} onChange={e=>setCmt(c=>({...c,[it.id]:e.target.value}))} placeholder="Kommentar…" style={{flex:1,padding:'6px 8px',border:'1px solid #cbd5e1',borderRadius:8,fontSize:12.5}}/><button className="btn btn-primary" style={{padding:'6px 12px'}} onClick={()=>addComment(it.id)}>Senden</button></div>
   </div>; };
-  const line=(it,sub)=>{ const pr=cImpPrio(it.priority); const rp=sub?(it.progress||0):rollup(it); const od=overdue(it.due_date,it.status); return <React.Fragment>
-    <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
-      <span style={{width:sub?8:11,height:sub?8:11,borderRadius:'50%',background:pr.c,flexShrink:0}} title={pr.l}/>
-      <span style={{fontSize:sub?13.5:15,fontWeight:sub?600:800,flex:'1 1 220px',color:'#0f172a'}}>{it.title}</span>
-      <span style={{fontSize:10.5,fontWeight:700,padding:'1px 7px',borderRadius:10,background:it.origin==='client'?'#f3e8ff':'#ecfeff',color:it.origin==='client'?'#7c3aed':'#0e7490'}}>{it.origin==='client'?'von Ihnen':'von TIVE 360°'}</span>
-      {bar(rp,pr.c)}<span style={{fontSize:13,fontWeight:800,width:42,textAlign:'right'}}>{rp}%</span>
-      <span style={{fontSize:11.5,color:'#64748b'}}>{C_IMP_STAT[it.status]||it.status}</span>
-      {it.due_date&&<span style={{fontSize:11.5,color:od?'#dc2626':'#64748b',fontWeight:od?800:600}}>bis {fmtD(it.due_date)}</span>}
-    </div>
-    {it.measures&&<div style={{fontSize:12.5,color:'#64748b',margin:'5px 0 0 19px'}}>Maßnahme: {it.measures}</div>}
-  </React.Fragment>; };
-  return <div style={{maxWidth:860}}>
-    <div style={{fontSize:13,color:'#64748b',marginBottom:14}}>Gemeinsamer Arbeitsplan. Sie nennen Verbesserungspunkte, TIVE 360° hinterlegt Maßnahmen und Fortschritt. Kommentieren können beide Seiten.</div>
+  const row=(it,sub)=>{ const pr=cImpPrio(it.priority); const st=cImpStat(it.status); const od=overdue(it.due_date,it.status); const p=sub?st.p:prog(it); const isOpen=open[it.id]; const cs=comments[it.id]||[]; const ks=kidsOf(it.id);
+    return <React.Fragment key={it.id}>
+      <div style={{display:'flex',alignItems:'stretch',borderTop:'1px solid #eef2f7',minHeight:sub?30:36}}>
+        <div style={{width:LBL,minWidth:LBL,display:'flex',alignItems:'center',gap:6,padding:'4px 8px',paddingLeft:sub?26:8}}>
+          <button onClick={()=>setOpen(o=>({...o,[it.id]:!isOpen}))} style={{border:'none',background:'none',cursor:'pointer',color:'#64748b',fontSize:11,width:12,padding:0}} title="Details">{isOpen?'▾':'▸'}</button>
+          <span style={{width:sub?7:9,height:sub?7:9,borderRadius:'50%',background:pr.c,flexShrink:0}} title={'Priorität: '+pr.l}/>
+          <span style={{flex:1,minWidth:0,fontSize:sub?12.5:13.5,fontWeight:sub?600:700,color:'#0f172a',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={it.title}>{it.title}</span>
+          {!sub&&<span style={{fontSize:9.5,fontWeight:700,padding:'1px 5px',borderRadius:8,background:it.origin==='client'?'#f3e8ff':'#ecfeff',color:it.origin==='client'?'#7c3aed':'#0e7490'}}>{it.origin==='client'?'Sie':'TIVE'}</span>}
+          <span style={{fontSize:11,fontWeight:800,color:od?'#dc2626':st.c,width:32,textAlign:'right'}}>{p}%</span>
+          <span style={{fontSize:10.5,color:'#64748b',width:70,textAlign:'right'}} title="Zustand">{od?'überfällig':st.l}</span>
+        </div>
+        <div style={{flex:1,position:'relative',minWidth:360,borderLeft:'1px solid #e5e7eb'}}>{gridBg}{ganttBar(it,sub)}</div>
+      </div>
+      {isOpen&&<div style={{padding:'6px 8px 10px '+(sub?34:20)+'px',background:'#f8fafc',borderTop:'1px solid #eef2f7'}}>
+        {it.start_date&&<span style={{fontSize:11.5,color:'#64748b',marginRight:12}}>Beginn {fmtD(it.start_date)}</span>}
+        {it.due_date&&<span style={{fontSize:11.5,color:od?'#dc2626':'#64748b',fontWeight:od?800:600,marginRight:12}}>Frist {fmtD(it.due_date)}{od?' · überfällig':''}</span>}
+        {it.measures&&<div style={{fontSize:12.5,color:'#0f172a',marginTop:6}}><b style={{color:'#64748b'}}>Maßnahme von TIVE 360°:</b> {it.measures}</div>}
+        {!sub&&<div style={{marginTop:8}}>{subFor===it.id
+          ? <div style={{display:'flex',gap:6,flexWrap:'wrap'}}><input value={subT} onChange={e=>setSubT(e.target.value)} placeholder="Unterpunkt nennen…" autoFocus style={{flex:'1 1 200px',padding:'6px 8px',border:'1px solid #cbd5e1',borderRadius:8,fontSize:12.5}}/><button className="btn btn-primary" style={{padding:'6px 12px'}} disabled={busy||!subT.trim()} onClick={()=>addSub(it.id)}>+ Anlegen</button><button className="btn" style={{padding:'6px 10px'}} onClick={()=>{setSubFor(null);setSubT('');}}>Abbrechen</button></div>
+          : <button onClick={()=>{setSubFor(it.id);setSubT('');}} style={{border:'none',background:'none',cursor:'pointer',color:'#7c3aed',fontSize:12,fontWeight:600,padding:0}}>+ Unterpunkt nennen</button>}</div>}
+        <div style={{fontSize:11,fontWeight:800,color:'#64748b',marginTop:8}}>Kommentare ({cs.length})</div>
+        {commentBlock(it)}
+      </div>}
+      {ks.map(k=>row(k,true))}
+    </React.Fragment>;
+  };
+  return <div style={{maxWidth:960}}>
+    <div style={{fontSize:13,color:'#64748b',marginBottom:14}}>Gemeinsamer Arbeitsplan. Sie nennen Verbesserungspunkte und kommentieren, TIVE 360° hinterlegt Maßnahmen, Termine und den Bearbeitungsstand. Der Fortschritt wächst aus dem Zustand jedes Punktes. ▸ öffnet Details und Kommentare.</div>
     {items===null? <div style={{color:'#94a3b8'}}>Lädt…</div> : <React.Fragment>
-      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:12,padding:'14px 16px',marginBottom:14,display:'flex',alignItems:'center',gap:12}}><span style={{fontSize:13,fontWeight:800}}>Gesamt</span>{bar(overall,'#0f172a')}<span style={{fontSize:16,fontWeight:800}}>{overall}%</span><span style={{fontSize:12,color:'#94a3b8'}}>· {tops.length} Punkte</span></div>
+      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:12,padding:'14px 16px',marginBottom:14,display:'flex',gap:18,flexWrap:'wrap',alignItems:'center'}}>
+        {(()=>{ const R=34,C=2*Math.PI*R,off=C*(1-overall/100); return <svg width="86" height="86" viewBox="0 0 86 86" style={{flexShrink:0}}><circle cx="43" cy="43" r={R} fill="none" stroke="#f1f5f9" strokeWidth="9"/><circle cx="43" cy="43" r={R} fill="none" stroke="#0f172a" strokeWidth="9" strokeLinecap="round" strokeDasharray={C} strokeDashoffset={off} transform="rotate(-90 43 43)"/><text x="43" y="47" textAnchor="middle" fontSize="20" fontWeight="800" fill="#0f172a">{overall}%</text></svg>; })()}
+        <div style={{display:'flex',gap:12,flexWrap:'wrap',flex:1}}>
+          {[['läuft',cLauf,'#0ea5b7'],['steht',cSteht,'#d97706'],['überfällig',cOver,'#dc2626'],['erledigt',cFertig,'#16a34a']].map(([l,n,c])=><div key={l} style={{flex:1,minWidth:90,background:'#f8fafc',borderRadius:12,padding:'10px 12px'}}><div style={{fontSize:24,fontWeight:800,color:c,lineHeight:1}}>{n}</div><div style={{fontSize:12,color:'#64748b',marginTop:2}}>{l}</div></div>)}
+        </div>
+      </div>
       <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:12,padding:'12px 14px',marginBottom:14,display:'flex',gap:10,flexWrap:'wrap'}}>
         <input value={newT} onChange={e=>setNewT(e.target.value)} placeholder="Neuen Verbesserungspunkt nennen…" style={{flex:1,minWidth:220,padding:'8px 10px',border:'1px solid #cbd5e1',borderRadius:8}}/>
         <button className="btn btn-primary" disabled={busy||!newT.trim()} onClick={addPoint}>+ Punkt hinzufügen</button>
       </div>
-      {tops.map(it=>{ const ks=kidsOf(it.id); return <div key={it.id} style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:12,padding:'14px 16px',marginBottom:12}}>
-        {line(it,false)}
-        {ks.length>0&&<div style={{marginLeft:19,marginTop:8}}>{ks.map(k=><div key={k.id} style={{padding:'8px 0',borderTop:'1px solid #eef2f7'}}>{line(k,true)}{commentBlock(k)}</div>)}</div>}
-        {ks.length===0? commentBlock(it) : <div style={{marginLeft:19,marginTop:6}}>{commentBlock(it)}</div>}
-        <div style={{marginLeft:19,marginTop:8}}>
-          {subFor===it.id
-            ? <div style={{display:'flex',gap:6,flexWrap:'wrap'}}><input value={subT} onChange={e=>setSubT(e.target.value)} placeholder="Unterpunkt nennen…" autoFocus style={{flex:'1 1 200px',padding:'6px 8px',border:'1px solid #cbd5e1',borderRadius:8,fontSize:12.5}}/><button className="btn btn-primary" style={{padding:'6px 12px'}} disabled={busy||!subT.trim()} onClick={()=>addSub(it.id)}>+ Anlegen</button><button className="btn" style={{padding:'6px 10px'}} onClick={()=>{setSubFor(null);setSubT('');}}>Abbrechen</button></div>
-            : <button onClick={()=>{setSubFor(it.id);setSubT('');}} style={{border:'none',background:'none',cursor:'pointer',color:'#7c3aed',fontSize:12,fontWeight:600,padding:0}}>+ Unterpunkt</button>}
-        </div>
-      </div>; })}
-      {tops.length===0&&<div style={{color:'#94a3b8'}}>Noch keine Punkte. Nennen Sie oben den ersten Verbesserungspunkt.</div>}
+      {tops.length===0? <div style={{color:'#94a3b8'}}>Noch keine Punkte. Nennen Sie oben den ersten Verbesserungspunkt.</div>
+       : <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:12,overflow:'hidden'}}>
+          <div style={{overflowX:'auto'}}><div style={{minWidth:760}}>
+            <div style={{display:'flex',alignItems:'stretch',background:'#f8fafc',borderBottom:'1px solid #e5e7eb'}}>
+              <div style={{width:LBL,minWidth:LBL,padding:'6px 8px',fontSize:11,fontWeight:700,color:'#64748b'}}>Punkt · Fortschritt · Zustand</div>
+              <div style={{flex:1,position:'relative',minWidth:360,height:24,borderLeft:'1px solid #e5e7eb'}}>{anyDated?months.map((m,i)=><span key={i} style={{position:'absolute',left:'calc('+m.x+'% + 4px)',top:5,fontSize:10.5,fontWeight:700,color:'#64748b'}}>{m.l}</span>):<span style={{position:'absolute',left:8,top:5,fontSize:10.5,color:'#94a3b8'}}>Zeitleiste, sobald Termine gesetzt sind</span>}{todayX>=0&&todayX<=100&&<div style={{position:'absolute',top:0,bottom:0,left:todayX+'%',width:2,background:'#dc2626',opacity:.7}}/>}</div>
+            </div>
+            {tops.map(it=>row(it,false))}
+          </div></div>
+        </div>}
     </React.Fragment>}
   </div>;
 }
 
-// S6: echter Kanal Kunde ↔ Teamleitung (client_team_messages, DB-backed statt localStorage).
+// S6/S6b: Kanal Kunde ↔ Team. recipient_employee_id=null → Teamleitung; gesetzt → Direktfaden an einen MA.
+// Der MA liest/antwortet in seinem Portal; Teamleitung/HR sehen jeden Faden mit.
 function MessagesView({client}){
   const [messages,setMessages]=useState(null);
+  const [emps,setEmps]=useState([]);
+  const [recip,setRecip]=useState('team');   // 'team' = Teamleitung; sonst employee.id
   const [newMsg,setNewMsg]=useState('');
   const [busy,setBusy]=useState(false);
   const load=async()=>{ try{ const {data}=await sb.from('client_team_messages').select('*').eq('project_id',client.project_id).order('sent_at',{ascending:true}); setMessages(data||[]); }catch(e){ setMessages([]); } };
   useEffect(()=>{ load(); const t=setInterval(load,20000); return ()=>clearInterval(t); },[]);
+  useEffect(()=>{ (async()=>{ const e=await loadEmployeesForClient(client.project_id); setEmps((e||[]).slice().sort((a,b)=>String(a.first_name+a.last_name).localeCompare(String(b.first_name+b.last_name),'de'))); })(); },[]);
+  const empName=id=>{ const e=emps.find(x=>x.id===id); return e?((e.first_name||'')+' '+(e.last_name||'')).trim():'Mitarbeiter'; };
+  const recipId=recip==='team'?null:recip;
+  const thread=(messages||[]).filter(m=> recipId? m.recipient_employee_id===recipId : !m.recipient_employee_id );
+  const countFor=id=>(messages||[]).filter(m=> id? m.recipient_employee_id===id : !m.recipient_employee_id ).length;
+  const recipLabel=recip==='team'?'die Teamleitung':empName(recipId);
   async function send(){
     const txt=newMsg.trim(); if(!txt||busy) return; setBusy(true);
-    const {error}=await sb.from('client_team_messages').insert({project_id:client.project_id, from_side:'client', author_name:client.name||'', body:txt});
+    const {error}=await sb.from('client_team_messages').insert({project_id:client.project_id, from_side:'client', author_name:client.name||'', body:txt, recipient_employee_id:recipId});
     setBusy(false);
     if(error){ window.alert('Nicht gesendet: '+(error.message||'')); return; }
     setNewMsg(''); load();
   }
+  const chip=(key,label,cnt,active)=><button key={key} onClick={()=>setRecip(key)} style={{padding:'6px 12px',borderRadius:20,border:'1px solid '+(active?'#1d4ed8':'#cbd5e1'),background:active?'#1d4ed8':'#fff',color:active?'#fff':'#334155',fontSize:12.5,fontWeight:active?700:500,cursor:'pointer',whiteSpace:'nowrap'}}>{label}{cnt>0&&<span style={{marginLeft:6,fontSize:11,opacity:.85}}>{cnt}</span>}</button>;
   return(
     <div>
       <div className="card">
-        <div className="card-header"><span className="card-title">💬 Nachrichten an die Teamleitung</span></div>
+        <div className="card-header"><span className="card-title">💬 Nachrichten</span></div>
         <div className="card-body">
-          <div className="msg-list" style={{marginBottom:16,maxHeight:440,overflowY:'auto',padding:'4px 0'}}>
+          <div style={{fontSize:12.5,color:'#64748b',marginBottom:10}}>Schreiben Sie der Teamleitung oder einem einzelnen Mitarbeiter. Bei Direktnachrichten antwortet der Mitarbeiter selbst; die Teamleitung liest jeden Verlauf mit.</div>
+          <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:14,paddingBottom:12,borderBottom:'1px solid #eef2f7'}}>
+            {chip('team','Teamleitung',countFor(null),recip==='team')}
+            {emps.map(e=>chip(e.id,((e.first_name||'')+' '+(e.last_name||'')).trim()||'MA',countFor(e.id),recip===e.id))}
+          </div>
+          <div className="msg-list" style={{marginBottom:16,maxHeight:420,overflowY:'auto',padding:'4px 0'}}>
             {messages===null ? <div style={{color:'#94a3b8',fontSize:13}}>Lädt…</div>
-             : messages.length===0 ? <div style={{color:'#94a3b8',fontSize:13}}>Noch keine Nachrichten. Schreiben Sie der Teamleitung Ihres Teams.</div>
-             : messages.map(m=>(
+             : thread.length===0 ? <div style={{color:'#94a3b8',fontSize:13}}>Noch keine Nachrichten mit {recipLabel}. Schreiben Sie unten die erste.</div>
+             : thread.map(m=>(
               <div key={m.id} className={`msg ${m.from_side==='client'?'msg-from-client':'msg-from-jsr'}`}>
                 <div style={{fontSize:13,lineHeight:1.6,whiteSpace:'pre-wrap'}}>{m.body}</div>
-                <div className="msg-meta">{m.from_side==='client'?(m.author_name||client.name):(m.author_name||'Teamleitung')} · {new Date(m.sent_at).toLocaleDateString('de-DE')}</div>
+                <div className="msg-meta">{m.from_side==='client'?(m.author_name||client.name):m.from_side==='employee'?(m.author_name||empName(m.recipient_employee_id)):(m.author_name||'Teamleitung')} · {new Date(m.sent_at).toLocaleDateString('de-DE')}</div>
               </div>
             ))}
           </div>
           <div style={{display:'flex',gap:10}}>
-            <textarea className="form-input" style={{flex:1,resize:'none',height:80}} placeholder="Nachricht an die Teamleitung..." value={newMsg} onChange={e=>setNewMsg(e.target.value)}/>
+            <textarea className="form-input" style={{flex:1,resize:'none',height:80}} placeholder={'Nachricht an '+recipLabel+'...'} value={newMsg} onChange={e=>setNewMsg(e.target.value)}/>
             <button className="btn btn-primary" style={{alignSelf:'flex-end'}} disabled={busy} onClick={send}>Senden →</button>
           </div>
         </div>
