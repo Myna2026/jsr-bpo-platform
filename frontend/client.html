@@ -168,6 +168,8 @@ td{padding:8px 12px;font-size:12px;vertical-align:middle}
   body{background:#fff!important}
   .card{box-shadow:none!important;border:1px solid #e5e7eb!important;break-inside:avoid}
 }
+@keyframes dsPulseG{0%,100%{box-shadow:0 0 8px 1px #16a34a,0 0 0 0 rgba(22,163,74,.6)}50%{box-shadow:0 0 10px 2px #16a34a,0 0 0 6px rgba(22,163,74,0)}}
+@keyframes dsPulseA{0%,100%{box-shadow:0 0 8px 1px #d97706,0 0 0 0 rgba(217,119,6,.6)}50%{box-shadow:0 0 10px 2px #d97706,0 0 0 6px rgba(217,119,6,0)}}
 
 .cal-grid { display:grid; grid-template-columns:repeat(7,1fr); gap:4px; }
 .cal-cell { min-height:64px; border-radius:8px; padding:6px 8px; background:var(--bg); border:1px solid var(--border); cursor:pointer; transition:background .12s; }
@@ -626,6 +628,56 @@ function LoginPage({authMsg, portalDenied, myPortals}){
   );
 }
 
+// ── Demo-Cockpit (nur Reisewelt-Demo): CSAT/AHT/Conversion, umschaltbar KW/laufender Monat,
+//    Teamdurchschnitt mit Vergleich zur Vorperiode (Richtungspfeil). Aus kpi_config + kpi_entries.
+function DemoCockpit({client}){
+  const [mode,setMode]=useState('kw');
+  const [cfg,setCfg]=useState([]); const [ent,setEnt]=useState([]);
+  useEffect(()=>{ let alive=true; (async()=>{
+    const [c,e]=await Promise.all([
+      sb.from('kpi_config_client_view').select('id,name,unit'),
+      sb.from('kpi_entries_client_view').select('kpi_id,kw,value')
+    ]);
+    if(!alive) return; setCfg(c.data||[]); setEnt(e.data||[]);
+  })(); return ()=>{alive=false;}; },[client.project_id]);
+  const idsByName=n=>cfg.filter(c=>c.name===n).map(c=>c.id);
+  const ourIds=new Set(cfg.map(c=>c.id));
+  const rows=ent.filter(r=>ourIds.has(r.kpi_id));
+  const avg=(ids,weeks)=>{ const set=new Set(ids); const vs=rows.filter(r=>set.has(r.kpi_id)&&weeks.includes(r.kw)).map(r=>Number(r.value)).filter(v=>!isNaN(v)); return vs.length? vs.reduce((a,b)=>a+b,0)/vs.length : null; };
+  const allKw=[...new Set(rows.map(r=>r.kw))].sort((a,b)=>a-b);
+  const maxKw=allKw.length?allKw[allKw.length-1]:37;
+  const periods = mode==='kw'
+    ? { now:[maxKw], prev:[maxKw-1], nowLbl:'KW '+maxKw, prevLbl:'KW '+(maxKw-1) }
+    : { now:allKw.filter(k=>k>=36), prev:allKw.filter(k=>k<36), nowLbl:'September', prevLbl:'August' };
+  const KPIS=[{name:'CSAT',unit:'%',better:'up'},{name:'AHT',unit:'min',better:'down'},{name:'Conversion',unit:'%',better:'up'}];
+  const tglS=on=>({padding:'5px 12px',border:'none',cursor:'pointer',fontSize:12.5,fontWeight:on?700:500,background:on?'#0F5661':'#fff',color:on?'#fff':'#334155'});
+  return <div className="card" style={{marginBottom:20}}>
+    <div className="card-header"><span className="card-title" style={{display:'inline-flex',alignItems:'center',gap:7}}><span style={{display:'inline-flex',color:'var(--blue)'}} dangerouslySetInnerHTML={{__html:heroicon('chart-bar',18)}} />Cockpit</span>
+      <div style={{display:'inline-flex',border:'1px solid #cbd5e1',borderRadius:8,overflow:'hidden'}}>
+        {[['kw','Kalenderwoche'],['monat','Laufender Monat']].map(([k,l])=><button key={k} onClick={()=>setMode(k)} style={tglS(mode===k)}>{l}</button>)}
+      </div>
+    </div>
+    <div className="card-body">
+      <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:14}}>
+        {KPIS.map(k=>{ const ids=idsByName(k.name); const now=avg(ids,periods.now), prev=avg(ids,periods.prev);
+          const delta=(now!=null&&prev!=null)?now-prev:null;
+          const good=delta==null?null:(Math.abs(delta)<0.05?null:(k.better==='up'?delta>0:delta<0));
+          const arrow=delta==null?'':(delta>0.05?'▲':delta<-0.05?'▼':'▬');
+          const col=good==null?'#94a3b8':(good?'#16a34a':'#dc2626');
+          return <div key={k.name} style={{background:'#f8fafc',borderRadius:14,padding:'16px 18px'}}>
+            <div style={{fontSize:12.5,fontWeight:700,color:'#64748b'}}>{k.name}</div>
+            <div style={{fontSize:30,fontWeight:800,color:'#0f172a',lineHeight:1.1,marginTop:4}}>{now!=null?now.toFixed(1):'—'}<span style={{fontSize:15,fontWeight:600,color:'#94a3b8'}}> {k.unit}</span></div>
+            <div style={{fontSize:12.5,marginTop:6,display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
+              <span style={{color:col,fontWeight:800}}>{arrow} {delta!=null?((delta>0?'+':'')+delta.toFixed(1)):'—'}</span>
+              <span style={{color:'#94a3b8'}}>vs. {periods.prevLbl}</span>
+            </div>
+          </div>; })}
+      </div>
+      <div style={{fontSize:11.5,color:'#94a3b8',marginTop:10}}>{periods.nowLbl} · Teamdurchschnitt · Vergleich zur Vorperiode</div>
+    </div>
+  </div>;
+}
+
 // ── Overview ──────────────────────────────────────────────
 function Overview({client, onOpenTeam, employees, posCats}){
   const staff = (employees||[]).map(empToCard);
@@ -677,6 +729,8 @@ function Overview({client, onOpenTeam, employees, posCats}){
           <div style={{fontSize:12,opacity:.8}}>Aktive Mitarbeiter</div>
         </div>
       </div>
+
+      {IS_DEMO && <DemoCockpit client={client}/>}
 
       <div className="grid-4">
         {[
@@ -1197,21 +1251,25 @@ function DemoShiftView({client, employees}){
   })(); return ()=>{alive=false;}; },[rStart,rEnd]);
   const empById=React.useMemo(()=>{ const m={}; (employees||[]).forEach(e=>{ m[e.id]=e; }); return m; },[employees]);
   const shiftFor=(empId,ds)=>(shifts||[]).find(s=>s.employee_id===empId && String(s.work_date).slice(0,10)===ds);
-  // Mitarbeiter mit Schicht im Bereich, nach Name.
+  const ABS_COL={sick:{bg:'#fee2e2',fg:'#dc2626',lbl:'krank',ic:'🤒'},vacation:{bg:'#dbeafe',fg:'#2563eb',lbl:'Urlaub',ic:'🏖'},unpaid:{bg:'#f1f5f9',fg:'#64748b',lbl:'frei',ic:'•'}};
+  const absenceFor=(empId,ds)=>{ const e=empById[empId]; const arr=(e&&e.absences)||[]; return arr.find(a=>a&&a.from&&a.to && String(a.from).slice(0,10)<=ds && ds<=String(a.to).slice(0,10)); };
+  // Mitarbeiter mit Schicht ODER Abwesenheit im Bereich, nach Name.
   const empIds=React.useMemo(()=>{ const set=new Set((shifts||[]).map(s=>s.employee_id).filter(id=>empById[id]));
-    return [...set].sort((a,b)=>String((empById[a]||{}).first_name+(empById[a]||{}).last_name).localeCompare(String((empById[b]||{}).first_name+(empById[b]||{}).last_name),'de')); },[shifts,empById]);
+    (employees||[]).forEach(e=>{ if(e&&(e.absences||[]).some(a=>a&&a.from&&a.to && String(a.from).slice(0,10)<=rEnd && String(a.to).slice(0,10)>=rStart)) set.add(e.id); });
+    return [...set].sort((a,b)=>String((empById[a]||{}).first_name+(empById[a]||{}).last_name).localeCompare(String((empById[b]||{}).first_name+(empById[b]||{}).last_name),'de')); },[shifts,empById,employees,rStart,rEnd]);
   const empName=id=>{ const e=empById[id]||{}; return ((e.first_name||'')+' '+(e.last_name||'')).trim()||'MA'; };
   // Check-in-Punkt für heute: grün=present, amber=late, hohl=geplant/nicht eingecheckt.
   function checkDot(empId){
-    const s=shiftFor(empId,todayIso); if(!s) return null;
+    const s=shiftFor(empId,todayIso); const ab=absenceFor(empId,todayIso); if(!s&&!ab) return <span style={{width:14,height:14,flexShrink:0}}/>;
+    if(ab) return <span title={ABS_COL[ab.type].lbl} style={{width:14,height:14,borderRadius:'50%',flexShrink:0,display:'inline-block',background:ABS_COL[ab.type].bg,border:'2px solid '+ABS_COL[ab.type].fg,boxSizing:'border-box'}}/>;
     const ci=checkins[empId+'|'+todayIso];
-    let c,glow,title;
-    if(ci&&ci.status==='present'){ c='#16a34a'; glow=true; title='Eingecheckt '+String(ci.arrival||'').slice(0,5); }
-    else if(ci&&ci.status==='late'){ c='#d97706'; glow=true; title='Verspätet eingecheckt '+String(ci.arrival||'').slice(0,5); }
-    else { c='#cbd5e1'; glow=false; title='Eingeplant, noch nicht eingecheckt'; }
-    return <span title={title} style={{width:10,height:10,borderRadius:'50%',flexShrink:0,display:'inline-block',
-      background:glow?c:'#fff', border:glow?('1px solid '+c):('2px solid '+c),
-      boxShadow:glow?('0 0 0 2px #fff, 0 0 7px 1px '+c):'none'}}/>;
+    let c,glow,pulse,title;
+    if(ci&&ci.status==='present'){ c='#16a34a'; glow=true; pulse='dsPulseG'; title='Eingecheckt '+String(ci.arrival||'').slice(0,5); }
+    else if(ci&&ci.status==='late'){ c='#d97706'; glow=true; pulse='dsPulseA'; title='Verspätet eingecheckt '+String(ci.arrival||'').slice(0,5); }
+    else { c='#cbd5e1'; glow=false; pulse=null; title='Eingeplant, noch nicht eingecheckt'; }
+    return <span title={title} style={{width:14,height:14,borderRadius:'50%',flexShrink:0,display:'inline-block',boxSizing:'border-box',
+      background:glow?c:'#fff', border:'2px solid '+c,
+      boxShadow:glow?('0 0 9px 2px '+c):'none', animation:pulse?(pulse+' 1.5s infinite'):'none'}}/>;
   }
   function exportCsv(){
     const rows=[['Mitarbeiter','Datum','Wochentag','Schicht','Zeit','Check-in']];
@@ -1235,6 +1293,9 @@ function DemoShiftView({client, employees}){
     <span style={{display:'inline-flex',alignItems:'center',gap:5}}><span style={{width:10,height:10,borderRadius:'50%',background:'#16a34a',boxShadow:'0 0 6px 1px #16a34a'}}/>eingecheckt</span>
     <span style={{display:'inline-flex',alignItems:'center',gap:5}}><span style={{width:10,height:10,borderRadius:'50%',background:'#d97706',boxShadow:'0 0 6px 1px #d97706'}}/>verspätet</span>
     <span style={{display:'inline-flex',alignItems:'center',gap:5}}><span style={{width:10,height:10,borderRadius:'50%',background:'#fff',border:'2px solid #cbd5e1'}}/>nicht eingecheckt</span>
+    <span style={{width:1,height:14,background:'#e5e7eb'}}/>
+    <span style={{display:'inline-flex',alignItems:'center',gap:5}}><span style={{width:11,height:11,borderRadius:3,background:ABS_COL.sick.bg,border:'1px solid '+ABS_COL.sick.fg}}/>krank</span>
+    <span style={{display:'inline-flex',alignItems:'center',gap:5}}><span style={{width:11,height:11,borderRadius:3,background:ABS_COL.vacation.bg,border:'1px solid '+ABS_COL.vacation.fg}}/>Urlaub</span>
   </div>;
 
   // ── Monat: Balkenplan (Mitarbeiter × 28 Tage) ──
@@ -1251,9 +1312,10 @@ function DemoShiftView({client, employees}){
       </div>
       {empIds.map(id=><div key={id} style={{display:'flex',borderBottom:'1px solid #f1f5f9',minHeight:26}}>
         <div style={{width:NAMEW,minWidth:NAMEW,display:'flex',alignItems:'center',gap:7,padding:'2px 8px',fontSize:12.5,fontWeight:600,color:'#0f172a',overflow:'hidden'}}>{checkDot(id)}<span style={{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{empName(id)}</span></div>
-        <div style={{display:'flex',flex:1}}>{days.map((d,i)=>{ const ds=iso(d); const s=shiftFor(id,ds); const wknd=((d.getDay()+6)%7)>=5; const today=ds===todayIso; const first=((d.getDay()+6)%7)===0;
+        <div style={{display:'flex',flex:1}}>{days.map((d,i)=>{ const ds=iso(d); const s=shiftFor(id,ds); const ab=absenceFor(id,ds); const wknd=((d.getDay()+6)%7)>=5; const today=ds===todayIso; const first=((d.getDay()+6)%7)===0;
           return <div key={i} style={{width:DAYW,minWidth:DAYW,borderLeft:first?'2px solid #e2e8f0':'1px solid #f8fafc',background:today?'#ecfeff':(wknd?'#f8fafc':'#fff'),display:'flex',alignItems:'center',justifyContent:'center',padding:'2px 2px'}}>
-            {s&&<div title={empName(id)+' · '+ds+' · '+(s.label||'')+' '+(s.shift_value||'')} style={{width:'100%',height:15,borderRadius:4,background:dsShiftColor(s.label)}}/>}
+            {ab? <div title={empName(id)+' · '+ABS_COL[ab.type].lbl} style={{width:'100%',height:15,borderRadius:4,background:ABS_COL[ab.type].bg,border:'1px solid '+ABS_COL[ab.type].fg,boxSizing:'border-box'}}/>
+             : s? <div title={empName(id)+' · '+ds+' · '+(s.label||'')+' '+(s.shift_value||'')} style={{width:'100%',height:15,borderRadius:4,background:dsShiftColor(s.label)}}/> : null}
           </div>; })}</div>
       </div>)}
     </div></div>;
@@ -1268,24 +1330,46 @@ function DemoShiftView({client, employees}){
       </div>
       {empIds.map(id=><div key={id} style={{display:'flex',borderBottom:'1px solid #f1f5f9',minHeight:34}}>
         <div style={{width:NAMEW,minWidth:NAMEW,display:'flex',alignItems:'center',gap:7,padding:'4px 8px',fontSize:13,fontWeight:600,color:'#0f172a'}}>{checkDot(id)}<span style={{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{empName(id)}</span></div>
-        {days.map((d,i)=>{ const ds=iso(d); const s=shiftFor(id,ds); const today=ds===todayIso;
+        {days.map((d,i)=>{ const ds=iso(d); const s=shiftFor(id,ds); const ab=absenceFor(id,ds); const today=ds===todayIso;
           return <div key={i} style={{flex:1,minWidth:104,borderLeft:'1px solid #f8fafc',background:today?'#f0fdff':'#fff',display:'flex',alignItems:'center',justifyContent:'center',padding:'3px'}}>
-            {s?<div style={{width:'100%',borderRadius:6,background:dsShiftColor(s.label),color:'#fff',fontSize:11,fontWeight:700,textAlign:'center',padding:'4px 2px'}} title={s.label}>{s.shift_value}</div>:<span style={{color:'#e2e8f0',fontSize:12}}>–</span>}
+            {ab?<div style={{width:'100%',borderRadius:6,background:ABS_COL[ab.type].bg,color:ABS_COL[ab.type].fg,fontSize:11,fontWeight:700,textAlign:'center',padding:'4px 2px',border:'1px solid '+ABS_COL[ab.type].fg,boxSizing:'border-box'}} title={ab.note||ABS_COL[ab.type].lbl}>{ABS_COL[ab.type].ic} {ABS_COL[ab.type].lbl}</div>
+             :s?<div style={{width:'100%',borderRadius:6,background:dsShiftColor(s.label),color:'#fff',fontSize:11,fontWeight:700,textAlign:'center',padding:'4px 2px'}} title={s.label}>{s.shift_value}</div>:<span style={{color:'#e2e8f0',fontSize:12}}>–</span>}
           </div>; })}
       </div>)}
     </div></div>;
   };
-  // ── Tag: Liste mit Check-in + Schichtzeit ──
+  // ── Tag: Stunden-Balkenplan (Zeitachse, Schicht von-bis je MA, Lücken sichtbar) ──
   const renderTag=()=>{
     const ds=iso(days[0]);
-    const list=empIds.map(id=>({id,s:shiftFor(id,ds)})).filter(x=>x.s);
+    const list=empIds.map(id=>({id,s:shiftFor(id,ds),ab:absenceFor(id,ds)})).filter(x=>x.s||x.ab)
+      .sort((a,b)=>{ const ta=a.s?(parseShiftTimes(a.s.shift_value)||{s:0}).s:99999, tb=b.s?(parseShiftTimes(b.s.shift_value)||{s:0}).s:99999; return ta-tb || empName(a.id).localeCompare(empName(b.id),'de'); });
     if(!list.length) return <div style={{padding:30,textAlign:'center',color:'#94a3b8'}}>Am {DOW[(days[0].getDay()+6)%7]}, {days[0].getDate()}. {MON[days[0].getMonth()]} ist niemand eingeteilt.</div>;
-    return <div>{list.map(({id,s})=><div key={id} style={{display:'flex',alignItems:'center',gap:12,padding:'10px 8px',borderTop:'1px solid #f1f5f9'}}>
-      {ds===todayIso?checkDot(id):<span style={{width:10,height:10,borderRadius:'50%',background:'#f1f5f9',flexShrink:0}}/>}
-      <span style={{flex:1,minWidth:0,fontSize:14,fontWeight:600,color:'#0f172a'}}>{empName(id)}</span>
-      <span style={{fontSize:11,fontWeight:700,color:'#fff',background:dsShiftColor(s.label),borderRadius:6,padding:'3px 9px'}}>{s.label}</span>
-      <span style={{fontSize:13,fontFamily:'var(--mono,monospace)',color:'#334155',minWidth:104,textAlign:'right'}}>{s.shift_value}</span>
-    </div>)}</div>;
+    let winS=Infinity, winE=-Infinity;
+    list.forEach(({s})=>{ const t=s&&parseShiftTimes(s.shift_value); if(t){ winS=Math.min(winS,t.s); winE=Math.max(winE,t.e); } });
+    if(!isFinite(winS)){ winS=360; winE=1320; } else { winS=Math.max(0,winS-30); winE=winE+30; }
+    const span=Math.max(60, winE-winS);
+    const hours=[]; for(let h=Math.ceil(winS/60); h<=Math.floor(winE/60); h++) hours.push(h);
+    const NW=168;
+    const nowMin=ds===todayIso?(()=>{ const n=new Date(); return n.getHours()*60+n.getMinutes(); })():null;
+    const nowLeft=nowMin!=null?((nowMin-winS)/span*100):null;
+    return <div style={{overflowX:'auto'}}><div style={{minWidth:560}}>
+      <div style={{display:'flex',alignItems:'flex-end',marginBottom:4}}>
+        <div style={{width:NW,minWidth:NW}}/>
+        <div style={{flex:1,position:'relative',height:16}}>
+          {hours.map(h=><span key={h} style={{position:'absolute',left:((h*60-winS)/span*100)+'%',transform:'translateX(-50%)',fontSize:10,color:'#94a3b8',fontFamily:'var(--mono,monospace)'}}>{String(h).padStart(2,'0')}</span>)}
+        </div>
+      </div>
+      {list.map(({id,s,ab})=>{ const t=s?(parseShiftTimes(s.shift_value)||{s:winS,e:winE}):null; const left=t?(t.s-winS)/span*100:0, width=t?Math.max(3,(t.e-t.s)/span*100):0;
+        return <div key={id} style={{display:'flex',alignItems:'center',borderTop:'1px solid #f1f5f9',minHeight:36}}>
+          <div style={{width:NW,minWidth:NW,display:'flex',alignItems:'center',gap:7,padding:'4px 8px',fontSize:13,fontWeight:600,color:'#0f172a'}}>{ds===todayIso?checkDot(id):<span style={{width:14,height:14,borderRadius:'50%',background:'#f1f5f9',flexShrink:0}}/>}<span style={{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{empName(id)}</span></div>
+          <div style={{flex:1,position:'relative',height:24,background:'#f8fafc',borderRadius:5}}>
+            {hours.map(h=><div key={h} style={{position:'absolute',left:((h*60-winS)/span*100)+'%',top:0,bottom:0,width:1,background:'#eef2f7'}}/>)}
+            {nowLeft!=null&&nowLeft>=0&&nowLeft<=100&&<div style={{position:'absolute',left:nowLeft+'%',top:-2,bottom:-2,width:2,background:'#dc2626',opacity:.7}} title="jetzt"/>}
+            {ab? <div title={ab.note||ABS_COL[ab.type].lbl} style={{position:'absolute',left:'1%',right:'1%',top:3,bottom:3,background:ABS_COL[ab.type].bg,border:'1px solid '+ABS_COL[ab.type].fg,borderRadius:5,display:'flex',alignItems:'center',justifyContent:'center',color:ABS_COL[ab.type].fg,fontSize:11,fontWeight:700,boxSizing:'border-box'}}>{ABS_COL[ab.type].ic} {ABS_COL[ab.type].lbl}{ab.note?' · '+ab.note:''}</div>
+             : <div title={s.label+' · '+s.shift_value} style={{position:'absolute',left:left+'%',width:width+'%',top:3,bottom:3,background:dsShiftColor(s.label),borderRadius:5,display:'flex',alignItems:'center',justifyContent:'center',color:'#fff',fontSize:11,fontWeight:700,overflow:'hidden',whiteSpace:'nowrap'}}>{s.shift_value}</div>}
+          </div>
+        </div>; })}
+    </div></div>;
   };
 
   return <div>
@@ -2234,7 +2318,7 @@ function App(){
     {key:'invoices',  label:'Rechnungen & Vertrag', icon:'◧', tab:'invoices'},
     {key:'messages',  label:'Nachrichten',          icon:'◎', tab:'messages'},
     {key:'showcases', label:'Kandidaten',           icon:'🎯', tab:'showcases'},
-    {key:'reports',   label:'Berichte',             icon:'📈', tab:'reports'},
+    {key:'reports',   label:'Reporting',            icon:'📈', tab:'reports'},
   ];
   const vt = client.visible_tabs||{overview:true,calendar:true};
   const navItems = ALL_NAV_ITEMS.filter(n=> n.tab==='reports' ? vt.reports!==false : (vt[n.tab]!==false&&(Object.keys(vt).length===0||vt[n.tab])));
@@ -2310,7 +2394,7 @@ function App(){
             {view==='messages'&&<span style={{display:'inline-flex',alignItems:'center',gap:7}}><span style={{display:'inline-flex'}} dangerouslySetInnerHTML={{__html:heroicon('chat-bubble-left-right',18)}} />Nachrichten</span>}
             {view==='calendar'&&<span style={{display:'inline-flex',alignItems:'center',gap:7}}><span style={{display:'inline-flex'}} dangerouslySetInnerHTML={{__html:heroicon('calendar',18)}} />Termine & Kalender</span>}
             {view==='showcases'&&<span style={{display:'inline-flex',alignItems:'center',gap:7}}><span style={{display:'inline-flex'}} dangerouslySetInnerHTML={{__html:heroicon('users',18)}} />Kandidaten-Vorschläge</span>}
-            {view==='reports'&&<span style={{display:'inline-flex',alignItems:'center',gap:7}}><span style={{display:'inline-flex'}} dangerouslySetInnerHTML={{__html:heroicon('chart-bar',18)}} />Berichte</span>}
+            {view==='reports'&&<span style={{display:'inline-flex',alignItems:'center',gap:7}}><span style={{display:'inline-flex'}} dangerouslySetInnerHTML={{__html:heroicon('chart-bar',18)}} />Reporting</span>}
             {view==='quality'&&<span style={{display:'inline-flex',alignItems:'center',gap:7}}><span style={{display:'inline-flex'}} dangerouslySetInnerHTML={{__html:heroicon('quality',18)}} />Qualitätsberichte</span>}
             {view==='arbeitsplan'&&<span style={{display:'inline-flex',alignItems:'center',gap:7}}>📋 Arbeitsplan</span>}
           </span>
