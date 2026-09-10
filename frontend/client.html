@@ -1273,27 +1273,32 @@ function InvoicesView({client}){
 }
 
 // ── Messages ──────────────────────────────────────────────
-// Arbeitsplan (Kundenansicht): gemeinsamer Verbesserungsplan. Kunde nennt Punkte (origin=client) + kommentiert;
-// Maßnahmen/Fortschritt pflegt TIVE (RLS erlaubt dem Kunden nur Anlegen + Kommentieren).
+// Arbeitsplan (Kundenansicht): gemeinsamer Verbesserungsplan. Kunde arbeitet aktiv mit — anlegen, anpassen,
+// Zustand setzen, kommentieren. AUSNAHME: unsere Maßnahmen (measures) pflegt nur TIVE (RLS-Trigger schützt sie).
 const C_IMP_PRIO=[{k:'sehr_wichtig',l:'sehr wichtig',c:'#dc2626'},{k:'wichtig',l:'wichtig',c:'#ea580c'},{k:'notwendig',l:'notwendig',c:'#ca8a04'},{k:'schoen',l:'wäre schön',c:'#64748b'}];
-const C_IMP_STAT=[{k:'offen',l:'offen',c:'#94a3b8',p:0},{k:'in_arbeit',l:'in Arbeit',c:'#0ea5b7',p:50},{k:'pausiert',l:'pausiert',c:'#a1a1aa',p:50},{k:'wartet',l:'wartet auf Zulieferung',c:'#d97706',p:50},{k:'erledigt',l:'erledigt',c:'#16a34a',p:100}];
+const C_IMP_STAT=[{k:'offen',l:'offen',c:'#94a3b8',p:0},{k:'in_arbeit',l:'in Arbeit',c:'#0ea5b7',p:50},{k:'erledigt',l:'erledigt',c:'#16a34a',p:100}];
 function cImpPrio(k){ return C_IMP_PRIO.find(p=>p.k===k)||C_IMP_PRIO[1]; }
 function cImpStat(k){ return C_IMP_STAT.find(s=>s.k===k)||C_IMP_STAT[0]; }
 function cImpAddDays(dstr,n){ const d=new Date(String(dstr).slice(0,10)); d.setDate(d.getDate()+n); return d.toISOString().slice(0,10); }
 function ClientPlanView({client}){
-  const [items,setItems]=useState(null); const [comments,setComments]=useState({}); const [open,setOpen]=useState({}); const [cmt,setCmt]=useState({}); const [newT,setNewT]=useState(''); const [busy,setBusy]=useState(false); const [subFor,setSubFor]=useState(null); const [subT,setSubT]=useState('');
+  const [items,setItems]=useState(null); const [comments,setComments]=useState({}); const [open,setOpen]=useState({}); const [cmt,setCmt]=useState({}); const [newT,setNewT]=useState(''); const [busy,setBusy]=useState(false); const [edit,setEdit]=useState(null); const [ef,setEf]=useState({});
+  const [narrow,setNarrow]=useState(()=>window.innerWidth<820);
+  useEffect(()=>{ const h=()=>setNarrow(window.innerWidth<820); window.addEventListener('resize',h); return ()=>window.removeEventListener('resize',h); },[]);
   const load=async()=>{ try{ const {data}=await sb.from('improvement_items').select('*').eq('project_id',client.project_id).order('sort_order',{ascending:true}); const its=data||[]; setItems(its); const ids=its.map(i=>i.id); if(ids.length){ const {data:cs}=await sb.from('improvement_comments').select('*').in('item_id',ids).order('created_at',{ascending:true}); const m={}; (cs||[]).forEach(c=>{(m[c.item_id]=m[c.item_id]||[]).push(c);}); setComments(m);} else setComments({}); }catch(e){ setItems([]); } };
   useEffect(()=>{ load(); },[]);
   const tops=(items||[]).filter(i=>!i.parent_id).sort((a,b)=>(a.sort_order||0)-(b.sort_order||0));
   const kidsOf=id=>(items||[]).filter(i=>i.parent_id===id).sort((a,b)=>(a.sort_order||0)-(b.sort_order||0));
-  const prog=it=>{ const ks=kidsOf(it.id); return ks.length?Math.round(ks.reduce((s,k)=>s+cImpStat(k.status).p,0)/ks.length):cImpStat(it.status).p; };
-  const overall=tops.length?Math.round(tops.reduce((s,t)=>s+prog(t),0)/tops.length):0;
+  const doneKids=it=>kidsOf(it.id).filter(k=>k.status==='erledigt').length;
+  const dState=it=>{ const ks=kidsOf(it.id); if(!ks.length) return it.status; if(ks.every(k=>k.status==='erledigt')) return 'erledigt'; if(ks.some(k=>k.status!=='offen')) return 'in_arbeit'; return 'offen'; };
+  const fillPct=it=>{ const ks=kidsOf(it.id); return ks.length? Math.round(doneKids(it)/ks.length*100) : cImpStat(it.status).p; };
   const fmtD=d=>{ if(!d)return''; const p=String(d).slice(0,10).split('-'); return p.length===3?p[2]+'.'+p[1]+'.'+p[0]:String(d); };
   const overdue=(d,s)=>{ if(!d||s==='erledigt')return false; try{return new Date(String(d).slice(0,10))<new Date(new Date().toISOString().slice(0,10));}catch(e){return false;} };
-  const cLauf=tops.filter(t=>{const p=prog(t);return p>0&&p<100&&!overdue(t.due_date,t.status)&&t.status!=='pausiert'&&t.status!=='wartet';}).length;
-  const cSteht=tops.filter(t=>t.status==='pausiert'||t.status==='wartet').length;
-  const cOver=tops.filter(t=>overdue(t.due_date,t.status)).length;
-  const cFertig=tops.filter(t=>prog(t)===100).length;
+  const overdueOf=it=>overdue(it.due_date, dState(it));
+  const cOffen=tops.filter(t=>dState(t)==='offen'&&!overdueOf(t)).length;
+  const cArbeit=tops.filter(t=>dState(t)==='in_arbeit'&&!overdueOf(t)).length;
+  const cFertig=tops.filter(t=>dState(t)==='erledigt').length;
+  const cOver=tops.filter(t=>overdueOf(t)).length;
+  const donePct=tops.length?Math.round(cFertig/tops.length*100):0;
   const span=i=>{ let a=i.start_date?String(i.start_date).slice(0,10):null, b=i.due_date?String(i.due_date).slice(0,10):null; if(!a&&!b) return null; if(!a) a=cImpAddDays(b,-14); if(!b) b=cImpAddDays(a,14); return [a,b]; };
   const nowStr=new Date().toISOString().slice(0,10);
   const alld=(items||[]).flatMap(i=>{const s=span(i);return s?[+new Date(s[0]),+new Date(s[1])]:[];}); alld.push(+new Date(nowStr));
@@ -1308,51 +1313,105 @@ function ClientPlanView({client}){
     const {error}=await sb.from('improvement_items').insert({project_id:client.project_id, parent_id:parentId||null, title:t, origin:'client', priority:'wichtig', status:'offen', progress:0, sort_order:ord, created_by_name:client.name||'Kunde'}); setBusy(false);
     if(error){ window.alert('Nicht gespeichert: '+(error.message||'')); return false; } load(); return true; }
   async function addPoint(){ if(await addItem(null,newT)) setNewT(''); }
-  async function addSub(parentId){ if(await addItem(parentId,subT)){ setSubT(''); setSubFor(null); } }
   async function addComment(itemId){ const b=(cmt[itemId]||'').trim(); if(!b)return; const {error}=await sb.from('improvement_comments').insert({item_id:itemId, project_id:client.project_id, side:'client', author_name:client.name||'Kunde', body:b}); if(error){ window.alert('Kommentar fehlgeschlagen: '+(error.message||'')); return; } setCmt(c=>({...c,[itemId]:''})); load(); }
-  const ganttBar=(it,sub)=>{ const sp=span(it); const p=sub?cImpStat(it.status).p:prog(it); const od=overdue(it.due_date,it.status); const c=od?'#dc2626':cImpStat(it.status).c;
-    if(!sp) return <span style={{position:'absolute',left:8,top:'50%',transform:'translateY(-50%)',fontSize:10.5,color:'#94a3b8',fontStyle:'italic'}}>kein Termin</span>;
-    const l=Math.max(0,X(sp[0])), w=Math.max(1.2,X(sp[1])-X(sp[0]));
-    return <div style={{position:'absolute',top:'50%',transform:'translateY(-50%)',left:l+'%',width:w+'%',height:sub?11:16,borderRadius:4,background:'#f1f5f9',boxShadow:'inset 0 0 0 1px #e2e8f0',overflow:'hidden'}} title={fmtD(sp[0])+' – '+fmtD(sp[1])+' · '+p+'%'}><div style={{width:p+'%',height:'100%',background:c,borderRadius:4}}/></div>; };
+  function openEdit(it){ setEf({title:it.title||'',priority:it.priority||'wichtig',status:it.status||'offen',start_date:it.start_date?String(it.start_date).slice(0,10):'',due_date:it.due_date?String(it.due_date).slice(0,10):''}); setEdit(it.id); }
+  function openNew(parentId){ setEf({title:'',priority:'wichtig',status:'offen',start_date:'',due_date:''}); setEdit('new:'+(parentId||'')); }
+  async function saveItem(){ const t=(ef.title||'').trim(); if(!t||busy) return; setBusy(true);
+    const base={ title:t, priority:ef.priority, status:ef.status, progress:cImpStat(ef.status).p, start_date:ef.start_date||null, due_date:ef.due_date||null };
+    let error;
+    if(String(edit).startsWith('new:')){ const parentId=String(edit).slice(4)||null; const sibs=parentId?kidsOf(parentId):tops; const ord=Math.max(0,...sibs.map(s=>s.sort_order||0))+1;
+      ({error}=await sb.from('improvement_items').insert({...base, project_id:client.project_id, parent_id:parentId, origin:'client', sort_order:ord, created_by_name:client.name||'Kunde'})); }
+    else { ({error}=await sb.from('improvement_items').update(base).eq('id',edit)); }
+    setBusy(false); if(error){ window.alert('Nicht gespeichert: '+(error.message||'')); return; } setEdit(null); load();
+  }
+  async function setStatus(it, st){ const {error}=await sb.from('improvement_items').update({status:st, progress:cImpStat(st).p}).eq('id',it.id); if(error){ window.alert('Nicht gespeichert: '+(error.message||'')); return; } load(); }
+  const statusSel=it=><select value={it.status} onChange={e=>setStatus(it,e.target.value)} title="Zustand ändern" style={{fontSize:11.5,padding:'3px 6px',border:'1px solid #cbd5e1',borderRadius:6,background:'#fff',color:'#0f172a',cursor:'pointer'}}>{C_IMP_STAT.map(s=><option key={s.k} value={s.k}>{s.l}</option>)}</select>;
+  const stateCell=it=>{ const ks=kidsOf(it.id); if(ks.length){ const od=overdueOf(it); return <span style={{fontSize:12,fontWeight:800,color:od?'#dc2626':dState(it)==='erledigt'?'#16a34a':'#0f172a',whiteSpace:'nowrap'}} title={doneKids(it)+' von '+ks.length+' erledigt'}>{doneKids(it)}/{ks.length}</span>; } return statusSel(it); };
+  const ganttBar=(it,sub)=>{ const sp=span(it); const p=fillPct(it); const od=overdueOf(it); const c=od?'#dc2626':cImpStat(dState(it)).c;
+    if(!sp) return <span style={{position:'absolute',left:10,top:'50%',transform:'translateY(-50%)',fontSize:11,color:'#94a3b8',fontStyle:'italic'}}>kein Termin</span>;
+    const l=Math.max(0,X(sp[0])), w=Math.max(2,X(sp[1])-X(sp[0]));
+    return <div style={{position:'absolute',top:'50%',transform:'translateY(-50%)',left:l+'%',width:w+'%',height:sub?15:24,borderRadius:sub?7:12,background:'#f1f5f9',boxShadow:'inset 0 0 0 1px #e2e8f0',overflow:'hidden'}} title={fmtD(sp[0])+' – '+fmtD(sp[1])}><div style={{width:p+'%',height:'100%',background:c,borderRadius:sub?7:12,transition:'width .3s'}}/></div>; };
   const gridBg=<React.Fragment>{months.map((m,i)=><div key={i} style={{position:'absolute',top:0,bottom:0,left:m.x+'%',width:1,background:'#e5e7eb'}}/>)}{todayX>=0&&todayX<=100&&<div style={{position:'absolute',top:0,bottom:0,left:todayX+'%',width:2,background:'#dc2626',opacity:.7}}/>}</React.Fragment>;
-  const LBL=340;
+  const LBL=300;
   const commentBlock=it=>{ const cs=comments[it.id]||[]; return <div style={{marginTop:6}}>
     {cs.map(c=><div key={c.id} style={{fontSize:12.5,marginBottom:4}}><b style={{color:c.side==='client'?'#7c3aed':'#0f172a'}}>{c.side==='client'?'Sie':(c.author_name||'TIVE 360°')}:</b> {c.body} <span style={{color:'#94a3b8',fontSize:10.5}}>· {fmtD(c.created_at)}</span></div>)}
     <div style={{display:'flex',gap:6,marginTop:4}}><input value={cmt[it.id]||''} onChange={e=>setCmt(c=>({...c,[it.id]:e.target.value}))} placeholder="Kommentar…" style={{flex:1,padding:'6px 8px',border:'1px solid #cbd5e1',borderRadius:8,fontSize:12.5}}/><button className="btn btn-primary" style={{padding:'6px 12px'}} onClick={()=>addComment(it.id)}>Senden</button></div>
   </div>; };
-  const row=(it,sub)=>{ const pr=cImpPrio(it.priority); const st=cImpStat(it.status); const od=overdue(it.due_date,it.status); const p=sub?st.p:prog(it); const isOpen=open[it.id]; const cs=comments[it.id]||[]; const ks=kidsOf(it.id);
+  const editForm=(parentLabel)=><div style={{border:'1px dashed #7c3aed',borderRadius:10,padding:'12px 14px',margin:'2px 0 10px',background:'#faf5ff'}}>
+    <div style={{fontSize:12,fontWeight:800,marginBottom:8}}>{String(edit).startsWith('new:')?(parentLabel?'Neuer Unterpunkt':'Neuer Punkt'):'Punkt bearbeiten'}</div>
+    <input value={ef.title} onChange={e=>setEf(f=>({...f,title:e.target.value}))} placeholder="Titel *" style={{width:'100%',padding:'7px 9px',border:'1px solid #cbd5e1',borderRadius:8,boxSizing:'border-box',marginBottom:8}}/>
+    <div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'center'}}>
+      <label style={{fontSize:12,color:'#64748b'}}>Priorität <select value={ef.priority} onChange={e=>setEf(f=>({...f,priority:e.target.value}))} style={{padding:'5px 7px',border:'1px solid #cbd5e1',borderRadius:8}}>{C_IMP_PRIO.map(p=><option key={p.k} value={p.k}>{p.l}</option>)}</select></label>
+      <label style={{fontSize:12,color:'#64748b'}}>Zustand <select value={ef.status} onChange={e=>setEf(f=>({...f,status:e.target.value}))} style={{padding:'5px 7px',border:'1px solid #cbd5e1',borderRadius:8}}>{C_IMP_STAT.map(s=><option key={s.k} value={s.k}>{s.l}</option>)}</select></label>
+      <label style={{fontSize:12,color:'#64748b'}}>Beginn <input type="date" value={ef.start_date} onChange={e=>setEf(f=>({...f,start_date:e.target.value}))} style={{padding:'5px 7px',border:'1px solid #cbd5e1',borderRadius:8}}/></label>
+      <label style={{fontSize:12,color:'#64748b'}}>Frist <input type="date" value={ef.due_date} onChange={e=>setEf(f=>({...f,due_date:e.target.value}))} style={{padding:'5px 7px',border:'1px solid #cbd5e1',borderRadius:8}}/></label>
+    </div>
+    <div style={{fontSize:11,color:'#94a3b8',marginTop:6}}>Die Maßnahmen pflegt TIVE 360°. Titel, Priorität, Termine und Zustand können Sie selbst setzen.</div>
+    <div style={{display:'flex',gap:8,marginTop:10}}><button className="btn btn-primary" style={{padding:'6px 14px'}} disabled={busy} onClick={saveItem}>Speichern</button><button className="btn" style={{padding:'6px 12px'}} onClick={()=>setEdit(null)}>Abbrechen</button></div>
+  </div>;
+  const detailPanel=(it,sub,padLeft)=>{ const od=overdueOf(it); const cs=comments[it.id]||[]; return <div style={{padding:'8px 10px 12px '+(padLeft||20)+'px',background:'#f8fafc',borderTop:'1px solid #eef2f7'}}>
+    {it.start_date&&<span style={{fontSize:11.5,color:'#64748b',marginRight:12}}>Beginn {fmtD(it.start_date)}</span>}
+    {it.due_date&&<span style={{fontSize:11.5,color:od?'#dc2626':'#64748b',fontWeight:od?800:600,marginRight:12}}>Frist {fmtD(it.due_date)}{od?' · überfällig':''}</span>}
+    <div style={{display:'flex',gap:6,flexWrap:'wrap',marginTop:6}}>
+      <button className="btn" style={{padding:'5px 10px',fontSize:12}} onClick={()=>openEdit(it)}>✎ Bearbeiten</button>{!sub&&<button className="btn" style={{padding:'5px 10px',fontSize:12}} onClick={()=>openNew(it.id)}>+ Unterpunkt</button>}
+    </div>
+    {it.measures&&<div style={{fontSize:12.5,color:'#0f172a',marginTop:8}}><b style={{color:'#64748b'}}>Maßnahme von TIVE 360°:</b> {it.measures}</div>}
+    <div style={{fontSize:11,fontWeight:800,color:'#64748b',marginTop:8}}>Kommentare ({cs.length})</div>
+    {commentBlock(it)}
+  </div>; };
+  const row=(it,sub)=>{ const pr=cImpPrio(it.priority); const isOpen=open[it.id];
     return <React.Fragment key={it.id}>
-      <div style={{display:'flex',alignItems:'stretch',borderTop:'1px solid #eef2f7',minHeight:sub?30:36}}>
-        <div style={{width:LBL,minWidth:LBL,display:'flex',alignItems:'center',gap:6,padding:'4px 8px',paddingLeft:sub?26:8}}>
+      {edit===it.id? <div style={{padding:'0 8px'}}>{editForm(!!sub)}</div> : <div style={{display:'flex',alignItems:'stretch',borderTop:'1px solid #eef2f7',minHeight:sub?36:46}}>
+        <div style={{width:LBL,minWidth:LBL,display:'flex',alignItems:'center',gap:7,padding:'6px 10px',paddingLeft:sub?28:10}}>
           <button onClick={()=>setOpen(o=>({...o,[it.id]:!isOpen}))} style={{border:'none',background:'none',cursor:'pointer',color:'#64748b',fontSize:11,width:12,padding:0}} title="Details">{isOpen?'▾':'▸'}</button>
-          <span style={{width:sub?7:9,height:sub?7:9,borderRadius:'50%',background:pr.c,flexShrink:0}} title={'Priorität: '+pr.l}/>
-          <span style={{flex:1,minWidth:0,fontSize:sub?12.5:13.5,fontWeight:sub?600:700,color:'#0f172a',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={it.title}>{it.title}</span>
+          <span style={{width:sub?7:10,height:sub?7:10,borderRadius:'50%',background:pr.c,flexShrink:0}} title={'Priorität: '+pr.l}/>
+          <span style={{flex:1,minWidth:0,fontSize:sub?12.5:14,fontWeight:sub?600:700,color:'#0f172a',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={it.title}>{it.title}</span>
           {!sub&&<span style={{fontSize:9.5,fontWeight:700,padding:'1px 5px',borderRadius:8,background:it.origin==='client'?'#f3e8ff':'#ecfeff',color:it.origin==='client'?'#7c3aed':'#0e7490'}}>{it.origin==='client'?'Sie':'TIVE'}</span>}
-          <span style={{fontSize:11,fontWeight:800,color:od?'#dc2626':st.c,width:32,textAlign:'right'}}>{p}%</span>
-          <span style={{fontSize:10.5,color:'#64748b',width:70,textAlign:'right'}} title="Zustand">{od?'überfällig':st.l}</span>
+          {stateCell(it)}
         </div>
-        <div style={{flex:1,position:'relative',minWidth:360,borderLeft:'1px solid #e5e7eb'}}>{gridBg}{ganttBar(it,sub)}</div>
-      </div>
-      {isOpen&&<div style={{padding:'6px 8px 10px '+(sub?34:20)+'px',background:'#f8fafc',borderTop:'1px solid #eef2f7'}}>
-        {it.start_date&&<span style={{fontSize:11.5,color:'#64748b',marginRight:12}}>Beginn {fmtD(it.start_date)}</span>}
-        {it.due_date&&<span style={{fontSize:11.5,color:od?'#dc2626':'#64748b',fontWeight:od?800:600,marginRight:12}}>Frist {fmtD(it.due_date)}{od?' · überfällig':''}</span>}
-        {it.measures&&<div style={{fontSize:12.5,color:'#0f172a',marginTop:6}}><b style={{color:'#64748b'}}>Maßnahme von TIVE 360°:</b> {it.measures}</div>}
-        {!sub&&<div style={{marginTop:8}}>{subFor===it.id
-          ? <div style={{display:'flex',gap:6,flexWrap:'wrap'}}><input value={subT} onChange={e=>setSubT(e.target.value)} placeholder="Unterpunkt nennen…" autoFocus style={{flex:'1 1 200px',padding:'6px 8px',border:'1px solid #cbd5e1',borderRadius:8,fontSize:12.5}}/><button className="btn btn-primary" style={{padding:'6px 12px'}} disabled={busy||!subT.trim()} onClick={()=>addSub(it.id)}>+ Anlegen</button><button className="btn" style={{padding:'6px 10px'}} onClick={()=>{setSubFor(null);setSubT('');}}>Abbrechen</button></div>
-          : <button onClick={()=>{setSubFor(it.id);setSubT('');}} style={{border:'none',background:'none',cursor:'pointer',color:'#7c3aed',fontSize:12,fontWeight:600,padding:0}}>+ Unterpunkt nennen</button>}</div>}
-        <div style={{fontSize:11,fontWeight:800,color:'#64748b',marginTop:8}}>Kommentare ({cs.length})</div>
-        {commentBlock(it)}
+        <div style={{flex:1,position:'relative',minWidth:340,borderLeft:'1px solid #e5e7eb'}}>{gridBg}{ganttBar(it,sub)}</div>
       </div>}
-      {ks.map(k=>row(k,true))}
+      {isOpen&&edit!==it.id&&detailPanel(it,sub,sub?34:22)}
+      {String(edit)==='new:'+it.id&&<div style={{padding:'0 8px 0 26px'}}>{editForm(true)}</div>}
+      {kidsOf(it.id).map(k=>row(k,true))}
     </React.Fragment>;
   };
-  return <div style={{maxWidth:960}}>
-    <div style={{fontSize:13,color:'#64748b',marginBottom:14}}>Gemeinsamer Arbeitsplan. Sie nennen Verbesserungspunkte und kommentieren, TIVE 360° hinterlegt Maßnahmen, Termine und den Bearbeitungsstand. Der Fortschritt wächst aus dem Zustand jedes Punktes. ▸ öffnet Details und Kommentare.</div>
+  const mcard=(it)=>{ const pr=cImpPrio(it.priority); const ks=kidsOf(it.id); const od=overdueOf(it); const isOpen=open[it.id]; const st=cImpStat(dState(it));
+    return <div key={it.id} style={{border:'1px solid #e5e7eb',borderRadius:12,padding:'12px 14px',marginBottom:10,background:'#fff'}}>
+      {edit===it.id? editForm(false) : <React.Fragment>
+        <div style={{display:'flex',alignItems:'center',gap:8}}>
+          <span style={{width:10,height:10,borderRadius:'50%',background:pr.c,flexShrink:0}} title={pr.l}/>
+          <span style={{flex:1,minWidth:0,fontSize:14.5,fontWeight:800,color:'#0f172a'}}>{it.title}</span>
+          <span style={{fontSize:9.5,fontWeight:700,padding:'1px 5px',borderRadius:8,background:it.origin==='client'?'#f3e8ff':'#ecfeff',color:it.origin==='client'?'#7c3aed':'#0e7490'}}>{it.origin==='client'?'Sie':'TIVE'}</span>
+        </div>
+        <div style={{display:'flex',alignItems:'center',gap:10,marginTop:8,flexWrap:'wrap'}}>
+          {ks.length? <span style={{fontSize:13,fontWeight:800,color:od?'#dc2626':st.c}}>{doneKids(it)} von {ks.length} erledigt</span> : statusSel(it)}
+          {it.due_date&&<span style={{fontSize:11.5,color:od?'#dc2626':'#64748b',fontWeight:od?800:600}}>bis {fmtD(it.due_date)}{od?' · überfällig':''}</span>}
+          <div style={{flex:1}}/>
+          <button onClick={()=>setOpen(o=>({...o,[it.id]:!isOpen}))} style={{border:'none',background:'none',cursor:'pointer',color:'#64748b',fontSize:12,fontWeight:700}}>{isOpen?'▾ weniger':'▸ mehr'}</button>
+        </div>
+        {ks.length>0&&<div style={{height:7,background:'#f1f5f9',borderRadius:4,overflow:'hidden',marginTop:8}}><div style={{width:fillPct(it)+'%',height:'100%',background:od?'#dc2626':st.c}}/></div>}
+      </React.Fragment>}
+      {isOpen&&edit!==it.id&&<div style={{marginTop:8}}>
+        {ks.map(k=>{ const kod=overdueOf(k); return <div key={k.id} style={{borderTop:'1px solid #eef2f7',padding:'8px 0'}}>
+          {edit===k.id? editForm(true) : <React.Fragment>
+            <div style={{display:'flex',alignItems:'center',gap:8}}><span style={{width:7,height:7,borderRadius:'50%',background:cImpPrio(k.priority).c,flexShrink:0}}/><span style={{flex:1,minWidth:0,fontSize:13,fontWeight:600,color:'#0f172a'}}>{k.title}</span>{statusSel(k)}</div>
+            {k.measures&&<div style={{fontSize:12,color:'#64748b',marginTop:4,marginLeft:15}}>Maßnahme: {k.measures}</div>}
+            <div style={{display:'flex',gap:6,marginTop:6,marginLeft:15,flexWrap:'wrap'}}><button className="btn" style={{padding:'4px 9px',fontSize:12}} onClick={()=>openEdit(k)}>✎</button>{k.due_date&&<span style={{fontSize:11,color:kod?'#dc2626':'#64748b',alignSelf:'center'}}>bis {fmtD(k.due_date)}</span>}</div>
+          </React.Fragment>}
+        </div>; })}
+        {detailPanel(it,false,0)}
+        {String(edit)==='new:'+it.id&&editForm(true)}
+      </div>}
+    </div>;
+  };
+  return <div>
+    <div style={{fontSize:13,color:'#64748b',marginBottom:14}}>Gemeinsamer Arbeitsplan. Jeder Punkt hat einen Zustand: <b>offen</b>, <b>in Arbeit</b> oder <b>erledigt</b>. Ein Hauptpunkt zeigt, wie viele Unterpunkte erledigt sind (z. B. „3 von 5"). Sie können Punkte anlegen, anpassen und den Zustand setzen; die Maßnahmen pflegt TIVE 360°.</div>
     {items===null? <div style={{color:'#94a3b8'}}>Lädt…</div> : <React.Fragment>
-      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:12,padding:'14px 16px',marginBottom:14,display:'flex',gap:18,flexWrap:'wrap',alignItems:'center'}}>
-        {(()=>{ const R=34,C=2*Math.PI*R,off=C*(1-overall/100); return <svg width="86" height="86" viewBox="0 0 86 86" style={{flexShrink:0}}><circle cx="43" cy="43" r={R} fill="none" stroke="#f1f5f9" strokeWidth="9"/><circle cx="43" cy="43" r={R} fill="none" stroke="#0f172a" strokeWidth="9" strokeLinecap="round" strokeDasharray={C} strokeDashoffset={off} transform="rotate(-90 43 43)"/><text x="43" y="47" textAnchor="middle" fontSize="20" fontWeight="800" fill="#0f172a">{overall}%</text></svg>; })()}
-        <div style={{display:'flex',gap:12,flexWrap:'wrap',flex:1}}>
-          {[['läuft',cLauf,'#0ea5b7'],['steht',cSteht,'#d97706'],['überfällig',cOver,'#dc2626'],['erledigt',cFertig,'#16a34a']].map(([l,n,c])=><div key={l} style={{flex:1,minWidth:90,background:'#f8fafc',borderRadius:12,padding:'10px 12px'}}><div style={{fontSize:24,fontWeight:800,color:c,lineHeight:1}}>{n}</div><div style={{fontSize:12,color:'#64748b',marginTop:2}}>{l}</div></div>)}
+      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:14,padding:'16px 18px',marginBottom:14,display:'flex',gap:22,flexWrap:'wrap',alignItems:'center'}}>
+        {(()=>{ const R=52,C=2*Math.PI*R,off=C*(1-donePct/100); return <svg width="128" height="128" viewBox="0 0 128 128" style={{flexShrink:0}}><circle cx="64" cy="64" r={R} fill="none" stroke="#f1f5f9" strokeWidth="13"/><circle cx="64" cy="64" r={R} fill="none" stroke="#16a34a" strokeWidth="13" strokeLinecap="round" strokeDasharray={C} strokeDashoffset={off} transform="rotate(-90 64 64)"/><text x="64" y="60" textAnchor="middle" fontSize="30" fontWeight="800" fill="#0f172a">{cFertig}/{tops.length}</text><text x="64" y="82" textAnchor="middle" fontSize="12" fill="#64748b">erledigt</text></svg>; })()}
+        <div style={{display:'flex',gap:12,flexWrap:'wrap',flex:1,minWidth:240}}>
+          {[['offen',cOffen,'#94a3b8'],['in Arbeit',cArbeit,'#0ea5b7'],['überfällig',cOver,'#dc2626'],['erledigt',cFertig,'#16a34a']].map(([l,n,c])=><div key={l} style={{flex:1,minWidth:118,background:'#f8fafc',borderRadius:14,padding:'14px 16px'}}><div style={{fontSize:30,fontWeight:800,color:c,lineHeight:1}}>{n}</div><div style={{fontSize:12.5,color:'#64748b',marginTop:4,fontWeight:600}}>{l}</div></div>)}
         </div>
       </div>
       <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:12,padding:'12px 14px',marginBottom:14,display:'flex',gap:10,flexWrap:'wrap'}}>
@@ -1360,43 +1419,54 @@ function ClientPlanView({client}){
         <button className="btn btn-primary" disabled={busy||!newT.trim()} onClick={addPoint}>+ Punkt hinzufügen</button>
       </div>
       {tops.length===0? <div style={{color:'#94a3b8'}}>Noch keine Punkte. Nennen Sie oben den ersten Verbesserungspunkt.</div>
-       : <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:12,overflow:'hidden'}}>
-          <div style={{overflowX:'auto'}}><div style={{minWidth:760}}>
-            <div style={{display:'flex',alignItems:'stretch',background:'#f8fafc',borderBottom:'1px solid #e5e7eb'}}>
-              <div style={{width:LBL,minWidth:LBL,padding:'6px 8px',fontSize:11,fontWeight:700,color:'#64748b'}}>Punkt · Fortschritt · Zustand</div>
-              <div style={{flex:1,position:'relative',minWidth:360,height:24,borderLeft:'1px solid #e5e7eb'}}>{anyDated?months.map((m,i)=><span key={i} style={{position:'absolute',left:'calc('+m.x+'% + 4px)',top:5,fontSize:10.5,fontWeight:700,color:'#64748b'}}>{m.l}</span>):<span style={{position:'absolute',left:8,top:5,fontSize:10.5,color:'#94a3b8'}}>Zeitleiste, sobald Termine gesetzt sind</span>}{todayX>=0&&todayX<=100&&<div style={{position:'absolute',top:0,bottom:0,left:todayX+'%',width:2,background:'#dc2626',opacity:.7}}/>}</div>
-            </div>
-            {tops.map(it=>row(it,false))}
-          </div></div>
-        </div>}
+       : narrow
+         ? <div>{tops.map(mcard)}</div>
+         : <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:14,overflow:'hidden'}}>
+            <div style={{overflowX:'auto'}}><div style={{minWidth:640}}>
+              <div style={{display:'flex',alignItems:'stretch',background:'#f8fafc',borderBottom:'1px solid #e5e7eb'}}>
+                <div style={{width:LBL,minWidth:LBL,padding:'7px 10px',fontSize:11,fontWeight:700,color:'#64748b'}}>Punkt · Zustand</div>
+                <div style={{flex:1,position:'relative',minWidth:340,height:26,borderLeft:'1px solid #e5e7eb'}}>{anyDated?months.map((m,i)=><span key={i} style={{position:'absolute',left:'calc('+m.x+'% + 5px)',top:6,fontSize:11,fontWeight:700,color:'#64748b'}}>{m.l}</span>):<span style={{position:'absolute',left:8,top:6,fontSize:11,color:'#94a3b8'}}>Zeitleiste, sobald Termine gesetzt sind</span>}{todayX>=0&&todayX<=100&&<div style={{position:'absolute',top:0,bottom:0,left:todayX+'%',width:2,background:'#dc2626',opacity:.7}}/>}</div>
+              </div>
+              {tops.map(it=>row(it,false))}
+            </div></div>
+          </div>}
     </React.Fragment>}
   </div>;
 }
 
+// Faden-Schlüssel für den Gelesen-Status: '<project>|team' oder '<project>|emp|<empId>'.
+function cmThreadKey(projectId, recipEmpId){ return projectId+'|'+(recipEmpId?('emp|'+recipEmpId):'team'); }
+
 // S6/S6b: Kanal Kunde ↔ Team. recipient_employee_id=null → Teamleitung; gesetzt → Direktfaden an einen MA.
 // Der MA liest/antwortet in seinem Portal; Teamleitung/HR sehen jeden Faden mit.
-function MessagesView({client}){
+function MessagesView({client, onMsgRead}){
   const [messages,setMessages]=useState(null);
   const [emps,setEmps]=useState([]);
+  const [reads,setReads]=useState({});
   const [recip,setRecip]=useState('team');   // 'team' = Teamleitung; sonst employee.id
   const [newMsg,setNewMsg]=useState('');
   const [busy,setBusy]=useState(false);
+  const listRef=useRef(null);
   const load=async()=>{ try{ const {data}=await sb.from('client_team_messages').select('*').eq('project_id',client.project_id).order('sent_at',{ascending:true}); setMessages(data||[]); }catch(e){ setMessages([]); } };
-  useEffect(()=>{ load(); const t=setInterval(load,20000); return ()=>clearInterval(t); },[]);
+  const loadReads=async()=>{ try{ const {data}=await sb.from('client_msg_reads').select('thread_key,last_read_at'); const m={}; (data||[]).forEach(r=>{m[r.thread_key]=r.last_read_at;}); setReads(m); }catch(e){} };
+  useEffect(()=>{ load(); loadReads(); const t=setInterval(()=>{load();loadReads();},20000); return ()=>clearInterval(t); },[]);
   useEffect(()=>{ (async()=>{ const e=await loadEmployeesForClient(client.project_id); setEmps((e||[]).slice().sort((a,b)=>String(a.first_name+a.last_name).localeCompare(String(b.first_name+b.last_name),'de'))); })(); },[]);
   const empName=id=>{ const e=emps.find(x=>x.id===id); return e?((e.first_name||'')+' '+(e.last_name||'')).trim():'Mitarbeiter'; };
   const recipId=recip==='team'?null:recip;
   const thread=(messages||[]).filter(m=> recipId? m.recipient_employee_id===recipId : !m.recipient_employee_id );
-  const countFor=id=>(messages||[]).filter(m=> id? m.recipient_employee_id===id : !m.recipient_employee_id ).length;
+  const unreadFor=id=>{ const tk=cmThreadKey(client.project_id,id); const lr=reads[tk]; return (messages||[]).filter(m=> (id? m.recipient_employee_id===id : !m.recipient_employee_id) && m.from_side!=='client' && (!lr||new Date(m.sent_at)>new Date(lr)) ).length; };
   const recipLabel=recip==='team'?'die Teamleitung':empName(recipId);
+  async function markRead(id){ const tk=cmThreadKey(client.project_id,id); const {error}=await sb.from('client_msg_reads').upsert({thread_key:tk,last_read_at:new Date().toISOString()},{onConflict:'user_id,thread_key'}); if(!error){ loadReads(); onMsgRead&&onMsgRead(); } }
+  // Beim Öffnen/Wechseln ans Ende scrollen; sichtbaren Faden als gelesen markieren.
+  useEffect(()=>{ const el=listRef.current; if(el) setTimeout(()=>{ el.scrollTop=el.scrollHeight; },30); if(messages && unreadFor(recipId)>0) markRead(recipId); }, [recip, messages]);
   async function send(){
     const txt=newMsg.trim(); if(!txt||busy) return; setBusy(true);
     const {error}=await sb.from('client_team_messages').insert({project_id:client.project_id, from_side:'client', author_name:client.name||'', body:txt, recipient_employee_id:recipId});
     setBusy(false);
     if(error){ window.alert('Nicht gesendet: '+(error.message||'')); return; }
-    setNewMsg(''); load();
+    setNewMsg(''); await load(); markRead(recipId);
   }
-  const chip=(key,label,cnt,active)=><button key={key} onClick={()=>setRecip(key)} style={{padding:'6px 12px',borderRadius:20,border:'1px solid '+(active?'#1d4ed8':'#cbd5e1'),background:active?'#1d4ed8':'#fff',color:active?'#fff':'#334155',fontSize:12.5,fontWeight:active?700:500,cursor:'pointer',whiteSpace:'nowrap'}}>{label}{cnt>0&&<span style={{marginLeft:6,fontSize:11,opacity:.85}}>{cnt}</span>}</button>;
+  const chip=(key,label,unr,active)=><button key={key} onClick={()=>setRecip(key)} style={{position:'relative',padding:'6px 12px',borderRadius:20,border:'1px solid '+(active?'#1d4ed8':'#cbd5e1'),background:active?'#1d4ed8':'#fff',color:active?'#fff':'#334155',fontSize:12.5,fontWeight:active?700:500,cursor:'pointer',whiteSpace:'nowrap'}}>{label}{unr>0&&<span style={{marginLeft:6,minWidth:16,height:16,borderRadius:8,background:active?'#fff':'#dc2626',color:active?'#1d4ed8':'#fff',fontSize:10,fontWeight:800,display:'inline-flex',alignItems:'center',justifyContent:'center',padding:'0 4px',verticalAlign:'middle'}}>{unr}</span>}</button>;
   return(
     <div>
       <div className="card">
@@ -1404,10 +1474,10 @@ function MessagesView({client}){
         <div className="card-body">
           <div style={{fontSize:12.5,color:'#64748b',marginBottom:10}}>Schreiben Sie der Teamleitung oder einem einzelnen Mitarbeiter. Bei Direktnachrichten antwortet der Mitarbeiter selbst; die Teamleitung liest jeden Verlauf mit.</div>
           <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:14,paddingBottom:12,borderBottom:'1px solid #eef2f7'}}>
-            {chip('team','Teamleitung',countFor(null),recip==='team')}
-            {emps.map(e=>chip(e.id,((e.first_name||'')+' '+(e.last_name||'')).trim()||'MA',countFor(e.id),recip===e.id))}
+            {chip('team','Teamleitung',unreadFor(null),recip==='team')}
+            {emps.map(e=>chip(e.id,((e.first_name||'')+' '+(e.last_name||'')).trim()||'MA',unreadFor(e.id),recip===e.id))}
           </div>
-          <div className="msg-list" style={{marginBottom:16,maxHeight:420,overflowY:'auto',padding:'4px 0'}}>
+          <div ref={listRef} className="msg-list" style={{marginBottom:12,maxHeight:420,overflowY:'auto',padding:'4px 0'}}>
             {messages===null ? <div style={{color:'#94a3b8',fontSize:13}}>Lädt…</div>
              : thread.length===0 ? <div style={{color:'#94a3b8',fontSize:13}}>Noch keine Nachrichten mit {recipLabel}. Schreiben Sie unten die erste.</div>
              : thread.map(m=>(
@@ -1417,10 +1487,8 @@ function MessagesView({client}){
               </div>
             ))}
           </div>
-          <div style={{display:'flex',gap:10}}>
-            <textarea className="form-input" style={{flex:1,resize:'none',height:80}} placeholder={'Nachricht an '+recipLabel+'...'} value={newMsg} onChange={e=>setNewMsg(e.target.value)}/>
-            <button className="btn btn-primary" style={{alignSelf:'flex-end'}} disabled={busy} onClick={send}>Senden →</button>
-          </div>
+          <textarea className="form-input" style={{width:'100%',resize:'none',height:80,boxSizing:'border-box'}} placeholder={'Nachricht an '+recipLabel+'...'} value={newMsg} onChange={e=>setNewMsg(e.target.value)}/>
+          <div style={{marginTop:8}}><button className="btn btn-primary" disabled={busy} onClick={send}>Senden →</button></div>
         </div>
       </div>
     </div>
@@ -1919,6 +1987,8 @@ function App(){
   const [clientDenied, setClientDenied]=useState(null);
   const [myPortals, setMyPortals]=useState([]);
   const [employees, setEmployees]=useState([]);
+  const [msgUnread, setMsgUnread]=useState(0);
+  const [msgReadTick, setMsgReadTick]=useState(0);
   const [posCats, setPosCats]=useState(defaultPosCats);   // Funktions-Farben portalweit (HR-Listen, Fallback Defaults)
   useEffect(()=>{ let alive=true; loadPositionCatsForClient().then(c=>{ if(alive && c) setPosCats(c); }); return ()=>{alive=false;}; }, []);
   const gatingRef=useRef(false);
@@ -1969,6 +2039,24 @@ function App(){
     // Aktualisierung braucht ein Kundenportal nicht.
     return ()=>{ alive=false; };
   }, [client]);
+
+  // Ungelesene Kundennachrichten für den Menü-Badge: nicht selbst verfasst UND neuer als last_read des Fadens.
+  useEffect(()=>{
+    if(!client || !client.project_id){ setMsgUnread(0); return; }
+    let alive=true;
+    const calc=async()=>{
+      try{
+        const [mRes,rRes]=await Promise.all([
+          sb.from('client_team_messages').select('project_id,recipient_employee_id,from_side,sent_at').eq('project_id',client.project_id),
+          sb.from('client_msg_reads').select('thread_key,last_read_at')
+        ]);
+        const reads={}; (rRes.data||[]).forEach(r=>{ reads[r.thread_key]=r.last_read_at; });
+        let n=0; (mRes.data||[]).forEach(m=>{ if(m.from_side==='client') return; const tk=cmThreadKey(m.project_id,m.recipient_employee_id); const lr=reads[tk]; if(!lr || new Date(m.sent_at)>new Date(lr)) n++; });
+        if(alive) setMsgUnread(n);
+      }catch(e){}
+    };
+    calc(); const t=setInterval(calc,20000); return ()=>{ alive=false; clearInterval(t); };
+  }, [client, msgReadTick]);
 
   if(clientDenied) return <ClientAccessDenied email={clientDenied}/>;
   if(!client) return <LoginPage authMsg={authMsg} portalDenied={portalDenied} myPortals={myPortals}/>;
@@ -2028,6 +2116,7 @@ function App(){
             <div key={n.key} className={`ni ${view===n.key?'on':''}`} onClick={()=>setView(n.key)}>
               <span className="ni-icon" dangerouslySetInnerHTML={{__html:getIcon(n.key)}} />
               <span>{n.label}</span>
+              {n.key==='messages'&&msgUnread>0&&<span style={{marginLeft:'auto',minWidth:18,height:18,borderRadius:9,background:'#dc2626',color:'#fff',fontSize:10.5,fontWeight:700,display:'inline-flex',alignItems:'center',justifyContent:'center',padding:'0 5px'}}>{msgUnread}</span>}
             </div>
           ))}
         </div>
@@ -2076,7 +2165,7 @@ function App(){
           {view==='orgchart'&&<OrgView client={client} employees={employees} posCats={posCats}/>}
           {view==='shifts'&&<DienstplanView client={client} employees={employees} posCats={posCats}/>}
           {view==='invoices'&&<InvoicesView client={client}/>}
-          {view==='messages'&&<MessagesView client={client}/>}
+          {view==='messages'&&<MessagesView client={client} onMsgRead={()=>setMsgReadTick(t=>t+1)}/>}
           {view==='calendar'&&<CalendarView client={client}/>}
           {view==='showcases'&&<ShowcasesView client={client}/>}
           {view==='quality'&&<QualityView client={client}/>}
