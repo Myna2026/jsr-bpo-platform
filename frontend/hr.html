@@ -5857,8 +5857,14 @@ function TrainingPlanModal({plan, projects, employees, onSave, onClose}){
 
 function TrainingPlans({plans, setPlans, projects, employees, setEmployees, showToast}){
   const [modal, setModal]=useState(null);
-  const applyEmp=async(changed)=>{ for(const ce of changed){ try{ await saveEmployeeToDB(ce); }catch(err){} }
-    if(changed.length&&setEmployees) setEmployees(es=>es.map(e=>{ const c=changed.find(x=>x.id===e.id); return c||e; })); };
+  const applyEmp=async(changed)=>{ const ok=[], failed=[];
+    for(const ce of changed){ try{ await saveEmployeeToDB(ce); ok.push(ce); }
+      catch(err){ failed.push(ce); console.error('[Schulung applyEmp] Speichern fehlgeschlagen', err); if(!applyEmp._err) applyEmp._err=err; } }
+    // Nur erfolgreich Gespeicherte in den lokalen State übernehmen (kein „sieht gespeichert aus, ist es aber nicht").
+    if(ok.length&&setEmployees) setEmployees(es=>es.map(e=>{ const c=ok.find(x=>x.id===e.id); return c||e; }));
+    if(failed.length&&showToast){ const nm=e=>((e.first_name||'')+' '+(e.last_name||'')).trim()||'Mitarbeiter';
+      showToast('⚠ '+failed.length+' von '+changed.length+' nicht gespeichert ('+failed.map(nm).join(', ')+'): '+dbErrMsg(applyEmp._err),'error'); }
+    applyEmp._err=null; return failed.length===0; };
   async function savePlan(form){
     const rec = form.id ? form : {...form, id:(window.crypto&&crypto.randomUUID)?crypto.randomUUID():'tp'+Date.now()};
     // Zuordnung ↔ Mitarbeiterstatus koppeln: neu zugeordnet → training_planned + training_id; abgewählt → zurück auf contract.
@@ -5869,9 +5875,11 @@ function TrainingPlans({plans, setPlans, projects, employees, setEmployees, show
       else if(removed.includes(e.id) && e.training_id===rec.id) changed.push({...e, training_id:'', status:(e.status==='training_planned'?'contract':e.status)});
     });
     if(form.id) setPlans(ps=>ps.map(p=>p.id===form.id?rec:p)); else setPlans(ps=>[...ps,rec]);
-    await saveTrainingPlanToDB(rec);
-    await applyEmp(changed);
-    if(changed.length&&showToast) showToast(added.length?(added.length+' Mitarbeiter zugeordnet (Status „Schulung geplant")'):(removed.length+' aus der Schulung genommen'),'success');
+    try{ await saveTrainingPlanToDB(rec); }
+    catch(e){ showToast&&showToast('⚠ Schulung speichern fehlgeschlagen: '+dbErrMsg(e),'error'); return; }
+    const allOk = await applyEmp(changed);   // applyEmp meldet Teil-/Fehlschläge selbst sichtbar
+    // Erfolg nur melden, wenn die Zuordnung auch wirklich gespeichert wurde (kein „sieht gespeichert aus").
+    if(changed.length&&showToast&&allOk) showToast(added.length?(added.length+' Mitarbeiter zugeordnet (Status „Schulung geplant")'):(removed.length+' aus der Schulung genommen'),'success');
     setModal(null);
   }
   async function startTraining(plan){
@@ -19849,6 +19857,13 @@ function CVModal({cv, projects, team, onSave, onClose, initialTab}){
     try{ const {data}=await sb.from('interview_invites').select('*').eq('cv_id',cv.id).order('created_at',{ascending:false}).limit(1);
       setInvRow((data&&data[0])||null); }catch(e){ setInvRow(null); } }, [cv]);
   useEffect(()=>{ loadInv(); }, [loadInv]);
+  // Liste/Kanban laden den schweren contract-Block nicht (Performance). Beim Öffnen den vollen Vertrag
+  // dieses Bewerbers nachladen, damit der Vertrag-Tab das signed_file (Download/Anzeige) hat. Einmalig,
+  // nur wenn noch kein signed_file im Formular liegt (überschreibt keine laufende Bearbeitung).
+  useEffect(()=>{ let alive=true; if(cv&&cv.id&&!(cv.contract&&cv.contract.signed_file)){
+      (async()=>{ try{ const {data}=await sb.from('cvs').select('contract').eq('id',cv.id).single();
+        if(alive&&data&&data.contract) setForm(f=> (f.contract&&f.contract.signed_file)?f:({...f, contract:data.contract})); }catch(_e){} })();
+    } return ()=>{alive=false;}; }, [cv&&cv.id]);
   const set = (k,v) => setForm(f=>({...f,[k]:v}));
 
   // ── KI-Bewertung ────────────────────────────────────────────
@@ -32213,9 +32228,23 @@ async function loadAllCvs(cols){
   try{ return await sbLoadAll((a,b)=>sb.from('cvs').select(cols).order('id',{ascending:true}).range(a,b)); }
   catch(e){ console.error('[cvs] loadAllCvs', e); return []; }
 }
+// Schlanke Spaltenliste für Liste/Kanban: ALLES außer dem schweren `contract`-Block. Messung 2026-09-11:
+// von 17 MB Zeilendaten der cvs-Tabelle (1216 Zeilen) stecken 15 MB in contract.signed_file (base64-Vertrags-
+// PDF, nur 13 Bewerber, größtes 1,6 MB). Kanban/Liste rendern contract NICHT — der Vertrag wird erst beim
+// Öffnen des Bewerbers nachgeladen (CVModal) bzw. beim Übernehmen (promoteToEmployee, loadCvFull). Spart ~88 %.
+// Gleiche Klasse wie der employees_masked_lite-Fix (contract_file). Bei neuer cvs-Spalte hier ergänzen.
+const CV_LIST_COLS = 'id,first_name,last_name,email,phone,city,status,project_id,target_role,source,cv_date,age,gender,dialect,education,education_level,experience_years,work_history,language_level,writing_level,languages_str,homeoffice_pref,available_from,dream,hobbies,travel_wish,photo_url,photo_color,better_email,better_phone,notes,is_structured,sales_potential,test_answers,test_scores,audios,videos,ai_reasoning,extra,created_at,updated_at,favorite_food,birthday,primary_skill,id_number,bank_name,bank_account,assessed_level,hr_rating,status_changed_at,public_code,street,postal_code,country,employee_id,converted_at';
 async function loadCvsFromDB(){
-  try{ return (await loadAllCvs('*')).map(cvWithAlias); }
+  try{ return (await loadAllCvs(CV_LIST_COLS)).map(cvWithAlias); }
   catch(e){ console.error('[4a-1] loadCvsFromDB', e); return []; }
+}
+// Voller Einzel-Bewerber inkl. schwerer Felder (contract mit signed_file) — beim Öffnen/Übernehmen nachladen,
+// damit die schlanke Listen-Ladung den Vertrag nicht verliert. Fällt auf den übergebenen (schlanken) Datensatz
+// zurück, wenn die Nachladung scheitert.
+async function loadCvFull(id){
+  if(!id) return null;
+  try{ const {data,error}=await sb.from('cvs').select('*').eq('id',id).single(); if(error) throw error; return cvWithAlias(data); }
+  catch(e){ console.error('[cvs] loadCvFull', e); return null; }
 }
 
 async function saveCvToDB(cv){
@@ -46517,6 +46546,9 @@ function App(){
     setEmployees(es=>es.map(e=>e.id===emp.id?emp:e)); setQualityModal(null);
   }
   async function promoteToEmployee(cv){
+    // Liste/Kanban laden den schweren contract-Block NICHT (Performance) → vor dem Übernehmen den vollen
+    // Bewerber inkl. contract.signed_file nachladen, sonst bekäme der neue Mitarbeiter kein Vertrags-PDF.
+    { const full = await loadCvFull(cv.id); if(full) cv = {...cv, ...full}; }
     // Transfer ALL relevant CV fields to employee
     // Salary/hours/schedule ONLY from contract
     const contract = cv.contract || {};
