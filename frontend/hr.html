@@ -9920,10 +9920,12 @@ function cockpitMonthMetrics(employees, cvsDb, selYear, selM0, range){
   const days30=[]; { const b=new Date(); b.setHours(0,0,0,0); for(let i=29;i>=0;i--){ const d=new Date(b); d.setDate(b.getDate()-i); days30.push(d); } }
   const labels30=days30.map(d=>d.getDate()+'. '+MON[d.getMonth()]);
   const dCv=days30.map(d=>cvDates.filter(x=>sameDay(x,d)).length);
-  const absMon=(a,e)=>{ if(!a||!a.from) return 0; const from=new Date(a.from+'T00:00:00'), to=new Date((a.to||a.from)+'T00:00:00'); let s=from<winStart?winStart:from, ee=to>winEnd?winEnd:to; if(s>ee) return 0; let n=0,g=0,d=new Date(s.getFullYear(),s.getMonth(),s.getDate()); const end=new Date(ee.getFullYear(),ee.getMonth(),ee.getDate()); while(d<=end&&g<400){ if(empWorksDay(e,d))n++; d.setDate(d.getDate()+1); g++; } return n; };
-  let krankM=0,urlaubM=0; (employees||[]).forEach(e=>{ if(!e||String(e.status||'').startsWith('terminated')||e.status==='inactive') return; (e.absences||[]).forEach(a=>{ if(a&&a.type==='sick')krankM+=absMon(a,e); else if(a&&a.type==='vacation'&&a.approved!==false)urlaubM+=absMon(a,e); }); });
-  const _we=new Date(winEnd.getFullYear(),winEnd.getMonth(),winEnd.getDate()); const _ws=new Date(winStart.getFullYear(),winStart.getMonth(),winStart.getDate());
-  const kuendM=(employees||[]).filter(e=>{ const td=e&&e.termination_date; if(!td) return false; const d=new Date(td); const dO=new Date(d.getFullYear(),d.getMonth(),d.getDate()); return dO>=_ws&&dO<=_we; }).length;
+  // Kopfwerte Krank/Urlaub/Kündigung teilen sich die Rechnung mit dem Kennzahlen-Register (Single Source) — keine
+  // zweite, driftende Zählung. Nur die Tageskurven (dSick/dVac/dKuend) bleiben hier lokal (Register hat keine Tagesserie).
+  const _wFrom=isoLocal(winStart), _wTo=isoLocal(winEnd);
+  const krankM=metricAbsenceDays(employees,'sick',_wFrom,_wTo);
+  const urlaubM=metricAbsenceDays(employees,'vacation',_wFrom,_wTo);
+  const kuendM=metricTerminations(employees,_wFrom,_wTo);
   return {monLabels,dSick,dVac,dKuend,labels30,dCv,krankM,urlaubM,kuendM};
 }
 function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence, cvsDb, payslipsDb, feedbackTodayDb, setEmployees, showToast, monthOff, setMonthOff}){
@@ -9938,6 +9940,7 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
 
   const active=employees.filter(e=>e&&e.status==='active');
   const inTraining=employees.filter(e=>e&&e.status==='training');
+  const _hcPeriod={from:isoLocal(new Date(_selY,_selM0,1)),to:isoLocal(new Date(_selY,_selM0+1,0))};   // Kopfzahl-Zeitraum = gewählter Monat
   const inbox=(cvsDb||[]).filter(c=>c&&c.status==='cv_inbound');   // Posteingang: ungesichtet, Arbeitsliste
 
   // Offene Urlaubsanträge (pending) + Realtime; decide() genehmigt/lehnt inline über den kanonischen Pfad.
@@ -10023,8 +10026,7 @@ function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence,
       {/* Kennzahlen: zwei kompakte Kacheln + gestapelte Verlaufs-Kacheln. Auf schmalem Screen untereinander,
           damit die Verläufe volle Breite bekommen; Werte per Antippen (kein Hover am Telefon). Gleiche Optik wie Desktop. */}
       <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
-        <TrendTile label="Aktiv" value={active.length} sub="Mitarbeiter" color="#0F5661"/>
-        <TrendTile label="Schulung" value={inTraining.length} sub="Mitarbeiter" color="#7c3aed"/>
+        <CockpitHeadcountTiles period={_hcPeriod} fallbackActive={active.length} fallbackTraining={inTraining.length}/>
       </div>
       <TrendTile label="Krankheitstage" value={M.krankM} sub="laufender Monat" color="#dc2626" chart={<HoverChart data={M.dSick} labels={M.monLabels} color="#dc2626" kind="area" h={46} fmt={v=>v+(v===1?' Person':' Personen')}/>}/>
       <TrendTile label="Urlaubstage" value={M.urlaubM} sub="laufender Monat" color="#d97706" chart={<HoverChart data={M.dVac} labels={M.monLabels} color="#d97706" kind="area" h={46} fmt={v=>v+(v===1?' Person':' Personen')}/>}/>
@@ -10388,6 +10390,9 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
   else { _selY=_pmNow.getFullYear(); _selM0=_pmNow.getMonth(); _isCur=true; _pLabel=_pmNow.toLocaleDateString('de-DE',{month:'long',year:'numeric'}); }   // Rückfall = laufender Monat
   const _cockpitYm = _selY+'-'+String(_selM0+1).padStart(2,'0');
   const _selRange = (ckP.mode==='range' && ckP.from && ckP.to) ? {from:ckP.from,to:ckP.to} : null;   // tagesgenauer Zeitraum
+  const _hcPeriod = _selRange ? _selRange
+    : ((_selKw&&_selKwYear) ? (()=>{ const mon=isoWeekMonday(_selKwYear,_selKw); const s=new Date(mon.getFullYear(),mon.getMonth(),mon.getDate()); const e=new Date(s); e.setDate(s.getDate()+6); return {from:isoLocal(s),to:isoLocal(e)}; })()
+    : {from:isoLocal(new Date(_selY,_selM0,1)),to:isoLocal(new Date(_selY,_selM0+1,0))});   // Kopfzahl-Zeitraum: Range | KW-Woche | Monat
   const _subKrank = _isCur?'laufender Monat':(_selRange?_pLabel:new Date(_selY,_selM0,1).toLocaleDateString('de-DE',{month:'long',year:'numeric'}));   // Bezugs-Label für Krank/Urlaub-Kacheln
   const _ownRef=(txt)=> _isCur?null:<div style={{fontSize:11,color:'var(--muted)',fontStyle:'italic',marginBottom:6}}>{txt||'Bezieht sich auf heute, folgt dem Zeitraum nicht.'}</div>;
   const _shiftMonth=(d)=>{ const b=ckP.mode==='monat'?(()=>{const[y,m]=ckP.ym.split('-').map(Number);return new Date(y,m-1+d,1);})():new Date(_selY,_selM0+d,1); setCkP({mode:'monat',ym:b.getFullYear()+'-'+String(b.getMonth()+1).padStart(2,'0')}); };
@@ -10495,8 +10500,6 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
     // (M ist oben am Zweig-Anfang definiert — vor cveingang/tiles6.)
     const _uPer=v=>v+(v===1?' Person':' Personen'), _uCv=v=>v+(v===1?' Bewerbung':' Bewerbungen'), _uKu=v=>v+(v===1?' Kündigung':' Kündigungen');
     const tiles6=[
-      {val:active.length,label:'Aktiv',sub:'Mitarbeiter',color:'#0F5661'},
-      {val:inTraining.length,label:'Schulung',sub:'Mitarbeiter',color:'#7c3aed'},
       {val:M.krankM,label:'Krankheitstage',sub:_subKrank,color:'#dc2626',daily:M.dSick,labels:M.monLabels,fmt:_uPer},
       {val:M.urlaubM,label:'Urlaubstage',sub:_subKrank,color:'#d97706',daily:M.dVac,labels:M.monLabels,fmt:_uPer},
       {val:M.kuendM,label:'Kündigungen',sub:_subKrank,color:'#b91c1c',daily:M.dKuend,labels:M.monLabels,fmt:_uKu},
@@ -10504,6 +10507,7 @@ function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavig
     ];
     // S1b: Block-Registry — Reihenfolge + Aus-/Einblenden per User (Drag im Bearbeiten-Modus).
     const tilesBlock=<div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:12,marginBottom:14}}>
+      <CockpitHeadcountTiles period={_hcPeriod} fallbackActive={active.length} fallbackTraining={inTraining.length}/>
       {tiles6.map((k,i)=>(<TrendTile key={i} label={k.label} value={k.val} sub={k.sub} color={k.color} nav={k.nav} onNavigate={onNavigate}
         chart={k.daily?<HoverChart data={k.daily} labels={k.labels} color={k.color} kind="area" h={46} fmt={k.fmt}/>:null}/>))}
     </div>;
@@ -30518,6 +30522,14 @@ const METRIC_REGISTRY = {
   forecast_stunden:   { label:'Forecast-Stunden',       unit:'h',   grain:'week',  source:'report_forecast',  col:'fc_hours',       agg:'sum',                    scope:{project:'project_id', skill:'skill'} },
   umsatz_ist:         { label:'Ist-Umsatz',             unit:'€',   grain:'month', source:'forecast_actuals', col:'revenue',        agg:'sum',                    scope:{project:'project_id'} },
   personalkosten_ist: { label:'Ist-Personalkosten',     unit:'€',   grain:'month', source:'forecast_actuals', col:'cost_personnel', agg:'sum',                    scope:{project:'project_id'} },
+  // Kopfzahlen (as-of aus der Statushistorie, Schnitt 2) + Abwesenheiten/Quoten (aus employees.absences).
+  // Diese Kennzahlen sind NICHT tabellen-/grain-basiert (kind statt source/col/grain); der Rechner verzweigt darauf.
+  aktiv:              { label:'Aktiv',                  unit:'',    kind:'headcount',    statuses:['active'],                      scope:{project:true, skill:true} },
+  schulung:           { label:'Schulung',              unit:'',    kind:'headcount',    statuses:['training','training_planned'], scope:{project:true, skill:true} },
+  krankheitstage:     { label:'Krankheitstage',        unit:'',    kind:'absence_days', absType:'sick' },
+  urlaubstage:        { label:'Urlaubstage',           unit:'',    kind:'absence_days', absType:'vacation' },
+  kuendigungen:       { label:'Kündigungen',           unit:'',    kind:'terminations' },
+  abwesenheitsquote:  { label:'Abwesenheitsquote',     unit:'%',   kind:'absence_rate' },
 };
 function _metricAgg(rows, m){
   if(m.agg==='sum')  return (rows||[]).reduce((s,r)=>s+(Number(r[m.col])||0),0);
@@ -30542,10 +30554,93 @@ function _metricMonthsIn(fromStr, toStr){ const f=new Date(fromStr+'T00:00:00'),
   while(y<t.getFullYear()||(y===t.getFullYear()&&m<=t.getMonth())){ out.push(y+'-'+String(m+1).padStart(2,'0')); m++; if(m>11){m=0;y++;} }
   return out; }
 function _metricResult(m, value, coverage, n){ return { key:null, label:m.label, unit:m.unit||'', value:(n===0?null:value), grain:m.grain, precisionLabel:METRIC_GRAIN_LABEL[m.grain], coverage, rows:n, estimate:false, noData:(n===0) }; }
+
+// ── Employees-/Historie-basierte Kennzahlen: EINE Rechnung, die Register UND Cockpit teilen (Single Source). ──
+function _absCoversDs(a, ds){ if(!a||!a.from) return false; const f=String(a.from).slice(0,10), t=String(a.to||a.from).slice(0,10); return ds>=f&&ds<=t; }
+// Abwesenheits-Personen-Werktage eines Typs im Zeitraum. IDENTISCH zur Cockpit-Zählung (empWorksDay, OHNE
+// Feiertagsabzug; gekündigte/inaktive MA zählen nicht; Urlaub nur wenn approved!==false).
+function metricAbsenceDays(employees, type, fromStr, toStr){
+  const f=new Date(fromStr+'T00:00:00'), t=new Date(toStr+'T00:00:00');
+  const ws=new Date(f.getFullYear(),f.getMonth(),f.getDate()), we=new Date(t.getFullYear(),t.getMonth(),t.getDate());
+  let total=0;
+  (employees||[]).forEach(e=>{
+    if(!e||String(e.status||'').startsWith('terminated')||e.status==='inactive') return;
+    (e.absences||[]).forEach(a=>{ if(!a||a.type!==type) return; if(type==='vacation'&&a.approved===false) return;
+      const af=new Date(String(a.from).slice(0,10)+'T00:00:00'), at=new Date(String(a.to||a.from).slice(0,10)+'T00:00:00');
+      let s=af<ws?ws:af, ee=at>we?we:at; if(s>ee) return;
+      let d=new Date(s.getFullYear(),s.getMonth(),s.getDate()); const end=new Date(ee.getFullYear(),ee.getMonth(),ee.getDate()); let g=0;
+      while(d<=end&&g<400){ if(empWorksDay(e,d)) total++; d.setDate(d.getDate()+1); g++; }
+    });
+  });
+  return total;
+}
+function metricTerminations(employees, fromStr, toStr){
+  return (employees||[]).filter(e=>{ const td=e&&e.termination_date; if(!td) return false; const d=String(td).slice(0,10); return d>=fromStr&&d<=toStr; }).length;
+}
+// Abwesenheitsquote: Ausfall-Stunden / Kapazitäts-Stunden. Nenner = KAPAZITÄT (MA-Sollzeit je Werktag,
+// feiertagsbereinigt für MA, die nicht an Feiertagen arbeiten), NICHT der Schichtplan — die kanonische Definition.
+function metricAbsenceRate(employees, fromStr, toStr){
+  const f=new Date(fromStr+'T00:00:00'), t=new Date(toStr+'T00:00:00');
+  const ws=new Date(f.getFullYear(),f.getMonth(),f.getDate()), we=new Date(t.getFullYear(),t.getMonth(),t.getDate());
+  let capH=0, absH=0;
+  (employees||[]).filter(e=>e&&['active','training'].includes(e.status)&&e.project_id).forEach(e=>{
+    const dh=(Number(e.work_hours)>0?Number(e.work_hours):8);
+    const holSet=holidayDatesForLocation(e.location||e.city)||new Set(); const worksHol=canWorkHoliday(e);
+    let d=new Date(ws.getFullYear(),ws.getMonth(),ws.getDate()); let g=0;
+    while(d<=we&&g<400){ const ds=isoLocal(d);
+      if(empWorksDay(e,d) && (worksHol||!holSet.has(ds))){
+        capH+=dh;
+        const on=(e.absences||[]).some(a=>a&&((a.type==='sick')||(a.type==='vacation'&&a.approved!==false))&&_absCoversDs(a,ds));
+        if(on){ const fr=absPartialFraction(e,ds); absH+=dh*(fr==null?1:fr); }
+      }
+      d.setDate(d.getDate()+1); g++;
+    }
+  });
+  return { rate: capH>0?(absH/capH*100):null, absH, capH };
+}
+// Cutover-Datum der Statushistorie (ab hier tagesgenau, davor geschätzt) — einmal laden, cachen.
+let _statusExactSince=null;
+async function _loadStatusCutover(){ if(_statusExactSince!==null) return _statusExactSince;
+  try{ const {data}=await sb.from('app_config').select('value').eq('key','status_history_exact_since').maybeSingle();
+    _statusExactSince=(data&&data.value!=null)? String(data.value).replace(/"/g,'') : ''; }catch(_e){ _statusExactSince=''; }
+  return _statusExactSince; }
+// Kind-Dispatcher für die employees-/historie-basierten Kennzahlen. ctx.employees liefert die MA-Daten
+// (Abwesenheiten/Projekt-Scope); Kopfzahl kommt as-of aus der Statushistorie-RPC employee_status_on.
+async function _metricEmployeeKind(key, m, from, to, scope, ctx){
+  const emps=ctx&&ctx.employees;
+  if(m.kind==='headcount'){
+    const todayS=isoLocal(new Date()); const asOf=(to>todayS?todayS:to);   // Stichtag = Periodenende, gedeckelt auf heute
+    const {data,error}=await sb.rpc('employee_status_on',{p_date:asOf}); if(error) throw error;
+    let ids=(data||[]).filter(r=>m.statuses.includes(r.status)).map(r=>r.employee_id);
+    if(scope&&(scope.project!=null||scope.skill!=null)&&Array.isArray(emps)){
+      const by={}; emps.forEach(e=>{ by[e.id]=e; });
+      ids=ids.filter(id=>{ const e=by[id]; if(!e) return false;
+        if(scope.project!=null && e.project_id!==scope.project) return false;
+        if(scope.skill!=null && (e.project_skill||e.skill)!==scope.skill) return false; return true; });
+    }
+    const cut=await _loadStatusCutover(); const exact=!!(cut && asOf>=cut);
+    return { key, label:m.label, unit:m.unit||'', value:ids.length, grain:'headcount', estimate:!exact,
+      precisionLabel: exact?('Kopfzahl per '+asOf+', tagesgenau'):('Kopfzahl per '+asOf+', geschätzt (vor '+(cut||'Cutover')+')'),
+      coverage:'Stichtag '+asOf, rows:ids.length, noData:false };
+  }
+  if(!Array.isArray(emps)) return {error:'employees fehlen (ctx.employees)', label:m.label, grain:m.kind};
+  if(m.kind==='absence_days'){ const v=metricAbsenceDays(emps, m.absType, from, to);
+    return { key, label:m.label, unit:m.unit||'', value:v, grain:'day', estimate:false, precisionLabel:'tagesgenau', coverage:'Tage '+from+' bis '+to, rows:v, noData:false }; }
+  if(m.kind==='terminations'){ const v=metricTerminations(emps, from, to);
+    return { key, label:m.label, unit:m.unit||'', value:v, grain:'day', estimate:false, precisionLabel:'tagesgenau', coverage:'Tage '+from+' bis '+to, rows:v, noData:false }; }
+  if(m.kind==='absence_rate'){ const r=metricAbsenceRate(emps, from, to);
+    return { key, label:m.label, unit:'%', value:r.rate, grain:'day', estimate:false, precisionLabel:'tagesgenau (Nenner: Kapazität)', coverage:'Ausfall '+Math.round(r.absH)+' h / Kapazität '+Math.round(r.capH)+' h', rows:1, noData:(r.rate===null) }; }
+  return {error:'Unbekannte Kennzahl-Art: '+m.kind, label:m.label};
+}
+
 // Der zentrale Rechner. period={from,to} (YYYY-MM-DD), scope={project,skill}. Liefert Wert + Genauigkeit, nie geraten.
-async function metricOverPeriod(key, period, scope){
+async function metricOverPeriod(key, period, scope, ctx){
   const m=METRIC_REGISTRY[key]; if(!m) return {error:'Unbekannte Kennzahl: '+key};
   const from=period&&period.from, to=period&&period.to; if(!from||!to) return {error:'Zeitraum fehlt'};
+  if(m.kind){   // employees-/historie-basiert (Kopfzahlen/Abwesenheiten) — nicht tabellen-/grain-basiert
+    try{ return await _metricEmployeeKind(key, m, from, to, scope, ctx); }
+    catch(e){ return {error:String((e&&e.message)||e), label:m.label, grain:m.kind}; }
+  }
   const sel=m.col + (m.agg==='wavg'&&m.weight?(','+m.weight):'');
   try{
     if(m.grain==='day'){
@@ -30589,10 +30684,42 @@ async function metricProrataEstimate(key, period, scope){
 try{ window.__metric = { registry:METRIC_REGISTRY, over:metricOverPeriod, prorata:metricProrataEstimate }; }catch(_e){}
 // Genauigkeits-Abzeichen: tagesgenau (grün) / auf ganze Wochen gerundet (bernstein) / monatsgebunden (grau) / Schätzung.
 function MetricPrecisionBadge({grain, estimate, title}){
+  // Kopfzahlen (Statushistorie): tagesgenau ab Cutover, davor geschätzt — eigener Text, nicht „anteilig".
+  if(grain==='headcount'){ const s=estimate?{t:'geschätzt',c:'#c2410c',bg:'#fff7ed'}:{t:'tagesgenau',c:'#059669',bg:'#ecfdf5'};
+    return <span title={title||''} style={{fontSize:10,fontWeight:700,padding:'1px 7px',borderRadius:20,background:s.bg,color:s.c,border:'1px solid '+s.c+'55',whiteSpace:'nowrap'}}>{s.t}</span>; }
   if(estimate) return <span title={title||''} style={{fontSize:10,fontWeight:700,padding:'1px 7px',borderRadius:20,background:'#fff7ed',color:'#c2410c',border:'1px solid #c2410c55',whiteSpace:'nowrap'}}>Schätzung (anteilig)</span>;
   const map={ day:{t:'tagesgenau',c:'#059669',bg:'#ecfdf5'}, week:{t:'auf ganze Wochen gerundet',c:'#b45309',bg:'#fffbeb'}, month:{t:'monatsgebunden',c:'#64748b',bg:'var(--surface-2)'} };
   const s=map[grain]||map.month;
   return <span title={title||''} style={{fontSize:10,fontWeight:700,padding:'1px 7px',borderRadius:20,background:s.bg,color:s.c,border:'1px solid '+s.c+'55',whiteSpace:'nowrap'}}>{s.t}</span>;
+}
+
+// Kopfzahlen (Aktiv/Schulung) fürs Cockpit über den Register (Schnitt 3): folgen dem gewählten Zeitraum
+// (as-of aus der Statushistorie), statt immer den Live-Bestand zu zeigen. period={from,to} (YYYY-MM-DD).
+function useHeadcounts(period){
+  const [hc,setHc]=React.useState({aktiv:null, schulung:null, aktivEst:false, schulungEst:false, ready:false});
+  const pk=period?(period.from+'|'+period.to):'';
+  React.useEffect(()=>{ let alive=true;
+    if(!pk){ return; }
+    (async()=>{ try{
+      const [a,s]=await Promise.all([ metricOverPeriod('aktiv',period), metricOverPeriod('schulung',period) ]);
+      if(!alive) return;
+      setHc({ aktiv:(a&&!a.error)?a.value:null, schulung:(s&&!s.error)?s.value:null,
+              aktivEst:!!(a&&a.estimate), schulungEst:!!(s&&s.estimate), ready:true });
+    }catch(_e){ if(alive) setHc(h=>({...h,ready:true})); } })();
+    return ()=>{alive=false;};
+  },[pk]);
+  return hc;
+}
+// Die zwei Kopfzahl-Kacheln als eigene Komponente — kapselt den async Hook, damit die Cockpit-Container den
+// frühen Mobile-Return behalten können (Hook lebt hier, nicht im Container). Fallback = Live-Bestand bis geladen.
+function CockpitHeadcountTiles({period, fallbackActive, fallbackTraining}){
+  const hc=useHeadcounts(period);
+  const aktiv=(hc.aktiv!=null)?hc.aktiv:fallbackActive;
+  const schul=(hc.schulung!=null)?hc.schulung:fallbackTraining;
+  return <React.Fragment>
+    <TrendTile label="Aktiv"    value={aktiv} sub={hc.aktivEst?'Mitarbeiter · geschätzt':'Mitarbeiter'} color="#0F5661"/>
+    <TrendTile label="Schulung" value={schul} sub={hc.schulungEst?'Mitarbeiter · geschätzt':'Mitarbeiter'} color="#7c3aed"/>
+  </React.Fragment>;
 }
 
 // ─── 25a: Employees CRUD on Supabase (Realtime + Deprecation) ────────
