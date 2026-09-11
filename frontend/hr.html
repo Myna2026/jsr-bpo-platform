@@ -31851,7 +31851,18 @@ async function saveEmployeeToDB(emp){
   if(isAdmin){
     // Readback bewusst schlank (nur unsensible Spalten): sensible Felder sind auf der Basistabelle
     // nicht mehr direkt lesbar (Lockdown). Autoritative DB-id/Namen über die lokalen Payload-Felder legen.
-    const r=await sb.from('employees').upsert(payload).select('id,first_name,last_name').single(); if(r.error) throw r.error; data={...payload, ...r.data};
+    // KEIN upsert (merge-duplicates): seit dem employees-Basis-Lockdown (2026-09-03, Tabellen-SELECT für
+    // authenticated entzogen, Lesen läuft über employees_masked) scheitert INSERT..ON CONFLICT mit 42501
+    // „permission denied for table employees" — ON CONFLICT DO UPDATE verlangt Tabellen-SELECT, das reine
+    // INSERT bzw. UPDATE aber nicht (Spalten-Grants + RETURNING reichen). Darum getrennt: neue Zeile = insert,
+    // bestehende = update per id. Beide Wege lesen id/first_name/last_name sauber zurück.
+    let r;
+    if(payload.id){ const _id=payload.id; const _body={...payload}; delete _body.id;
+      r=await sb.from('employees').update(_body).eq('id',_id).select('id,first_name,last_name').single();
+    } else {
+      r=await sb.from('employees').insert(payload).select('id,first_name,last_name').single();
+    }
+    if(r.error) throw r.error; data={...payload, ...r.data};
   } else {
     const existing = payload.id && EMP_BY_ID[payload.id];   // Bestand? → Update, sonst Anlage
     const r=await sb.rpc(existing?'update_employee_lead':'promote_employee', {p_payload:payload});
