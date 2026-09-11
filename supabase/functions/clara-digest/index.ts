@@ -73,6 +73,10 @@ Deno.serve(async (req)=>{
   const { data:stats } = await sb.rpc("clara_morning_stats", { p_date: day });
   const { data:obs } = await sb.from("agent_observations").select("title").eq("agent_key","clara").eq("day",day);
   const notes = (obs||[]).map((o:any)=>o.title).join(" ");
+  // Auto-Parken: wie viele hat Clara heute frueh (Cron 05:40) in den Pool geparkt? Nur zaehlen, wenn der letzte Lauf VON HEUTE ist.
+  const { data:apCfg } = await sb.from("app_config").select("value").eq("key","jsr_clara_auto_v1").maybeSingle();
+  const _lr:any = (apCfg as any)?.value?.auto_park?.last_run;
+  const parkedN = (_lr && String(_lr.at||"").slice(0,10)===day) ? (Number(_lr.parked)||0) : 0;
   const { data:cl } = await sb.from("ai_agents").select("persona,name,email,mail_from_name,disclosure,accent,avatar_url").eq("key","clara").maybeSingle();
   const persona = (cl&&cl.persona) || "Du bist Clara, digitale Kollegin im Recruiting.";
 
@@ -133,6 +137,7 @@ Deno.serve(async (req)=>{
       +'<td style="padding-right:8px;"><span style="display:inline-block;background:#fde68a;color:#8a5a00;font-weight:bold;font-size:14px;padding:7px 13px;border-radius:20px;">&#9733; GUT '+qGut+'</span></td>'
       +'<td><span style="display:inline-block;background:#eef0f4;color:#6b7280;font-weight:bold;font-size:14px;padding:7px 13px;border-radius:20px;">Rest '+qRest+'</span></td>'
       +'</tr></table></td></tr>'
+    +(parkedN>0 ? '<tr><td style="padding:12px 22px 2px;"><div style="font-size:13px;color:#374151;">&#9851; In den Pool geparkt (zu lange unbearbeitet): <b style="color:#0891b2;">'+parkedN+'</b> <span style="color:#9ca3af;">— aus dem Trichter genommen, keine Absage; im Bewerber-Pool auffindbar.</span></div></td></tr>' : '')
     +'<tr><td style="padding:16px 22px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f6f4fb;border-left:4px solid '+acc+';border-radius:10px;"><tr>'
       +'<td width="58" valign="top" style="padding:14px 0 14px 14px;"><img src="'+photo+'" width="40" height="40" alt="Clara" style="border-radius:20px;display:block;"></td>'
       +'<td style="padding:14px;font-size:15px;line-height:1.55;color:#1f2937;">'+obsText.replace(/</g,"&lt;").replace(/\n/g,"<br>")+'</td></tr></table></td></tr>'
@@ -144,12 +149,14 @@ Deno.serve(async (req)=>{
     +"Bewerbungen heute: "+nt+" (gestern "+np+", "+arrow.replace(/▲ |▼ /,"")+")\n"
     +"Davon neu: "+neu+"\nDubletten offen: "+dub+"\n\n"
     +"Sprachniveau: hoch "+hoch+", mittel "+mit+", niedrig "+nied+", unbekannt "+unb+"\n"
-    +"Qualität: TOP "+qTop+", GUT "+qGut+", Rest "+qRest+"\n\n"
+    +"Qualität: TOP "+qTop+", GUT "+qGut+", Rest "+qRest+"\n"
+    +(parkedN>0?("In den Pool geparkt (zu lange unbearbeitet): "+parkedN+"\n"):"")+"\n"
     +obsText+"\n\nZum Recruiting: "+recruitLink+"\n\n— Clara, digitale Kollegin im Recruiting";
   const slackText = "*Recruiting heute Morgen · "+dateLbl+"*\n"
     +"📥 Bewerbungen heute: *"+nt+"*  ("+arrow+")\n🆕 Davon neu: *"+neu+"*    👥 Dubletten offen: *"+dub+"*\n"
     +"Sprache: hoch "+hoch+" · mittel "+mit+" · niedrig "+nied+" · unbekannt "+unb+"\n"
-    +"Qualität: ⭐ TOP "+qTop+" · ★ GUT "+qGut+" · Rest "+qRest+"\n\n"+obsText+"\n_— Clara_";
+    +"Qualität: ⭐ TOP "+qTop+" · ★ GUT "+qGut+" · Rest "+qRest+"\n"
+    +(parkedN>0?("♻️ In den Pool geparkt: *"+parkedN+"*\n"):"")+"\n"+obsText+"\n_— Clara_";
 
   if(sp.get("dry")==="1") return json({ dry:true, day, obsText, textFb, html });
 
