@@ -19179,16 +19179,25 @@ function ContractSection({cv, onContractSaved, onPromote}){
     setShowPreview(true);
   }
 
-  function handleSignedUpload(e){
-    const file = e.target.files[0];
+  const [upBusy, setUpBusy] = useState(false);
+  const [upErr, setUpErr] = useState('');
+  async function handleSignedUpload(e){
+    const file = e.target.files[0]; if(e.target) e.target.value='';
     if(!file) return;
-    const reader = new FileReader();
-    reader.onload = ev => {
-      const updated = {...contract, signed:true, signed_date:isoLocal(new Date()), signed_file:ev.target.result, signed_filename:file.name};
-      setContract(updated);
-      onContractSaved(updated);
-    };
-    reader.readAsDataURL(file);
+    // Wurzel-Fix: Datei in den Storage (cv-docs), NICHT mehr als base64 in die Zeile. In contract nur der Pfad.
+    setUpErr(''); setUpBusy(true);
+    const up = await cvDocUpload(cv.id, file);
+    setUpBusy(false);
+    if(up.error){ setUpErr(up.error); return; }
+    const updated = {...contract, signed:true, signed_date:isoLocal(new Date()), signed_path:up.path, signed_filename:up.filename};
+    delete updated.signed_file;   // keine base64 mehr in der Zeile
+    setContract(updated);
+    onContractSaved(updated);
+  }
+  // Vertrag öffnen: neuer Weg über signierten Storage-Link (signed_path), Rückfall auf base64-Altbestand (signed_file).
+  async function openSignedDoc(){
+    if(contract&&contract.signed_path){ const url=await cvDocOpen(contract.signed_path); if(url) window.open(url,'_blank'); else setUpErr('Vertrag nicht verfügbar (kein Zugriff oder gelöscht).'); return; }
+    if(contract&&contract.signed_file){ const a=document.createElement('a'); a.href=contract.signed_file; a.download=contract.signed_filename||'vertrag.pdf'; a.click(); }
   }
 
   function printContract(){
@@ -19269,9 +19278,9 @@ function ContractSection({cv, onContractSaved, onPromote}){
             <>
               <button className="btn btn-sm" onClick={()=>setShowForm(true)}>✏ Bearbeiten</button>
               <button className="btn btn-sm" onClick={printContract} style={{background:'var(--purple)',color:'white',border:'none'}}>🖨 Drucken</button>
-              <label className="btn btn-sm" style={{cursor:'pointer',background:'var(--amber)',color:'white',border:'none'}}>
-                📎 Unterzeichnet hochladen
-                <input type="file" accept=".pdf,.jpg,.jpeg,.png" style={{display:'none'}} onChange={handleSignedUpload}/>
+              <label className="btn btn-sm" style={{cursor:upBusy?'default':'pointer',background:'var(--amber)',color:'white',border:'none',opacity:upBusy?.6:1}}>
+                {upBusy?'⏳ Lädt hoch…':'📎 Unterzeichnet hochladen'}
+                <input type="file" accept=".pdf,.jpg,.jpeg,.png" disabled={upBusy} style={{display:'none'}} onChange={handleSignedUpload}/>
               </label>
               {onPromote&&<button className="btn btn-sm" disabled title="Erst nach Hochladen des unterschriebenen Vertrags" style={{opacity:.45,cursor:'not-allowed'}}>🎉 Zu Mitarbeiter konvertieren</button>}
               {onPromote&&<div style={{flexBasis:'100%',fontSize:11,color:'var(--muted)',marginTop:2}}>Übernahme zu Mitarbeiter erst nach Hochladen des unterschriebenen Vertrags. Danach wird der Mitarbeiter auf „Schulung geplant" gesetzt.</div>}
@@ -19282,10 +19291,11 @@ function ContractSection({cv, onContractSaved, onPromote}){
               <button className="btn btn-sm btn-primary" onClick={onPromote}>
                 🎉 Zu Mitarbeiter konvertieren
               </button>
-              {contract.signed_file&&<a href={contract.signed_file} download={contract.signed_filename||'vertrag.pdf'}
-                className="btn btn-sm" style={{textDecoration:'none'}}>⬇ Vertrag</a>}
+              {(contract.signed_path||contract.signed_file)&&<button onClick={openSignedDoc}
+                className="btn btn-sm" style={{textDecoration:'none'}}>⬇ Vertrag</button>}
             </>
           )}
+          {upErr&&<div style={{flexBasis:'100%',fontSize:12,color:'var(--red,#dc2626)',marginTop:4}}>⚠ {upErr}</div>}
         </div>
       </div>
 
@@ -25782,6 +25792,25 @@ async function empDocDelete(row){
   return {ok:true};
 }
 function fmtBytes(n){ n=Number(n)||0; if(n<1024) return n+' B'; if(n<1048576) return Math.round(n/1024)+' KB'; return (n/1048576).toFixed(1)+' MB'; }
+
+// ── Bewerber-Vertragsdatei · privater Bucket "cv-docs" (Wurzel-Fix: base64 raus aus cvs.contract.signed_file) ──
+// Pfad <cv_id>/contract/<datei>. RLS spiegelt die cvs-Rechte (perm 'bewerber' + Projekt). Signierte Links 300 s.
+// Beim Übernehmen wird die Datei ins Mitarbeiter-System (employee-docs) kopiert (promoteToEmployee).
+const CV_DOC_BUCKET = 'cv-docs';
+async function cvDocUpload(cvId, file){
+  if(!cvId||!file) return {error:'Bewerber erst speichern, dann Vertrag hochladen.'};
+  const okType = file.type==='application/pdf' || /^image\/(jpeg|png)$/.test(file.type||'') || /\.(pdf|jpe?g|png)$/i.test(file.name||'');
+  if(!okType) return {error:'Nur PDF, JPG oder PNG.'};
+  if(file.size > 10*1024*1024) return {error:'Datei über 10 MB.'};
+  const extM=/\.(\w+)$/.exec(file.name||''); const ext=(extM&&extM[1]||(file.type==='application/pdf'?'pdf':file.type==='image/png'?'png':'jpg')).toLowerCase();
+  const rand=Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+  const path=cvId+'/contract/'+isoLocal(new Date())+'_vertrag_'+rand+'.'+ext;
+  const up=await sb.storage.from(CV_DOC_BUCKET).upload(path, file, {contentType:file.type||'application/pdf', upsert:false});
+  if(up.error){ console.warn('[cvDoc] upload', up.error); return {error:(up.error.message||'Upload fehlgeschlagen')}; }
+  return {ok:true, path, filename:(file.name||('vertrag.'+ext))};
+}
+async function cvDocOpen(path){ if(!path) return null;
+  try{ const {data,error}=await sb.storage.from(CV_DOC_BUCKET).createSignedUrl(path, 300); if(error||!data) return null; return data.signedUrl||null; }catch(e){ return null; } }
 
 function EmployeeDocsPanel({emp}){
   const [docs,setDocs]=useState(null);           // null = laedt
@@ -46665,6 +46694,16 @@ function App(){
     // Der Recruiting-Verlauf (Mails/Termine an cv_id) bleibt damit an der Person erhalten.
     try{ await markCvConvertedInDB(cv.id, saved.id); }
     catch(e){ showToast('⚠ CV-Verknüpfung fehlgeschlagen (Mitarbeiter #'+nextNum+' wurde angelegt): '+(e.message||'DB'),'error'); return; }
+    // Wurzel-Fix: unterschriebenen Vertrag NICHT als base64 in die MA-Zeile, sondern die Storage-Datei (cv-docs)
+    // ins Mitarbeiter-Dokumentensystem (employee-docs) übernehmen. Nur PDF (Bucket ist PDF-only); Bilder bleiben
+    // am verknüpften Bewerber erreichbar. Best-effort — blockiert die Übernahme nicht.
+    if(cv.contract&&cv.contract.signed_path&&(/\.pdf$/i.test(cv.contract.signed_filename||'')||/\.pdf$/i.test(cv.contract.signed_path))){
+      try{ const {data:blob}=await sb.storage.from(CV_DOC_BUCKET).download(cv.contract.signed_path);
+        if(blob){ const f=new File([blob], cv.contract.signed_filename||'arbeitsvertrag.pdf', {type:'application/pdf'});
+          const up=await empDocUpload(saved.id, f, 'contract');
+          if(up.error) showToast('⚠ Mitarbeiter #'+nextNum+' angelegt, Vertrag ins Dokumentensystem übernehmen fehlgeschlagen: '+up.error+' (bleibt am Bewerber)','error'); }
+      }catch(e){ console.warn('[promote] Vertrag-Kopie cv-docs→employee-docs', e); }
+    }
     alert('✅ Mitarbeiter #'+nextNum+' angelegt!\n\nPortal-Login:\nMitarbeiternummer: '+nextNum+'\nPasswort: jsr'+nextNum+'\n\n(Passwort bitte beim ersten Login ändern)');
   }
 
