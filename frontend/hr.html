@@ -21209,16 +21209,33 @@ function PhoneActionView({team, showToast}){
   const [allRows,setAllRows]=useState(null);    // Auswertungstabelle (mgmt/hr)
   const [sortK,setSortK]=useState('assignee_name'); const [sortD,setSortD]=useState(1);
   const [fltA,setFltA]=useState(''); const [fltS,setFltS]=useState('');
+  const [campaigns,setCampaigns]=useState(null);   // alle Kampagnen (mgmt) für Auswahl
+  const [showNew,setShowNew]=useState(false); const [nName,setNName]=useState(''); const [nFrom,setNFrom]=useState(''); const [nTo,setNTo]=useState('');
+  const [copied,setCopied]=useState(false);
+  const PHONE_LINK_BASE='https://client.tive360.de/telefon.html?t=';
   const _tomorrow=(()=>{ const d=new Date(); d.setDate(d.getDate()+1); return isoLocal(d); })();
   const loadLeads=React.useCallback(async(cid)=>{ const {data,error}=await sb.rpc('phonecall_my_leads',{p_campaign:cid});
     setLeads(error?[]:(data||[])); }, []);
   const loadOvw=React.useCallback(async(cid)=>{ if(!isMgmt){ setOvw(null); return; } const {data}=await sb.rpc('phonecall_overview',{p_campaign:cid}); setOvw(data||[]); },[isMgmt]);
   const loadAll=React.useCallback(async(cid)=>{ if(!isMgmt){ setAllRows(null); return; } const {data}=await sb.rpc('phonecall_all_leads',{p_campaign:cid}); setAllRows(data||[]); },[isMgmt]);
+  const loadFor=React.useCallback(async(c)=>{ setCamp(c); if(c){ await loadLeads(c.id); await loadOvw(c.id); await loadAll(c.id); } else { setLeads([]); } },[loadLeads,loadOvw,loadAll]);
   useEffect(()=>{ let alive=true; (async()=>{
-    const {data}=await sb.from('call_campaigns').select('id,name').eq('active',true).order('created_at',{ascending:false}).limit(1);
-    const c=(data&&data[0])||null; if(!alive) return; setCamp(c);
-    if(c){ await loadLeads(c.id); await loadOvw(c.id); await loadAll(c.id); } else { setLeads([]); }
-  })(); return ()=>{alive=false;}; },[]);
+    let list=null;
+    if(isMgmt){ const {data}=await sb.rpc('campaign_list'); list=data||[]; if(alive) setCampaigns(list); }
+    let c=null;
+    if(list&&list.length){ const x=list[0]; c={id:x.id,name:x.name,public_token:x.public_token}; }
+    else { const {data}=await sb.from('call_campaigns').select('id,name,public_token').eq('active',true).order('created_at',{ascending:false}).limit(1); c=(data&&data[0])||null; }
+    if(!alive) return; await loadFor(c);
+  })(); return ()=>{alive=false;}; },[isMgmt]);
+  async function selectCamp(id){ const c=(campaigns||[]).find(x=>x.id===id); if(!c) return; setLeads(null); await loadFor({id:c.id,name:c.name,public_token:c.public_token}); }
+  async function createCampaign(){ if(!nName.trim()) return;
+    const {data,error}=await sb.rpc('campaign_create',{p_name:nName.trim(), p_from:nFrom||null, p_to:nTo||null});
+    if(error){ showToast&&showToast('⚠ '+(error.message||'DB'),'error'); return; }
+    setShowNew(false); setNName(''); setNFrom(''); setNTo('');
+    const {data:list}=await sb.rpc('campaign_list'); setCampaigns(list||[]);
+    const nc=(list||[]).find(x=>x.id===(data&&data.id)); if(nc){ setLeads(null); await loadFor({id:nc.id,name:nc.name,public_token:nc.public_token}); }
+    showToast&&showToast('Aktion angelegt, jetzt Leads + Teilnehmer zuordnen','success');
+  }
   async function act(lead, result, reason, date){
     setBusy(lead.lead_id);
     const {error}=await sb.rpc('phonecall_log',{p_lead_id:lead.lead_id, p_result:result, p_reason:reason||null, p_date:date||null, p_note:null});
@@ -21240,15 +21257,41 @@ function PhoneActionView({team, showToast}){
     if(l.status==='no_answer') return {t:'📵 Wiedervorlage '+fmtDe(l.followup_date),c:'#b45309',bg:'var(--amber-bg)'};
     return null; };
 
-  if(camp===undefined||leads===null) return <div className="w-empty" style={{padding:'40px 0',textAlign:'center',color:'var(--muted)'}}>Lädt…</div>;
-  if(!camp) return <div className="w-empty" style={{padding:'40px 0',textAlign:'center',color:'var(--muted)'}}>Keine aktive Telefonaktion.</div>;
+  if(camp===undefined) return <div className="w-empty" style={{padding:'40px 0',textAlign:'center',color:'var(--muted)'}}>Lädt…</div>;
+  const _link = (camp&&camp.public_token) ? (PHONE_LINK_BASE+camp.public_token) : '';
+  const _inp={padding:'8px 10px',border:'1px solid var(--border)',borderRadius:8,fontSize:14,background:'var(--card)',color:'var(--text)'};
+  const mgmtBar = isMgmt ? <div style={{marginBottom:14,display:'flex',flexDirection:'column',gap:8}}>
+    <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+      <span style={{fontSize:12,fontWeight:800,color:'var(--muted)'}}>Aktion</span>
+      <select value={camp?camp.id:''} onChange={e=>selectCamp(e.target.value)} style={{..._inp,fontWeight:700,maxWidth:300}}>
+        {!camp&&<option value="">— keine —</option>}
+        {(campaigns||[]).map(c=><option key={c.id} value={c.id}>{c.name}{c.active?'':' (beendet)'} · {c.done}/{c.total}</option>)}
+      </select>
+      <button className="btn btn-sm btn-primary" onClick={()=>setShowNew(v=>!v)}>＋ Neue Aktion</button>
+    </div>
+    {showNew && <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:12,padding:'12px 14px',display:'flex',flexWrap:'wrap',gap:8,alignItems:'flex-end'}}>
+      <label style={{display:'flex',flexDirection:'column',gap:3,fontSize:12,fontWeight:700,flex:'1 1 200px'}}>Name<input value={nName} onChange={e=>setNName(e.target.value)} placeholder="z. B. Rückgewinnung Oktober" style={_inp}/></label>
+      <label style={{display:'flex',flexDirection:'column',gap:3,fontSize:12,fontWeight:700}}>Von<input type="date" value={nFrom} onChange={e=>setNFrom(e.target.value)} style={_inp}/></label>
+      <label style={{display:'flex',flexDirection:'column',gap:3,fontSize:12,fontWeight:700}}>Bis<input type="date" value={nTo} onChange={e=>setNTo(e.target.value)} style={_inp}/></label>
+      <button className="btn btn-sm btn-primary" disabled={!nName.trim()} onClick={createCampaign}>Anlegen</button>
+      <div style={{flexBasis:'100%',fontSize:11.5,color:'var(--muted)'}}>Danach Leads über Filter zuordnen und Teilnehmer wählen (folgt in den nächsten Schritten). Ergebnis-Knöpfe: Standard wie Recruiting, je Aktion anpassbar.</div>
+    </div>}
+    {_link && <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap',fontSize:12}}>
+      <span style={{color:'var(--muted)',fontWeight:700}}>🔗 Link</span>
+      <input readOnly value={_link} onFocus={e=>e.target.select()} style={{..._inp,flex:'1 1 260px',fontSize:12,background:'var(--surface-2)'}}/>
+      <button className="btn btn-sm" onClick={()=>{ try{ navigator.clipboard.writeText(_link); setCopied(true); setTimeout(()=>setCopied(false),1500); }catch(e){} }}>{copied?'✓ kopiert':'kopieren'}</button>
+    </div>}
+  </div> : null;
+
+  if(!camp) return <div>{mgmtBar}<div className="w-empty" style={{padding:'30px 0',textAlign:'center',color:'var(--muted)'}}>{isMgmt?'Noch keine Aktion. Lege oben eine neue an.':'Keine aktive Telefonaktion.'}</div></div>;
+  if(leads===null) return <div>{mgmtBar}<div className="w-empty" style={{padding:'30px 0',textAlign:'center',color:'var(--muted)'}}>Lädt…</div></div>;
   const open=leads.filter(l=>l.status==='open'); const done=leads.filter(l=>l.status!=='open');
   const btn={fontSize:14,fontWeight:800,padding:'12px 10px',borderRadius:12,border:'1px solid var(--border)',cursor:'pointer',flex:1,minWidth:110};
 
   return <div>
+    {mgmtBar}
     <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',marginBottom:4}}>
-      <div style={{fontSize:20,fontWeight:800}}>📞 Telefonaktion</div>
-      <span style={{fontSize:12,color:'var(--muted)'}}>{camp.name}</span>
+      <div style={{fontSize:20,fontWeight:800}}>📞 {camp.name}</div>
     </div>
     <div style={{fontSize:13,color:'var(--muted)',marginBottom:14,lineHeight:1.5,maxWidth:720}}>Ziel: Bewerber zum Gespräch ins Büro einladen. Nach jedem Anruf ein Knopf, mehr nicht.</div>
 
