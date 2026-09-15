@@ -8,9 +8,11 @@ KI-Assistenten und für alle, die später dazukommen.
 **Abgrenzung:**
 - **Bedienung** („wie lege ich einen Mitarbeiter an") steht im **Handbuch**
   (`SYSTEM_MANUAL` in `frontend/hr.html`, angezeigt unter „Wissen System").
-- **Änderungs-Regeln und fachliche Vorgaben** (Feldnamen-Migration, Status-Modell,
-  Urlaubs-/Gehaltsmodell im Detail) stehen in **`CLAUDE.md`**. Bei Konflikten gilt
-  CLAUDE.md. Dieses Dokument dupliziert das nicht, sondern verweist darauf.
+- **Änderungs-Regeln** (Scope, Deploy, Git, Prozess) stehen kompakt in
+  **`CLAUDE.md`**; die **fachlichen Vorgaben im Detail** (Personen-/Datenmodell,
+  Feldnamen, Urlaubs-/Abwesenheits-/Gehaltsmodell, Schichtplanung, Offboarding,
+  technische Schulden) in **`docs/`**. Bei Konflikten gelten diese Vorgaben.
+  Dieses Dokument dupliziert das nicht, sondern verweist darauf.
 - Der ursprüngliche Tourism-Leads-Teil steht in `README.md` und ist überholt.
 
 ---
@@ -260,8 +262,9 @@ Diese Prinzipien ziehen sich durch das ganze System — beim Bauen einhalten:
 5. **Deploy ≠ Commit.** `deploy.sh` = rsync auf den Server (kein Git). Committen/
    Pushen nur auf ausdrückliche Aufforderung; nie „deployt und committed" melden,
    wenn nur deployt wurde. Build-ID-Stempel + Caddy-no-cache gegen Browser-Cache.
-6. **Migrationen** liegen als SQL-Dateien in `migrations/`; der Betreiber spielt
-   sie im Supabase-SQL-Editor ein. Secrets nie committen.
+6. **Migrationen** liegen als SQL-Dateien in `migrations/` und werden per
+   `supabase db query --linked -f` eingespielt (additiv ohne Rückfrage, ändernd/
+   löschend erst fragen). Secrets nie committen.
 7. **Sichtbare Texte** ohne lange Gedankenstriche; Komma/Doppelpunkt/Punkt.
 
 ---
@@ -390,9 +393,10 @@ nicht vollständig — Bedienung steht im Handbuch.
 
 ## 10. Verweise
 
-- **`CLAUDE.md`** — verbindliche fachliche Vorgaben und Änderungs-Regeln
-  (Datenmodell, Feldnamen-Migration, Status-/Urlaubs-/Gehaltsmodell, offene
-  technische Schulden). Bei Konflikten gilt CLAUDE.md.
+- **`CLAUDE.md`** — Scope, Leitplanken, Deploy/Git, Prozess-Regeln (Kurzfassung).
+- **`docs/`** — verbindliche fachliche Vorgaben im Detail: `fachmodell/`
+  (Personen-/Datenmodell, Urlaub/Abwesenheit, Gehalt), `schichtplanung.md`,
+  `offboarding.md`, `technische-schulden.md`, `technologie-stack.md`.
 - **Handbuch** — Bedienung (`SYSTEM_MANUAL` in `hr.html`, „Wissen System").
 - **`supabase/schema_auth.sql`** — Rollen, RLS-Helfer, Guards.
 - **`migrations/`** — alle DB-Änderungen als SQL.
