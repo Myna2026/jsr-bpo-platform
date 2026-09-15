@@ -34,6 +34,11 @@
   .dt input{padding:12px;border:1px solid var(--line);border-radius:10px;font-size:16px}
   .badge{display:inline-block;font-size:13px;font-weight:800;padding:5px 12px;border-radius:20px}
   .link{background:none;border:none;color:var(--muted);font-size:12.5px;text-decoration:underline;cursor:pointer;padding:0;margin-left:8px}
+  .whoami{display:flex;align-items:center;justify-content:space-between;gap:10px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 14px;margin-bottom:12px}
+  .whoami .who{font-weight:800}
+  .pick{width:100%;text-align:left;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:15px 16px;margin-bottom:10px;cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:10px}
+  .pick .pn{font-weight:800;font-size:16px}
+  .pick .pc{font-size:13px;color:var(--muted)}
   .state{text-align:center;padding:52px 20px;color:var(--muted)}
   .state .big{font-size:44px;margin-bottom:10px}
   .toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);background:#0f172a;color:#fff;padding:11px 18px;border-radius:12px;font-size:14px;font-weight:700;box-shadow:0 6px 20px rgba(0,0,0,.25);opacity:0;transition:opacity .2s;pointer-events:none;z-index:50}
@@ -56,6 +61,7 @@ const sb=window.supabase.createClient(SB_URL,SB_KEY);
 const app=document.getElementById('app');
 const toastEl=document.getElementById('toast');
 const token=new URLSearchParams(location.search).get('t')||'';
+const LS_KEY='tive_phone_me_'+token;   // gemerkte Namenswahl je Link
 const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const tel=p=>'tel:'+String(p||'').replace(/[^+0-9]/g,'');
 const fmtDe=s=>{ if(!s) return '—'; const p=String(s).slice(0,10).split('-'); return p.length===3?(p[2]+'.'+p[1]+'.'):s; };
@@ -69,33 +75,51 @@ let toastT=null;
 function toast(msg,err){ toastEl.textContent=msg; toastEl.className='toast show'+(err?' err':''); clearTimeout(toastT); toastT=setTimeout(()=>{toastEl.className='toast';},2200); }
 function stateBox(icon,title,text){ app.innerHTML='<div class="state"><div class="big">'+icon+'</div><h1>'+esc(title)+'</h1><div class="sub">'+esc(text)+'</div></div>'; }
 
-let LEADS=[]; let NAME=''; let ui={};   // lead_id -> 'reject'|'termin'
-let busy=null;
+let PARTS=[]; let ME=null; let LEADS=[]; let ui={}; let busy=null;
 
-async function load(){
+async function boot(){
   if(!token){ return stateBox('🔗','Link ungültig','Bitte öffne den Link genau so, wie du ihn bekommen hast.'); }
-  const {data,error}=await sb.rpc('phone_public_load',{p_token:token});
-  if(error){ return stateBox('⚠️','Konnte nicht laden','Bitte später erneut versuchen. ('+esc(error.message||'')+')'); }
-  if(!data||!data.length){ return stateBox('🔗','Link ungültig oder leer','Für diesen Link sind keine Bewerber hinterlegt.'); }
-  LEADS=data; NAME=data[0].assignee_name||''; render();
+  const {data,error}=await sb.rpc('phone_link_participants',{p_token:token});
+  if(error){ return stateBox('⚠️','Konnte nicht laden','Bitte später erneut versuchen.'); }
+  if(!data||!data.length){ return stateBox('🔗','Link ungültig oder leer','Für diesen Link ist keine Aktion hinterlegt.'); }
+  PARTS=data;
+  const saved=localStorage.getItem(LS_KEY);
+  if(saved && PARTS.some(p=>p.assignee_user_id===saved)){ ME=saved; return loadLeads(); }
+  renderPicker();
 }
-function render(){
-  const open=LEADS.filter(l=>l.status==='open').length;
-  const done=LEADS.length-open; const pct=LEADS.length?Math.round(100*done/LEADS.length):0;
-  let h='<h1>📞 Telefonaktion</h1>';
-  h+='<div class="sub">'+esc(NAME)+' · Ziel: zum Gespräch ins Büro einladen. Nach jedem Anruf ein Knopf.</div>';
-  h+='<div class="prog"><span style="width:'+pct+'%"></span></div>';
-  h+='<div class="sub" style="margin-top:-8px">'+open+' offen · '+done+' erledigt von '+LEADS.length+'</div>';
-  const order=[...LEADS.filter(l=>l.status==='open'),...LEADS.filter(l=>l.status!=='open')];
-  order.forEach(l=>{ h+=card(l); });
+function renderPicker(){
+  let h='<h1>📞 Telefonaktion</h1><div class="sub">Wer bist du? Tipp auf deinen Namen — die Auswahl wird gemerkt.</div>';
+  PARTS.forEach(p=>{ h+='<button class="pick" data-uid="'+esc(p.assignee_user_id)+'">'
+    +'<span class="pn">'+esc(p.assignee_name)+'</span>'
+    +'<span class="pc">'+p.open+' offen · '+p.total+'</span></button>'; });
   app.innerHTML=h;
-  order.forEach(l=>bind(l));
+  app.querySelectorAll('.pick').forEach(b=>b.onclick=()=>{ ME=b.getAttribute('data-uid'); localStorage.setItem(LS_KEY,ME); loadLeads(); });
 }
+async function loadLeads(){
+  app.innerHTML='<div class="state"><div class="big">⏳</div>Lädt…</div>';
+  const {data,error}=await sb.rpc('phone_link_leads',{p_token:token,p_assignee:ME});
+  if(error){ return stateBox('⚠️','Konnte nicht laden','Bitte erneut versuchen.'); }
+  LEADS=data||[]; render();
+}
+function meName(){ const p=PARTS.find(x=>x.assignee_user_id===ME); return p?p.assignee_name:''; }
 function statusBadge(l){
   if(l.status==='appointment') return '<span class="badge" style="background:var(--green-bg);color:var(--green)">✅ Termin '+fmtDe(l.appointment_date)+'</span>';
   if(l.status==='rejected'){ const r=(REASONS.find(x=>x[0]===l.reject_reason)||[])[1]||'Absage'; return '<span class="badge" style="background:var(--red-bg);color:var(--red)">✗ '+esc(r)+'</span>'; }
   if(l.status==='no_answer') return '<span class="badge" style="background:var(--amber-bg);color:var(--amber)">📵 Wiedervorlage '+fmtDe(l.followup_date)+'</span>';
   return '';
+}
+function render(){
+  const open=LEADS.filter(l=>l.status==='open').length; const done=LEADS.length-open; const pct=LEADS.length?Math.round(100*done/LEADS.length):0;
+  let h='<div class="whoami"><span class="who">👋 '+esc(meName())+'</span><button class="link" id="switch">Nicht du? Wechseln</button></div>';
+  h+='<div class="sub">Ziel: zum Gespräch ins Büro einladen. Nach jedem Anruf ein Knopf.</div>';
+  h+='<div class="prog"><span style="width:'+pct+'%"></span></div>';
+  h+='<div class="sub" style="margin-top:-8px">'+open+' offen · '+done+' erledigt von '+LEADS.length+'</div>';
+  if(!LEADS.length){ h+='<div class="state">Dir sind keine Bewerber zugeteilt.</div>'; }
+  const order=[...LEADS.filter(l=>l.status==='open'),...LEADS.filter(l=>l.status!=='open')];
+  order.forEach(l=>{ h+=card(l); });
+  app.innerHTML=h;
+  const sw=document.getElementById('switch'); if(sw) sw.onclick=()=>{ localStorage.removeItem(LS_KEY); ME=null; renderPicker(); };
+  order.forEach(l=>bind(l));
 }
 function card(l){
   const id=l.lead_id; const done=l.status!=='open';
@@ -122,29 +146,27 @@ function card(l){
 }
 function bind(l){
   const el=app.querySelector('.card[data-id="'+l.lead_id+'"]'); if(!el) return;
-  el.querySelectorAll('[data-act]').forEach(b=>{
-    b.onclick=async()=>{
-      const act=b.getAttribute('data-act');
-      if(act==='rj-open'){ ui[l.lead_id]='reject'; return render(); }
-      if(act==='ap-open'){ ui[l.lead_id]='termin'; return render(); }
-      if(act==='back'){ ui[l.lead_id]=null; return render(); }
-      if(act==='na') return log(l,'no_answer');
-      if(act==='open') return log(l,'open');
-      if(act==='rj') return log(l,'rejected',b.getAttribute('data-reason'));
-      if(act==='ap-ok'){ const d=el.querySelector('[data-date]').value||tomorrow(); return log(l,'appointment',null,d); }
-    };
-  });
+  el.querySelectorAll('[data-act]').forEach(b=>{ b.onclick=async()=>{
+    const act=b.getAttribute('data-act');
+    if(act==='rj-open'){ ui[l.lead_id]='reject'; return render(); }
+    if(act==='ap-open'){ ui[l.lead_id]='termin'; return render(); }
+    if(act==='back'){ ui[l.lead_id]=null; return render(); }
+    if(act==='na') return log(l,'no_answer');
+    if(act==='open') return log(l,'open');
+    if(act==='rj') return log(l,'rejected',b.getAttribute('data-reason'));
+    if(act==='ap-ok'){ const d=el.querySelector('[data-date]').value||tomorrow(); return log(l,'appointment',null,d); }
+  }; });
 }
 async function log(l,result,reason,date){
   if(busy) return; busy=l.lead_id;
-  const {error}=await sb.rpc('phone_public_log',{p_token:token,p_lead_id:l.lead_id,p_result:result,p_reason:reason||null,p_date:date||null});
+  const {error}=await sb.rpc('phone_link_log',{p_token:token,p_assignee:ME,p_lead_id:l.lead_id,p_result:result,p_reason:reason||null,p_date:date||null});
   busy=null;
   if(error){ toast('Nicht gespeichert: '+(error.message||''),true); return; }
   ui[l.lead_id]=null;
   toast(result==='appointment'?'Termin gespeichert ✅':result==='rejected'?'Als Absage vermerkt':result==='no_answer'?'Wiedervorlage gesetzt':'Zurückgesetzt');
-  await load();
+  await loadLeads();
 }
-load();
+boot();
 </script>
 </body>
 </html>
