@@ -1259,7 +1259,7 @@ const MENU_BADGE_MAIN_ITEMS = [
   {key:'timetracking',label:'Zeiterfassung'},{key:'locations',label:'Standorte'},{key:'spaces',label:'Spaces & Seats'},
   {key:'payroll',label:'Löhne'},{key:'orgchart',label:'Organigramm'},{key:'absences',label:'Abwesenheiten'},{key:'calendar',label:'Kalender'},
   {key:'urlaubantraege',label:'Urlaubsanträge'},{key:'feedback',label:'Feedbackgespräche'},{key:'kanban',label:'Recruiting'},{key:'funnel',label:'Bewerber-Trichter'},{key:'onboarding',label:'Onboarding'},{key:'langarchiv',label:'Aussortiert (Sprache)'},
-  {key:'cvs',label:'CVs & Bewerber'},{key:'pool',label:'Bewerber-Pool'},{key:'postfach',label:'Postfach'},{key:'bewerberlinks',label:'Bewerber-Links'},{key:'dubletten',label:'Dubletten'},{key:'showcase',label:'Showcases'},{key:'training_plans',label:'Schulungsplanung'},
+  {key:'cvs',label:'CVs & Bewerber'},{key:'pool',label:'Bewerber-Pool'},{key:'phoneaction',label:'Telefonaktion'},{key:'postfach',label:'Postfach'},{key:'bewerberlinks',label:'Bewerber-Links'},{key:'dubletten',label:'Dubletten'},{key:'showcase',label:'Showcases'},{key:'training_plans',label:'Schulungsplanung'},
   {key:'timeline',label:'Timeline'},{key:'projects',label:'Projekte'},{key:'forecast',label:'Forecast'},{key:'fcist',label:'Forecast vs. Ist'},{key:'vorschau',label:'Personal-Vorschau'},
   {key:'profitability',label:'Wirtschaftlichkeit'},{key:'praesentation',label:'Präsentationen'},{key:'termin',label:'Termin vorbereiten'},{key:'uploads',label:'Uploads'},{key:'dataimport',label:'Datenimport'},{key:'uploadplan',label:'Upload-Plan'},{key:'recmkt',label:'Recruiting Marketing'},{key:'nlquery',label:'Datenabfrage'},
   {key:'useractivity',label:'Nutzung & Aktivität'},{key:'errorlog',label:'Fehler-Log'},{key:'reminders',label:'Erinnerungen'},{key:'taskadmin',label:'Aufgaben-Verwaltung'},{key:'mgmtcalls',label:'Management-Calls'},
@@ -1294,7 +1294,7 @@ const HR_DEFAULT_LOCKED_TABS = ['workforce'];
 // Führungs-Set: reine Leads (projektleiter/teamlead, NICHT auch management/hr/finance) sehen NUR diese Tabs
 // (harte Obergrenze in hasAccess — auch die „always"-Admin-Tabs superadmin/appusers/hraccess/tabperms bleiben aus).
 // Recruiting = kanban+cvs+funnel (der Workflow braucht alle drei). Management kann darunter weiter einzeln sperren.
-const LEAD_ALLOWED_TABS = ['start','cockpit','shiftplan','checkin','absences','urlaubantraege','employees','performance','calendar','callqa','feedback','praesentation','dataimport','kanban','cvs','pool','funnel','training_plans','wissensspeicher','clientmsgs','arbeitsplan'];
+const LEAD_ALLOWED_TABS = ['start','cockpit','shiftplan','checkin','absences','urlaubantraege','employees','performance','calendar','callqa','feedback','praesentation','dataimport','kanban','cvs','pool','phoneaction','funnel','training_plans','wissensspeicher','clientmsgs','arbeitsplan'];
 const isLeadOnlyRoles = rk => { const r=rk||[]; return (r.includes('projektleiter')||r.includes('teamlead')) && !r.some(x=>x==='management'||x==='hr'||x==='finance'); };
 // Sperrbarer Katalog = alle Menue-Tabs ausser always-Tabs. workforce ist normal sperrbar.
 const HR_LOCKABLE_TABS = [...MENU_BADGE_MAIN_ITEMS.filter(t=>HR_ALWAYS_TABS.indexOf(t.key)<0)];
@@ -7600,6 +7600,7 @@ function buildNavSections(f){
       ...(_isMgmtHr ? [{key:'contract_templates',label:'Vertragsvorlagen',icon:'📄'}] : []),   // Management + HR
     ]},
     {sec:'Recruiting', items:[
+      {key:'phoneaction',label:'Telefonaktion',icon:'📞'},
       {key:'kanban',label:'Recruiting',icon:'🔄'},
       {key:'funnel',label:'Bewerber-Trichter',icon:'📊'},
       {key:'cvs',label:'CVs & Bewerber',icon:'📋'},
@@ -21192,6 +21193,117 @@ function CVsView({cvList, setCvList, projects, onPromoteToEmployee, team, showTo
       </div>
     </div>
   );
+}
+
+// ── Telefonaktion ────────────────────────────────────
+// Je Teilnehmer seine zugeteilten Leads. Pflege in Sekunden: 3 Knöpfe (Nicht erreicht / Abgesagt / Termin).
+// Alles über die RPC phonecall_log → CV-Status + Kalender + last_worked_at in EINEM Schritt (kein Excel).
+function PhoneActionView({team, showToast}){
+  const rk=(team&&team.role_keys)||[]; const isMgmt=rk.some(r=>r==='management'||r==='hr');
+  const [camp,setCamp]=useState(undefined);   // undefined=lädt, null=keine
+  const [leads,setLeads]=useState(null);
+  const [ovw,setOvw]=useState(null);
+  const [busy,setBusy]=useState(null);
+  const [openUi,setOpenUi]=useState({});       // lead_id -> 'reject'|'termin'|null
+  const [dt,setDt]=useState({});                // lead_id -> gewähltes Termindatum
+  const _tomorrow=(()=>{ const d=new Date(); d.setDate(d.getDate()+1); return isoLocal(d); })();
+  const loadLeads=React.useCallback(async(cid)=>{ const {data,error}=await sb.rpc('phonecall_my_leads',{p_campaign:cid});
+    setLeads(error?[]:(data||[])); }, []);
+  const loadOvw=React.useCallback(async(cid)=>{ if(!isMgmt){ setOvw(null); return; } const {data}=await sb.rpc('phonecall_overview',{p_campaign:cid}); setOvw(data||[]); },[isMgmt]);
+  useEffect(()=>{ let alive=true; (async()=>{
+    const {data}=await sb.from('call_campaigns').select('id,name').eq('active',true).order('created_at',{ascending:false}).limit(1);
+    const c=(data&&data[0])||null; if(!alive) return; setCamp(c);
+    if(c){ await loadLeads(c.id); await loadOvw(c.id); } else { setLeads([]); }
+  })(); return ()=>{alive=false;}; },[]);
+  async function act(lead, result, reason, date){
+    setBusy(lead.lead_id);
+    const {error}=await sb.rpc('phonecall_log',{p_lead_id:lead.lead_id, p_result:result, p_reason:reason||null, p_date:date||null, p_note:null});
+    setBusy(null);
+    if(error){ showToast&&showToast('⚠ Konnte nicht speichern: '+(error.message||'DB'),'error'); return; }
+    setOpenUi(u=>({...u,[lead.lead_id]:null}));
+    if(camp){ loadLeads(camp.id); loadOvw(camp.id); }
+    showToast&&showToast(result==='appointment'?'Termin gespeichert, Bewerber → Interview im Büro':result==='rejected'?'Als Absage vermerkt':result==='no_answer'?'Wiedervorlage gesetzt':'Zurückgesetzt','success');
+  }
+  const telHref=p=>'tel:'+String(p||'').replace(new RegExp('[^+0-9]','g'),'');
+  const expChip=e=>{ const s=String(e||'').toLowerCase().trim(); if(!s) return {t:'Erfahrung ?',c:'var(--muted)'};
+    if(/^(nein|no|kein|nicht)/.test(s)) return {t:'keine Erfahrung',c:'var(--muted)'};
+    if(/(ja|yes|jo|jahr|erfahr|agent|service|call|verkauf|[0-9])/.test(s)) return {t:'CC-Erfahrung ✓',c:'#15803d'};
+    return {t:'Erfahrung ?',c:'var(--muted)'}; };
+  const fmtDe=s=>{ if(!s) return '—'; const p=String(s).slice(0,10).split('-'); return p.length===3?(p[2]+'.'+p[1]+'.'):s; };
+  const REASONS=[['kein_interesse','Kein Interesse'],['zu_weit','Zu weit weg'],['hat_anderes','Hat schon was anderes']];
+  const statusBadge=l=>{ if(l.status==='appointment') return {t:'✅ Termin '+fmtDe(l.appointment_date),c:'#15803d',bg:'#f0fdf4'};
+    if(l.status==='rejected'){ const r=(REASONS.find(x=>x[0]===l.reject_reason)||[])[1]||'Absage'; return {t:'✗ Abgesagt · '+r,c:'#b91c1c',bg:'#fef2f2'}; }
+    if(l.status==='no_answer') return {t:'📵 Wiedervorlage '+fmtDe(l.followup_date),c:'#b45309',bg:'var(--amber-bg)'};
+    return null; };
+
+  if(camp===undefined||leads===null) return <div className="w-empty" style={{padding:'40px 0',textAlign:'center',color:'var(--muted)'}}>Lädt…</div>;
+  if(!camp) return <div className="w-empty" style={{padding:'40px 0',textAlign:'center',color:'var(--muted)'}}>Keine aktive Telefonaktion.</div>;
+  const open=leads.filter(l=>l.status==='open'); const done=leads.filter(l=>l.status!=='open');
+  const btn={fontSize:14,fontWeight:800,padding:'12px 10px',borderRadius:12,border:'1px solid var(--border)',cursor:'pointer',flex:1,minWidth:110};
+
+  return <div>
+    <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',marginBottom:4}}>
+      <div style={{fontSize:20,fontWeight:800}}>📞 Telefonaktion</div>
+      <span style={{fontSize:12,color:'var(--muted)'}}>{camp.name}</span>
+    </div>
+    <div style={{fontSize:13,color:'var(--muted)',marginBottom:14,lineHeight:1.5,maxWidth:720}}>Ziel: Bewerber zum Gespräch ins Büro einladen. Nach jedem Anruf ein Knopf, mehr nicht.</div>
+
+    {isMgmt && ovw && ovw.length>0 && <div style={{marginBottom:18,background:'var(--surface)',border:'1px solid var(--border)',borderRadius:14,padding:'12px 14px'}}>
+      <div style={{fontSize:12,fontWeight:800,textTransform:'uppercase',letterSpacing:'.05em',color:'var(--muted)',marginBottom:8}}>Übersicht (Clara) · wer wie weit ist</div>
+      <div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:12.5}}>
+        <thead><tr style={{textAlign:'left',color:'var(--muted)'}}>{['Teilnehmer','offen','angerufen','Termine','Absagen','WV fällig','Fortschritt'].map(h=><th key={h} style={{padding:'4px 8px',fontWeight:700}}>{h}</th>)}</tr></thead>
+        <tbody>{ovw.map(o=>{ const done=o.total-o.open; const pct=o.total?Math.round(100*done/o.total):0; return <tr key={o.assignee_user_id} style={{borderTop:'1px solid var(--border)'}}>
+          <td style={{padding:'5px 8px',fontWeight:700}}>{o.assignee_name}</td>
+          <td style={{padding:'5px 8px'}}>{o.open}</td><td style={{padding:'5px 8px'}}>{done}/{o.total}</td>
+          <td style={{padding:'5px 8px',color:'#15803d',fontWeight:700}}>{o.appointment}</td>
+          <td style={{padding:'5px 8px',color:'var(--muted)'}}>{o.rejected}</td>
+          <td style={{padding:'5px 8px',color:o.followups_due>0?'#b45309':'var(--muted)',fontWeight:o.followups_due>0?700:400}}>{o.followups_due}</td>
+          <td style={{padding:'5px 8px',minWidth:90}}><div style={{background:'var(--surface-2)',borderRadius:6,height:8,overflow:'hidden'}}><div style={{width:pct+'%',height:'100%',background:'#0891b2'}}/></div></td>
+        </tr>; })}</tbody>
+      </table></div>
+    </div>}
+
+    <div style={{fontSize:14,fontWeight:800,margin:'6px 0 10px'}}>Meine Anrufe <span style={{color:'var(--muted)',fontWeight:600}}>· {open.length} offen von {leads.length}</span></div>
+    {!leads.length ? <div className="w-empty" style={{padding:'30px 0',textAlign:'center',color:'var(--muted)'}}>Dir sind keine Leads zugeteilt.</div>
+    : <div style={{display:'flex',flexDirection:'column',gap:10}}>
+        {[...open,...done].map(l=>{ const sb2=statusBadge(l); const ex=expChip(l.cc_experience); const ui=openUi[l.lead_id];
+          return <div key={l.lead_id} style={{background:'var(--card)',border:'1px solid var(--border)',borderRadius:14,padding:'13px 15px',opacity:l.status==='open'?1:.85}}>
+            <div style={{display:'flex',alignItems:'center',gap:12,flexWrap:'wrap'}}>
+              <div style={{flex:'1 1 200px',minWidth:180}}>
+                <div style={{fontWeight:800,fontSize:15.5}}>{l.first_name} {l.last_name}</div>
+                <div style={{display:'flex',gap:8,flexWrap:'wrap',marginTop:3,fontSize:12}}>
+                  <span style={{fontWeight:800,color:l.language_level==='C1'?'#15803d':'#0891b2'}}>{l.language_level||'—'}</span>
+                  <span style={{color:ex.c}}>{ex.t}</span>
+                  <span style={{color:'var(--muted)'}}>beworben {fmtDe(l.cv_date)}</span>
+                </div>
+              </div>
+              <a href={telHref(l.phone)} style={{textDecoration:'none',background:'#0891b2',color:'#fff',fontWeight:800,fontSize:15,padding:'10px 16px',borderRadius:12,whiteSpace:'nowrap'}}>📞 {l.phone||'—'}</a>
+            </div>
+            {sb2 && <div style={{marginTop:8,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+              <span style={{fontSize:12.5,fontWeight:700,color:sb2.c,background:sb2.bg,padding:'3px 10px',borderRadius:20}}>{sb2.t}</span>
+              <button onClick={()=>act(l,'open')} disabled={busy===l.lead_id} style={{border:'none',background:'none',color:'var(--muted)',fontSize:12,cursor:'pointer',textDecoration:'underline'}}>ändern</button>
+            </div>}
+            {l.status==='open' && ui!=='reject' && ui!=='termin' && <div style={{display:'flex',gap:8,marginTop:11,flexWrap:'wrap'}}>
+              <button disabled={busy===l.lead_id} onClick={()=>act(l,'no_answer')} style={{...btn,background:'var(--amber-bg)',color:'#b45309',borderColor:'var(--amber)'}}>📵 Nicht erreicht</button>
+              <button disabled={busy===l.lead_id} onClick={()=>setOpenUi(u=>({...u,[l.lead_id]:'reject'}))} style={{...btn,background:'#fef2f2',color:'#b91c1c',borderColor:'#fecaca'}}>✗ Abgesagt</button>
+              <button disabled={busy===l.lead_id} onClick={()=>setOpenUi(u=>({...u,[l.lead_id]:'termin'}))} style={{...btn,background:'#f0fdf4',color:'#15803d',borderColor:'#bbf7d0'}}>✅ Termin</button>
+            </div>}
+            {ui==='reject' && <div style={{marginTop:11}}>
+              <div style={{fontSize:12,color:'var(--muted)',marginBottom:6}}>Grund der Absage:</div>
+              <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+                {REASONS.map(([k,lbl])=><button key={k} disabled={busy===l.lead_id} onClick={()=>act(l,'rejected',k)} style={{fontSize:13,fontWeight:700,padding:'9px 13px',borderRadius:10,border:'1px solid #fecaca',background:'#fef2f2',color:'#b91c1c',cursor:'pointer'}}>{lbl}</button>)}
+                <button onClick={()=>setOpenUi(u=>({...u,[l.lead_id]:null}))} style={{fontSize:13,padding:'9px 13px',borderRadius:10,border:'1px solid var(--border)',background:'var(--card)',color:'var(--muted)',cursor:'pointer'}}>Zurück</button>
+              </div>
+            </div>}
+            {ui==='termin' && <div style={{marginTop:11,display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
+              <span style={{fontSize:13,fontWeight:700,color:'#15803d'}}>Termin im Büro am</span>
+              <input type="date" value={dt[l.lead_id]||_tomorrow} onChange={e=>setDt(d=>({...d,[l.lead_id]:e.target.value}))} style={{padding:'8px 10px',border:'1px solid var(--border)',borderRadius:9,fontSize:14,background:'var(--card)',color:'var(--text)'}}/>
+              <button disabled={busy===l.lead_id} onClick={()=>act(l,'appointment',null,dt[l.lead_id]||_tomorrow)} style={{fontSize:13,fontWeight:800,padding:'9px 15px',borderRadius:10,border:'none',background:'#15803d',color:'#fff',cursor:'pointer'}}>Bestätigen</button>
+              <button onClick={()=>setOpenUi(u=>({...u,[l.lead_id]:null}))} style={{fontSize:13,padding:'9px 13px',borderRadius:10,border:'1px solid var(--border)',background:'var(--card)',color:'var(--muted)',cursor:'pointer'}}>Zurück</button>
+            </div>}
+          </div>; })}
+      </div>}
+  </div>;
 }
 
 // ── Bewerber-Pool (Vorrat) ────────────────────────────────────
@@ -46855,6 +46967,7 @@ function App(){
       'kanban':'<path d="M15 3.75H9v16.5h6V3.75ZM16.5 20.25h3.375c1.035 0 1.875-.84 1.875-1.875V5.625c0-1.036-.84-1.875-1.875-1.875H16.5v16.5ZM4.125 3.75H7.5v16.5H4.125a1.875 1.875 0 0 1-1.875-1.875V5.625c0-1.036.84-1.875 1.875-1.875Z"/>',
       'funnel':'<path fill-rule="evenodd" d="M3.792 2.938A49.069 49.069 0 0 1 12 2.25c2.797 0 5.54.236 8.209.688a1.857 1.857 0 0 1 1.541 1.836v1.044a3 3 0 0 1-.879 2.121l-6.182 6.182a1.5 1.5 0 0 0-.439 1.061v2.927a3 3 0 0 1-1.659 2.684l-1.921.96A.75.75 0 0 1 9.75 21v-5.818a1.5 1.5 0 0 0-.44-1.06L3.13 7.938a3 3 0 0 1-.879-2.121V4.774c0-.897.64-1.683 1.542-1.836Z" clip-rule="evenodd"/>',
       'pool':'<path fill-rule="evenodd" d="M4.755 10.059a7.5 7.5 0 0 1 12.548-3.364l1.903 1.903h-3.183a.75.75 0 1 0 0 1.5h4.992a.75.75 0 0 0 .75-.75V4.356a.75.75 0 0 0-1.5 0v3.18l-1.9-1.9A9 9 0 0 0 3.306 9.67a.75.75 0 1 0 1.45.388Zm15.408 3.352a.75.75 0 0 0-.919.53 7.5 7.5 0 0 1-12.548 3.364l-1.902-1.903h3.183a.75.75 0 0 0 0-1.5H2.984a.75.75 0 0 0-.75.75v4.992a.75.75 0 0 0 1.5 0v-3.18l1.9 1.9a9 9 0 0 0 15.059-4.035.75.75 0 0 0-.53-.918Z" clip-rule="evenodd"/>',
+      'phoneaction':'<path fill-rule="evenodd" d="M1.5 4.5a3 3 0 0 1 3-3h1.372c.86 0 1.61.586 1.819 1.42l1.105 4.423a1.875 1.875 0 0 1-.694 1.955l-1.293.97c-.135.101-.164.249-.126.352a11.285 11.285 0 0 0 6.697 6.697c.103.038.25.009.352-.126l.97-1.293a1.875 1.875 0 0 1 1.955-.694l4.423 1.105c.834.209 1.42.959 1.42 1.82V19.5a3 3 0 0 1-3 3h-2.25C8.552 22.5 1.5 15.448 1.5 6.75V4.5Z" clip-rule="evenodd"/>',
       'onboarding':'<path d="M5.25 6.375a4.125 4.125 0 1 1 8.25 0 4.125 4.125 0 0 1-8.25 0ZM2.25 19.125a7.125 7.125 0 0 1 14.25 0v.003l-.001.119a.75.75 0 0 1-.363.63 13.067 13.067 0 0 1-6.761 1.873c-2.472 0-4.786-.684-6.76-1.873a.75.75 0 0 1-.364-.63l-.001-.122ZM18.75 7.5a.75.75 0 0 0-1.5 0v2.25H15a.75.75 0 0 0 0 1.5h2.25v2.25a.75.75 0 0 0 1.5 0v-2.25H21a.75.75 0 0 0 0-1.5h-2.25V7.5Z"/>',
       'cvs':'<path fill-rule="evenodd" d="M5.625 1.5c-1.036 0-1.875.84-1.875 1.875v17.25c0 1.035.84 1.875 1.875 1.875h12.75c1.035 0 1.875-.84 1.875-1.875V12.75A3.75 3.75 0 0 0 16.5 9h-1.875a1.875 1.875 0 0 1-1.875-1.875V5.25A3.75 3.75 0 0 0 9 1.5H5.625ZM7.5 15a.75.75 0 0 1 .75-.75h7.5a.75.75 0 0 1 0 1.5h-7.5A.75.75 0 0 1 7.5 15Zm.75 2.25a.75.75 0 0 0 0 1.5H12a.75.75 0 0 0 0-1.5H8.25Z" clip-rule="evenodd"/> <path d="M12.971 1.816A5.23 5.23 0 0 1 14.25 5.25v1.875c0 .207.168.375.375.375H16.5a5.23 5.23 0 0 1 3.434 1.279 9.768 9.768 0 0 0-6.963-6.963Z"/>',
       'showcase':'<path fill-rule="evenodd" d="M10.788 3.21c.448-1.077 1.976-1.077 2.424 0l2.082 5.006 5.404.434c1.164.093 1.636 1.545.749 2.305l-4.117 3.527 1.257 5.273c.271 1.136-.964 2.033-1.96 1.425L12 18.354 7.373 21.18c-.996.608-2.231-.29-1.96-1.425l1.257-5.273-4.117-3.527c-.887-.76-.415-2.212.749-2.305l5.404-.434 2.082-5.005Z" clip-rule="evenodd"/>',
@@ -47192,6 +47305,7 @@ function App(){
           {view==='cvs'&&<CVsView cvList={cvList} setCvList={setCvList} projects={projects} onPromoteToEmployee={promoteToEmployee} testQuestions={testQuestions} showToast={showToast} navFilter={navFilter} onClearNavFilter={()=>setNavFilter(null)} isMobileW={isMobileW}/>}
           {view==='funnel'&&<RecruitingFunnel cvList={cvList} employees={employees} isMobileW={isMobileW}/>}
           {view==='pool'&&<PoolView cvList={cvList} setCvList={setCvList} showToast={showToast}/>}
+          {view==='phoneaction'&&<PhoneActionView team={team} showToast={showToast}/>}
           {view==='showcase'&&(
             <div>
               <CandidateShowcase cvList={cvList} setCvList={setCvList} projects={projects}/>
