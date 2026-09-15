@@ -138,6 +138,8 @@ echo "→ Bewerber-Anreicherung (öffentlich, Token)..."
 rsync -az --progress "$LOCAL_DIR/bewerber.html" "$SERVER:$REMOTE_BASE/client/bewerber.html"
 echo "→ Bewerber-Erfassung vor Ort (Empfangs-Tablet, Stations-Token)..."
 rsync -az --progress "$LOCAL_DIR/bewerber_vorort.html" "$SERVER:$REMOTE_BASE/client/bewerber_vorort.html"
+echo "→ Telefonaktion (öffentlich, Teilnehmer-Token)..."
+rsync -az --progress "$LOCAL_DIR/telefon.html" "$SERVER:$REMOTE_BASE/client/telefon.html"
 
 echo "→ Root (Landing + Login)..."
 ssh "$SERVER" "mkdir -p $REMOTE_BASE/root"
