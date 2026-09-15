@@ -76,6 +76,9 @@ function toast(msg,err){ toastEl.textContent=msg; toastEl.className='toast show'
 function stateBox(icon,title,text){ app.innerHTML='<div class="state"><div class="big">'+icon+'</div><h1>'+esc(title)+'</h1><div class="sub">'+esc(text)+'</div></div>'; }
 
 let PARTS=[]; let ME=null; let LEADS=[]; let ui={}; let busy=null;
+let OVW=[]; let ALL=[]; let showTbl=false; let sK='assignee_name'; let sD=1; let fA=''; let fS='';
+const SL={open:'offen',no_answer:'Nicht erreicht',rejected:'Abgesagt',appointment:'Termin'};
+const RL={kein_interesse:'Kein Interesse',zu_weit:'Zu weit weg',hat_anderes:'Hat schon was anderes'};
 
 async function boot(){
   if(!token){ return stateBox('🔗','Link ungültig','Bitte öffne den Link genau so, wie du ihn bekommen hast.'); }
@@ -97,9 +100,58 @@ function renderPicker(){
 }
 async function loadLeads(){
   app.innerHTML='<div class="state"><div class="big">⏳</div>Lädt…</div>';
-  const {data,error}=await sb.rpc('phone_link_leads',{p_token:token,p_assignee:ME});
-  if(error){ return stateBox('⚠️','Konnte nicht laden','Bitte erneut versuchen.'); }
-  LEADS=data||[]; render();
+  const [le,ov,al]=await Promise.all([
+    sb.rpc('phone_link_leads',{p_token:token,p_assignee:ME}),
+    sb.rpc('phone_link_overview',{p_token:token}),
+    sb.rpc('phone_link_all',{p_token:token}) ]);
+  if(le.error){ return stateBox('⚠️','Konnte nicht laden','Bitte erneut versuchen.'); }
+  LEADS=le.data||[]; OVW=ov.data||[]; ALL=al.data||[]; render();
+}
+function overviewHtml(){
+  if(!OVW.length) return '';
+  let h='<div class="card" style="padding:12px 14px"><div class="sub2" style="margin:0 0 8px">📊 Übersicht · alle Teilnehmer</div>';
+  OVW.forEach(o=>{ const done=o.total-o.open; const mine=o.assignee_user_id===ME;
+    h+='<div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-top:1px solid var(--line);font-size:13px'+(mine?';font-weight:800':'')+'">'
+      +'<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(o.assignee_name)+(mine?' (du)':'')+'</span>'
+      +'<span style="color:var(--green);font-weight:800">'+o.appointment+' Termine</span>'
+      +'<span style="color:var(--muted)">'+done+'/'+o.total+'</span>'
+      +'<span style="color:'+(o.open>0?'var(--amber)':'var(--muted)')+'">'+o.open+' offen</span></div>'; });
+  h+='</div>';
+  return h;
+}
+function tableHtml(){
+  let h='<button class="pick" id="tblToggle" style="margin-top:6px"><span class="pn" style="font-size:15px">📋 Alle Anrufe · Auswertung</span><span class="pc">'+(showTbl?'ausblenden':'anzeigen')+'</span></button>';
+  if(!showTbl) return h;
+  const fd=s=>{ if(!s) return ''; const p=String(s).slice(0,10).split('-'); return p[2]+'.'+p[1]+'.'; };
+  const fdt=s=>{ if(!s) return '—'; const d=new Date(s); return d.toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit'})+' '+d.toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'}); };
+  const action=r=> r.status==='appointment'?('Termin '+fd(r.appointment_date)+(r.appointment_time?(' '+String(r.appointment_time).slice(0,5)):''))
+    : r.status==='rejected'?(RL[r.reject_reason]||'Absage') : r.status==='no_answer'?('WV '+fd(r.followup_date)) : '—';
+  const assignees=[...new Set(ALL.map(r=>r.assignee_name))].sort((a,b)=>String(a).localeCompare(String(b),'de'));
+  let rows=ALL.filter(r=>(!fA||r.assignee_name===fA)&&(!fS||r.status===fS));
+  const kf=r=> sK==='ergebnis'?action(r) : sK==='updated_at'?String(r.updated_at||'') : String(r[sK]||'').toLowerCase();
+  rows=[...rows].sort((a,b)=>{ const x=kf(a),y=kf(b); return (x<y?-1:x>y?1:0)*sD; });
+  const th=(k,l)=>'<th data-sk="'+k+'" style="padding:6px 6px;cursor:pointer;white-space:nowrap;text-align:left;color:var(--muted)">'+l+(sK===k?(sD>0?' ▲':' ▼'):'')+'</th>';
+  h+='<div class="card" style="padding:10px 12px">';
+  h+='<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">'
+    +'<select id="fA" style="flex:1;padding:8px;border:1px solid var(--line);border-radius:9px;font-size:14"><option value="">Alle Bearbeiter</option>'+assignees.map(a=>'<option value="'+esc(a)+'"'+(a===fA?' selected':'')+'>'+esc(a)+'</option>').join('')+'</select>'
+    +'<select id="fS" style="flex:1;padding:8px;border:1px solid var(--line);border-radius:9px;font-size:14"><option value="">Alle Status</option>'+Object.entries(SL).map(([k,v])=>'<option value="'+k+'"'+(k===fS?' selected':'')+'>'+v+'</option>').join('')+'</select></div>';
+  h+='<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead><tr>'
+    +th('cv_name','Bewerber')+th('assignee_name','Bearbeiter')+th('status','Status')+th('ergebnis','Was passiert')+th('updated_at','Wann')+th('note','Kommentar')+'</tr></thead><tbody>';
+  rows.forEach(r=>{ h+='<tr style="border-top:1px solid var(--line)">'
+    +'<td style="padding:5px 6px;font-weight:700">'+esc(r.cv_name)+'</td>'
+    +'<td style="padding:5px 6px">'+esc(r.assignee_name)+'</td>'
+    +'<td style="padding:5px 6px">'+(SL[r.status]||r.status)+'</td>'
+    +'<td style="padding:5px 6px;white-space:nowrap">'+esc(action(r))+'</td>'
+    +'<td style="padding:5px 6px;white-space:nowrap;color:var(--muted)">'+(r.status==='open'?'—':fdt(r.updated_at))+'</td>'
+    +'<td style="padding:5px 6px;color:var(--muted)">'+esc(r.note||'')+'</td></tr>'; });
+  h+='</tbody></table></div><div class="sub2" style="margin-top:6px">'+rows.length+' Zeilen</div></div>';
+  return h;
+}
+function bindTable(){
+  const t=document.getElementById('tblToggle'); if(t) t.onclick=()=>{ showTbl=!showTbl; render(); };
+  const fa=document.getElementById('fA'); if(fa) fa.onchange=e=>{ fA=e.target.value; render(); };
+  const fs=document.getElementById('fS'); if(fs) fs.onchange=e=>{ fS=e.target.value; render(); };
+  document.querySelectorAll('th[data-sk]').forEach(th=>th.onclick=()=>{ const k=th.getAttribute('data-sk'); if(sK===k) sD=-sD; else { sK=k; sD=1; } render(); });
 }
 function meName(){ const p=PARTS.find(x=>x.assignee_user_id===ME); return p?p.assignee_name:''; }
 function plusDays(n){ const d=new Date(); d.setDate(d.getDate()+n); return d.toISOString().slice(0,10); }
@@ -113,15 +165,18 @@ function noteField(l){ return '<input type="text" data-note maxlength="200" plac
 function render(){
   const open=LEADS.filter(l=>l.status==='open').length; const done=LEADS.length-open; const pct=LEADS.length?Math.round(100*done/LEADS.length):0;
   let h='<div class="whoami"><span class="who">👋 '+esc(meName())+'</span><button class="link" id="switch">Nicht du? Wechseln</button></div>';
-  h+='<div class="sub">Ziel: zum Gespräch ins Büro einladen. Nach jedem Anruf ein Knopf.</div>';
+  h+=overviewHtml();
+  h+='<div class="sub" style="margin-top:12px">Deine Anrufe · Ziel: zum Gespräch ins Büro einladen. Nach jedem Anruf ein Knopf.</div>';
   h+='<div class="prog"><span style="width:'+pct+'%"></span></div>';
   h+='<div class="sub" style="margin-top:-8px">'+open+' offen · '+done+' erledigt von '+LEADS.length+'</div>';
   if(!LEADS.length){ h+='<div class="state">Dir sind keine Bewerber zugeteilt.</div>'; }
   const order=[...LEADS.filter(l=>l.status==='open'),...LEADS.filter(l=>l.status!=='open')];
   order.forEach(l=>{ h+=card(l); });
+  h+=tableHtml();
   app.innerHTML=h;
   const sw=document.getElementById('switch'); if(sw) sw.onclick=()=>{ localStorage.removeItem(LS_KEY); ME=null; renderPicker(); };
   order.forEach(l=>bind(l));
+  bindTable();
 }
 function card(l){
   const id=l.lead_id; const done=l.status!=='open';
