@@ -53,7 +53,11 @@ Deno.serve(async (req) => {
   const plan = items.map((i) => {
     const parent = i.parent_id && byId[i.parent_id] ? byId[i.parent_id].title + " › " : "";
     return `- [${i.priority}] ${parent}${i.title} · Status ${i.status} · Fortschritt ${i.progress || 0}%` +
-      (i.due_date ? " · Frist " + String(i.due_date).slice(0, 10) : " · keine Frist") +
+      (i.start_date ? " · Start " + String(i.start_date).slice(0, 10) : "") +
+      (i.due_date ? " · Ende " + String(i.due_date).slice(0, 10) : " · kein Ende gesetzt") +
+      " · Aufwand " + (i.effort_days || 1) + " Tag(e)" +
+      (i.owner_name ? " · verantwortlich " + i.owner_name + (i.owner_side === "client" ? " (Kunde)" : " (wir)") : " · KEIN Verantwortlicher") +
+      (i.depends_on && byId[i.depends_on] ? " · wartet auf: " + byId[i.depends_on].title + (byId[i.depends_on].status !== "erledigt" ? " (noch nicht erledigt)" : "") : "") +
       (i.measures && String(i.measures).trim() ? " · Maßnahme: " + i.measures : " · KEINE Maßnahme") +
       (i.origin === "client" ? " · von Condor genannt" : "");
   }).join("\n");
@@ -63,7 +67,8 @@ Deno.serve(async (req) => {
     "Analysiere Fristen und Fortschritt, melde SACHLICH und knapp, was liegenbleibt und wo es stockt, und gib konkrete nächste Schritte. " +
     "Heute ist " + today + ". Nutze NUR die Daten unten, erfinde nichts. Die Meldung geht an unser Team, nicht an den Kunden.\n\n" +
     "PLAN:\n" + plan + "\n\n" +
-    "SIGNALE (bereits ausgezählt): überfällig " + overdue.length + ", Hauptpunkte ohne Maßnahme " + noMeasure.length + ", ohne Fortschritt " + stalled.length + ".";
+    "SIGNALE (bereits ausgezählt): überfällig " + overdue.length + ", Hauptpunkte ohne Maßnahme " + noMeasure.length + ", ohne Fortschritt " + stalled.length + ". " +
+    "Achte auch auf: Punkte ohne Verantwortlichen, Abhängigkeiten auf unerledigte Vorgänger, Punkte ohne Ende-Datum (kein Balken = kein Plan).";
 
   try {
     const resp = await fetch("https://api.anthropic.com/v1/messages", {

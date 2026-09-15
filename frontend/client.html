@@ -1579,164 +1579,289 @@ function InvoicesView({client}){
 }
 
 // ── Messages ──────────────────────────────────────────────
-// Arbeitsplan (Kundenansicht): gemeinsamer Verbesserungsplan. Kunde arbeitet aktiv mit — anlegen, anpassen,
-// Zustand setzen, kommentieren. AUSNAHME: unsere Maßnahmen (measures) pflegt nur TIVE (RLS-Trigger schützt sie).
-const C_IMP_PRIO=[{k:'sehr_wichtig',l:'sehr wichtig',c:'#dc2626'},{k:'wichtig',l:'wichtig',c:'#ea580c'},{k:'notwendig',l:'notwendig',c:'#ca8a04'},{k:'schoen',l:'wäre schön',c:'#64748b'}];
-const C_IMP_STAT=[{k:'offen',l:'offen',c:'#94a3b8',p:0},{k:'in_arbeit',l:'in Arbeit',c:'#0ea5b7',p:50},{k:'erledigt',l:'erledigt',c:'#16a34a',p:100}];
-function cImpPrio(k){ return C_IMP_PRIO.find(p=>p.k===k)||C_IMP_PRIO[1]; }
-function cImpStat(k){ return C_IMP_STAT.find(s=>s.k===k)||C_IMP_STAT[0]; }
-function cImpAddDays(dstr,n){ const d=new Date(String(dstr).slice(0,10)); d.setDate(d.getDate()+n); return d.toISOString().slice(0,10); }
+// ── Arbeitsplan: geteilter Kern. IDENTISCH in hr.html und client.html (bitte synchron halten, diff-prüfbar). ──
+// Je Punkt: Zustand (Pille, Klick), Titel (Klick = editieren), Verantwortlicher (Name+Seite), Start/Ende (Datumswahl
+// in der Zeile), Aufwand in Tagen (= Gewicht), Kommentare, ein Vorgänger (Abhängigkeit). Fortschritt Hauptpunkt =
+// Σ(Aufwand × Fortschritt)/Σ Aufwand der Unterpunkte; Hauptpunkt-Termine = Spanne der Unterpunkte (nicht pflegbar).
+// Zeitachse zeichnet NUR echte Termine: Start+Ende = Balken, nur Ende = Raute, nur Start = Marke, nichts = nichts.
+const IMP_PRIO=[{k:'sehr_wichtig',l:'sehr wichtig',c:'#dc2626'},{k:'wichtig',l:'wichtig',c:'#ea580c'},{k:'notwendig',l:'notwendig',c:'#ca8a04'},{k:'schoen',l:'wäre schön',c:'#64748b'}];
+const IMP_STAT=[{k:'offen',l:'offen',c:'#94a3b8',p:0},{k:'in_arbeit',l:'in Arbeit',c:'#0ea5b7',p:50},{k:'erledigt',l:'erledigt',c:'#16a34a',p:100}];
+function impPrio(k){ return IMP_PRIO.find(p=>p.k===k)||IMP_PRIO[1]; }
+function impStat(k){ return IMP_STAT.find(s=>s.k===k)||IMP_STAT[0]; }
+function impFmtD(d){ if(!d) return ''; const p=String(d).slice(0,10).split('-'); return p.length===3?p[2]+'.'+p[1]+'.'+p[0]:String(d); }
+function impToday(){ const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+function impWorkdays(a,b){ const d=new Date(String(a).slice(0,10)+'T00:00:00'), e=new Date(String(b).slice(0,10)+'T00:00:00'); if(!(d<=e)) return 0; let n=0,g=0; while(d<=e&&g<800){ const w=d.getDay(); if(w!==0&&w!==6) n++; d.setDate(d.getDate()+1); g++; } return n; }
+// Rechenkern über den Baum: Gewicht, Fortschritt, abgeleiteter Zustand, Terminspanne, Überfällig, Abhängigkeits-Konflikt.
+function impCalc(items){
+  const all=items||[]; const byId={}; all.forEach(i=>{byId[i.id]=i;});
+  const kids={}; all.forEach(i=>{ if(i.parent_id){ (kids[i.parent_id]=kids[i.parent_id]||[]).push(i); } });
+  Object.keys(kids).forEach(k=>kids[k].sort((a,b)=>(a.sort_order||0)-(b.sort_order||0)));
+  const kidsOf=id=>kids[id]||[]; const isLeaf=it=>!kidsOf(it.id).length;
+  const weight=it=>isLeaf(it)?Math.max(1,Number(it.effort_days)||1):kidsOf(it.id).reduce((s,k)=>s+weight(k),0);
+  const pct=it=>{ if(isLeaf(it)) return impStat(it.status).p; const ks=kidsOf(it.id); const W=ks.reduce((s,k)=>s+weight(k),0); return W?Math.round(ks.reduce((s,k)=>s+weight(k)*pct(k),0)/W):0; };
+  const state=it=>{ if(isLeaf(it)) return it.status||'offen'; const ks=kidsOf(it.id); if(ks.every(k=>state(k)==='erledigt')) return 'erledigt'; if(ks.some(k=>state(k)!=='offen')) return 'in_arbeit'; return 'offen'; };
+  const span=it=>{ if(isLeaf(it)) return {a:it.start_date?String(it.start_date).slice(0,10):null, b:it.due_date?String(it.due_date).slice(0,10):null};
+    let a=null,b=null; kidsOf(it.id).forEach(k=>{ const s=span(k); if(s.a&&(!a||s.a<a)) a=s.a; if(s.b&&(!b||s.b>b)) b=s.b; }); return {a,b}; };
+  const today=impToday();
+  const overdue=it=>{ const s=span(it); return !!(s.b&&s.b<today&&state(it)!=='erledigt'); };
+  const pred=it=>it.depends_on&&byId[it.depends_on]?byId[it.depends_on]:null;
+  const depConflict=it=>{ const p=pred(it); if(!p) return false; const ps=span(p), ms=span(it); return !!(ps.b&&ms.a&&ms.a<ps.b); };
+  const tops=all.filter(i=>!i.parent_id).sort((a,b)=>(a.sort_order||0)-(b.sort_order||0));
+  const leaves=all.filter(isLeaf); const W=leaves.reduce((s,l)=>s+weight(l),0);
+  const totalPct=W?Math.round(leaves.reduce((s,l)=>s+weight(l)*pct(l),0)/W):0;
+  const isDesc=(id,ofId)=>kidsOf(ofId).some(k=>k.id===id||isDesc(id,k.id));
+  return {byId,kidsOf,isLeaf,weight,pct,state,span,overdue,pred,depConflict,tops,leaves,totalPct,today,isDesc};
+}
+// Popover an einem Anker-Rechteck, per Portal (fixed) — wird von overflow-Containern nicht abgeschnitten.
+function ImpPop({anchor,onClose,children,width}){
+  const ref=React.useRef(null);
+  React.useEffect(()=>{ const md=e=>{ if(ref.current&&!ref.current.contains(e.target)) onClose(); }; const kd=e=>{ if(e.key==='Escape') onClose(); };
+    document.addEventListener('mousedown',md); document.addEventListener('keydown',kd); return ()=>{ document.removeEventListener('mousedown',md); document.removeEventListener('keydown',kd); }; },[onClose]);
+  if(!anchor) return null; const w=width||240; const left=Math.max(8,Math.min(anchor.left,window.innerWidth-w-8)); const below=anchor.bottom+4; const top=below+260>window.innerHeight?Math.max(8,anchor.top-4-Math.min(260,anchor.top-8)):below;
+  return ReactDOM.createPortal(<div ref={ref} style={{position:'fixed',top,left,width:w,zIndex:9000,background:'var(--card,#fff)',border:'1px solid var(--border,#e5e7eb)',borderRadius:12,boxShadow:'0 12px 32px rgba(0,0,0,.16)',padding:10,color:'var(--text,#0f172a)'}}>{children}</div>, document.body);
+}
+// Zustand-Pille: klickbar bei Blättern (Popover mit den 3 Zuständen), bei Hauptpunkten abgeleitet (nicht klickbar).
+function ImpStatusPill({it,C,onPick,small}){
+  const [anc,setAnc]=React.useState(null); const st=impStat(C.state(it)); const leaf=C.isLeaf(it); const od=C.overdue(it);
+  const col=od?'#dc2626':st.c; const ks=C.kidsOf(it.id); const done=ks.filter(k=>C.state(k)==='erledigt').length;
+  const lbl=leaf?st.l:(done+'/'+ks.length);
+  return <React.Fragment>
+    <button onClick={e=>{ if(leaf) setAnc(e.currentTarget.getBoundingClientRect()); }} title={leaf?'Zustand ändern':(done+' von '+ks.length+' Unterpunkten erledigt · ergibt sich aus den Unterpunkten')}
+      style={{display:'inline-flex',alignItems:'center',gap:5,padding:small?'2px 8px':'3px 10px',borderRadius:999,border:'1px solid '+col,background:'color-mix(in srgb, '+col+' 14%, var(--card,#fff))',color:col,fontSize:small?11:11.5,fontWeight:800,cursor:leaf?'pointer':'default',whiteSpace:'nowrap',minWidth:small?0:84,justifyContent:'center'}}>
+      {C.state(it)==='erledigt'?'✓ ':''}{lbl}{!leaf&&<span style={{fontWeight:600,opacity:.8}}> · {C.pct(it)}%</span>}
+    </button>
+    {anc&&<ImpPop anchor={anc} onClose={()=>setAnc(null)} width={180}>
+      {IMP_STAT.map(s=><button key={s.k} onClick={()=>{ setAnc(null); if(s.k!==it.status) onPick(s.k); }} style={{display:'flex',alignItems:'center',gap:8,width:'100%',padding:'7px 8px',border:'none',background:s.k===it.status?'var(--surface-2,#f1f5f9)':'transparent',borderRadius:8,cursor:'pointer',fontSize:13,fontWeight:s.k===it.status?800:600,color:'var(--text,#0f172a)',textAlign:'left'}}><span style={{width:10,height:10,borderRadius:'50%',background:s.c}}/>{s.k==='erledigt'?'✓ ':''}{s.l}</button>)}
+    </ImpPop>}
+  </React.Fragment>;
+}
+// Verantwortlicher: Chip, Klick → Liste (Team des Projekts + Kunde + bereits genutzte Namen) oder Freitext mit Seite.
+function ImpOwnerChip({it,choices,labels,onPick,compact}){
+  const [anc,setAnc]=React.useState(null); const [txt,setTxt]=React.useState('');
+  const side=it.owner_side==='client'?'client':'team'; const has=!!it.owner_name;
+  const col=side==='client'?'#7c3aed':'var(--accent,#0F5661)';
+  const pick=(name,sd)=>{ setAnc(null); setTxt(''); onPick(name,sd); };
+  return <React.Fragment>
+    <button onClick={e=>setAnc(e.currentTarget.getBoundingClientRect())} title={has?('Verantwortlich: '+it.owner_name+' ('+(side==='client'?labels.client:labels.team)+')'):'Verantwortlichen setzen'}
+      style={{display:'inline-flex',alignItems:'center',gap:5,maxWidth:'100%',padding:compact?'2px 7px':'3px 8px',borderRadius:999,border:'1px solid '+(has?col:'var(--border,#e5e7eb)'),background:has?'color-mix(in srgb, '+col+' 10%, var(--card,#fff))':'transparent',color:has?col:'var(--muted,#64748b)',fontSize:11.5,fontWeight:has?700:500,cursor:'pointer',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>
+      <span style={{overflow:'hidden',textOverflow:'ellipsis'}}>{has?it.owner_name:'👤 wer?'}</span>
+    </button>
+    {anc&&<ImpPop anchor={anc} onClose={()=>setAnc(null)} width={250}>
+      {[['team',labels.teamLong,choices.team],['client',labels.clientLong,choices.client]].map(([sd,head,list])=>list.length>0&&<div key={sd} style={{marginBottom:6}}>
+        <div style={{fontSize:10.5,fontWeight:800,color:'var(--muted,#64748b)',textTransform:'uppercase',letterSpacing:.4,padding:'2px 6px'}}>{head}</div>
+        {list.map(n=><button key={n} onClick={()=>pick(n,sd)} style={{display:'block',width:'100%',textAlign:'left',padding:'6px 8px',border:'none',background:it.owner_name===n&&side===sd?'var(--surface-2,#f1f5f9)':'transparent',borderRadius:8,cursor:'pointer',fontSize:13,fontWeight:600,color:'var(--text,#0f172a)'}}>{n}</button>)}
+      </div>)}
+      <div style={{borderTop:'1px solid var(--border,#e5e7eb)',paddingTop:8,marginTop:4}}>
+        <input value={txt} onChange={e=>setTxt(e.target.value)} placeholder="Anderer Name…" onKeyDown={e=>{ if(e.key==='Enter'&&txt.trim()) pick(txt.trim(),'team'); }} style={{width:'100%',boxSizing:'border-box',padding:'6px 8px',border:'1px solid var(--border,#e5e7eb)',borderRadius:8,background:'var(--card,#fff)',color:'var(--text,#0f172a)',fontSize:12.5}}/>
+        <div style={{display:'flex',gap:6,marginTop:6}}>
+          <button className="btn btn-sm" disabled={!txt.trim()} onClick={()=>pick(txt.trim(),'team')}>als {labels.team}</button>
+          <button className="btn btn-sm" disabled={!txt.trim()} onClick={()=>pick(txt.trim(),'client')}>als {labels.client}</button>
+          <div style={{flex:1}}/>
+          {has&&<button className="btn btn-sm" onClick={()=>pick(null,null)}>niemand</button>}
+        </div>
+      </div>
+    </ImpPop>}
+  </React.Fragment>;
+}
+// Aufwand in Tagen (Gewicht). Blatt: Klick → Stepper + Vorschlag aus Werktagen Start→Ende. Hauptpunkt: Summe, nicht klickbar.
+function ImpEffortChip({it,C,onPick,compact}){
+  const [anc,setAnc]=React.useState(null); const leaf=C.isLeaf(it); const w=C.weight(it); const sp=C.span(it);
+  const sugg=leaf&&sp.a&&sp.b?impWorkdays(sp.a,sp.b):0;
+  return <React.Fragment>
+    <button onClick={e=>{ if(leaf) setAnc(e.currentTarget.getBoundingClientRect()); }} title={leaf?'Aufwand in Tagen (Gewicht im Fortschritt)':'Summe der Unterpunkte'}
+      style={{padding:compact?'2px 7px':'3px 8px',borderRadius:8,border:'1px solid var(--border,#e5e7eb)',background:leaf?'var(--card,#fff)':'transparent',color:leaf?'var(--text,#0f172a)':'var(--muted,#64748b)',fontSize:11.5,fontWeight:700,cursor:leaf?'pointer':'default',whiteSpace:'nowrap'}}>{w} {w===1?'Tag':'Tage'}</button>
+    {anc&&<ImpPop anchor={anc} onClose={()=>setAnc(null)} width={230}>
+      <div style={{fontSize:11.5,color:'var(--muted,#64748b)',marginBottom:6}}>Aufwand in Tagen. Zählt als Gewicht im Fortschritt.</div>
+      <div style={{display:'flex',alignItems:'center',gap:8}}>
+        <button className="btn btn-sm" onClick={()=>onPick(Math.max(1,w-1))}>−</button>
+        <input type="number" min="1" max="365" value={w} onChange={e=>{ const n=Math.max(1,Math.min(365,parseInt(e.target.value,10)||1)); onPick(n); }} style={{width:64,textAlign:'center',padding:'5px 6px',border:'1px solid var(--border,#e5e7eb)',borderRadius:8,background:'var(--card,#fff)',color:'var(--text,#0f172a)',fontWeight:800}}/>
+        <button className="btn btn-sm" onClick={()=>onPick(Math.min(365,w+1))}>+</button>
+        <span style={{fontSize:12,color:'var(--muted,#64748b)'}}>Tage</span>
+      </div>
+      {sugg>0&&sugg!==w&&<button className="btn btn-sm" style={{marginTop:8,width:'100%'}} onClick={()=>{ onPick(sugg); setAnc(null); }}>Werktage laut Termin übernehmen: {sugg}</button>}
+    </ImpPop>}
+  </React.Fragment>;
+}
+const impDateInp={padding:'3px 4px',border:'1px solid var(--border,#e5e7eb)',borderRadius:7,background:'var(--card,#fff)',color:'var(--text,#0f172a)',fontSize:11.5,fontFamily:'inherit',width:'100%',boxSizing:'border-box',minWidth:0};
+// Titel: Klick auf den Text = direkt editieren (Enter speichert, Esc verwirft).
+function ImpTitle({it,sub,onSave,mobile}){
+  const [v,setV]=React.useState(null);
+  const done=()=>{ if(v===null) return; const t=v.trim(); setV(null); if(t&&t!==it.title) onSave(t); };
+  if(v!==null) return <input autoFocus value={v} onChange={e=>setV(e.target.value)} onBlur={done} onKeyDown={e=>{ if(e.key==='Enter') done(); if(e.key==='Escape') setV(null); }} style={{flex:1,minWidth:0,padding:'4px 6px',border:'1px solid var(--accent,#0F5661)',borderRadius:6,background:'var(--card,#fff)',color:'var(--text,#0f172a)',fontSize:sub?12.5:13.5,fontWeight:700,fontFamily:'inherit'}}/>;
+  return <span onClick={()=>setV(it.title||'')} title={it.title+' · Klick zum Ändern'} style={{flex:1,minWidth:0,fontSize:mobile?(sub?13:14.5):(sub?12.5:13.5),fontWeight:sub?600:700,color:'var(--text,#0f172a)',overflow:'hidden',display:'-webkit-box',WebkitLineClamp:mobile?4:3,WebkitBoxOrient:'vertical',lineHeight:1.25,wordBreak:'break-word',cursor:'text'}}>{it.title}</span>;
+}
+// Der Plan selbst: Kopfzahlen + Tabelle mit Zeitachse (Desktop) bzw. Kartenliste (mobil).
+// props: items, comments, narrow, labels {client,team,clientLong,teamLong,commentAuthor(c)},
+//        ownerChoices {team:[],client:[]}, canEditMeasures, canDelete, onPatch(it,patch), onAdd(parentId,title), onDelete(it), onComment(itemId,body)
+function ImpPlanGrid(P){
+  const {items,comments,narrow,labels,ownerChoices,canEditMeasures,canDelete,onPatch,onAdd,onDelete,onComment}=P;
+  const C=impCalc(items||[]);
+  const [open,setOpen]=React.useState({}); const [cmt,setCmt]=React.useState({}); const [newT,setNewT]=React.useState(null); const [newSub,setNewSub]=React.useState(null); const [meas,setMeas]=React.useState({}); const [geo,setGeo]=React.useState({});
+  const bodyRef=React.useRef(null); const cellRefs=React.useRef({});
+  const usedNames=[...new Set((items||[]).map(i=>i.owner_name).filter(Boolean))];
+  const choices={team:[...new Set([...(ownerChoices.team||[]),...usedNames.filter(n=>(items||[]).some(i=>i.owner_name===n&&i.owner_side!=='client'))])],
+                 client:[...new Set([...(ownerChoices.client||[]),...usedNames.filter(n=>(items||[]).some(i=>i.owner_name===n&&i.owner_side==='client'))])]};
+  // Kopfzahlen (Hauptpunkte)
+  const cOffen=C.tops.filter(t=>C.state(t)==='offen'&&!C.overdue(t)).length, cArbeit=C.tops.filter(t=>C.state(t)==='in_arbeit'&&!C.overdue(t)).length, cFertig=C.tops.filter(t=>C.state(t)==='erledigt').length, cOver=C.tops.filter(t=>C.overdue(t)).length;
+  const cNoEnd=C.leaves.filter(l=>!C.span(l).b&&C.state(l)!=='erledigt').length;
+  // Zeitachse: Bereich aus echten Terminen + heute. Ohne Termine: keine Achse.
+  const dated=(items||[]).filter(i=>C.isLeaf(i)).flatMap(i=>{ const s=C.span(i); return [s.a,s.b].filter(Boolean).map(d=>+new Date(d+'T00:00:00')); });
+  const anyDated=dated.length>0; const nowMs=+new Date(C.today+'T00:00:00');
+  let t0=Math.min(nowMs,...dated), t1=Math.max(nowMs,...dated); if(t1-t0<21*864e5) t1=t0+21*864e5; const padD=Math.max(3*864e5,(t1-t0)*0.06); t0-=padD; t1+=padD;
+  const X=d=>((+new Date(String(d).slice(0,10)+'T00:00:00'))-t0)/(t1-t0)*100;
+  const months=(()=>{ const out=[]; const d=new Date(t0); d.setDate(1); d.setHours(0,0,0,0); let g=0; while(+d<=t1&&g<36){ const x=((+d)-t0)/(t1-t0)*100; const nx=new Date(d); nx.setMonth(nx.getMonth()+1); if(+nx>t0) out.push({x:Math.max(0,x),l:d.toLocaleDateString('de-DE',{month:'short'})+(d.getMonth()===0||out.length===0?' '+String(d.getFullYear()).slice(2):'')}); d.setMonth(d.getMonth()+1); g++; } return out; })();
+  const todayX=X(C.today);
+  // Geometrie der Zeitachsen-Zellen für die Abhängigkeits-Pfeile (nach jedem Render messen, nur bei Änderung setzen).
+  React.useEffect(()=>{ if(narrow||!bodyRef.current) return; const b=bodyRef.current.getBoundingClientRect(); const g={};
+    Object.entries(cellRefs.current).forEach(([id,el])=>{ if(!el||!el.isConnected) return; const r=el.getBoundingClientRect(); g[id]={top:r.top-b.top,h:r.height,left:r.left-b.left,w:r.width}; });
+    g.__h=b.height; g.__w=b.width; if(JSON.stringify(g)!==JSON.stringify(geo)) setGeo(g); });
+  React.useEffect(()=>{ const h=()=>setGeo({}); window.addEventListener('resize',h); return ()=>window.removeEventListener('resize',h); },[]);
+  const arrows=narrow?[]:(items||[]).flatMap(it=>{ const p=C.pred(it); if(!p) return []; const ps=C.span(p), ms=C.span(it); const a=geo[p.id], b=geo[it.id]; if(!ps.b||!ms.a||!a||!b) return [];
+    const x1=a.left+a.w*Math.min(100,Math.max(0,X(ps.b)+((864e5)/(t1-t0))*100))/100, y1=a.top+a.h/2, x2=b.left+b.w*Math.min(100,Math.max(0,X(ms.a)))/100, y2=b.top+b.h/2; const conflict=C.depConflict(it);
+    const xm=Math.max(x1+8,x2-8); return [{k:it.id,d:'M'+x1+' '+y1+' H'+xm+' V'+y2+' H'+(x2-1),c:conflict?'#dc2626':'#94a3b8',conflict}]; });
+  const setStatus=(it,st)=>onPatch(it,{status:st,progress:impStat(st).p});
+  const patchDate=(it,k,v)=>{ const p={[k]:v||null}; const a=k==='start_date'?v:it.start_date, b=k==='due_date'?v:it.due_date; if(a&&b&&String(b).slice(0,10)<String(a).slice(0,10)){ if(k==='start_date') p.due_date=v; else p.start_date=v; } onPatch(it,p); };
+  const depOptions=it=>(items||[]).filter(o=>o.id!==it.id&&!C.isDesc(o.id,it.id)&&o.parent_id!==it.id);
+  // Balken / Raute / Marke — nur aus echten Terminen.
+  const bar=(it,sub)=>{ const s=C.span(it); const st=C.state(it); const od=C.overdue(it); const col=od?'#dc2626':impStat(st).c; const p=C.pct(it); const leaf=C.isLeaf(it);
+    if(s.a&&s.b){ const l=Math.max(0,X(s.a)), r=Math.min(100,X(s.b)+((864e5)/(t1-t0))*100); const w=Math.max(0.6,r-l);
+      return <div title={impFmtD(s.a)+' – '+impFmtD(s.b)+' · '+p+'%'+(od?' · überfällig':'')} style={{position:'absolute',top:'50%',transform:'translateY(-50%)',left:l+'%',width:w+'%',height:sub?14:leaf?20:16,borderRadius:sub?7:10,background:leaf?'var(--surface-2,#f1f5f9)':'transparent',boxShadow:'inset 0 0 0 '+(leaf?'1px':'2px')+' '+(leaf?'var(--border,#e5e7eb)':col),overflow:'hidden'}}><div style={{width:p+'%',height:'100%',background:col,opacity:leaf?1:.35,transition:'width .3s'}}/></div>; }
+    if(s.b) return <div title={'Ende '+impFmtD(s.b)+' · kein Start gesetzt'} style={{position:'absolute',top:'50%',left:'calc('+Math.min(100,X(s.b))+'% - 6px)',width:12,height:12,transform:'translateY(-50%) rotate(45deg)',background:col,borderRadius:2}}/>;
+    if(s.a) return <div title={'Start '+impFmtD(s.a)+' · Ende fehlt'} style={{position:'absolute',top:'50%',left:Math.max(0,X(s.a))+'%',transform:'translateY(-50%)',display:'flex',alignItems:'center',gap:3}}><div style={{width:2,height:16,background:col,borderRadius:1}}/><span style={{fontSize:10,color:'var(--muted,#64748b)',whiteSpace:'nowrap'}}>Ende?</span></div>;
+    return null; };
+  const gridBg=<React.Fragment>{months.map((m,i)=><div key={i} style={{position:'absolute',top:0,bottom:0,left:m.x+'%',width:1,background:'var(--border,#e5e7eb)',opacity:.6}}/>)}{todayX>=0&&todayX<=100&&<div style={{position:'absolute',top:0,bottom:0,left:todayX+'%',width:2,background:'#dc2626',opacity:.6}}/>}</React.Fragment>;
+  const depChip=it=>{ const p=C.pred(it); if(!p) return null; const cf=C.depConflict(it); return <span title={(cf?'Konflikt: startet vor dem Ende von „':'wartet auf „')+p.title+'“'+(cf?'“ ('+impFmtD(C.span(p).b)+')':'“')} style={{fontSize:11,color:cf?'#dc2626':'var(--muted,#64748b)',fontWeight:cf?800:600,flexShrink:0}}>{cf?'⚠':'⛓'}</span>; };
+  const originTag=it=>!it.parent_id&&<span style={{fontSize:9.5,fontWeight:700,padding:'1px 5px',borderRadius:8,background:it.origin==='client'?'#f3e8ff':'#ecfeff',color:it.origin==='client'?'#7c3aed':'#0e7490',flexShrink:0}}>{it.origin==='client'?labels.client:labels.team}</span>;
+  const ccount=it=>(comments[it.id]||[]).length;
+  const cmtBtn=it=>{ const n=ccount(it); const isOpen=!!open[it.id]; return <button onClick={()=>setOpen(o=>({...o,[it.id]:!isOpen}))} title={n+' Kommentar(e) · Details öffnen'} style={{border:'none',background:isOpen?'var(--surface-2,#f1f5f9)':'transparent',borderRadius:8,cursor:'pointer',padding:'3px 6px',fontSize:11.5,fontWeight:700,color:n?'var(--text,#0f172a)':'var(--muted,#64748b)',whiteSpace:'nowrap'}}>💬{n?' '+n:''}</button>; };
+  // Aufklapp-Panel: Maßnahme, Priorität, Vorgänger, Kommentare, Unterpunkt/Löschen.
+  const detail=(it,padLeft)=>{ const cs=comments[it.id]||[]; const p=C.pred(it); const mv=meas[it.id]; return <div style={{padding:'10px 12px 12px '+(padLeft||12)+'px',background:'var(--surface-2,#f1f5f9)',borderTop:'1px solid var(--border,#e5e7eb)'}}>
+    <div style={{display:'flex',gap:14,flexWrap:'wrap',alignItems:'center',marginBottom:8}}>
+      <label style={{fontSize:12,color:'var(--muted,#64748b)',display:'flex',alignItems:'center',gap:6}}>Priorität <select value={it.priority||'wichtig'} onChange={e=>onPatch(it,{priority:e.target.value})} style={{padding:'4px 6px',border:'1px solid var(--border,#e5e7eb)',borderRadius:8,background:'var(--card,#fff)',color:'var(--text,#0f172a)',fontSize:12}}>{IMP_PRIO.map(x=><option key={x.k} value={x.k}>{x.l}</option>)}</select></label>
+      <label style={{fontSize:12,color:'var(--muted,#64748b)',display:'flex',alignItems:'center',gap:6}}>Wartet auf <select value={it.depends_on||''} onChange={e=>onPatch(it,{depends_on:e.target.value||null})} style={{padding:'4px 6px',border:'1px solid var(--border,#e5e7eb)',borderRadius:8,background:'var(--card,#fff)',color:'var(--text,#0f172a)',fontSize:12,maxWidth:260}}><option value="">niemanden</option>{depOptions(it).map(o=><option key={o.id} value={o.id}>{(o.parent_id&&C.byId[o.parent_id]?'› ':'')+o.title}</option>)}</select></label>
+      {p&&C.depConflict(it)&&<span style={{fontSize:12,color:'#dc2626',fontWeight:700}}>⚠ startet vor dem Ende von „{p.title}“ ({impFmtD(C.span(p).b)})</span>}
+      <div style={{flex:1}}/>
+      {!it.parent_id&&<button className="btn btn-sm" onClick={()=>setNewSub({parent:it.id,val:''})}>+ Unterpunkt</button>}
+      {canDelete&&onDelete&&<button className="btn btn-sm" onClick={()=>onDelete(it)}>✕ Löschen</button>}
+    </div>
+    {canEditMeasures
+      ? <div style={{marginBottom:8}}><div style={{fontSize:11,fontWeight:800,color:'var(--muted,#64748b)',marginBottom:3}}>Maßnahme (was wir tun)</div>
+          <textarea value={mv!==undefined?mv:(it.measures||'')} onChange={e=>setMeas(m=>({...m,[it.id]:e.target.value}))} rows={2} placeholder="Noch keine Maßnahme hinterlegt…" style={{width:'100%',boxSizing:'border-box',padding:'6px 8px',border:'1px solid var(--border,#e5e7eb)',borderRadius:8,background:'var(--card,#fff)',color:'var(--text,#0f172a)',fontSize:12.5,resize:'vertical',fontFamily:'inherit'}}/>
+          {mv!==undefined&&mv!==(it.measures||'')&&<div style={{display:'flex',gap:6,marginTop:4}}><button className="btn btn-primary btn-sm" onClick={()=>{ onPatch(it,{measures:mv.trim()||null}); setMeas(m=>{ const n={...m}; delete n[it.id]; return n; }); }}>Maßnahme speichern</button><button className="btn btn-sm" onClick={()=>setMeas(m=>{ const n={...m}; delete n[it.id]; return n; })}>Verwerfen</button></div>}
+        </div>
+      : <div style={{fontSize:12.5,marginBottom:8}}><b style={{color:'var(--muted,#64748b)'}}>Maßnahme von {labels.teamLong}:</b> {it.measures||<i style={{color:'var(--muted,#64748b)'}}>noch keine</i>}</div>}
+    <div style={{fontSize:11,fontWeight:800,color:'var(--muted,#64748b)',marginBottom:4}}>Kommentare ({cs.length})</div>
+    {cs.map(c=><div key={c.id} style={{fontSize:12.5,marginBottom:4}}><b style={{color:c.side==='client'?'#7c3aed':'var(--accent,#0F5661)'}}>{labels.commentAuthor(c)}:</b> {c.body} <span style={{color:'var(--muted,#64748b)',fontSize:10.5}}>· {impFmtD(c.created_at)}</span></div>)}
+    <div style={{display:'flex',gap:6,marginTop:4}}><input value={cmt[it.id]||''} onChange={e=>setCmt(c=>({...c,[it.id]:e.target.value}))} onKeyDown={async e=>{ if(e.key==='Enter'&&(cmt[it.id]||'').trim()){ if(await onComment(it.id,cmt[it.id].trim())) setCmt(c=>({...c,[it.id]:''})); } }} placeholder="Kommentar… (Enter)" style={{flex:1,padding:'6px 8px',border:'1px solid var(--border,#e5e7eb)',borderRadius:8,background:'var(--card,#fff)',color:'var(--text,#0f172a)',fontSize:12.5}}/><button className="btn btn-sm" onClick={async()=>{ const b=(cmt[it.id]||'').trim(); if(b&&await onComment(it.id,b)) setCmt(c=>({...c,[it.id]:''})); }}>Senden</button></div>
+  </div>; };
+  const subInput=(parentId,padLeft)=>newSub&&newSub.parent===parentId&&<div style={{display:'flex',gap:6,padding:'6px 10px 8px '+(padLeft||30)+'px',borderTop:'1px solid var(--border,#e5e7eb)',background:'var(--surface-2,#f1f5f9)'}}>
+    <input autoFocus value={newSub.val} onChange={e=>setNewSub(s=>({...s,val:e.target.value}))} onKeyDown={async e=>{ if(e.key==='Escape') setNewSub(null); if(e.key==='Enter'&&newSub.val.trim()){ if(await onAdd(parentId,newSub.val.trim())) setNewSub(null); } }} placeholder="Unterpunkt… (Enter speichert, Esc bricht ab)" style={{flex:1,padding:'6px 8px',border:'1px solid var(--accent,#0F5661)',borderRadius:8,background:'var(--card,#fff)',color:'var(--text,#0f172a)',fontSize:12.5}}/>
+    <button className="btn btn-primary btn-sm" disabled={!newSub.val.trim()} onClick={async()=>{ if(await onAdd(parentId,newSub.val.trim())) setNewSub(null); }}>Anlegen</button><button className="btn btn-sm" onClick={()=>setNewSub(null)}>Abbrechen</button>
+  </div>;
+  const newTopRow=(mobile)=>newT===null
+    ? <button onClick={()=>setNewT('')} style={{border:'none',background:'transparent',cursor:'pointer',color:'var(--accent,#0F5661)',fontWeight:700,fontSize:12.5,padding:mobile?'10px 4px':'9px 12px',textAlign:'left',width:'100%'}}>+ Punkt hinzufügen</button>
+    : <div style={{display:'flex',gap:6,padding:mobile?'8px 0':'8px 12px'}}><input autoFocus value={newT} onChange={e=>setNewT(e.target.value)} onKeyDown={async e=>{ if(e.key==='Escape') setNewT(null); if(e.key==='Enter'&&newT.trim()){ if(await onAdd(null,newT.trim())) setNewT(null); } }} placeholder="Neuer Punkt… (Enter speichert)" style={{flex:1,padding:'7px 9px',border:'1px solid var(--accent,#0F5661)',borderRadius:8,background:'var(--card,#fff)',color:'var(--text,#0f172a)',fontSize:13}}/><button className="btn btn-primary btn-sm" disabled={!newT.trim()} onClick={async()=>{ if(await onAdd(null,newT.trim())) setNewT(null); }}>Anlegen</button><button className="btn btn-sm" onClick={()=>setNewT(null)}>Abbrechen</button></div>;
+  // Spalten (Desktop)
+  const COL={st:98,title:300,owner:118,date:106,eff:62,cm:38}; const LEFT=COL.st+COL.title+COL.owner+COL.date*2+COL.eff+COL.cm; const TL=240;
+  const row=(it,sub)=>{ const leaf=C.isLeaf(it); const s=C.span(it); const isOpen=!!open[it.id]; const od=C.overdue(it); const pr=impPrio(it.priority);
+    return <React.Fragment key={it.id}>
+      <div style={{display:'flex',alignItems:'stretch',borderTop:'1px solid var(--border,#e5e7eb)',minHeight:sub?36:44,background:sub?'color-mix(in srgb, var(--surface-2,#f1f5f9) 45%, var(--card,#fff))':'var(--card,#fff)'}}>
+        <div style={{width:COL.st,minWidth:COL.st,display:'flex',alignItems:'center',padding:'4px 6px',paddingLeft:sub?18:8,boxSizing:'border-box'}}><ImpStatusPill it={it} C={C} onPick={st=>setStatus(it,st)}/></div>
+        <div style={{width:COL.title,minWidth:COL.title,display:'flex',alignItems:'center',gap:6,padding:'4px 8px',boxSizing:'border-box'}}>
+          <span style={{width:sub?6:9,height:sub?6:9,borderRadius:'50%',background:pr.c,flexShrink:0}} title={'Priorität: '+pr.l}/>
+          <ImpTitle it={it} sub={sub} onSave={t=>onPatch(it,{title:t})}/>
+          {depChip(it)}{originTag(it)}
+        </div>
+        <div style={{width:COL.owner,minWidth:COL.owner,display:'flex',alignItems:'center',padding:'4px 6px',boxSizing:'border-box',overflow:'hidden'}}><ImpOwnerChip it={it} choices={choices} labels={labels} onPick={(n,sd)=>onPatch(it,{owner_name:n,owner_side:n?sd:null})}/></div>
+        <div style={{width:COL.date,minWidth:COL.date,display:'flex',alignItems:'center',padding:'4px 6px',boxSizing:'border-box'}}>{leaf?<input type="date" value={s.a||''} onChange={e=>patchDate(it,'start_date',e.target.value)} title="Start" style={impDateInp}/>:<span style={{fontSize:11.5,color:'var(--muted,#64748b)'}}>{s.a?impFmtD(s.a):'–'}</span>}</div>
+        <div style={{width:COL.date,minWidth:COL.date,display:'flex',alignItems:'center',padding:'4px 6px',boxSizing:'border-box'}}>{leaf?<input type="date" value={s.b||''} onChange={e=>patchDate(it,'due_date',e.target.value)} title="Ende" style={od?{...impDateInp,borderColor:'#dc2626',color:'#dc2626',fontWeight:800}:impDateInp}/>:<span style={{fontSize:11.5,color:od?'#dc2626':'var(--muted,#64748b)',fontWeight:od?800:400}}>{s.b?impFmtD(s.b):'–'}</span>}</div>
+        <div style={{width:COL.eff,minWidth:COL.eff,display:'flex',alignItems:'center',padding:'4px 6px',boxSizing:'border-box'}}><ImpEffortChip it={it} C={C} onPick={n=>onPatch(it,{effort_days:n})}/></div>
+        <div style={{width:COL.cm,minWidth:COL.cm,display:'flex',alignItems:'center',padding:'4px 2px',boxSizing:'border-box'}}>{cmtBtn(it)}</div>
+        <div ref={el=>{ if(el) cellRefs.current[it.id]=el; else delete cellRefs.current[it.id]; }} style={{flex:1,position:'relative',overflow:'hidden',minWidth:TL,borderLeft:'1px solid var(--border,#e5e7eb)'}}>{anyDated&&gridBg}{anyDated&&bar(it,sub)}</div>
+      </div>
+      {isOpen&&detail(it,sub?30:14)}
+      {subInput(it.id,30)}
+      {C.kidsOf(it.id).map(k=>row(k,true))}
+    </React.Fragment>; };
+  const head=(w,l,extra)=><div style={{width:w,minWidth:w,padding:'7px 6px',fontSize:10.5,fontWeight:800,color:'var(--muted,#64748b)',textTransform:'uppercase',letterSpacing:.3,boxSizing:'border-box',...(extra||{})}}>{l}</div>;
+  // Mobil: Karte je Hauptpunkt, Unterpunkte darunter; alle Felder direkt antippbar.
+  const chips=(it,sub)=>{ const leaf=C.isLeaf(it); const s=C.span(it); const od=C.overdue(it); return <div style={{display:'flex',gap:6,flexWrap:'wrap',alignItems:'center',marginTop:6}}>
+    <ImpOwnerChip it={it} choices={choices} labels={labels} onPick={(n,sd)=>onPatch(it,{owner_name:n,owner_side:n?sd:null})} compact/>
+    {leaf?<label style={{display:'inline-flex',alignItems:'center',gap:3,fontSize:10.5,color:'var(--muted,#64748b)'}}>Start<input type="date" value={s.a||''} onChange={e=>patchDate(it,'start_date',e.target.value)} style={{...impDateInp,width:'auto'}}/></label>:s.a&&<span style={{fontSize:11,color:'var(--muted,#64748b)'}}>ab {impFmtD(s.a)}</span>}
+    {leaf?<label style={{display:'inline-flex',alignItems:'center',gap:3,fontSize:10.5,color:od?'#dc2626':'var(--muted,#64748b)'}}>Ende<input type="date" value={s.b||''} onChange={e=>patchDate(it,'due_date',e.target.value)} style={{...impDateInp,width:'auto',borderColor:od?'#dc2626':undefined,color:od?'#dc2626':undefined}}/></label>:s.b&&<span style={{fontSize:11,color:od?'#dc2626':'var(--muted,#64748b)',fontWeight:od?800:400}}>bis {impFmtD(s.b)}</span>}
+    <ImpEffortChip it={it} C={C} onPick={n=>onPatch(it,{effort_days:n})} compact/>
+    {depChip(it)}{cmtBtn(it)}
+  </div>; };
+  const card=it=>{ const ks=C.kidsOf(it.id); const od=C.overdue(it); const st=impStat(C.state(it)); const pr=impPrio(it.priority);
+    return <div key={it.id} style={{border:'1px solid var(--border,#e5e7eb)',borderRadius:12,marginBottom:10,background:'var(--card,#fff)',overflow:'hidden'}}>
+      <div style={{padding:'12px 14px'}}>
+        <div style={{display:'flex',alignItems:'flex-start',gap:8}}><span style={{width:9,height:9,borderRadius:'50%',background:pr.c,flexShrink:0,marginTop:5}} title={pr.l}/><ImpTitle it={it} onSave={t=>onPatch(it,{title:t})} mobile/>{originTag(it)}</div>
+        <div style={{display:'flex',alignItems:'center',gap:8,marginTop:8}}><ImpStatusPill it={it} C={C} onPick={s=>setStatus(it,s)}/>{ks.length>0&&<div style={{flex:1,height:7,background:'var(--surface-2,#f1f5f9)',borderRadius:4,overflow:'hidden'}}><div style={{width:C.pct(it)+'%',height:'100%',background:od?'#dc2626':st.c}}/></div>}</div>
+        {chips(it,false)}
+      </div>
+      {open[it.id]&&detail(it,14)}
+      {subInput(it.id,14)}
+      {ks.map(k=><div key={k.id} style={{borderTop:'1px solid var(--border,#e5e7eb)',padding:'10px 14px 10px 22px',background:'color-mix(in srgb, var(--surface-2,#f1f5f9) 45%, var(--card,#fff))'}}>
+        <div style={{display:'flex',alignItems:'flex-start',gap:8}}><span style={{width:6,height:6,borderRadius:'50%',background:impPrio(k.priority).c,flexShrink:0,marginTop:6}}/><ImpTitle it={k} sub onSave={t=>onPatch(k,{title:t})} mobile/></div>
+        <div style={{marginTop:6}}><ImpStatusPill it={k} C={C} onPick={s=>setStatus(k,s)} small/></div>
+        {chips(k,true)}
+        {open[k.id]&&<div style={{margin:'8px -14px -10px -22px'}}>{detail(k,22)}</div>}
+      </div>)}
+    </div>; };
+  const cardS={border:'1px solid var(--border,#e5e7eb)',borderRadius:14,background:'var(--card,#fff)',marginBottom:14};
+  return <React.Fragment>
+    <div style={{...cardS,padding:'16px 18px',display:'flex',gap:22,flexWrap:'wrap',alignItems:'center'}}>
+      {(()=>{ const R=52,Cc=2*Math.PI*R,off=Cc*(1-C.totalPct/100); return <svg width="128" height="128" viewBox="0 0 128 128" style={{flexShrink:0}}><circle cx="64" cy="64" r={R} fill="none" stroke="var(--surface-2,#f1f5f9)" strokeWidth="13"/><circle cx="64" cy="64" r={R} fill="none" stroke="#16a34a" strokeWidth="13" strokeLinecap="round" strokeDasharray={Cc} strokeDashoffset={off} transform="rotate(-90 64 64)"/><text x="64" y="60" textAnchor="middle" fontSize="28" fontWeight="800" fill="var(--text,#0f172a)">{C.totalPct}%</text><text x="64" y="82" textAnchor="middle" fontSize="11" fill="var(--muted,#64748b)">nach Aufwand</text></svg>; })()}
+      <div style={{display:'flex',gap:10,flexWrap:'wrap',flex:1,minWidth:240}}>
+        {[['offen',cOffen,'#94a3b8'],['in Arbeit',cArbeit,'#0ea5b7'],['überfällig',cOver,'#dc2626'],['erledigt',cFertig,'#16a34a'],['ohne Ende',cNoEnd,'#ca8a04']].map(([l,n,c])=><div key={l} style={{flex:1,minWidth:96,background:'var(--surface-2,#f1f5f9)',borderRadius:14,padding:'12px 14px'}}><div style={{fontSize:28,fontWeight:800,color:c,lineHeight:1}}>{n}</div><div style={{fontSize:12,color:'var(--muted,#64748b)',marginTop:4,fontWeight:600}}>{l}</div></div>)}
+      </div>
+    </div>
+    {narrow
+      ? <div>{C.tops.map(card)}<div style={cardS}>{newTopRow(true)}</div></div>
+      : <div style={{...cardS,overflow:'hidden'}}>
+          <div style={{overflowX:'auto'}}><div ref={bodyRef} style={{minWidth:LEFT+TL,position:'relative'}}>
+            <div style={{display:'flex',alignItems:'stretch',background:'var(--surface-2,#f1f5f9)',borderBottom:'1px solid var(--border,#e5e7eb)'}}>
+              {head(COL.st,'Zustand')}{head(COL.title,'Punkt')}{head(COL.owner,'Verantwortlich')}{head(COL.date,'Start')}{head(COL.date,'Ende')}{head(COL.eff,'Aufwand')}{head(COL.cm,'')}
+              <div style={{flex:1,position:'relative',overflow:'hidden',minWidth:TL,height:30,borderLeft:'1px solid var(--border,#e5e7eb)'}}>
+                {anyDated?months.map((m,i)=><span key={i} style={{position:'absolute',left:'calc('+m.x+'% + 5px)',top:8,fontSize:10.5,fontWeight:800,color:'var(--muted,#64748b)',textTransform:'uppercase'}}>{m.l}</span>):<span style={{position:'absolute',left:10,top:8,fontSize:11,color:'var(--muted,#64748b)'}}>Zeitachse erscheint, sobald Start und Ende gesetzt sind</span>}
+                {anyDated&&todayX>=0&&todayX<=100&&<div style={{position:'absolute',top:0,bottom:0,left:todayX+'%',width:2,background:'#dc2626',opacity:.6}}/>}
+              </div>
+            </div>
+            {C.tops.length===0&&<div style={{padding:'14px 12px',color:'var(--muted,#64748b)',fontSize:13}}>Noch keine Punkte.</div>}
+            {C.tops.map(it=>row(it,false))}
+            <div style={{borderTop:'1px solid var(--border,#e5e7eb)'}}>{newTopRow(false)}</div>
+            {arrows.length>0&&<svg style={{position:'absolute',top:0,left:0,width:geo.__w||0,height:geo.__h||0,pointerEvents:'none',zIndex:2}}>
+              <defs><marker id="impArrG" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#94a3b8"/></marker><marker id="impArrR" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#dc2626"/></marker></defs>
+              {arrows.map(a=><path key={a.k} d={a.d} fill="none" stroke={a.c} strokeWidth={a.conflict?2:1.5} strokeDasharray={a.conflict?'4 3':undefined} markerEnd={'url(#'+(a.conflict?'impArrR':'impArrG')+')'}/>)}
+            </svg>}
+          </div></div>
+        </div>}
+  </React.Fragment>;
+}
+// ── Ende geteilter Kern ──
+// Arbeitsplan (Kundenansicht): gemeinsamer Plan, Kunde arbeitet aktiv mit (anlegen, Zustand, Termine, Verantwortliche,
+// Aufwand, Vorgänger, Kommentare). AUSNAHME: unsere Maßnahmen (measures) pflegt nur TIVE (RLS-Trigger schützt sie); kein Löschen.
 function ClientPlanView({client}){
-  const [items,setItems]=useState(null); const [comments,setComments]=useState({}); const [open,setOpen]=useState({}); const [cmt,setCmt]=useState({}); const [newT,setNewT]=useState(''); const [busy,setBusy]=useState(false); const [edit,setEdit]=useState(null); const [ef,setEf]=useState({});
+  const [items,setItems]=useState(null); const [comments,setComments]=useState({}); const [emps,setEmps]=useState([]);
   const [narrow,setNarrow]=useState(()=>window.innerWidth<820);
   useEffect(()=>{ const h=()=>setNarrow(window.innerWidth<820); window.addEventListener('resize',h); return ()=>window.removeEventListener('resize',h); },[]);
-  const load=async()=>{ try{ const {data}=await sb.from('improvement_items').select('*').eq('project_id',client.project_id).order('sort_order',{ascending:true}); const its=data||[]; setItems(its); const ids=its.map(i=>i.id); if(ids.length){ const {data:cs}=await sb.from('improvement_comments').select('*').in('item_id',ids).order('created_at',{ascending:true}); const m={}; (cs||[]).forEach(c=>{(m[c.item_id]=m[c.item_id]||[]).push(c);}); setComments(m);} else setComments({}); }catch(e){ setItems([]); } };
-  useEffect(()=>{ load(); },[]);
-  const tops=(items||[]).filter(i=>!i.parent_id).sort((a,b)=>(a.sort_order||0)-(b.sort_order||0));
-  const kidsOf=id=>(items||[]).filter(i=>i.parent_id===id).sort((a,b)=>(a.sort_order||0)-(b.sort_order||0));
-  const doneKids=it=>kidsOf(it.id).filter(k=>k.status==='erledigt').length;
-  const dState=it=>{ const ks=kidsOf(it.id); if(!ks.length) return it.status; if(ks.every(k=>k.status==='erledigt')) return 'erledigt'; if(ks.some(k=>k.status!=='offen')) return 'in_arbeit'; return 'offen'; };
-  const fillPct=it=>{ const ks=kidsOf(it.id); return ks.length? Math.round(doneKids(it)/ks.length*100) : cImpStat(it.status).p; };
-  const fmtD=d=>{ if(!d)return''; const p=String(d).slice(0,10).split('-'); return p.length===3?p[2]+'.'+p[1]+'.'+p[0]:String(d); };
-  const overdue=(d,s)=>{ if(!d||s==='erledigt')return false; try{return new Date(String(d).slice(0,10))<new Date(new Date().toISOString().slice(0,10));}catch(e){return false;} };
-  const overdueOf=it=>overdue(it.due_date, dState(it));
-  const cOffen=tops.filter(t=>dState(t)==='offen'&&!overdueOf(t)).length;
-  const cArbeit=tops.filter(t=>dState(t)==='in_arbeit'&&!overdueOf(t)).length;
-  const cFertig=tops.filter(t=>dState(t)==='erledigt').length;
-  const cOver=tops.filter(t=>overdueOf(t)).length;
-  const donePct=tops.length?Math.round(cFertig/tops.length*100):0;
-  const span=i=>{ let a=i.start_date?String(i.start_date).slice(0,10):null, b=i.due_date?String(i.due_date).slice(0,10):null; if(!a&&!b) return null; if(!a) a=cImpAddDays(b,-14); if(!b) b=cImpAddDays(a,14); return [a,b]; };
-  const nowStr=new Date().toISOString().slice(0,10);
-  const alld=(items||[]).flatMap(i=>{const s=span(i);return s?[+new Date(s[0]),+new Date(s[1])]:[];}); alld.push(+new Date(nowStr));
-  let t0=Math.min.apply(null,alld), t1=Math.max.apply(null,alld); if(!isFinite(t0)){t0=+new Date(nowStr);t1=t0+90*864e5;} if(t1<=t0)t1=t0+30*864e5;
-  const padD=Math.max(3*864e5,(t1-t0)*0.05); t0-=padD; t1+=padD;
-  const X=d=>((+new Date(String(d).slice(0,10)))-t0)/(t1-t0)*100;
-  const months=(()=>{ const out=[]; const d=new Date(t0); d.setDate(1); d.setHours(0,0,0,0); let g=0; while(+d<=t1&&g<24){ out.push({x:Math.max(0,((+d)-t0)/(t1-t0)*100),l:d.toLocaleDateString('de-DE',{month:'short'})}); d.setMonth(d.getMonth()+1); g++; } return out; })();
-  const todayX=X(nowStr);
-  const anyDated=(items||[]).some(i=>span(i));
-  async function addItem(parentId, title){ const t=(title||'').trim(); if(!t||busy)return false; setBusy(true);
-    const sibs=parentId?kidsOf(parentId):tops; const ord=Math.max(0,...sibs.map(s=>s.sort_order||0))+1;
-    const {error}=await sb.from('improvement_items').insert({project_id:client.project_id, parent_id:parentId||null, title:t, origin:'client', priority:'wichtig', status:'offen', progress:0, sort_order:ord, created_by_name:client.name||'Kunde'}); setBusy(false);
-    if(error){ window.alert('Nicht gespeichert: '+(error.message||'')); return false; } load(); return true; }
-  async function addPoint(){ if(await addItem(null,newT)) setNewT(''); }
-  async function addComment(itemId){ const b=(cmt[itemId]||'').trim(); if(!b)return; const {error}=await sb.from('improvement_comments').insert({item_id:itemId, project_id:client.project_id, side:'client', author_name:client.name||'Kunde', body:b}); if(error){ window.alert('Kommentar fehlgeschlagen: '+(error.message||'')); return; } setCmt(c=>({...c,[itemId]:''})); load(); }
-  function openEdit(it){ setEf({title:it.title||'',priority:it.priority||'wichtig',status:it.status||'offen',start_date:it.start_date?String(it.start_date).slice(0,10):'',due_date:it.due_date?String(it.due_date).slice(0,10):''}); setEdit(it.id); }
-  function openNew(parentId){ setEf({title:'',priority:'wichtig',status:'offen',start_date:'',due_date:''}); setEdit('new:'+(parentId||'')); }
-  async function saveItem(){ const t=(ef.title||'').trim(); if(!t||busy) return; setBusy(true);
-    const base={ title:t, priority:ef.priority, status:ef.status, progress:cImpStat(ef.status).p, start_date:ef.start_date||null, due_date:ef.due_date||null };
-    let error;
-    if(String(edit).startsWith('new:')){ const parentId=String(edit).slice(4)||null; const sibs=parentId?kidsOf(parentId):tops; const ord=Math.max(0,...sibs.map(s=>s.sort_order||0))+1;
-      ({error}=await sb.from('improvement_items').insert({...base, project_id:client.project_id, parent_id:parentId, origin:'client', sort_order:ord, created_by_name:client.name||'Kunde'})); }
-    else { ({error}=await sb.from('improvement_items').update(base).eq('id',edit)); }
-    setBusy(false); if(error){ window.alert('Nicht gespeichert: '+(error.message||'')); return; } setEdit(null); load();
-  }
-  async function setStatus(it, st){ const {error}=await sb.from('improvement_items').update({status:st, progress:cImpStat(st).p}).eq('id',it.id); if(error){ window.alert('Nicht gespeichert: '+(error.message||'')); return; } load(); }
-  const statusSel=it=><select value={it.status} onChange={e=>setStatus(it,e.target.value)} title="Zustand ändern" style={{fontSize:11.5,padding:'3px 6px',border:'1px solid #cbd5e1',borderRadius:6,background:'#fff',color:'#0f172a',cursor:'pointer'}}>{C_IMP_STAT.map(s=><option key={s.k} value={s.k}>{s.l}</option>)}</select>;
-  const stateCell=it=>{ const ks=kidsOf(it.id); if(ks.length){ const od=overdueOf(it); return <span style={{fontSize:12,fontWeight:800,color:od?'#dc2626':dState(it)==='erledigt'?'#16a34a':'#0f172a',whiteSpace:'nowrap'}} title={doneKids(it)+' von '+ks.length+' erledigt'}>{doneKids(it)}/{ks.length}</span>; } return statusSel(it); };
-  const ganttBar=(it,sub)=>{ const sp=span(it); const p=fillPct(it); const od=overdueOf(it); const c=od?'#dc2626':cImpStat(dState(it)).c;
-    if(!sp) return <span style={{position:'absolute',left:10,top:'50%',transform:'translateY(-50%)',fontSize:11,color:'#94a3b8',fontStyle:'italic'}}>kein Termin</span>;
-    const l=Math.max(0,X(sp[0])), w=Math.max(2,X(sp[1])-X(sp[0]));
-    return <div style={{position:'absolute',top:'50%',transform:'translateY(-50%)',left:l+'%',width:w+'%',height:sub?15:24,borderRadius:sub?7:12,background:'#f1f5f9',boxShadow:'inset 0 0 0 1px #e2e8f0',overflow:'hidden'}} title={fmtD(sp[0])+' – '+fmtD(sp[1])}><div style={{width:p+'%',height:'100%',background:c,borderRadius:sub?7:12,transition:'width .3s'}}/></div>; };
-  const gridBg=<React.Fragment>{months.map((m,i)=><div key={i} style={{position:'absolute',top:0,bottom:0,left:m.x+'%',width:1,background:'#e5e7eb'}}/>)}{todayX>=0&&todayX<=100&&<div style={{position:'absolute',top:0,bottom:0,left:todayX+'%',width:2,background:'#dc2626',opacity:.7}}/>}</React.Fragment>;
-  const LBL=520;   // Titelspalte breit genug für ganze Punkt-Titel (Lesbarkeit vor Zeitachse)
-  const commentBlock=it=>{ const cs=comments[it.id]||[]; return <div style={{marginTop:6}}>
-    {cs.map(c=><div key={c.id} style={{fontSize:12.5,marginBottom:4}}><b style={{color:c.side==='client'?'#7c3aed':'#0f172a'}}>{c.side==='client'?'Sie':(c.author_name||'TIVE 360°')}:</b> {c.body} <span style={{color:'#94a3b8',fontSize:10.5}}>· {fmtD(c.created_at)}</span></div>)}
-    <div style={{display:'flex',gap:6,marginTop:4}}><input value={cmt[it.id]||''} onChange={e=>setCmt(c=>({...c,[it.id]:e.target.value}))} placeholder="Kommentar…" style={{flex:1,padding:'6px 8px',border:'1px solid #cbd5e1',borderRadius:8,fontSize:12.5}}/><button className="btn btn-primary" style={{padding:'6px 12px'}} onClick={()=>addComment(it.id)}>Senden</button></div>
-  </div>; };
-  const editForm=(parentLabel)=><div style={{border:'1px dashed #7c3aed',borderRadius:10,padding:'12px 14px',margin:'2px 0 10px',background:'#faf5ff'}}>
-    <div style={{fontSize:12,fontWeight:800,marginBottom:8}}>{String(edit).startsWith('new:')?(parentLabel?'Neuer Unterpunkt':'Neuer Punkt'):'Punkt bearbeiten'}</div>
-    <input value={ef.title} onChange={e=>setEf(f=>({...f,title:e.target.value}))} placeholder="Titel *" style={{width:'100%',padding:'7px 9px',border:'1px solid #cbd5e1',borderRadius:8,boxSizing:'border-box',marginBottom:8}}/>
-    <div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'center'}}>
-      <label style={{fontSize:12,color:'#64748b'}}>Priorität <select value={ef.priority} onChange={e=>setEf(f=>({...f,priority:e.target.value}))} style={{padding:'5px 7px',border:'1px solid #cbd5e1',borderRadius:8}}>{C_IMP_PRIO.map(p=><option key={p.k} value={p.k}>{p.l}</option>)}</select></label>
-      <label style={{fontSize:12,color:'#64748b'}}>Zustand <select value={ef.status} onChange={e=>setEf(f=>({...f,status:e.target.value}))} style={{padding:'5px 7px',border:'1px solid #cbd5e1',borderRadius:8}}>{C_IMP_STAT.map(s=><option key={s.k} value={s.k}>{s.l}</option>)}</select></label>
-      <label style={{fontSize:12,color:'#64748b'}}>Beginn <input type="date" value={ef.start_date} onChange={e=>setEf(f=>({...f,start_date:e.target.value}))} style={{padding:'5px 7px',border:'1px solid #cbd5e1',borderRadius:8}}/></label>
-      <label style={{fontSize:12,color:'#64748b'}}>Frist <input type="date" value={ef.due_date} onChange={e=>setEf(f=>({...f,due_date:e.target.value}))} style={{padding:'5px 7px',border:'1px solid #cbd5e1',borderRadius:8}}/></label>
-    </div>
-    <div style={{fontSize:11,color:'#94a3b8',marginTop:6}}>Die Maßnahmen pflegt TIVE 360°. Titel, Priorität, Termine und Zustand können Sie selbst setzen.</div>
-    <div style={{display:'flex',gap:8,marginTop:10}}><button className="btn btn-primary" style={{padding:'6px 14px'}} disabled={busy} onClick={saveItem}>Speichern</button><button className="btn" style={{padding:'6px 12px'}} onClick={()=>setEdit(null)}>Abbrechen</button></div>
-  </div>;
-  const detailPanel=(it,sub,padLeft)=>{ const od=overdueOf(it); const cs=comments[it.id]||[]; return <div style={{padding:'8px 10px 12px '+(padLeft||20)+'px',background:'#f8fafc',borderTop:'1px solid #eef2f7'}}>
-    {it.start_date&&<span style={{fontSize:11.5,color:'#64748b',marginRight:12}}>Beginn {fmtD(it.start_date)}</span>}
-    {it.due_date&&<span style={{fontSize:11.5,color:od?'#dc2626':'#64748b',fontWeight:od?800:600,marginRight:12}}>Frist {fmtD(it.due_date)}{od?' · überfällig':''}</span>}
-    <div style={{display:'flex',gap:6,flexWrap:'wrap',marginTop:6}}>
-      <button className="btn" style={{padding:'5px 10px',fontSize:12}} onClick={()=>openEdit(it)}>✎ Bearbeiten</button>{!sub&&<button className="btn" style={{padding:'5px 10px',fontSize:12}} onClick={()=>openNew(it.id)}>+ Unterpunkt</button>}
-    </div>
-    {it.measures&&<div style={{fontSize:12.5,color:'#0f172a',marginTop:8}}><b style={{color:'#64748b'}}>Maßnahme von TIVE 360°:</b> {it.measures}</div>}
-    <div style={{fontSize:11,fontWeight:800,color:'#64748b',marginTop:8}}>Kommentare ({cs.length})</div>
-    {commentBlock(it)}
-  </div>; };
-  const row=(it,sub)=>{ const pr=cImpPrio(it.priority); const isOpen=open[it.id];
-    return <React.Fragment key={it.id}>
-      {edit===it.id? <div style={{padding:'0 8px'}}>{editForm(!!sub)}</div> : <div style={{display:'flex',alignItems:'stretch',borderTop:'1px solid #eef2f7',minHeight:sub?36:46}}>
-        <div style={{width:LBL,minWidth:LBL,display:'flex',alignItems:'center',gap:7,padding:'6px 10px',paddingLeft:sub?28:10}}>
-          <button onClick={()=>setOpen(o=>({...o,[it.id]:!isOpen}))} style={{border:'none',background:'none',cursor:'pointer',color:'#64748b',fontSize:11,width:12,padding:0}} title="Details">{isOpen?'▾':'▸'}</button>
-          <span style={{width:sub?7:10,height:sub?7:10,borderRadius:'50%',background:pr.c,flexShrink:0}} title={'Priorität: '+pr.l}/>
-          <span style={{flex:1,minWidth:0,fontSize:sub?12.5:14,fontWeight:sub?600:700,color:'#0f172a',overflow:'hidden',display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical',lineHeight:1.25,wordBreak:'break-word'}} title={it.title}>{it.title}</span>
-          {!sub&&<span style={{fontSize:9.5,fontWeight:700,padding:'1px 5px',borderRadius:8,background:it.origin==='client'?'#f3e8ff':'#ecfeff',color:it.origin==='client'?'#7c3aed':'#0e7490'}}>{it.origin==='client'?'Sie':'TIVE'}</span>}
-          {stateCell(it)}
-        </div>
-        <div style={{flex:1,position:'relative',overflow:'hidden',minWidth:340,borderLeft:'1px solid #e5e7eb'}}>{gridBg}{ganttBar(it,sub)}</div>
-      </div>}
-      {isOpen&&edit!==it.id&&detailPanel(it,sub,sub?34:22)}
-      {String(edit)==='new:'+it.id&&<div style={{padding:'0 8px 0 26px'}}>{editForm(true)}</div>}
-      {kidsOf(it.id).map(k=>row(k,true))}
-    </React.Fragment>;
-  };
-  const mcard=(it)=>{ const pr=cImpPrio(it.priority); const ks=kidsOf(it.id); const od=overdueOf(it); const isOpen=open[it.id]; const st=cImpStat(dState(it));
-    return <div key={it.id} style={{border:'1px solid #e5e7eb',borderRadius:12,padding:'12px 14px',marginBottom:10,background:'#fff'}}>
-      {edit===it.id? editForm(false) : <React.Fragment>
-        <div style={{display:'flex',alignItems:'center',gap:8}}>
-          <span style={{width:10,height:10,borderRadius:'50%',background:pr.c,flexShrink:0}} title={pr.l}/>
-          <span style={{flex:1,minWidth:0,fontSize:14.5,fontWeight:800,color:'#0f172a'}}>{it.title}</span>
-          <span style={{fontSize:9.5,fontWeight:700,padding:'1px 5px',borderRadius:8,background:it.origin==='client'?'#f3e8ff':'#ecfeff',color:it.origin==='client'?'#7c3aed':'#0e7490'}}>{it.origin==='client'?'Sie':'TIVE'}</span>
-        </div>
-        <div style={{display:'flex',alignItems:'center',gap:10,marginTop:8,flexWrap:'wrap'}}>
-          {ks.length? <span style={{fontSize:13,fontWeight:800,color:od?'#dc2626':st.c}}>{doneKids(it)} von {ks.length} erledigt</span> : statusSel(it)}
-          {it.due_date&&<span style={{fontSize:11.5,color:od?'#dc2626':'#64748b',fontWeight:od?800:600}}>bis {fmtD(it.due_date)}{od?' · überfällig':''}</span>}
-          <div style={{flex:1}}/>
-          <button onClick={()=>setOpen(o=>({...o,[it.id]:!isOpen}))} style={{border:'none',background:'none',cursor:'pointer',color:'#64748b',fontSize:12,fontWeight:700}}>{isOpen?'▾ weniger':'▸ mehr'}</button>
-        </div>
-        {ks.length>0&&<div style={{height:7,background:'#f1f5f9',borderRadius:4,overflow:'hidden',marginTop:8}}><div style={{width:fillPct(it)+'%',height:'100%',background:od?'#dc2626':st.c}}/></div>}
-      </React.Fragment>}
-      {isOpen&&edit!==it.id&&<div style={{marginTop:8}}>
-        {ks.map(k=>{ const kod=overdueOf(k); return <div key={k.id} style={{borderTop:'1px solid #eef2f7',padding:'8px 0'}}>
-          {edit===k.id? editForm(true) : <React.Fragment>
-            <div style={{display:'flex',alignItems:'center',gap:8}}><span style={{width:7,height:7,borderRadius:'50%',background:cImpPrio(k.priority).c,flexShrink:0}}/><span style={{flex:1,minWidth:0,fontSize:13,fontWeight:600,color:'#0f172a'}}>{k.title}</span>{statusSel(k)}</div>
-            {k.measures&&<div style={{fontSize:12,color:'#64748b',marginTop:4,marginLeft:15}}>Maßnahme: {k.measures}</div>}
-            <div style={{display:'flex',gap:6,marginTop:6,marginLeft:15,flexWrap:'wrap'}}><button className="btn" style={{padding:'4px 9px',fontSize:12}} onClick={()=>openEdit(k)}>✎</button>{k.due_date&&<span style={{fontSize:11,color:kod?'#dc2626':'#64748b',alignSelf:'center'}}>bis {fmtD(k.due_date)}</span>}</div>
-          </React.Fragment>}
-        </div>; })}
-        {detailPanel(it,false,0)}
-        {String(edit)==='new:'+it.id&&editForm(true)}
-      </div>}
-    </div>;
-  };
+  const load=async()=>{ try{ const {data}=await sb.from('improvement_items').select('*').eq('project_id',client.project_id).order('sort_order',{ascending:true}); const its=data||[]; setItems(its); const ids=its.map(i=>i.id); if(ids.length){ const {data:cs}=await sb.from('improvement_comments').select('*').in('item_id',ids).order('created_at',{ascending:true}); const m={}; (cs||[]).forEach(c=>{ (m[c.item_id]=m[c.item_id]||[]).push(c); }); setComments(m); } else setComments({}); }catch(e){ setItems([]); } };
+  useEffect(()=>{ load(); (async()=>{ setEmps(await loadEmployeesForClient(client.project_id)); })(); },[]);
+  const OVH=['Teamleiter','Projektleiter','Trainer','QM','Supervisor'];
+  const teamNames=[...new Set((emps||[]).filter(e=>e&&OVH.includes(e.position)).map(e=>((e.first_name||'')+' '+(e.last_name||'')).trim()).filter(Boolean))];
+  const clientName=client.name||'Kunde';
+  const labels={client:'Sie',team:'TIVE',clientLong:clientName,teamLong:'TIVE 360°',commentAuthor:c=>c.side==='client'?'Sie':(c.author_name||'TIVE 360°')};
+  async function onPatch(it,patch){ setItems(prev=>(prev||[]).map(i=>i.id===it.id?{...i,...patch}:i));
+    const {error}=await sb.from('improvement_items').update({...patch,updated_at:new Date().toISOString()}).eq('id',it.id);
+    if(error){ window.alert('Nicht gespeichert: '+(error.message||'')); load(); return false; } return true; }
+  async function onAdd(parentId,title){ const all=items||[]; const sibs=all.filter(i=>(i.parent_id||null)===(parentId||null)); const ord=Math.max(0,...sibs.map(s=>s.sort_order||0))+1;
+    const {error}=await sb.from('improvement_items').insert({project_id:client.project_id,parent_id:parentId||null,title,origin:'client',priority:'wichtig',status:'offen',progress:0,effort_days:1,sort_order:ord,created_by_name:clientName});
+    if(error){ window.alert('Nicht angelegt: '+(error.message||'')); return false; } await load(); return true; }
+  async function onComment(itemId,body){ const {error}=await sb.from('improvement_comments').insert({item_id:itemId,project_id:client.project_id,side:'client',author_name:clientName,body}); if(error){ window.alert('Kommentar fehlgeschlagen: '+(error.message||'')); return false; } load(); return true; }
   return <div>
-    <div style={{fontSize:13,color:'#64748b',marginBottom:14}}>Gemeinsamer Arbeitsplan. Jeder Punkt hat einen Zustand: <b>offen</b>, <b>in Arbeit</b> oder <b>erledigt</b>. Ein Hauptpunkt zeigt, wie viele Unterpunkte erledigt sind (z. B. „3 von 5"). Sie können Punkte anlegen, anpassen und den Zustand setzen; die Maßnahmen pflegt TIVE 360°.</div>
-    {items===null? <div style={{color:'#94a3b8'}}>Lädt…</div> : <React.Fragment>
-      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:14,padding:'16px 18px',marginBottom:14,display:'flex',gap:22,flexWrap:'wrap',alignItems:'center'}}>
-        {(()=>{ const R=52,C=2*Math.PI*R,off=C*(1-donePct/100); return <svg width="128" height="128" viewBox="0 0 128 128" style={{flexShrink:0}}><circle cx="64" cy="64" r={R} fill="none" stroke="#f1f5f9" strokeWidth="13"/><circle cx="64" cy="64" r={R} fill="none" stroke="#16a34a" strokeWidth="13" strokeLinecap="round" strokeDasharray={C} strokeDashoffset={off} transform="rotate(-90 64 64)"/><text x="64" y="60" textAnchor="middle" fontSize="30" fontWeight="800" fill="#0f172a">{cFertig}/{tops.length}</text><text x="64" y="82" textAnchor="middle" fontSize="12" fill="#64748b">erledigt</text></svg>; })()}
-        <div style={{display:'flex',gap:12,flexWrap:'wrap',flex:1,minWidth:240}}>
-          {[['offen',cOffen,'#94a3b8'],['in Arbeit',cArbeit,'#0ea5b7'],['überfällig',cOver,'#dc2626'],['erledigt',cFertig,'#16a34a']].map(([l,n,c])=><div key={l} style={{flex:1,minWidth:118,background:'#f8fafc',borderRadius:14,padding:'14px 16px'}}><div style={{fontSize:30,fontWeight:800,color:c,lineHeight:1}}>{n}</div><div style={{fontSize:12.5,color:'#64748b',marginTop:4,fontWeight:600}}>{l}</div></div>)}
-        </div>
-      </div>
-      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:12,padding:'12px 14px',marginBottom:14,display:'flex',gap:10,flexWrap:'wrap'}}>
-        <input value={newT} onChange={e=>setNewT(e.target.value)} placeholder="Neuen Verbesserungspunkt nennen…" style={{flex:1,minWidth:220,padding:'8px 10px',border:'1px solid #cbd5e1',borderRadius:8}}/>
-        <button className="btn btn-primary" disabled={busy||!newT.trim()} onClick={addPoint}>+ Punkt hinzufügen</button>
-      </div>
-      {tops.length===0? <div style={{color:'#94a3b8'}}>Noch keine Punkte. Nennen Sie oben den ersten Verbesserungspunkt.</div>
-       : narrow
-         ? <div>{tops.map(mcard)}</div>
-         : <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:14,overflow:'hidden'}}>
-            <div style={{overflowX:'auto'}}><div style={{minWidth:LBL+340}}>
-              <div style={{display:'flex',alignItems:'stretch',background:'#f8fafc',borderBottom:'1px solid #e5e7eb'}}>
-                <div style={{width:LBL,minWidth:LBL,padding:'7px 10px',fontSize:11,fontWeight:700,color:'#64748b'}}>Punkt · Zustand</div>
-                <div style={{flex:1,position:'relative',overflow:'hidden',minWidth:340,height:26,borderLeft:'1px solid #e5e7eb'}}>{anyDated?months.map((m,i)=><span key={i} style={{position:'absolute',left:'calc('+m.x+'% + 5px)',top:6,fontSize:11,fontWeight:700,color:'#64748b'}}>{m.l}</span>):<span style={{position:'absolute',left:8,top:6,fontSize:11,color:'#94a3b8'}}>Zeitleiste, sobald Termine gesetzt sind</span>}{todayX>=0&&todayX<=100&&<div style={{position:'absolute',top:0,bottom:0,left:todayX+'%',width:2,background:'#dc2626',opacity:.7}}/>}</div>
-              </div>
-              {tops.map(it=>row(it,false))}
-            </div></div>
-          </div>}
-    </React.Fragment>}
+    <div style={{fontSize:13,color:'#64748b',marginBottom:14}}>Gemeinsamer Arbeitsplan. Alles direkt in der Zeile: <b>Zustand</b> per Klick auf die Pille, <b>Titel</b> anklicken und tippen, <b>Start/Ende</b> auswählen, <b>Verantwortlichen</b> und <b>Aufwand</b> in Tagen setzen. Hauptpunkte ergeben sich aus ihren Unterpunkten; die Maßnahmen pflegt TIVE 360°.</div>
+    {items===null? <div style={{color:'#94a3b8'}}>Lädt…</div>
+     : <ImpPlanGrid items={items} comments={comments} narrow={narrow} labels={labels} ownerChoices={{team:teamNames,client:[clientName]}} canEditMeasures={false} canDelete={false} onPatch={onPatch} onAdd={onAdd} onDelete={null} onComment={onComment}/>}
   </div>;
 }
 
