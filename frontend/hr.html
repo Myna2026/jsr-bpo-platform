@@ -21206,14 +21206,18 @@ function PhoneActionView({team, showToast}){
   const [busy,setBusy]=useState(null);
   const [openUi,setOpenUi]=useState({});       // lead_id -> 'reject'|'termin'|null
   const [dt,setDt]=useState({});                // lead_id -> gewähltes Termindatum
+  const [allRows,setAllRows]=useState(null);    // Auswertungstabelle (mgmt/hr)
+  const [sortK,setSortK]=useState('assignee_name'); const [sortD,setSortD]=useState(1);
+  const [fltA,setFltA]=useState(''); const [fltS,setFltS]=useState('');
   const _tomorrow=(()=>{ const d=new Date(); d.setDate(d.getDate()+1); return isoLocal(d); })();
   const loadLeads=React.useCallback(async(cid)=>{ const {data,error}=await sb.rpc('phonecall_my_leads',{p_campaign:cid});
     setLeads(error?[]:(data||[])); }, []);
   const loadOvw=React.useCallback(async(cid)=>{ if(!isMgmt){ setOvw(null); return; } const {data}=await sb.rpc('phonecall_overview',{p_campaign:cid}); setOvw(data||[]); },[isMgmt]);
+  const loadAll=React.useCallback(async(cid)=>{ if(!isMgmt){ setAllRows(null); return; } const {data}=await sb.rpc('phonecall_all_leads',{p_campaign:cid}); setAllRows(data||[]); },[isMgmt]);
   useEffect(()=>{ let alive=true; (async()=>{
     const {data}=await sb.from('call_campaigns').select('id,name').eq('active',true).order('created_at',{ascending:false}).limit(1);
     const c=(data&&data[0])||null; if(!alive) return; setCamp(c);
-    if(c){ await loadLeads(c.id); await loadOvw(c.id); } else { setLeads([]); }
+    if(c){ await loadLeads(c.id); await loadOvw(c.id); await loadAll(c.id); } else { setLeads([]); }
   })(); return ()=>{alive=false;}; },[]);
   async function act(lead, result, reason, date){
     setBusy(lead.lead_id);
@@ -21221,7 +21225,7 @@ function PhoneActionView({team, showToast}){
     setBusy(null);
     if(error){ showToast&&showToast('⚠ Konnte nicht speichern: '+(error.message||'DB'),'error'); return; }
     setOpenUi(u=>({...u,[lead.lead_id]:null}));
-    if(camp){ loadLeads(camp.id); loadOvw(camp.id); }
+    if(camp){ loadLeads(camp.id); loadOvw(camp.id); loadAll(camp.id); }
     showToast&&showToast(result==='appointment'?'Termin gespeichert, Bewerber → Interview im Büro':result==='rejected'?'Als Absage vermerkt':result==='no_answer'?'Wiedervorlage gesetzt':'Zurückgesetzt','success');
   }
   const telHref=p=>'tel:'+String(p||'').replace(new RegExp('[^+0-9]','g'),'');
@@ -21263,6 +21267,40 @@ function PhoneActionView({team, showToast}){
       </table></div>
     </div>}
 
+    {isMgmt && allRows && (()=>{
+      const SL={open:'offen',no_answer:'Nicht erreicht',rejected:'Abgesagt',appointment:'Termin'};
+      const RS={kein_interesse:'Kein Interesse',zu_weit:'Zu weit weg',hat_anderes:'Hat schon was anderes'};
+      const fdt=s=>{ if(!s) return '—'; const d=new Date(s); return d.toLocaleDateString('de-DE')+' '+d.toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'}); };
+      const fd=s=>{ if(!s) return ''; const p=String(s).slice(0,10).split('-'); return p[2]+'.'+p[1]+'.'; };
+      const action=r=> r.status==='appointment'?('Termin '+fd(r.appointment_date)+(r.appointment_time?(' '+String(r.appointment_time).slice(0,5)):''))
+        : r.status==='rejected'?(RS[r.reject_reason]||'Absage')
+        : r.status==='no_answer'?('Wiedervorlage '+fd(r.followup_date))
+        : '—';
+      const assignees=[...new Set(allRows.map(r=>r.assignee_name))].sort((a,b)=>String(a).localeCompare(String(b),'de'));
+      let rows=allRows.filter(r=>(!fltA||r.assignee_name===fltA)&&(!fltS||r.status===fltS));
+      const kf=r=> sortK==='ergebnis'?action(r) : sortK==='updated_at'?String(r.updated_at||'') : String(r[sortK]||'').toLowerCase();
+      rows=[...rows].sort((a,b)=>{ const x=kf(a),y=kf(b); return (x<y?-1:x>y?1:0)*sortD; });
+      const th=(k,lbl)=><th onClick={()=>{ if(sortK===k) setSortD(d=>-d); else { setSortK(k); setSortD(1); } }} style={{padding:'6px 8px',cursor:'pointer',whiteSpace:'nowrap',userSelect:'none',fontWeight:700}}>{lbl}{sortK===k?(sortD>0?' ▲':' ▼'):''}</th>;
+      return <div style={{marginBottom:18,background:'var(--surface)',border:'1px solid var(--border)',borderRadius:14,padding:'12px 14px'}}>
+        <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap',marginBottom:8}}>
+          <div style={{fontSize:12,fontWeight:800,textTransform:'uppercase',letterSpacing:'.05em',color:'var(--muted)'}}>Auswertung · alle Anrufe</div>
+          <select value={fltA} onChange={e=>setFltA(e.target.value)} style={{marginLeft:'auto',padding:'4px 8px',border:'1px solid var(--border)',borderRadius:7,fontSize:12,background:'var(--card)',color:'var(--text)'}}><option value="">Alle Bearbeiter</option>{assignees.map(a=><option key={a} value={a}>{a}</option>)}</select>
+          <select value={fltS} onChange={e=>setFltS(e.target.value)} style={{padding:'4px 8px',border:'1px solid var(--border)',borderRadius:7,fontSize:12,background:'var(--card)',color:'var(--text)'}}><option value="">Alle Status</option>{Object.entries(SL).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select>
+          <span style={{fontSize:12,color:'var(--muted)'}}>{rows.length} Zeilen</span>
+        </div>
+        <div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:12.5}}>
+          <thead><tr style={{textAlign:'left',color:'var(--muted)',borderBottom:'1px solid var(--border)'}}>{th('cv_name','Bewerber')}{th('assignee_name','Bearbeiter')}{th('status','Status')}{th('ergebnis','Was passiert')}{th('updated_at','Wann')}{th('note','Kommentar')}</tr></thead>
+          <tbody>{rows.map(r=><tr key={r.lead_id} style={{borderBottom:'1px solid var(--border)'}}>
+            <td style={{padding:'5px 8px',fontWeight:700}}>{r.cv_name}</td>
+            <td style={{padding:'5px 8px'}}>{r.assignee_name}</td>
+            <td style={{padding:'5px 8px'}}>{SL[r.status]||r.status}</td>
+            <td style={{padding:'5px 8px'}}>{action(r)}</td>
+            <td style={{padding:'5px 8px',whiteSpace:'nowrap',color:'var(--muted)'}}>{r.status==='open'?'—':fdt(r.updated_at)}</td>
+            <td style={{padding:'5px 8px',color:'var(--muted)'}}>{r.note||''}</td>
+          </tr>)}</tbody>
+        </table></div>
+      </div>;
+    })()}
     <div style={{fontSize:14,fontWeight:800,margin:'6px 0 10px'}}>Meine Anrufe <span style={{color:'var(--muted)',fontWeight:600}}>· {open.length} offen von {leads.length}</span></div>
     {!leads.length ? <div className="w-empty" style={{padding:'30px 0',textAlign:'center',color:'var(--muted)'}}>Dir sind keine Leads zugeteilt.</div>
     : <div style={{display:'flex',flexDirection:'column',gap:10}}>

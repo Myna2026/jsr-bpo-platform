@@ -102,12 +102,14 @@ async function loadLeads(){
   LEADS=data||[]; render();
 }
 function meName(){ const p=PARTS.find(x=>x.assignee_user_id===ME); return p?p.assignee_name:''; }
+function plusDays(n){ const d=new Date(); d.setDate(d.getDate()+n); return d.toISOString().slice(0,10); }
 function statusBadge(l){
-  if(l.status==='appointment') return '<span class="badge" style="background:var(--green-bg);color:var(--green)">✅ Termin '+fmtDe(l.appointment_date)+'</span>';
+  if(l.status==='appointment') return '<span class="badge" style="background:var(--green-bg);color:var(--green)">✅ Termin '+fmtDe(l.appointment_date)+(l.appointment_time?(' '+String(l.appointment_time).slice(0,5)+' Uhr'):'')+'</span>';
   if(l.status==='rejected'){ const r=(REASONS.find(x=>x[0]===l.reject_reason)||[])[1]||'Absage'; return '<span class="badge" style="background:var(--red-bg);color:var(--red)">✗ '+esc(r)+'</span>'; }
   if(l.status==='no_answer') return '<span class="badge" style="background:var(--amber-bg);color:var(--amber)">📵 Wiedervorlage '+fmtDe(l.followup_date)+'</span>';
   return '';
 }
+function noteField(l){ return '<input type="text" data-note maxlength="200" placeholder="Notiz (optional): z. B. ruft morgen zurück" value="'+esc(l.note||'')+'" style="width:100%;padding:11px 12px;border:1px solid var(--line);border-radius:10px;font-size:15px;margin-top:9px"/>'; }
 function render(){
   const open=LEADS.filter(l=>l.status==='open').length; const done=LEADS.length-open; const pct=LEADS.length?Math.round(100*done/LEADS.length):0;
   let h='<div class="whoami"><span class="who">👋 '+esc(meName())+'</span><button class="link" id="switch">Nicht du? Wechseln</button></div>';
@@ -129,16 +131,23 @@ function card(l){
      +'<span style="color:var(--muted)">'+esc(expText(l.cc_experience))+'</span>'
      +'<span style="color:var(--muted)">beworben '+fmtDe(l.cv_date)+'</span></div>';
   h+='<a class="call" href="'+tel(l.phone)+'">📞 '+esc(l.phone||'—')+'</a>';
-  if(done){ h+='<div>'+statusBadge(l)+'<button class="link" data-act="open">ändern</button></div>'; }
-  else if(ui[id]==='reject'){ h+='<div class="sub2">Grund der Absage:</div><div class="reasons">'
+  if(done){ h+='<div>'+statusBadge(l)+'<button class="link" data-act="open">ändern</button></div>';
+     if(l.note) h+='<div class="sub2" style="margin-top:6px">📝 '+esc(l.note)+'</div>'; }
+  else if(ui[id]==='na'){ h+='<div class="sub2">Wiedervorlage am:</div><div class="dt">'
+     +'<input type="date" data-date value="'+plusDays(2)+'"/>'
+     +'<button class="b na" data-act="na-ok" style="flex:0 0 auto">Bestätigen</button>'
+     +'<button class="b" data-act="back" style="flex:0 0 auto">Zurück</button></div>'+noteField(l); }
+  else if(ui[id]==='reject'){ h+=noteField(l)+'<div class="sub2">Grund der Absage:</div><div class="reasons">'
      +REASONS.map(([k,lb])=>'<button class="b rj" data-act="rj" data-reason="'+k+'">'+lb+'</button>').join('')
      +'<button class="b" data-act="back">Zurück</button></div>'; }
-  else if(ui[id]==='termin'){ h+='<div class="dt"><span style="font-weight:800;color:var(--green)">Termin am</span>'
+  else if(ui[id]==='termin'){ h+='<div class="dt"><span style="font-weight:800;color:var(--green)">Termin</span>'
      +'<input type="date" data-date value="'+tomorrow()+'"/>'
-     +'<button class="b ap" data-act="ap-ok" style="flex:0 0 auto">Bestätigen</button>'
+     +'<input type="time" data-time value="10:00" style="flex:0 0 auto"/></div>'
+     +noteField(l)+'<div class="dt" style="margin-top:9px">'
+     +'<button class="b ap" data-act="ap-ok">Bestätigen</button>'
      +'<button class="b" data-act="back" style="flex:0 0 auto">Zurück</button></div>'; }
   else { h+='<div class="btns">'
-     +'<button class="b na" data-act="na">📵 Nicht erreicht</button>'
+     +'<button class="b na" data-act="na-open">📵 Nicht erreicht</button>'
      +'<button class="b rj" data-act="rj-open">✗ Abgesagt</button>'
      +'<button class="b ap" data-act="ap-open">✅ Termin</button></div>'; }
   h+='</div>';
@@ -146,20 +155,22 @@ function card(l){
 }
 function bind(l){
   const el=app.querySelector('.card[data-id="'+l.lead_id+'"]'); if(!el) return;
+  const noteVal=()=>{ const n=el.querySelector('[data-note]'); return n?n.value.trim():null; };
   el.querySelectorAll('[data-act]').forEach(b=>{ b.onclick=async()=>{
     const act=b.getAttribute('data-act');
+    if(act==='na-open'){ ui[l.lead_id]='na'; return render(); }
     if(act==='rj-open'){ ui[l.lead_id]='reject'; return render(); }
     if(act==='ap-open'){ ui[l.lead_id]='termin'; return render(); }
     if(act==='back'){ ui[l.lead_id]=null; return render(); }
-    if(act==='na') return log(l,'no_answer');
     if(act==='open') return log(l,'open');
-    if(act==='rj') return log(l,'rejected',b.getAttribute('data-reason'));
-    if(act==='ap-ok'){ const d=el.querySelector('[data-date]').value||tomorrow(); return log(l,'appointment',null,d); }
+    if(act==='na-ok'){ const d=el.querySelector('[data-date]').value||plusDays(2); return log(l,'no_answer',null,d,null,noteVal()); }
+    if(act==='rj') return log(l,'rejected',b.getAttribute('data-reason'),null,null,noteVal());
+    if(act==='ap-ok'){ const d=el.querySelector('[data-date]').value||tomorrow(); const t=(el.querySelector('[data-time]')||{}).value||null; return log(l,'appointment',null,d,t,noteVal()); }
   }; });
 }
-async function log(l,result,reason,date){
+async function log(l,result,reason,date,time,note){
   if(busy) return; busy=l.lead_id;
-  const {error}=await sb.rpc('phone_link_log',{p_token:token,p_assignee:ME,p_lead_id:l.lead_id,p_result:result,p_reason:reason||null,p_date:date||null});
+  const {error}=await sb.rpc('phone_link_log',{p_token:token,p_assignee:ME,p_lead_id:l.lead_id,p_result:result,p_reason:reason||null,p_date:date||null,p_time:time||null,p_note:note||null});
   busy=null;
   if(error){ toast('Nicht gespeichert: '+(error.message||''),true); return; }
   ui[l.lead_id]=null;
