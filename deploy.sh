@@ -60,6 +60,7 @@ else
   run_check "eslintcheck.js (hr.html no-undef)" node    "$CHECKS/eslintcheck.js"
   run_check "tdzcheck.js  (hr.html eager-TDZ)"  node    "$CHECKS/tdzcheck.js"
   run_check "sharedcheck.js (shared/jsr-calc.js)" node  "$CHECKS/sharedcheck.js"
+  run_check "cpocheck.js (shared/cpo-calc.js ↔ Spec §7)" node "$CHECKS/cpocheck.js"
   run_check "statuscheck.js (STATUS_FLOW ↔ cvs_status_valid)" node "$CHECKS/statuscheck.js"
   run_check "menucheck.js (Menue ↔ HR-Tab-Sperren-Katalog)" node "$CHECKS/menucheck.js"
 
