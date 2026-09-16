@@ -226,9 +226,15 @@
     return s + ' %';
   }
 
+  // Mandats-Schlüssel eines Projekts (für Projektleiter: nur das eigene Projekt). Leer, wenn kein Mandat.
+  function mandatesForProject(projectId) {
+    if (!projectId) return [];
+    return Object.keys(MANDATES).filter(function (k) { return k.split('/')[0] === projectId; });
+  }
+
   global.CpoCalc = {
     MANDATES: MANDATES,
-    mandateKey: mandateKey, defaultsFor: defaultsFor, initialState: initialState,
+    mandateKey: mandateKey, mandatesForProject: mandatesForProject, defaultsFor: defaultsFor, initialState: initialState,
     calcRow: calcRow, calcAll: calcAll, breakEven: breakEven, ampel: ampel,
     sensitivity: sensitivity, sensitivityRows: sensitivityRows, curve: curve,
     proposal: proposal, proposals: proposals, customerView: customerView,
