@@ -172,16 +172,3 @@ Details, Historie und Erledigtes: `docs/technische-schulden.md`.
 | `docs/technische-schulden.md` | Offene Schulden, Auth-Go-Live-Blocker, Erledigtes (Belege-Auskapselung) |
 | `docs/technologie-stack.md` | Backend-Stack (FastAPI/Celery, Tourism-Leads-Teil), Docker, Ordnerstruktur |
 | `README.md` | Ursprünglicher Tourism-Leads-Teil, überholt |
-
-## Ordnerstruktur (Kurz)
-```
-frontend/            hr.html / mitarbeiter.html / client.html (Kern), Nebenseiten,
-                     shared/ (jsr-calc.js, presentation-slides.js), assets/
-supabase/functions/  Edge Functions (Agenten, Importe, Mailer, nlquery, assistant, …)
-supabase/*.sql       schema_auth.sql (Rollen, RLS-Helfer, Guards) + Alt-Schemata
-migrations/          alle DB-Änderungen als datierte SQL-Dateien
-scripts/checks/      Deploy-Vorab-Checks, scripts/precompile/ Babel-Precompile
-deploy.sh            Frontend-Deploy (rsync), rollback.sh
-backend/, docker/    ursprünglicher Tourism-Leads-Teil (FastAPI, Celery, Postgres)
-demo/                Vorführ-Mandant „Reisewelt"
-```
