@@ -65,6 +65,44 @@ async function gradeFree(q: any, a: any, agentName: string): Promise<{ points: n
   return { points: Math.round(points * 100) / 100, feedback: String(t.feedback || ""), rubric: { hits: [...mustHit, ...niceHit], missing: must.filter((m) => !mustHit.includes(m)) } };
 }
 
+
+// Fragen-Pool in Stufen: exakt (Thema/Zielgebiet + Stufe + Art) → Art frei → Stufe frei → verwandte Themen (gleiche Themenfamilie
+// „Coaching: Abläufe · …“ bzw. gleiches Zielgebiet) → alles. Die Einheit wird immer voll; die Antwort sagt, womit aufgefüllt wurde.
+// Nie ins Leere laufen (User): wenn zu einem Thema fünf Fragen existieren, funktioniert eine Zehn-Minuten-Einheit trotzdem.
+type PoolInfo = { exact: number; filled: number; fillFrom: string | null; note: string | null };
+async function buildPool(pid: string, s: any, n: number, kinds: string[], diff: string, exclude: Set<string>): Promise<{ pool: any[]; info: PoolInfo }> {
+  const { data: all } = await admin.from("coach_questions").select("*").eq("project_id", pid).eq("status", "active").limit(5000);
+  const rows: any[] = all || [];
+  const topic = s.mode === "topic" && s.topic ? String(s.topic) : null;
+  const zg = s.mode === "sprint" && s.zielgebiet ? norm(String(s.zielgebiet)) : null;
+  // Zielgebiet als ganzes Wort ("Kos" darf nicht "Stornokosten" treffen)
+  const zgRe = zg ? new RegExp("(^|[^a-z0-9])" + zg.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "([^a-z0-9]|$)") : null;
+  const inScope = (x: any) => topic ? x.topic === topic : zgRe ? (zgRe.test(norm(x.zielgebiet || "")) || zgRe.test(norm(x.prompt))) : true;
+  const family = topic ? topic.split(" · ")[0] : null;
+  const related = (x: any) => topic ? (x.topic !== topic && (family && x.topic.split(" · ")[0] === family)) : zg ? false : false;
+  const tiers: { f: (x: any) => boolean; label: string | null }[] = [
+    { f: (x) => inScope(x) && (diff === "mix" || x.difficulty === diff) && kinds.includes(x.kind), label: null },
+    { f: (x) => inScope(x) && (diff === "mix" || x.difficulty === diff), label: "anderer Frageart" },
+    { f: (x) => inScope(x), label: diff === "mix" ? null : "anderer Stufe" },
+    { f: (x) => related(x), label: "verwandten Themen" },
+    { f: (x) => !!(zg) && norm(x.zielgebiet || "").length > 0, label: "anderen Zielgebieten" },
+    { f: () => true, label: "allen Themen" },
+  ];
+  // Dieselbe Frage (gleicher Wortlaut, z. B. aus zwei Dokumenten oder in zwei Stufen) nur einmal je Einheit
+  const pool: any[] = []; const seen = new Set<string>(); const seenPrompt = new Set<string>(); let exact = 0; let fillFrom: string | null = null;
+  const push = (x: any) => { const k = norm(x.prompt); if (seenPrompt.has(k)) { seen.add(x.id); return false; } seenPrompt.add(k); seen.add(x.id); pool.push(x); return true; };
+  for (let i = 0; i < tiers.length && pool.length < n; i++) {
+    const t = tiers[i]; const cand = shuffle(rows.filter((x) => !seen.has(x.id) && !exclude.has(x.id) && t.f(x)));
+    for (const x of cand) { if (pool.length >= n) break; push(x); }
+    if (i === 0) exact = pool.length; else if (cand.length && t.label && !fillFrom) fillFrom = t.label;
+  }
+  // Wenn selbst mit Ausschluss (kürzlich richtig) zu wenig: Ausschluss aufheben
+  if (pool.length < n) { const cand = shuffle(rows.filter((x) => !seen.has(x.id) && inScope(x))); for (const x of cand) { if (pool.length >= n) break; push(x); } }
+  const scopeLabel = topic ? "„" + topic + "“" : zg ? "„" + s.zielgebiet + "“" : null;
+  const note = exact >= n || !scopeLabel ? null : (exact === 0 ? "Zu " + scopeLabel + " gibt es auf dieser Stufe und Art keine Fragen, die Einheit ist aus " + (fillFrom || "anderen Fragen") + " aufgefüllt." : "Zu " + scopeLabel + " gibt es dafür nur " + exact + " Frage" + (exact === 1 ? "" : "n") + ", der Rest kommt aus " + (fillFrom || "anderen Fragen") + ".");
+  return { pool, info: { exact, filled: pool.length - exact, fillFrom, note } };
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   const auth = req.headers.get("Authorization") || ""; if (!auth) return json({ error: "Nicht angemeldet." }, 401);
@@ -82,12 +120,10 @@ Deno.serve(async (req) => {
       const s = body.settings || {}; const minutes = [2, 5, 10, 15].includes(Number(s.minutes)) ? Number(s.minutes) : 5; const n = countFor(minutes);
       const diff = ["leicht", "mittel", "schwer", "mix"].includes(s.difficulty) ? s.difficulty : "mix";
       const kinds: string[] = Array.isArray(s.kinds) && s.kinds.length ? s.kinds : ["mc", "gap", "match", "order", "free"];
-      let q = admin.from("coach_questions").select("*").eq("project_id", ppid).eq("status", "active").in("kind", kinds);
-      if (diff !== "mix") q = q.eq("difficulty", diff); if (s.mode === "topic" && s.topic) q = q.eq("topic", String(s.topic));
-      if (s.mode === "sprint" && s.zielgebiet) q = q.or("zielgebiet.ilike.%" + String(s.zielgebiet).replace(/[%,()]/g, "") + "%,prompt.ilike.%" + String(s.zielgebiet).replace(/[%,()]/g, "") + "%");
-      const { data: pool } = await q.limit(2000); if (!pool || !pool.length) return json({ error: "Dazu gibt es noch keine Übungsfragen." }, 404);
-      const capFree = Math.max(1, Math.floor(n / 3)); const free = shuffle(pool.filter((x: any) => x.kind === "free")).slice(0, capFree); const rest = shuffle(pool.filter((x: any) => x.kind !== "free")).slice(0, n - free.length);
-      return json({ ok: true, session_id: null, preview: true, agent: pAgent, questions: [...rest, ...free].slice(0, n).map(publicQ) });
+      const { pool, info } = await buildPool(ppid, s, n, kinds, diff, new Set());
+      if (!pool.length) return json({ error: "Für diesen Partner gibt es noch keine Übungsfragen." }, 404);
+      const capFree = Math.max(1, Math.floor(n / 3)); const free = pool.filter((x: any) => x.kind === "free").slice(0, capFree); const rest = pool.filter((x: any) => x.kind !== "free").slice(0, n - free.length);
+      return json({ ok: true, session_id: null, preview: true, agent: pAgent, fill: info, questions: [...rest, ...free].slice(0, n).map(publicQ) });
     }
     if (action === "answer") {
       const { data: q } = await admin.from("coach_questions").select("*").eq("id", body.question_id).eq("project_id", ppid).maybeSingle(); if (!q) return json({ error: "Frage fehlt." }, 404);
@@ -118,35 +154,25 @@ Deno.serve(async (req) => {
     const minutes = [2, 5, 10, 15].includes(Number(s.minutes)) ? Number(s.minutes) : 5;
     const n = countFor(minutes); const diff = ["leicht", "mittel", "schwer", "mix"].includes(s.difficulty) ? s.difficulty : "mix";
     const kinds: string[] = Array.isArray(s.kinds) && s.kinds.length ? s.kinds.filter((k: string) => ["mc", "gap", "match", "order", "free"].includes(k)) : ["mc", "gap", "match", "order", "free"];
-    let q = admin.from("coach_questions").select("*").eq("project_id", pid).eq("status", "active").in("kind", kinds);
-    if (diff !== "mix") q = q.eq("difficulty", diff);
-    if (s.mode === "topic" && s.topic) q = q.eq("topic", String(s.topic));
-    if (s.mode === "sprint" && s.zielgebiet) q = q.or("zielgebiet.ilike.%" + String(s.zielgebiet).replace(/[%,()]/g, "") + "%,prompt.ilike.%" + String(s.zielgebiet).replace(/[%,()]/g, "") + "%");
-    const { data: pool } = await q.limit(2000);
-    if (!pool || !pool.length) return json({ error: "Dazu gibt es noch keine Übungsfragen." }, 404);
-    // Gedächtnis: zuletzt richtig beantwortete Fragen (7 Tage) raus, Themen mit schwachem Schnitt bevorzugen
+    // Gedächtnis: in 7 Tagen richtig beantwortete Fragen zuerst meiden (werden nur genommen, wenn sonst nichts da ist)
     const since = new Date(Date.now() - 7 * 864e5).toISOString();
     const { data: recent } = await admin.from("coach_answers").select("question_id,topic,points,max_points").eq("employee_id", empId).gte("answered_at", since);
     const doneRight = new Set((recent || []).filter((r: any) => Number(r.points) >= Number(r.max_points)).map((r: any) => r.question_id));
+    const { pool: rawPool, info } = await buildPool(pid, s, n * 3, kinds, diff, doneRight);
+    if (!rawPool.length) return json({ error: "Für dein Projekt gibt es noch keine Übungsfragen." }, 404);
+    // Aus dem Pool (exakte Treffer zuerst) je Thema gleich viel, schwache Themen doppelt; Freitext höchstens ein Drittel
     const topicScore: Record<string, { p: number; m: number }> = {}; for (const r of (recent || [])) { const t = topicScore[r.topic] = topicScore[r.topic] || { p: 0, m: 0 }; t.p += Number(r.points); t.m += Number(r.max_points); }
-    let cand = pool.filter((x: any) => !doneRight.has(x.id)); if (cand.length < n) cand = pool;
-    // Gewichtung: je Thema gleich viel Chance (kein Übergewicht großer Themen), schwache Themen doppelt
-    const byTopic: Record<string, any[]> = {}; for (const x of cand) (byTopic[x.topic] = byTopic[x.topic] || []).push(x);
-    const topics = Object.keys(byTopic); const weight = (t: string) => { const ts = topicScore[t]; return ts && ts.m > 0 && ts.p / ts.m < 0.7 ? 2 : 1; };
-    // Freitext höchstens ein Drittel (sonst wird die Einheit zäh), am Ende der Einheit
-    const capFree = Math.max(1, Math.floor(n / 3)); const hasNonFree = cand.some((x: any) => x.kind !== "free");
-    const picked: any[] = []; const used = new Set<string>(); let freeN = 0, guard = 0;
-    while (picked.length < n && used.size < cand.length && guard++ < 5000) {
-      const bag = topics.flatMap((t) => Array(weight(t)).fill(t)); const t = bag[Math.floor(Math.random() * bag.length)];
-      const opts = byTopic[t].filter((x: any) => !used.has(x.id)); if (!opts.length) continue;
-      const x = opts[Math.floor(Math.random() * opts.length)]; used.add(x.id);
-      if (x.kind === "free") { if (freeN >= capFree && hasNonFree) continue; freeN++; }
-      picked.push(x);
-    }
+    const weight = (t: string) => { const ts = topicScore[t]; return ts && ts.m > 0 && ts.p / ts.m < 0.7 ? 2 : 1; };
+    const exactPart = rawPool.slice(0, info.exact), fillPart = rawPool.slice(info.exact);
+    const capFree = Math.max(1, Math.floor(n / 3)); const picked: any[] = []; let freeN = 0;
+    const take = (cand: any[]) => { const byTopic: Record<string, any[]> = {}; for (const x of cand) (byTopic[x.topic] = byTopic[x.topic] || []).push(x); const topics = Object.keys(byTopic); let guard = 0;
+      while (picked.length < n && guard++ < 5000) { const left = topics.filter((t) => byTopic[t].length); if (!left.length) break; const bag = left.flatMap((t) => Array(weight(t)).fill(t)); const t = bag[Math.floor(Math.random() * bag.length)];
+        const x = byTopic[t].shift(); if (x.kind === "free") { if (freeN >= capFree && cand.some((y) => y.kind !== "free")) continue; freeN++; } picked.push(x); } };
+    take(exactPart); if (picked.length < n) take(fillPart);
     const list = [...shuffle(picked.filter((x) => x.kind !== "free")), ...picked.filter((x) => x.kind === "free")].slice(0, n);
     const { data: sess, error } = await admin.from("coach_sessions").insert({ employee_id: empId, project_id: pid, user_id: u.user.id, assignment_id: assignment ? assignment.id : null, settings: { mode: s.mode || "daily", topic: s.topic || null, zielgebiet: s.zielgebiet || null, minutes, difficulty: diff, kinds, assignment: assignment ? { id: assignment.id, by: assignment.assigned_by_name, note: assignment.note } : null }, question_ids: list.map((x) => x.id) }).select("id").single();
     if (error) return json({ error: error.message }, 500);
-    return json({ ok: true, session_id: sess.id, agent: agentName, assignment: assignment ? { id: assignment.id, topic: assignment.topic, by: assignment.assigned_by_name, note: assignment.note } : null, questions: list.map(publicQ) });
+    return json({ ok: true, session_id: sess.id, agent: agentName, fill: { exact: Math.min(info.exact, list.length), note: info.note }, assignment: assignment ? { id: assignment.id, topic: assignment.topic, by: assignment.assigned_by_name, note: assignment.note } : null, questions: list.map(publicQ) });
   }
 
   if (action === "answer") {

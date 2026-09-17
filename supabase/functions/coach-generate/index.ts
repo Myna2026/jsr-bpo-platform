@@ -35,7 +35,8 @@ function ruleQuestions(facts: any[], docTitles: Record<string, string>): Q[] {
   // Ablenker dürfen die richtige Antwort weder enthalten noch in ihr enthalten sein ("Travco" vs "Travco/Touring" wäre beides richtig).
   const distinctByValue = (arr: any[], self: any) => { const me = norm(self.value); const seen = new Set<string>([me]); return arr.filter((x) => { const k = norm(x.value); if (seen.has(k) || k === "" || k.includes(me) || me.includes(k)) return false; seen.add(k); return true; }); };
   // Regelfragen nur aus nachschlagbaren Fakten: mit Zielgebiet, oder Kontakt/Zeit/Preis/Regel mit kurzem Wert. Prosa (Abläufe) übernimmt die KI.
-  const askable = (f: any) => !!f.value && String(f.value).length <= 120 && (f.zielgebiet || ["kontakt", "zeit", "preis", "regel"].includes(f.info_type));
+  const NO_TOPIC = /^(stand|aktualit|version|quelle|dokument)/i;   // Dokumentstand ist kein Übungsstoff
+  const askable = (f: any) => !!f.value && String(f.value).length <= 120 && !NO_TOPIC.test(String(f.topic || "")) && (f.zielgebiet || ["kontakt", "zeit", "preis", "regel"].includes(f.info_type));
 
   for (const f of facts) {
     if (!askable(f)) continue;

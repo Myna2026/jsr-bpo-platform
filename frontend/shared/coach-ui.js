@@ -40,6 +40,7 @@ function coInjectCss(){ if(document.getElementById('cocss'))return; var st=docum
 '.co-res{text-align:center;padding:10px 0} .co-res .big{font-size:52px;font-weight:800;color:var(--acc);line-height:1;font-variant-numeric:tabular-nums} .co-res .sub{font-size:15px;color:#334155;margin-top:6px}',
 '.co-tr{display:flex;flex-direction:column;gap:8px;margin-top:14px} .co-tl{display:grid;grid-template-columns:1fr 120px 52px;gap:10px;align-items:center;font-size:13px} .co-bar{height:8px;border-radius:4px;background:#eef2f4;overflow:hidden} .co-bar i{display:block;height:100%}',
 '.co-hist{margin-top:18px} .co-hrow{display:flex;gap:10px;align-items:center;padding:8px 0;border-top:1px solid #eef2f7;font-size:13px} .co-hrow .p{font-family:ui-monospace,monospace;font-weight:700;width:60px} .co-hrow .d{color:#64748b;width:110px} .co-hrow .m{flex:1;color:#334155}',
+'.co-fill{margin-top:12px;padding:9px 12px;border-radius:10px;background:#fffbeb;border:1px solid #fde68a;color:#92400e;font-size:12.5px}',
 '.co-asg{display:flex;flex-direction:column;gap:8px} .co-asgrow{display:flex;gap:12px;align-items:center;border:2px solid #fecaca;background:#fff7f7;border-radius:12px;padding:12px 14px} .co-asgrow.late{border-color:#dc2626} .co-asgmeta{font-size:12px;color:#64748b;margin-top:2px} .co-asgnote{font-size:12.5px;color:#334155;margin-top:4px}',
 '@media (max-width:640px){.co{padding:16px;border-radius:14px} .co-q{font-size:17px} .co-pair{grid-template-columns:1fr} .co-tl{grid-template-columns:1fr 90px 44px}}'
 ].join('\n'); document.head.appendChild(st); }
@@ -56,7 +57,7 @@ function renderCoach(){
   var host=document.getElementById(_coCtx.hostId||'vCoach'); if(!host)return;
   var pid=_coCtx.pid;
   host.innerHTML='<div style="padding:20px;color:#8b93a8;font-size:14px">Lädt…</div>';
-  var availP=_coCtx.preview ? sb.from('coach_questions').select('topic,zielgebiet').eq('project_id',pid).eq('status','active').limit(5000).then(function(r){ var rows=r.data||[]; var t={},z={}; rows.forEach(function(x){ t[x.topic]=1; if(x.zielgebiet) z[x.zielgebiet]=1; }); return {data:{questions:rows.length,topics:Object.keys(t).sort(),zielgebiete:Object.keys(z).sort(),today:0,assignments:[]}}; }) : sb.rpc('coach_available');
+  var availP=_coCtx.preview ? sb.from('coach_questions').select('topic,zielgebiet,difficulty,kind').eq('project_id',pid).eq('status','active').limit(5000).then(function(r){ var rows=r.data||[]; var t={},z={},m={}; rows.forEach(function(x){ t[x.topic]=1; if(x.zielgebiet) z[x.zielgebiet]=1; var k=[x.topic,x.zielgebiet||'',x.difficulty,x.kind].join('|'); m[k]=(m[k]||0)+1; }); var matrix=Object.keys(m).map(function(k){ var p=k.split('|'); return {t:p[0],z:p[1]||null,d:p[2],k:p[3],n:m[k]}; }); return {data:{questions:rows.length,topics:Object.keys(t).sort(),zielgebiete:Object.keys(z).sort(),matrix:matrix,today:0,assignments:[]}}; }) : sb.rpc('coach_available');
   Promise.all([availP, sb.from('partner_agents').select('*').eq('project_id',pid).maybeSingle()]).then(function(r){
     _coAvail=(r[0]&&r[0].data)||{}; _coAg=(r[1]&&r[1].data)||(_coCtx.fallbackAgent?_coCtx.fallbackAgent(pid):(typeof kbFallbackAgent==='function'?kbFallbackAgent(pid):{name:'Coach',color:'#0F5661'}));
     if(!_coAvail.questions){ host.innerHTML='<div class="co"><div class="kbc-empty">Für dein Projekt liegt noch kein Übungsstoff vor. Sobald Wissen im Wissensspeicher liegt, erscheint der Coach hier.</div></div>'; return; }
@@ -64,12 +65,22 @@ function renderCoach(){
   }).catch(function(e){ host.innerHTML='<div class="co"><div class="kbc-err">Coach nicht erreichbar: '+coEsc(e.message||e)+'</div></div>'; });
 }
 var _coSet={mode:'daily',topic:'',zielgebiet:'',minutes:5,difficulty:'mix',kinds:'auto'};
+// Die Auswahl richtet sich nach dem Stoff: Themen/Zielgebiete mit Anzahl, Stufen und Fragearten nur, wo es sie für die Wahl gibt.
+function coScope(rows,s){ var zg=(s.mode==='sprint'&&s.zielgebiet)?s.zielgebiet.toLowerCase():null; return rows.filter(function(r){ if(s.mode==='topic'&&s.topic) return r.t===s.topic; if(zg) return (r.z||'').toLowerCase().indexOf(zg)>=0; return true; }); }
+function coAvailFor(s){ var rows=(_coAvail&&_coAvail.matrix)||[]; var sc=coScope(rows,s); var sum=function(list){ return list.reduce(function(a,r){ return a+(r.n||0); },0); };
+  var topics={}; rows.forEach(function(r){ topics[r.t]=(topics[r.t]||0)+r.n; }); var zgs={}; rows.forEach(function(r){ if(r.z) zgs[r.z]=(zgs[r.z]||0)+r.n; });
+  var diffs={}; sc.forEach(function(r){ diffs[r.d]=(diffs[r.d]||0)+r.n; }); var kinds={}; sc.forEach(function(r){ if(s.difficulty==='mix'||r.d===s.difficulty) kinds[r.k]=(kinds[r.k]||0)+r.n; });
+  var exact=sum(sc.filter(function(r){ return (s.difficulty==='mix'||r.d===s.difficulty)&&(s.kinds==='auto'||(s.kinds==='mc'?(r.k==='mc'||r.k==='match'):s.kinds==='gap'?(r.k==='gap'||r.k==='order'):r.k==='free')); }));
+  return {topics:Object.keys(topics).sort(function(a,b){ return a.localeCompare(b,'de'); }).map(function(t){ return {t:t,n:topics[t]}; }), zgs:Object.keys(zgs).sort(function(a,b){ return a.localeCompare(b,'de'); }).map(function(z){ return {z:z,n:zgs[z]}; }), diffs:diffs, kinds:kinds, inScope:sum(sc), exact:exact}; }
+function coCountFor(m){ return Math.max(3,Math.min(20,Math.round(m*1.2))); }
 function coStartScreen(host){
   var ag=_coAg, a=_coAvail, s=_coSet; var name=coEsc(ag.name||'Coach');
   var greet=_coCtx.preview?'Probelauf: dieselbe Einheit, die die Mitarbeiter bekommen. Nichts wird gespeichert.':(a.today>0?('Du hast heute schon '+a.today+' Einheit'+(a.today>1?'en':'')+' gemacht. Noch eine?'):'Heute noch nicht geübt. Fünf Minuten reichen.');
   var asg=(a.assignments||[]);
   var asgHtml=asg.length?'<div class="co-lbl" style="color:#b91c1c">Pflichteinheiten · '+asg.length+' offen</div><div class="co-asg">'+asg.map(function(x){ var due=x.due_date?new Date(x.due_date+'T00:00:00').toLocaleDateString('de-DE'):null; return '<div class="co-asgrow'+(x.overdue?' late':'')+'"><div style="flex:1;min-width:0"><b>'+coEsc(x.topic||(x.zielgebiet?'Vor dem Gespräch: '+x.zielgebiet:'Mix aus allem'))+'</b><div class="co-asgmeta">'+x.minutes+' Min · '+({mix:'gemischt',leicht:'leicht',mittel:'mittel',schwer:'schwer'}[x.difficulty]||x.difficulty)+(due?' · bis '+due+(x.overdue?' (überfällig)':''):'')+(x.assigned_by_name?' · von '+coEsc(x.assigned_by_name):'')+'</div>'+(x.note?'<div class="co-asgnote">„'+coEsc(x.note)+'“</div>':'')+'</div><button class="co-btn co-asgo" data-id="'+x.id+'">Jetzt machen</button></div>'; }).join('')+'</div>':'';
-  var topics=(a.topics||[]), zgs=(a.zielgebiete||[]);
+  // Ungültige Wahl auf „gemischt“/„passend“ zurücksetzen, bevor gezeichnet wird
+  var av0=coAvailFor(s); if(s.difficulty!=='mix'&&!av0.diffs[s.difficulty]) s.difficulty='mix'; var av1=coAvailFor(s); var kindOk={auto:true,mc:!!(av1.kinds.mc||av1.kinds.match),gap:!!(av1.kinds.gap||av1.kinds.order),free:!!av1.kinds.free}; if(!kindOk[s.kinds]) s.kinds='auto';
+  var av=coAvailFor(s); var topics=av.topics, zgs=av.zgs;
   host.innerHTML='<div class="co" style="--acc:'+(ag.color||'#0F5661')+'">'
     +'<div class="co-hd"><div class="kbc-orb" style="width:64px;height:64px">'+coAvatar(ag,64)+'</div><div><div class="kbc-ttl">'+name+' coacht</div><div class="kbc-sub">'+coEsc(greet)+' Ich frage aus unseren Unterlagen, du antwortest, ich sage dir sofort, was stimmt.</div></div></div>'
     +asgHtml
@@ -77,18 +88,19 @@ function coStartScreen(host){
     +'<button class="co-mode'+(s.mode==='daily'?' on':'')+'" data-m="daily"><b>Tageseinheit</b><span>Mix aus allem, deine schwachen Themen zuerst</span></button>'
     +'<button class="co-mode'+(s.mode==='topic'?' on':'')+'" data-m="topic"><b>Thema üben</b><span>Gesprächsführung, Stornierung, Peakwork …</span></button>'
     +'<button class="co-mode'+(s.mode==='sprint'?' on':'')+'" data-m="sprint"><b>Vor dem Gespräch</b><span>Ein Zielgebiet, zwei Minuten, das Wichtigste</span></button></div>'
-    +'<div id="coTopic" style="display:'+(s.mode==='topic'?'block':'none')+'"><div class="co-lbl">Thema</div><select class="co-sel" id="coTopicSel"><option value="">Zufall</option>'+topics.map(function(t){ return '<option value="'+coEsc(t)+'"'+(s.topic===t?' selected':'')+'>'+coEsc(t)+'</option>'; }).join('')+'</select></div>'
-    +'<div id="coZg" style="display:'+(s.mode==='sprint'?'block':'none')+'"><div class="co-lbl">Zielgebiet</div><select class="co-sel" id="coZgSel"><option value="">Zufällig</option>'+zgs.map(function(t){ return '<option value="'+coEsc(t)+'"'+(s.zielgebiet===t?' selected':'')+'>'+coEsc(t)+'</option>'; }).join('')+'</select></div>'
+    +'<div id="coTopic" style="display:'+(s.mode==='topic'?'block':'none')+'"><div class="co-lbl">Thema</div><select class="co-sel" id="coTopicSel"><option value="">Zufall ('+(a.questions||0)+' Fragen)</option>'+topics.map(function(x){ return '<option value="'+coEsc(x.t)+'"'+(s.topic===x.t?' selected':'')+'>'+coEsc(x.t)+' ('+x.n+')</option>'; }).join('')+'</select></div>'
+    +'<div id="coZg" style="display:'+(s.mode==='sprint'?'block':'none')+'"><div class="co-lbl">Zielgebiet</div><select class="co-sel" id="coZgSel"><option value="">Zufällig</option>'+zgs.map(function(x){ return '<option value="'+coEsc(x.z)+'"'+(s.zielgebiet===x.z?' selected':'')+'>'+coEsc(x.z)+' ('+x.n+')</option>'; }).join('')+'</select></div>'
     +'<div class="co-lbl">Dauer</div><div class="co-row" id="coMin">'+[2,5,10,15].map(function(m){ return '<button class="co-chip'+(s.minutes===m?' on':'')+'" data-v="'+m+'">'+m+' Min</button>'; }).join('')+'</div>'
-    +'<div class="co-lbl">Schwierigkeit</div><div class="co-row" id="coDiff">'+[['mix','Gemischt'],['leicht','Leicht'],['mittel','Mittel'],['schwer','Schwer']].map(function(d){ return '<button class="co-chip'+(s.difficulty===d[0]?' on':'')+'" data-v="'+d[0]+'">'+d[1]+'</button>'; }).join('')+'</div>'
-    +'<div class="co-lbl">Wie gefragt wird</div><div class="co-row" id="coKind">'+[['auto','Passend zum Stoff'],['mc','Auswahl'],['gap','Eintippen'],['free','Situationen (Freitext)']].map(function(d){ return '<button class="co-chip'+(s.kinds===d[0]?' on':'')+'" data-v="'+d[0]+'">'+d[1]+'</button>'; }).join('')+'</div>'
+    +'<div class="co-lbl">Schwierigkeit</div><div class="co-row" id="coDiff">'+[['mix','Gemischt'],['leicht','Leicht'],['mittel','Mittel'],['schwer','Schwer']].filter(function(d){ return d[0]==='mix'||av.diffs[d[0]]; }).map(function(d){ return '<button class="co-chip'+(s.difficulty===d[0]?' on':'')+'" data-v="'+d[0]+'">'+d[1]+(d[0]!=='mix'?' <span style="opacity:.7;font-weight:500">'+av.diffs[d[0]]+'</span>':'')+'</button>'; }).join('')+'</div>'
+    +'<div class="co-lbl">Wie gefragt wird</div><div class="co-row" id="coKind">'+[['auto','Passend zum Stoff'],['mc','Auswahl'],['gap','Eintippen'],['free','Situationen (Freitext)']].filter(function(d){ return kindOk[d[0]]; }).map(function(d){ return '<button class="co-chip'+(s.kinds===d[0]?' on':'')+'" data-v="'+d[0]+'">'+d[1]+'</button>'; }).join('')+'</div>'
+    +(function(){ var need=coCountFor(s.minutes); if(av.exact>=need||!(s.mode==='topic'&&s.topic||s.mode==='sprint'&&s.zielgebiet)) return ''; return '<div class="co-fill">Dazu gibt es '+av.exact+' passende Frage'+(av.exact===1?'':'n')+', die Einheit braucht '+need+'. Der Rest wird mit verwandten Themen aufgefüllt.</div>'; })()
     +'<button class="co-go" id="coGo">Einheit starten</button>'
     +'<div class="co-hist" id="coHist"></div></div>';
   host.querySelectorAll('.co-mode').forEach(function(b){ b.addEventListener('click',function(){ s.mode=b.getAttribute('data-m'); if(s.mode==='sprint'&&s.minutes>5)s.minutes=2; coStartScreen(host); }); });
   var chip=function(id,key){ host.querySelectorAll('#'+id+' .co-chip').forEach(function(b){ b.addEventListener('click',function(){ var v=b.getAttribute('data-v'); s[key]=(key==='minutes')?Number(v):v; coStartScreen(host); }); }); };
   chip('coMin','minutes'); chip('coDiff','difficulty'); chip('coKind','kinds');
-  var ts=document.getElementById('coTopicSel'); if(ts) ts.addEventListener('change',function(){ s.topic=ts.value; });
-  var zs=document.getElementById('coZgSel'); if(zs) zs.addEventListener('change',function(){ s.zielgebiet=zs.value; });
+  var ts=document.getElementById('coTopicSel'); if(ts) ts.addEventListener('change',function(){ s.topic=ts.value; coStartScreen(host); });
+  var zs=document.getElementById('coZgSel'); if(zs) zs.addEventListener('change',function(){ s.zielgebiet=zs.value; coStartScreen(host); });
   document.getElementById('coGo').addEventListener('click',function(){ coStart(host); });
   host.querySelectorAll('.co-asgo').forEach(function(b){ b.addEventListener('click',function(){ coStart(host,b.getAttribute('data-id')); }); });
   if(!_coCtx.preview) coLoadHist();
@@ -105,11 +117,11 @@ function coStart(host,assignmentId){ var s=_coSet; var go=document.getElementByI
   var kinds=s.kinds==='auto'?null:(s.kinds==='mc'?['mc','match']:s.kinds==='gap'?['gap','order']:['free']);
   var body=assignmentId?{action:'start',assignment_id:assignmentId}:{action:'start',settings:{mode:s.mode,topic:s.mode==='topic'?s.topic:null,zielgebiet:s.mode==='sprint'?s.zielgebiet:null,minutes:s.minutes,difficulty:s.difficulty,kinds:kinds}};
   coCall(body)
-    .then(function(r){ _coSess=r.session_id; _coQ=r.questions||[]; _coIdx=0; _coRes=[]; _coAssign=r.assignment||null; coRenderQ(host); })
+    .then(function(r){ _coSess=r.session_id; _coQ=r.questions||[]; _coIdx=0; _coRes=[]; _coAssign=r.assignment||null; _coFill=(r.fill&&r.fill.note)||null; coRenderQ(host); })
     .catch(function(e){ if(go){ go.disabled=false; go.textContent='Einheit starten'; } alert('Konnte keine Einheit starten: '+(e.message||e)); });
 }
 function coProg(results){ return '<div class="co-prog">'+_coQ.map(function(q,i){ var r=results[i]; var c=i===_coIdx?'cur':(r==null?'':(r>=1?'ok':r>0?'half':'no')); return '<i class="'+c+'"></i>'; }).join('')+'</div>'; }
-var _coRes=[];
+var _coRes=[]; var _coFill=null;
 function coRenderQ(host){
   var q=_coQ[_coIdx]; var ag=_coAg; if(!q){ coFinish(host); return; }
   _coT0=Date.now(); _coOrder=null; _coMatch={};
@@ -121,6 +133,7 @@ function coRenderQ(host){
   else if(q.kind==='match'){ var L=(q.options||{}).left||[], R=(q.options||{}).right||[]; body=L.map(function(l,i){ return '<div class="co-pair"><div class="l">'+coEsc(l)+'</div><select class="co-sel co-msel" data-l="'+coEsc(l)+'"><option value="">…</option>'+R.map(function(r){ return '<option value="'+coEsc(r)+'">'+coEsc(r)+'</option>'; }).join('')+'</select></div>'; }).join(''); }
   else if(q.kind==='order'){ _coOrder=(q.options||[]).slice(); body='<div id="coOrd"></div>'; }
   host.innerHTML='<div class="co" style="--acc:'+(ag.color||'#0F5661')+'">'+coProg(_coRes)
+    +(_coFill&&_coIdx===0?'<div class="co-fill" style="margin-bottom:8px">'+coEsc(_coFill)+'</div>':'')
     +(_coAssign?'<div class="co-meta" style="color:#b91c1c">Pflichteinheit'+(_coAssign.by?' von '+coEsc(_coAssign.by):'')+(_coAssign.note?': „'+coEsc(_coAssign.note)+'“':'')+'</div>':'')
     +'<div class="co-meta">Frage '+(_coIdx+1)+' von '+_coQ.length+' · <b>'+coEsc(q.topic)+'</b>'+(q.zielgebiet?' · '+coEsc(q.zielgebiet):'')+' · '+kindLbl+'</div>'
     +'<div class="co-q">'+coEsc(q.prompt)+'</div>'+body
