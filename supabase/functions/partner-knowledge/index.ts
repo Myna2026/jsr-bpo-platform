@@ -112,7 +112,7 @@ function isKeywordInput(q: string): boolean {
 // Übersicht ohne KI, direkt aus den Treffern: lieber zeigen, was da ist, als nichts. Greift, wenn die KI trotz
 // Treffern known=false liefert (LLM-Varianz bei kurzen Eingaben) oder die Eingabe so kurz ist, dass eine Übersicht
 // der ehrlichere Einstieg ist. Fakten werden nach Thema gruppiert; jedes Thema wird ein anklickbarer related-Punkt.
-function buildOverview(question: string, facts: any[], overview: any[], overviewZg: string[], chunks: any[], luecke: string | null): any {
+function buildOverview(question: string, facts: any[], overview: any[], overviewZg: string[], chunks: any[], luecke: string | null, pendingNote?: (f: any) => string): any {
   const pool = (overview.length ? overview : facts).filter((f) => f && f.topic);
   const zg = overviewZg.length ? overviewZg[0] : ([...new Set(pool.map((f) => f.zielgebiet).filter(Boolean))] as string[])[0] || null;
   const topics: string[] = [];
@@ -141,7 +141,7 @@ function buildOverview(question: string, facts: any[], overview: any[], overview
   const coverF = qWords.filter((w) => scored.some((x) => { const t = norm(String(x.f.topic || "")), l = norm(String(x.f.label || "")); return t.includes(w) || l.includes(w); })).length;
   const coverC = qWords.filter((w) => chunkRanked.slice(0, 3).some((x) => norm(String(x.c.content || "")).includes(w) || norm(String(x.c.section || "")).includes(w))).length;
   if (direct.length && !(chunkBest >= 3 && (factBest < 3 || coverC > coverF))) {
-    const blocks = direct.map((f) => ({ kind: "info", title: String(f.label || f.topic), text: String(f.value || ""), source: f.source === "manual" ? "manuell gepflegt" : (f.source_title || "Register") }));
+    const blocks = direct.map((f) => ({ kind: "info", title: String(f.label || f.topic), text: String(f.value || "") + (pendingNote ? pendingNote(f) : ""), source: f.source === "manual" ? "manuell gepflegt" : (f.source_title || "Register") }));
     const usedTopics = new Set(direct.map((f) => f.topic));
     const others: string[] = [];
     for (const f of pool) { if (!usedTopics.has(f.topic) && f.topic && !others.includes(f.topic)) others.push(f.topic); }
@@ -228,6 +228,21 @@ Deno.serve(async (req) => {
   const overview: any[] = Array.isArray(r.overview) ? r.overview : [];
   const overviewZg: string[] = Array.isArray(r.overview_zg) ? r.overview_zg : [];
 
+  // Freigabe: offene Änderungen zu den gefundenen Fakten (Wert Y wartet auf den Partner) + unbestätigte Neuanlagen.
+  // Der gültige Wert bleibt der alte; Conny nennt die wartende Änderung dazu, statt sie zu verschweigen oder vorwegzunehmen.
+  const factIds = [...new Set([...facts, ...related, ...overview].map((f: any) => f.id).filter(Boolean))];
+  const pending: Record<string, any> = {}; const unconfirmed = new Set<string>();
+  if (factIds.length) {
+    try {
+      const { data: ch } = await sb.from("kb_fact_changes").select("fact_id,change_kind,new_value,proposed_at").eq("project_id", projectId).eq("status", "open").in("fact_id", factIds);
+      for (const c of (ch || [])) { if (c.change_kind === "new") unconfirmed.add(c.fact_id); else pending[c.fact_id] = c; }
+    } catch (_e) { /* ohne Freigabe-Info weiter */ }
+  }
+  const withPending = (line: string, f: any) => { const c = pending[f.id];
+    if (c && c.change_kind === "update") return line + "  [ÄNDERUNG WARTET: neuer Wert \"" + c.new_value + "\" ist vorgeschlagen, vom Partner noch nicht bestätigt; gültig ist weiterhin der genannte Wert]";
+    if (c && c.change_kind === "delete") return line + "  [LÖSCHUNG WARTET: Eintrag soll entfallen, vom Partner noch nicht bestätigt; gilt weiterhin]";
+    if (unconfirmed.has(f.id)) return line + "  [NEU, vom Partner noch nicht bestätigt]";
+    return line; };
   // Partner-Agent (Name + Charakter) für Ton und Begrüßung. Nicht sensibel; RLS erlaubt select für Angemeldete.
   const { data: pa } = await sb.from("partner_agents").select("name,character").eq("project_id", projectId).maybeSingle();
   const agentName = (pa && pa.name) || "der Kollege";
@@ -242,10 +257,10 @@ Deno.serve(async (req) => {
   }
 
   const wissen = [
-    facts.length ? "REGISTER-FAKTEN:\n" + facts.map(factLine).join("\n") : "",
+    facts.length ? "REGISTER-FAKTEN:\n" + facts.map((f: any) => withPending(factLine(f), f)).join("\n") : "",
     chunks.length ? "DOKUMENT-ABSCHNITTE:\n" + chunks.map(chunkLine).join("\n") : "",
     related.length ? "VERWANDT (nicht gefragt, aber evtl. als Nächstes nützlich — nur hieraus related vorschlagen):\n" + related.map(relatedLine).join("\n") : "",
-    overview.length ? ("ÜBERSICHT ZUM ZIELGEBIET" + (overviewZg.length ? " (" + overviewZg.join(", ") + ")" : "") + " — ALLES, was zu diesem Zielgebiet hinterlegt ist. Nutze das, wenn die Frage vage ist, um zu zeigen, was du hast:\n" + overview.map(overviewLine).join("\n")) : "",
+    overview.length ? ("ÜBERSICHT ZUM ZIELGEBIET" + (overviewZg.length ? " (" + overviewZg.join(", ") + ")" : "") + " — ALLES, was zu diesem Zielgebiet hinterlegt ist. Nutze das, wenn die Frage vage ist, um zu zeigen, was du hast:\n" + overview.map((f: any) => withPending(overviewLine(f), f)).join("\n")) : "",
   ].filter(Boolean).join("\n\n");
 
   const system =
@@ -257,6 +272,7 @@ Deno.serve(async (req) => {
     "- Die Abschnitte können mehrere Zielgebiete/Fälle enthalten (die Unterlagen sind oft Tabellen mit einer Zeile je Ort). Nutze nur die Zeile(n), die zum gefragten Ort/Fall passen; ist der gefragte Ort dabei, beantworte die Frage daraus.\n" +
     "- Mehrdeutige Frage (Hotel oder Flughafen; welche Saison; welcher Veranstalter): known=false und stelle in 'rueckfrage' die eine nötige Rückfrage, statt zu raten.\n" +
     "- LÜCKE ERKENNEN: Nennt die Frage ein KONKRETES Sachthema, zu dem im WISSEN nichts steht (z. B. Waldbrand, Unwetter, Streik, Erdbeben, andere Naturereignisse oder Sonderlagen) — AUCH wenn du zum genannten Ort eine Übersicht zeigen kannst — dann trage dieses fehlende Thema kurz in 'luecke' ein (z. B. 'Waldbrand / Naturereignisse'). So landet es auf der Lückenliste und wir wissen, was wir beim Partner anfragen müssen. Generische Füllwörter (Problem, Frage, Hilfe, Info) sind KEINE Lücke -> luecke=null. Steht das Thema im Wissen -> null. Das gilt UNABHÄNGIG davon, ob du sonst antwortest oder eine Übersicht zeigst.\n" +
+    "- FREIGABE: Trägt ein Fakt die Marke [ÄNDERUNG WARTET …] oder [LÖSCHUNG WARTET …], dann gilt der genannte Wert und du sagst in einem eigenen Block kind='hinweis' dazu: 'Achtung: dazu liegt eine Änderung auf … vor, die der Partner noch nicht bestätigt hat.' Nimm den neuen Wert NIE vorweg. [NEU, vom Partner noch nicht bestätigt] erwähnst du kurz als Hinweis.\n" +
     "- DOKUMENTARTEN: Abschnitte tragen ihre Art vorne in der Klammer (Schulungsunterlage, Zielgebiet, FAQ). Fragen zu Gesprächsführung, Telefonverhalten, Umgang mit dem Kunden, Werkzeugen (Peakwork, Midoco, Travelviewer) und internen Prozessen beantwortest du bevorzugt aus der Schulungsunterlage; Fragen zu Ort, Treffpunkt, Agentur, Notfallnummer bevorzugt aus Register und Zielgebiet. Bei Unklarheit zählt alles. Nenne die Art in der Quelle mit.\n" +
     "- STICHWORTE: Eingaben aus ein bis drei Wörtern ohne Satz (\"Transfer Mallorca\", \"Storno\", \"Notfallnummer Kos\") sind Stichworte vom Telefon und bedeuten: alles Wichtige zu diesem Thema an diesem Ort. Behandle sie genau wie die ausformulierte Frage (\"Transfer Mallorca\" = \"Kunde findet den Transfer auf Mallorca nicht / wie läuft der Transfer auf Mallorca\"). Gibt es dazu einen passenden Fakt oder Abschnitt, antworte DIREKT damit (known=true). Gibt es mehrere Aspekte, gib die Übersicht mit related-Punkten. NIEMALS known=false, wenn im Wissen etwas zu den Stichworten steht.\n" +
     "- VAGE FRAGE = ÜBERSICHT: Nennt die Frage nur einen Ort oder ein Thema ohne konkreten Bedarf (\"Problem Rhodos\", \"Frage zu Mallorca\", \"was gibt es zu Kos\") UND es gibt unten einen Abschnitt ÜBERSICHT ZUM ZIELGEBIET: sag NIEMALS 'steht nicht drin'. Antworte dann known=true, intent='uebersicht'. Sag in einem kurzen info-Block, WAS du zu dem Zielgebiet hast, nach Art gruppiert (z. B. Notfallnummer, örtliche Agentur, Treffpunkt am Flughafen, Rücktransfer/Abläufe). Lege für die einzelnen Kategorien 'related'-Punkte an (je ein anklickbarer Punkt mit der konkreten Frage, z. B. label 'Notfallnummer', question 'Notfallnummer Rhodos'). Stelle in 'rueckfrage' die eine Frage, worum es genau geht. Genau wie ein Kollege: \"Zu Rhodos habe ich das und das, was brauchst du?\" Nenne nur Kategorien, die wirklich in der ÜBERSICHT stehen, und nur bei uebersicht: gib KEINE konkreten Nummern/Werte im Block aus (die kommen erst auf die konkrete Rückfrage).\n\n" +
@@ -294,7 +310,7 @@ Deno.serve(async (req) => {
   const hasRueck = typeof out.rueckfrage === "string" && out.rueckfrage.trim();
   const emptyKnown = llmKnown && !(Array.isArray(out.blocks) && out.blocks.some((b: any) => b && b.text));
   if (hasData && ((!llmKnown && (keyword || !hasRueck)) || emptyKnown)) {
-    const res: any = buildOverview(question, facts, overview, overviewZg, chunks, llmLuecke);
+    const res: any = buildOverview(question, facts, overview, overviewZg, chunks, llmLuecke, (f: any) => { const c = pending[f.id]; if (c && c.change_kind === "update") return "\nAchtung: Änderung auf „" + c.new_value + "“ vorgeschlagen, vom Partner noch nicht bestätigt. Es gilt der genannte Wert."; if (c && c.change_kind === "delete") return "\nAchtung: Löschung vorgeschlagen, vom Partner noch nicht bestätigt. Gilt weiterhin."; if (unconfirmed.has(f.id)) return "\n(neu, vom Partner noch nicht bestätigt)"; return ""; });
     res.used = { facts: facts.length, chunks: chunks.length, overview: overview.length };
     res.query_id = await logQuery(projectId, uid, question, res);
     return json(res);

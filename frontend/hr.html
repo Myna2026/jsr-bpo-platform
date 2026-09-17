@@ -26482,6 +26482,8 @@ function ClientAccountsTab({projects, clients, setClients}){
     {key:'messages',    label:'Nachrichten',         icon:'💬'},
     {key:'showcases',   label:'Kandidaten-Showcases',icon:'🎯'},
     {key:'reports',     label:'Berichte',            icon:'📈'},
+    {key:'arbeitsplan', label:'Optimierungen',       icon:'📋'},
+    {key:'kbchanges',   label:'Wissensänderungen (Freigabe)', icon:'✅'},
   ];
 
   function newClientTemplate(){
@@ -41724,6 +41726,13 @@ function WissensspeicherView({projects, team, showToast}){
   const [mode,setMode]=React.useState('ask');   // ask | register | docs
   const [facts,setFacts]=React.useState(null);
   const [factDocs,setFactDocs]=React.useState({});
+  const [changes,setChanges]=React.useState([]);   // offene Freigabe-Vorschläge (kb_fact_changes, status open) des Partners
+  const loadChanges=async(pid)=>{ if(!pid){ setChanges([]); return; } try{ const {data}=await sb.from('kb_fact_changes').select('*').eq('project_id',pid).eq('status','open').order('proposed_at'); setChanges(data||[]); }catch(e){ setChanges([]); } };
+  const changeOf=(fid)=>changes.find(c=>c.fact_id===fid)||null;
+  const daysSince=(ts)=>Math.max(0,Math.floor((Date.now()-new Date(ts).getTime())/864e5));
+  // Freigabe-Weg: nichts wird direkt überschrieben. propose() ruft kb_change_propose; applied=false heißt „wartet auf den Partner“.
+  const propose=async(kind,factId,payload,docId,locator,note)=>{ const {data,error}=await sb.rpc('kb_change_propose',{p_project:partner,p_kind:kind,p_fact:factId||null,p_new:payload||{},p_source_document:docId||null,p_locator:locator||null,p_note:note||null}); if(error) throw error; return data||{}; };
+  const withdrawChange=async(c)=>{ if(!(await uiConfirm({title:'Vorschlag zurückziehen', text:'Der Vorschlag „'+(c.label||'')+'“ wird zurückgezogen'+(c.change_kind==='new'?' und der neue Eintrag entfernt':'')+'.', confirmLabel:'Zurückziehen'}))) return; try{ const {error}=await sb.rpc('kb_change_withdraw',{p_change:c.id}); if(error) throw error; loadChanges(partner); loadFacts(partner); }catch(e){ showToast&&showToast('Fehlgeschlagen: '+((e&&e.message)||e),'error'); } };
   const [fq,setFq]=React.useState('');
   const [showArch,setShowArch]=React.useState(false);
   const [editF,setEditF]=React.useState(null);
@@ -41746,6 +41755,7 @@ function WissensspeicherView({projects, team, showToast}){
   const runGeo=async()=>{ if(!partner) return; setGeoBusy(true); try{ const {data,error}=await sb.functions.invoke('kb-geo',{body:{project_id:partner}}); if(error) throw error; if(data&&data.error) throw new Error(data.error); showToast&&showToast('Geografische Zuordnung aktualisiert: '+((data&&data.regions)||0)+' Regionen'); await loadRegions(partner); setGeoShow(true); }catch(e){ showToast&&showToast('Zuordnung fehlgeschlagen: '+((e&&e.message)||e),'error'); } finally{ setGeoBusy(false); } };
   const delRegion=async(r)=>{ if(!(await uiConfirm({title:'Region entfernen', text:'"'+r.name+'" aus der geografischen Zuordnung entfernen?', confirmLabel:'Entfernen', danger:true}))) return; try{ const {error}=await sb.from('kb_regions').delete().eq('id',r.id); if(error) throw error; loadRegions(partner); }catch(e){ showToast&&showToast('Fehlgeschlagen: '+((e&&e.message)||e),'error'); } };
   React.useEffect(()=>{ if(partner&&mode==='register'&&facts===null) loadFacts(partner); },[partner,mode]);
+  React.useEffect(()=>{ if(partner) loadChanges(partner); else setChanges([]); },[partner]);
   React.useEffect(()=>{ if(partner&&mode==='register'&&regions===null) loadRegions(partner); },[partner,mode]);
   React.useEffect(()=>{ if(partner&&mode==='gaps'&&qlog===null) loadQlog(partner); },[partner,mode]);
   // Vollansicht (Steckbrief) braucht Register + Anfragen für „was er weiß" und „seine Bilanz".
@@ -41756,17 +41766,18 @@ function WissensspeicherView({projects, team, showToast}){
     if(!f.topic.trim()||!f.label.trim()||!f.value.trim()){ showToast&&showToast('Thema, Titel und Wert sind Pflicht','error'); return; }
     const qualifier={}; if(f.q_saison&&f.q_saison.trim()) qualifier.saison=f.q_saison.trim(); if(f.q_veranstalter&&f.q_veranstalter.trim()) qualifier.veranstalter=f.q_veranstalter.trim();
     const uid=(team&&team.user_id)||null; const now=new Date().toISOString();
-    const payload={ topic:f.topic.trim(), zielgebiet:(f.zielgebiet||'').trim()||null, info_type:f.info_type||null, label:f.label.trim(), value:f.value.trim(), qualifier, valid_from:f.valid_from||null, valid_to:f.valid_to||null, updated_by:uid, updated_at:now };
+    const payload={ topic:f.topic.trim(), zielgebiet:(f.zielgebiet||'').trim()||null, info_type:f.info_type||null, label:f.label.trim(), value:f.value.trim(), qualifier, valid_from:f.valid_from||null, valid_to:f.valid_to||null, source:'manual' };
     setBusy('fact');
     try{
-      if(f.__new){ const {error}=await sb.from('kb_facts').insert({...payload, project_id:partner, source:'manual', confidence:'confirmed', status:'active', created_by:uid}); if(error) throw error; }
-      else { const {error}=await sb.from('kb_facts').update(payload).eq('id',f.id); if(error) throw error; }
-      setEditF(null); showToast&&showToast('Gespeichert'); loadFacts(partner);
+      const r=await propose(f.__new?'new':'update', f.__new?null:f.id, payload, null, null, null);
+      setEditF(null); showToast&&showToast(r.applied?(f.__new?'Angelegt. Gilt sofort, '+partnerName(partner)+' bestätigt noch.':'Gespeichert'):'Änderung vorgemerkt. Gilt erst, wenn '+partnerName(partner)+' sie bestätigt.'); loadFacts(partner); loadChanges(partner);
     }catch(e){ showToast&&showToast('Speichern fehlgeschlagen: '+((e&&e.message)||e),'error'); }
     setBusy('');
   };
   const setFactStatus=async(f,st)=>{ try{ const {error}=await sb.from('kb_facts').update({status:st, updated_by:(team&&team.user_id)||null, updated_at:new Date().toISOString()}).eq('id',f.id); if(error) throw error; loadFacts(partner); }catch(e){ showToast&&showToast('Fehlgeschlagen: '+((e&&e.message)||e),'error'); } };
-  const delFact=async(f)=>{ if(!(await uiConfirm({title:'Eintrag löschen', text:'"'+f.label+'" wird aus dem Register und den Antworten entfernt. Unter „Gelöschte" bleibt er wiederherstellbar.', confirmLabel:'Löschen'}))) return; setFactStatus(f,'archived'); };
+  const delFact=async(f)=>{ const confirmed=!!f.client_confirmed_at;
+    if(!(await uiConfirm({title:'Eintrag löschen', text:'"'+f.label+'"'+(confirmed?' ist vom Partner bestätigt. Die Löschung wird vorgemerkt und gilt erst, wenn '+partnerName(partner)+' sie bestätigt; bis dahin bleibt der Eintrag gültig.':' wird aus dem Register und den Antworten entfernt.'), confirmLabel:confirmed?'Löschung vorschlagen':'Löschen'}))) return;
+    try{ const r=await propose('delete', f.id, {}, null, null, null); showToast&&showToast(r.applied?'Gelöscht':'Löschung vorgemerkt, wartet auf '+partnerName(partner)+'.'); loadFacts(partner); loadChanges(partner); }catch(e){ showToast&&showToast('Fehlgeschlagen: '+((e&&e.message)||e),'error'); } };
   const purgeFact=async(f)=>{ if(!(await uiConfirm({title:'Endgültig löschen', text:'"'+f.label+'" wird unwiderruflich entfernt.', confirmLabel:'Endgültig löschen', danger:true}))) return; try{ const {error}=await sb.from('kb_facts').delete().eq('id',f.id); if(error) throw error; loadFacts(partner); }catch(e){ showToast&&showToast('Fehlgeschlagen: '+((e&&e.message)||e),'error'); } };
   const factProv=(f)=>{ const who=(id)=> id?(names[id]||'jemand'):null;
     const src = f.source==='manual' ? 'von Hand angelegt' : ('aus Datei'+(factDocs[f.source_document_id]?(' „'+factDocs[f.source_document_id]+'"'):'')+(f.source_locator?(', '+f.source_locator):''));
@@ -41806,21 +41817,24 @@ function WissensspeicherView({projects, team, showToast}){
     const uid=(team&&team.user_id)||null; const now=new Date().toISOString();
     const mkRow=(p,saison,veranstalter)=>{ const qualifier={}; if(saison) qualifier.saison=saison; if(veranstalter) qualifier.veranstalter=veranstalter;
       return {project_id:partner, topic:p.topic, zielgebiet:p.zielgebiet||null, info_type:p.info_type||'sonstiges', label:p.label, value:p.value, qualifier, source:'file', source_document_id:c.docId, source_locator:p.source_locator||null, confidence:'confirmed', status:'active', created_by:uid, updated_by:uid, updated_at:now}; };
-    const inserts=[]; const archiveIds=[];
+    // Freigabe-Weg: Neues geht sofort live (gekennzeichnet), „Ersetzen“ wird als Änderung alt → neu vorgemerkt (Partner bestätigt).
+    const jobs=[];   // {kind, factId, payload}
+    const mkPayload=(p,saison,veranstalter)=>{ const row=mkRow(p,saison,veranstalter); return {topic:row.topic, zielgebiet:row.zielgebiet, info_type:row.info_type, label:row.label, value:row.value, qualifier:row.qualifier, source:'file'}; };
     c.proposals.forEach((p,i)=>{ const r=c.res[i];
-      if(r.status==='new'||r.status==='dup'){ if(r.include) inserts.push(mkRow(p,p.saison,p.veranstalter)); }
+      if(r.status==='new'||r.status==='dup'){ if(r.include) jobs.push({kind:'new', factId:null, payload:mkPayload(p,p.saison,p.veranstalter), locator:p.source_locator||null}); }
       else if(r.status==='conflict'){
         if(r.choice==='alt') return;
-        if(r.choice==='ersetzen'){ if(r.match) archiveIds.push(r.match.id); inserts.push(mkRow(p,p.saison,p.veranstalter)); }
-        else if(r.choice==='beides'){ inserts.push(mkRow(p,r.saison,r.veranstalter)); }   // alt bleibt, neu mit Unterscheidung
+        if(r.choice==='ersetzen'){ if(r.match) jobs.push({kind:'update', factId:r.match.id, payload:mkPayload(p,p.saison,p.veranstalter), locator:p.source_locator||null}); else jobs.push({kind:'new', factId:null, payload:mkPayload(p,p.saison,p.veranstalter), locator:p.source_locator||null}); }
+        else if(r.choice==='beides'){ jobs.push({kind:'new', factId:null, payload:mkPayload(p,r.saison,r.veranstalter), locator:p.source_locator||null}); }   // alt bleibt, neu mit Unterscheidung
       }
     });
-    if(!inserts.length && !archiveIds.length){ setCatalog(null); return; }
+    if(!jobs.length){ setCatalog(null); return; }
     setBusy('catalog');
     try{
-      if(archiveIds.length){ const {error}=await sb.from('kb_facts').update({status:'archived',updated_by:uid,updated_at:now}).in('id',archiveIds); if(error) throw error; }
-      for(let i=0;i<inserts.length;i+=200){ const {error}=await sb.from('kb_facts').insert(inserts.slice(i,i+200)); if(error) throw error; }
-      showToast&&showToast('Register aktualisiert: '+inserts.length+' neu'+(archiveIds.length?(', '+archiveIds.length+' ersetzt'):'')); setCatalog(null); if(facts!==null) loadFacts(partner);
+      let nNew=0, nPending=0;
+      for(let i=0;i<jobs.length;i+=8){ const part=jobs.slice(i,i+8); const rs=await Promise.all(part.map(j=>propose(j.kind,j.factId,j.payload,c.docId,j.locator,null))); rs.forEach((r,k)=>{ if(part[k].kind==='new') nNew++; else if(r&&r.applied===false) nPending++; }); }
+      const inserts=jobs.filter(j=>j.kind==='new');
+      showToast&&showToast('Register aktualisiert: '+nNew+' neu (gelten sofort, '+partnerName(partner)+' bestätigt noch)'+(nPending?(', '+nPending+' Änderung'+(nPending===1?'':'en')+' vorgemerkt, warten auf Bestätigung'):'')); setCatalog(null); if(facts!==null) loadFacts(partner); loadChanges(partner);
       // Neue Zielgebiete geografisch mitkartieren (im Hintergrund, ohne den Ablauf zu blockieren).
       if(inserts.length){ sb.functions.invoke('kb-geo',{body:{project_id:partner}}).then(()=>loadRegions(partner)).catch(()=>{}); }
     }catch(e){ showToast&&showToast('Übernehmen fehlgeschlagen: '+((e&&e.message)||e),'error'); }
@@ -41929,6 +41943,11 @@ function WissensspeicherView({projects, team, showToast}){
         <div style={{fontSize:13.5,marginTop:2,whiteSpace:'pre-wrap',wordBreak:'break-word'}}>{f.value}</div>
         {(f.qualifier&&(f.qualifier.saison||f.qualifier.veranstalter))&&<div style={{fontSize:11.5,color:'#b45309',marginTop:2}}>{[f.qualifier.saison&&('Saison: '+f.qualifier.saison), f.qualifier.veranstalter&&('Veranstalter: '+f.qualifier.veranstalter)].filter(Boolean).join(' · ')}</div>}
         <div style={{fontSize:11,color:'var(--muted)',marginTop:3}}>{factProv(f)}</div>
+        {(()=>{ const c=changeOf(f.id); const old=c&&daysSince(c.proposed_at)>=7;
+          if(c&&c.change_kind==='update') return <div style={{marginTop:6,padding:'6px 9px',borderRadius:7,background:old?'#fef2f2':'#fffbeb',border:'1px solid '+(old?'#fecaca':'#fde68a'),fontSize:12}}><b style={{color:old?'#b91c1c':'#92400e'}}>⏳ Änderung wartet auf {partnerName(partner)}</b> · seit {daysSince(c.proposed_at)} Tag{daysSince(c.proposed_at)===1?'':'en'}<div style={{marginTop:3}}><span style={{textDecoration:'line-through',color:'var(--muted)'}}>{c.old_value}</span> → <b>{c.new_value}</b></div>{canEdit&&<button className="btn btn-sm" style={{marginTop:4}} onClick={()=>withdrawChange(c)}>Zurückziehen</button>}</div>;
+          if(c&&c.change_kind==='delete') return <div style={{marginTop:6,padding:'6px 9px',borderRadius:7,background:old?'#fef2f2':'#fffbeb',border:'1px solid '+(old?'#fecaca':'#fde68a'),fontSize:12}}><b style={{color:old?'#b91c1c':'#92400e'}}>⏳ Löschung wartet auf {partnerName(partner)}</b> · seit {daysSince(c.proposed_at)} Tag{daysSince(c.proposed_at)===1?'':'en'}, bis dahin gültig{canEdit&&<button className="btn btn-sm" style={{marginLeft:8}} onClick={()=>withdrawChange(c)}>Zurückziehen</button>}</div>;
+          if(!f.client_confirmed_at&&f.status==='active') return <div style={{marginTop:4,fontSize:11.5,color:'#0F5661',fontWeight:600}}>🆕 neu, von {partnerName(partner)} noch nicht bestätigt (gilt bereits)</div>;
+          return null; })()}
       </div>
       {canEdit&&<div style={{flex:'0 0 auto',display:'flex',gap:6}}>
         {showArch? <React.Fragment><button className="btn btn-sm" onClick={()=>setFactStatus(f,'active')}>Wiederherstellen</button><button className="btn btn-sm" onClick={()=>purgeFact(f)}>Endgültig</button></React.Fragment>
@@ -42098,6 +42117,7 @@ function WissensspeicherView({projects, team, showToast}){
         <div style={{display:'flex',alignItems:'baseline',gap:10,flexWrap:'wrap',marginBottom:10}}>
           <span style={{fontSize:26,fontWeight:800,color:'var(--text)'}}>{activeFacts.length}</span>
           <span style={{fontSize:13,color:'var(--muted)'}}>Einträge · {themeList.length} Themen · {zgTotal} Zielgebiete</span>
+          {changes.length>0&&<span style={{fontSize:12,fontWeight:700,padding:'2px 9px',borderRadius:20,background:changes.some(c=>daysSince(c.proposed_at)>=7)?'#fef2f2':'#fffbeb',color:changes.some(c=>daysSince(c.proposed_at)>=7)?'#b91c1c':'#92400e'}}>⏳ {changes.length} wartet{changes.length===1?'':'en'} auf {partnerName(partner)}{changes.some(c=>daysSince(c.proposed_at)>=7)?' · ältester seit '+Math.max(...changes.map(c=>daysSince(c.proposed_at)))+' Tagen':''}</span>}
         </div>
         <div style={{display:'flex',flexWrap:'wrap',gap:6}}>
           {themeList.map(t=><button key={t} onClick={()=>{ setRegView('thema'); setRegOpen(o=>({...o,['th:'+t]:true})); setFq(''); }} title="Zu diesem Thema"
