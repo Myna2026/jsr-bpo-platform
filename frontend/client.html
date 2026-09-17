@@ -2015,6 +2015,227 @@ function ImpPlanGrid(P){
 // ── Wissensänderungen (Kunde entscheidet): Vorschläge alt gegen neu, Bestätigen / Ablehnen, Gruppe auf einmal, Verlauf. ──
 // Datenbasis kb_fact_changes (RLS: nur eigenes Projekt), Entscheidung über RPC kb_change_decide (jeder Zugang des Kunden).
 // Offene Vorschläge bleiben offen, bis jemand entscheidet: sichtbar alternd (rot ab 7 Tagen), nie automatisch übernommen.
+// ── Conny im Kundenportal: Frage-Konsole, wörtlich aus dem Mitarbeiter-Portal übernommen (Vanilla, DOM in #vPartnerwissen).
+// Nur Fragen (Lesezugang perm 'wissen' read/own → kb_retrieve liefert nur das eigene Projekt). Kein Upload, kein Register,
+// keine Lücken-Liste. Projekt kommt aus dem Kundenkonto (window._kbClientPid, gesetzt von KbConnyView).
+function kbClientPid(){ return window._kbClientPid||null; }
+var KB_AGENTS={'proj_cd_c9d0e1f2':{name:'Conny',color:'#F5B301',face_key:'carlos'},'proj_hc_a1b2c3d4':{name:'Holger',color:'#3B82F6',face_key:'holger'},'proj_gn_e5f6a7b8':{name:'Georg',color:'#EC4899',face_key:'georg'},'proj_fb_a3b4c5d6':{name:'Fabian',color:'#8B5CF6',face_key:'fabian'}};
+var KB_PNAMES={'proj_cd_c9d0e1f2':'Condor','proj_hc_a1b2c3d4':'HolidayCheck','proj_gn_e5f6a7b8':'Giganetz','proj_fb_a3b4c5d6':'Fabletics'};
+function kbFallbackAgent(pid){ var f=KB_AGENTS[pid]||{name:(KB_PNAMES[pid]||'Wissen'),color:'#0F5661',face_key:'default'}; return {project_id:pid,name:f.name,color:f.color,face_key:f.face_key,avatar_url:null,greeting:null}; }
+function kbEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+// Gezeichnetes Gesicht (Entwurf B), identisch zu hr.html — greift, solange kein Foto hochgeladen ist.
+function kbFaceSvg(faceKey,color,size){ size=size||64; color=color||'#0F5661';
+  var skin='#e8b98f',skinD='#d79f78',hair='#3a2a1e',extra='',hairPath,eyeY=28;
+  if(faceKey==='holger'){ skin='#e9c3a1';skinD='#d6ac8a';hair='#aab2bf';
+    hairPath='<path d="M19 24 Q22 12 32 12 Q42 12 45 24 Q41 19 32 19 Q23 19 19 24 Z" fill="'+hair+'"/>';
+    extra='<circle cx="27" cy="28.5" r="4" fill="none" stroke="#26303f" stroke-width="1.4"/><circle cx="37" cy="28.5" r="4" fill="none" stroke="#26303f" stroke-width="1.4"/><line x1="31" y1="28.5" x2="33" y2="28.5" stroke="#26303f" stroke-width="1.4"/>'; }
+  else if(faceKey==='georg'){ hair='#2a1c12'; hairPath='<path d="M19 26 Q19 12 32 12 Q45 12 45 26 Q45 20 38 19 L36 15 Q30 20 22 20 Q19 22 19 26 Z" fill="'+hair+'"/>'; }
+  else if(faceKey==='fabian'){ hair='#2a1c12'; eyeY=29; hairPath='<path d="M20 22 Q23 14 32 14 Q41 14 44 22 Q40 19 32 19 Q24 19 20 22 Z" fill="'+hair+'"/>'; extra='<rect x="18" y="21" width="28" height="4.5" rx="2.2" fill="'+color+'"/>'; }
+  else { hairPath='<path d="M19 25 Q21 13 32 13 Q43 13 45 25 Q41 20 32 20 Q23 20 19 25 Z" fill="'+hair+'"/>'; }
+  var sm=eyeY+5,smc=eyeY+8.5,band=eyeY,ear=eyeY-2,mic1=eyeY+5,mic2=eyeY+13;
+  return '<svg viewBox="0 0 64 64" width="'+size+'" height="'+size+'" aria-hidden="true">'
+    +'<path d="M12 62 Q32 47 52 62 Z" fill="'+color+'" fill-opacity="0.5"/>'
+    +'<rect x="28" y="39" width="8" height="9" fill="'+skinD+'"/><circle cx="32" cy="28" r="13" fill="'+skin+'"/>'+hairPath+extra
+    +'<circle cx="27" cy="'+eyeY+'" r="1.7" fill="#26303f"/><circle cx="37" cy="'+eyeY+'" r="1.7" fill="#26303f"/>'
+    +'<path d="M28 '+sm+' Q32 '+smc+' 36 '+sm+'" stroke="#26303f" stroke-width="1.6" fill="none" stroke-linecap="round"/>'
+    +'<path d="M18 '+band+' A14 14 0 0 1 46 '+band+'" stroke="#2b3550" stroke-width="2.6" fill="none"/>'
+    +'<rect x="15.5" y="'+ear+'" width="5" height="8" rx="2.2" fill="#2b3550"/><rect x="43.5" y="'+ear+'" width="5" height="8" rx="2.2" fill="#2b3550"/>'
+    +'<path d="M18 '+mic1+' Q13 '+mic2+' 25 '+mic2+'" stroke="#2b3550" stroke-width="2" fill="none"/><circle cx="25" cy="'+mic2+'" r="1.8" fill="#2b3550"/></svg>';
+}
+function kbAvatarHtml(a,size){ size=size||46; if(a&&a.avatar_url) return '<img src="'+String(a.avatar_url).replace(/"/g,'&quot;')+'" alt="" style="width:100%;height:100%;object-fit:cover;display:block">'; return kbFaceSvg((a&&a.face_key)||'default',(a&&a.color)||'#0F5661',size); }
+var KB_EMAIL_RE=/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+function kbContacts(ans){
+  var txt=[(ans&&ans.title)||''].concat(((ans&&ans.blocks)||[]).map(function(b){return b.text||'';})).join('   ');
+  var emails=Array.from(new Set(txt.match(KB_EMAIL_RE)||[]));
+  var raw=txt.replace(KB_EMAIL_RE,'  ').match(/(?:\+|00)?\d[\d\s().\/-]{5,}\d/g)||[];
+  var phones=Array.from(new Set(raw.map(function(s){return s.trim().replace(/[.\s]+$/,'');}).filter(function(s){var d=s.replace(/\D/g,'');return d.length>=7&&d.length<=16;})));
+  return {phones:phones,emails:emails};
+}
+function kbAnswerText(ans){
+  var lines=[]; if(ans&&ans.title) lines.push(ans.title); var n=0;
+  ((ans&&ans.blocks)||[]).forEach(function(b){
+    if(b.kind==='schritt'){ n++; lines.push(n+'. '+(b.title?b.title+': ':'')+b.text); }
+    else if(b.kind==='notfall'){ lines.push('Notfall: '+(b.title?b.title+' - ':'')+b.text); }
+    else if(b.kind==='hinweis'){ lines.push('Hinweis: '+(b.title?b.title+' - ':'')+b.text); }
+    else if(b.kind==='kundensatz'){ lines.push('Für den Kunden: '+b.text); }
+    else lines.push((b.title?b.title+': ':'')+b.text);
+  });
+  return lines.join('\n');
+}
+function kbDoCopy(text,btn){ try{ navigator.clipboard.writeText(text).then(function(){ if(btn){ var o=btn.textContent; btn.textContent='Kopiert ✓'; setTimeout(function(){ btn.textContent=o; },1400); } }); }catch(e){} }
+var _kbAns=null,_kbBusy=false,_kbAg=null;
+function kbInjectCss(){ if(document.getElementById('kbcss'))return; var st=document.createElement('style'); st.id='kbcss'; st.textContent=[
+'.kbc{position:relative;overflow:hidden;border-radius:16px;padding:18px;background:radial-gradient(135% 165% at 8% -12%, color-mix(in srgb, var(--acc) 16%, #ffffff) 0%, #f6f8fc 52%, #eef2f8 100%);border:1px solid color-mix(in srgb, var(--acc) 26%, #e2e8f0);box-shadow:0 12px 34px rgba(15,23,42,.10)}',
+'.kbc-hd{display:flex;align-items:center;gap:14px;margin-bottom:18px}',
+'.kbc-orb{flex:0 0 auto;width:76px;height:76px;border-radius:50%;overflow:hidden;display:flex;align-items:center;justify-content:center;background:#fff;border:3px solid color-mix(in srgb, var(--acc) 68%, #fff);box-shadow:0 0 0 5px color-mix(in srgb, var(--acc) 15%, transparent), 0 8px 20px color-mix(in srgb, var(--acc) 26%, transparent)}',
+'.kbc-orb svg,.kbc-orb img{width:100%;height:100%;display:block;object-fit:cover}',
+'.kbc-ttl{font-size:19px;font-weight:800;color:#0f172a;line-height:1.2}',
+'.kbc-sub{font-size:13px;color:#64748b;margin-top:2px}',
+'.kbc-lbl{font-size:11px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:color-mix(in srgb, var(--acc) 55%, #64748b);margin-bottom:7px}',
+'.kbc-bar{display:flex;gap:8px;align-items:center;padding:7px 7px 7px 15px;border-radius:14px;background:#ffffff;border:1px solid color-mix(in srgb, var(--acc) 22%, #cbd5e1);box-shadow:0 2px 10px rgba(15,23,42,.06)}',
+'.kbc-bar:focus-within{border-color:var(--acc);box-shadow:0 0 0 2px color-mix(in srgb, var(--acc) 26%, transparent)}',
+'.kbc-in{flex:1;min-width:0;background:transparent;border:none;outline:none;font-size:17px;font-weight:600;color:#0f172a}',
+'.kbc-in::placeholder{color:#94a3b8}',
+'.kbc-go{flex:0 0 auto;border:none;cursor:pointer;border-radius:11px;padding:13px 20px;font-weight:800;font-size:15px;min-height:46px;color:#ffffff;background:linear-gradient(180deg, color-mix(in srgb, var(--acc) 86%, #fff), var(--acc))}',
+'.kbc-go:disabled{opacity:.5}',
+'.kbc-band{display:flex;align-items:center;gap:12px;margin-top:22px;padding:16px;border-radius:14px;border:1px solid #e2e8f0;background:#ffffff}',
+'.kbc-ans{margin-top:22px;padding:18px;border-radius:16px;background:#ffffff;border:1px solid #e6eaf1;box-shadow:0 8px 26px rgba(15,23,42,.07)}',
+'.kbc-dots{display:flex;gap:5px}.kbc-dots i{width:8px;height:8px;border-radius:50%;background:var(--acc);animation:kbcB 1s infinite}.kbc-dots i:nth-child(2){animation-delay:.15s}.kbc-dots i:nth-child(3){animation-delay:.3s}',
+'@keyframes kbcB{0%,100%{transform:translateY(0);opacity:.5}50%{transform:translateY(-5px);opacity:1}}',
+'.kbc-bt{font-size:14px;color:#64748b}',
+'.kbc-title{font-size:21px;font-weight:800;color:#0f172a;margin:0 0 14px;line-height:1.25}',
+'.kbc-steps{display:flex;flex-direction:column;gap:14px}',
+'.kbc-row{display:flex;gap:12px;align-items:flex-start}',
+'.kbc-num{flex:0 0 auto;width:30px;height:30px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:800;color:#ffffff;background:linear-gradient(180deg, color-mix(in srgb, var(--acc) 84%, #fff), var(--acc))}',
+'.kbc-dot{flex:0 0 auto;width:10px;height:10px;border-radius:50%;margin-top:7px;background:var(--acc)}',
+'.kbc-bt2{flex:1;min-width:0}',
+'.kbc-bttl{font-size:15px;font-weight:800;color:#0f172a;margin-bottom:2px}',
+'.kbc-bbody{font-size:16.5px;line-height:1.5;color:#334155;white-space:pre-wrap;word-break:break-word}',
+'.kbc-src{font-size:11.5px;color:#94a3b8;margin-top:4px}',
+'.kbc-say{padding:14px;border-radius:12px;background:color-mix(in srgb, var(--acc) 8%, #ffffff);border:1px dashed color-mix(in srgb, var(--acc) 42%, transparent)}',
+'.kbc-saylbl{font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;color:color-mix(in srgb, var(--acc) 62%, #334155);margin-bottom:5px}',
+'.kbc-saytext{font-size:16.5px;line-height:1.5;color:#0f172a;font-style:italic}',
+'.kbc-call{padding:14px;border-radius:12px}',
+'.kbc-notfall{background:rgba(220,38,38,.08);border:1px solid rgba(220,38,38,.32);border-left:5px solid #dc2626}',
+'.kbc-hinweis{background:rgba(217,119,6,.09);border:1px solid rgba(217,119,6,.30);border-left:5px solid #d97706}',
+'.kbc-caltag{font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px}',
+'.kbc-actions{margin-top:16px;padding-top:15px;border-top:1px solid #eef1f6;display:flex;flex-direction:column;gap:10px}',
+'.kbc-act{display:flex;align-items:center;gap:8px;flex-wrap:wrap}',
+'.kbc-actval{font-size:15.5px;color:#0f172a;font-weight:700;margin-right:2px}',
+'.kbc-actbtn{cursor:pointer;border-radius:11px;padding:12px 16px;font-size:15px;font-weight:700;color:color-mix(in srgb, var(--acc) 72%, #334155);background:color-mix(in srgb, var(--acc) 10%, #ffffff);border:1px solid color-mix(in srgb, var(--acc) 34%, transparent);text-decoration:none;display:inline-flex;align-items:center;gap:6px;min-height:48px}',
+'.kbc-copyall{cursor:pointer;border-radius:11px;padding:12px 16px;font-size:15px;font-weight:700;color:#475569;background:#f1f5f9;border:1px solid #dbe2ea;min-height:48px;width:100%}',
+'.kbc-mail{margin-top:12px;padding:15px;border-radius:12px;border:1px solid #e2e8f0;background:#ffffff}',
+'.kbc-maillbl{font-size:13.5px;font-weight:700;color:#475569;margin-bottom:10px}',
+'.kbc-mailrow{display:flex;gap:11px;align-items:flex-start;padding:10px 0;font-size:15.5px;color:#334155;cursor:pointer}',
+'.kbc-mailrow input{margin-top:4px;flex:0 0 auto;width:20px;height:20px}',
+'.kbc-rel{margin-top:16px;display:flex;flex-wrap:wrap;gap:8px;align-items:center}',
+'.kbc-rellbl{font-size:12.5px;color:#64748b;width:100%}',
+'.kbc-relbtn{cursor:pointer;border-radius:22px;padding:10px 16px;font-size:14.5px;font-weight:600;color:color-mix(in srgb, var(--acc) 72%, #334155);background:color-mix(in srgb, var(--acc) 10%, #ffffff);border:1px solid color-mix(in srgb, var(--acc) 34%, transparent)}',
+'.kbc-fb{margin-top:16px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}',
+'.kbc-fbb{cursor:pointer;border-radius:10px;padding:10px 14px;font-size:13.5px;font-weight:600;color:#475569;background:#f1f5f9;border:1px solid #dbe2ea}',
+'.kbc-fbtxt{font-size:13px;color:#64748b}',
+'.kbc-empty{margin-top:22px;padding:18px;border-radius:16px;border:1px solid #e2e8f0;background:#ffffff;color:#64748b;font-size:15.5px}',
+'.kbc-rueck{margin-top:22px;padding:18px;border-radius:16px;border:1px solid color-mix(in srgb, var(--acc) 40%, #e2e8f0);background:color-mix(in srgb, var(--acc) 8%, #ffffff);color:#7c5e10;font-size:16px}',
+'.kbc-rueck b{color:color-mix(in srgb, var(--acc) 70%, #334155);display:block;font-size:12px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px}',
+'.kbc-err{margin-top:22px;padding:16px 18px;border-radius:16px;background:rgba(220,38,38,.07);border:1px solid rgba(220,38,38,.32);color:#b91c1c;font-size:15px}'
+].join('\n'); document.head.appendChild(st); }
+function renderPartnerwissen(){
+  kbInjectCss();
+  var host=document.getElementById('vPartnerwissen'); if(!host)return;
+  var pid=kbClientPid();
+  if(!pid){ host.innerHTML='<div class="kbc" style="--acc:#0F5661"><div class="kbc-empty">Für deinen Zugang ist noch kein Projekt hinterlegt. Bitte wende dich an HR.</div></div>'; return; }
+  host.innerHTML='<div style="padding:20px;color:#8b93a8;font-size:14px">Lädt…</div>';
+  sb.from('partner_agents').select('*').eq('project_id',pid).maybeSingle()
+    .then(function(r){ kbBuildConsole(host,pid,(r&&r.data)||kbFallbackAgent(pid)); })
+    .catch(function(){ kbBuildConsole(host,pid,kbFallbackAgent(pid)); });
+}
+function kbBuildConsole(host,pid,ag){
+  _kbAg=ag; _kbAns=null; _kbBusy=false;
+  var pname=KB_PNAMES[pid]||'';
+  var greet=ag.greeting||'Frag mich wie einen Kollegen. Antwort nur aus den Unterlagen, mit Quelle.';
+  host.innerHTML='<div class="kbc" style="--acc:'+(ag.color||'#0F5661')+'">'
+    +'<div class="kbc-hd"><div class="kbc-orb">'+kbAvatarHtml(ag,76)+'</div><div style="flex:1;min-width:0"><div class="kbc-ttl">'+kbEsc(ag.name)+(pname?(' · '+kbEsc(pname)):'')+'</div><div class="kbc-sub">'+kbEsc(greet)+'</div></div></div>'
+    +'<div class="kbc-lbl">Deine Frage</div>'
+    +'<div class="kbc-bar"><input class="kbc-in" id="kbInput" enterkeyhint="search" placeholder="z. B. Notfallnummer, Transfer …"><button class="kbc-go" id="kbGo">Fragen</button></div>'
+    +'<div id="kbResult"></div></div>';
+  var inp=document.getElementById('kbInput'), go=document.getElementById('kbGo');
+  if(go)go.addEventListener('click',function(){ kbAsk(inp.value,false); });
+  if(inp)inp.addEventListener('keydown',function(e){ if(e.key==='Enter'){ kbAsk(inp.value,false); } });
+}
+function kbSetResult(html){ var r=document.getElementById('kbResult'); if(r)r.innerHTML=html; }
+function kbAsk(question, pushToInput){
+  question=(question||'').trim(); if(!question||_kbBusy)return;
+  var pid=kbClientPid(); if(!pid)return;
+  var inp=document.getElementById('kbInput'); if(inp&&pushToInput)inp.value=question;
+  _kbBusy=true; var ag=_kbAg||kbFallbackAgent(pid);
+  kbSetResult('<div class="kbc-band"><span class="kbc-dots"><i></i><i></i><i></i></span><span class="kbc-bt">'+kbEsc(ag.name)+' schaut nach…</span></div>');
+  sb.functions.invoke('partner-knowledge',{body:{question:question, project_id:pid}}).then(function(res){
+    _kbBusy=false;
+    if(res&&res.error){ kbSetResult('<div class="kbc-err">Gerade nicht erreichbar. Bitte noch einmal versuchen.</div>'); return; }
+    _kbAns=(res&&res.data)||{}; kbRenderAns();
+  }).catch(function(){ _kbBusy=false; kbSetResult('<div class="kbc-err">Gerade nicht erreichbar. Bitte noch einmal versuchen.</div>'); });
+}
+function kbRenderAns(){
+  var d=_kbAns||{};
+  if(!d.known){ if(d.rueckfrage){ kbSetResult('<div class="kbc-rueck"><b>Kurze Rückfrage</b>'+kbEsc(d.rueckfrage)+'</div>'); return; } kbSetResult('<div class="kbc-empty">'+kbEsc(d.note||'Dazu ist nichts hinterlegt.')+'</div>'); return; }
+  var html=''; if(d.title)html+='<div class="kbc-title">'+kbEsc(d.title)+'</div>';
+  html+='<div class="kbc-steps">'; var blocks=d.blocks||[], stepNo=0;
+  for(var i=0;i<blocks.length;i++){ var b=blocks[i]||{}; var isN=b.kind==='notfall', isH=b.kind==='hinweis', isS=b.kind==='schritt', isSay=b.kind==='kundensatz';
+    var src=b.source? kbEsc(b.source.length>90?b.source.slice(0,90)+'…':b.source):'';
+    if(isSay){ html+='<div class="kbc-say"><div class="kbc-saylbl">🗣 Das sagst du dem Kunden</div><div class="kbc-saytext">'+kbEsc(b.text)+'</div></div>'; }
+    else if(isN||isH){ html+='<div class="kbc-call '+(isN?'kbc-notfall':'kbc-hinweis')+'"><div class="kbc-caltag" style="color:'+(isN?'#f87171':'#fbbf24')+'">'+(isN?'⚠ Notfall':'ℹ Hinweis')+(b.title?(' · '+kbEsc(b.title)):'')+'</div><div class="kbc-bbody">'+kbEsc(b.text)+'</div>'+(src?('<div class="kbc-src">Quelle: '+src+'</div>'):'')+'</div>'; }
+    else { if(isS)stepNo++; html+='<div class="kbc-row">'+(isS?('<span class="kbc-num">'+stepNo+'</span>'):'<span class="kbc-dot"></span>')+'<div class="kbc-bt2">'+(b.title?('<div class="kbc-bttl">'+kbEsc(b.title)+'</div>'):'')+'<div class="kbc-bbody">'+kbEsc(b.text)+'</div>'+(src?('<div class="kbc-src">Quelle: '+src+'</div>'):'')+'</div></div>'; }
+  }
+  html+='</div>';
+  var c=kbContacts(d), acts='';
+  c.phones.forEach(function(ph){ acts+='<div class="kbc-act"><span class="kbc-actval">📞 '+kbEsc(ph)+'</span><button class="kbc-actbtn kbc-cp" data-c="'+kbEsc(ph).replace(/"/g,'&quot;')+'">📋 Kopieren</button><a class="kbc-actbtn" href="tel:'+ph.replace(/[^\d+]/g,'')+'">📞 Anrufen</a></div>'; });
+  c.emails.forEach(function(em){ acts+='<div class="kbc-act"><span class="kbc-actval">✉ '+kbEsc(em)+'</span><button class="kbc-actbtn kbc-cp" data-c="'+kbEsc(em).replace(/"/g,'&quot;')+'">📋 Kopieren</button><a class="kbc-actbtn" href="mailto:'+kbEsc(em)+'">✉ Mail</a></div>'; });
+  acts+='<button class="kbc-copyall" id="kbCopyAll">📋 Ganze Antwort kopieren</button>';
+  if((d.blocks||[]).length) acts+='<button class="kbc-copyall" id="kbMailBtn">✉ Mail an den Kunden</button>';
+  html+='<div class="kbc-actions">'+acts+'</div><div id="kbMailPanel"></div>';
+  var rel=d.related||[];
+  if(rel.length){ html+='<div class="kbc-rel"><span class="kbc-rellbl">Dazu passt vielleicht:</span>';
+    for(var j=0;j<rel.length;j++){ html+='<button class="kbc-relbtn" data-q="'+kbEsc(rel[j].question).replace(/"/g,'&quot;')+'">👉 '+kbEsc(rel[j].label)+'</button>'; }
+    html+='</div>'; }
+  if(d.rueckfrage)html+='<div class="kbc-rueck"><b>Kurze Rückfrage</b>'+kbEsc(d.rueckfrage)+'</div>';
+  if(d.query_id)html+='<div class="kbc-fb" id="kbFb"><span class="kbc-fbtxt">War das richtig?</span><button class="kbc-fbb" data-fb="1">👍 hat geholfen</button><button class="kbc-fbb" data-fb="0">👎 war falsch</button></div>';
+  kbSetResult(html);
+  var r=document.getElementById('kbResult'); if(!r)return;
+  r.querySelectorAll('.kbc-relbtn').forEach(function(btn){ btn.addEventListener('click',function(){ kbAsk(btn.getAttribute('data-q'),true); }); });
+  r.querySelectorAll('.kbc-fbb').forEach(function(btn){ btn.addEventListener('click',function(){ kbSendFb(btn.getAttribute('data-fb')==='1'); }); });
+  r.querySelectorAll('.kbc-cp').forEach(function(btn){ btn.addEventListener('click',function(){ kbDoCopy(btn.getAttribute('data-c'),btn); }); });
+  var ca=document.getElementById('kbCopyAll'); if(ca) ca.addEventListener('click',function(){ kbDoCopy(kbAnswerText(d),ca); });
+  var mb=document.getElementById('kbMailBtn'); if(mb) mb.addEventListener('click',kbOpenMail);
+}
+function kbOpenMail(){ var d=_kbAns; if(!d||!d.blocks) return; var c=document.getElementById('kbMailPanel'); if(!c) return;
+  var html='<div class="kbc-mail"><div class="kbc-maillbl">Welche Punkte sollen in die Mail? Die KI macht daraus einen sendbaren Text, Fakten bleiben unverändert.</div>';
+  d.blocks.forEach(function(b,i){ var lbl=b.title||(b.text.length>80?b.text.slice(0,80)+'…':b.text); html+='<label class="kbc-mailrow"><input type="checkbox" data-mi="'+i+'" checked>'+kbEsc(lbl)+'</label>'; });
+  html+='<div style="display:flex;gap:8px;margin-top:12px"><button class="kbc-go" id="kbMailGo">✉ Mail erstellen</button><button class="kbc-copyall" id="kbMailCancel" style="width:auto">Abbrechen</button></div></div>';
+  c.innerHTML=html;
+  document.getElementById('kbMailGo').addEventListener('click',kbMakeMail);
+  document.getElementById('kbMailCancel').addEventListener('click',function(){ c.innerHTML=''; });
+}
+function kbMakeMail(){ var d=_kbAns; if(!d) return; var pid=kbClientPid(); var sel=[];
+  document.querySelectorAll('#kbMailPanel input[data-mi]').forEach(function(cb){ if(cb.checked){ var b=d.blocks[+cb.getAttribute('data-mi')]; if(b) sel.push({kind:b.kind,title:b.title,text:b.text}); } });
+  if(!sel.length) return;
+  var go=document.getElementById('kbMailGo'); if(go){ go.textContent='Schreibt…'; go.disabled=true; }
+  var qEl=document.getElementById('kbInput');
+  sb.functions.invoke('kb-mail',{body:{project_id:pid,question:(qEl&&qEl.value)||'',blocks:sel}}).then(function(res){
+    if(res&&res.data&&res.data.ok){ window.location.href='mailto:?subject='+encodeURIComponent(res.data.subject||'')+'&body='+encodeURIComponent(res.data.body||''); var c=document.getElementById('kbMailPanel'); if(c)c.innerHTML=''; }
+    else { if(go){ go.textContent='✉ Mail erstellen'; go.disabled=false; } }
+  }).catch(function(){ if(go){ go.textContent='✉ Mail erstellen'; go.disabled=false; } });
+}
+function kbSendFb(helpful){ if(!_kbAns||!_kbAns.query_id)return;
+  try{ sb.rpc('kb_feedback',{p_query:_kbAns.query_id,p_helpful:helpful}); }catch(e){}
+  var fb=document.getElementById('kbFb'); if(fb)fb.innerHTML='<span class="kbc-fbtxt">'+(helpful?'Danke für die Rückmeldung.':'Danke, wird geprüft.')+'</span>';
+}
+// React-Hülle: mountet die Vanilla-Konsole; bei Partnerwechsel neu aufbauen.
+function KbConnyView({client}){
+  useEffect(()=>{ window._kbClientPid=(client&&client.project_id)||null; try{ renderPartnerwissen(); }catch(e){ console.error(e); } },[client&&client.project_id]);
+  return <div><div style={{fontSize:12.5,color:'#64748b',marginBottom:10}}>Ihre Wissensdatenbank zum internen Gebrauch: Fragen stellen, Antworten mit Quelle aus Ihren Unterlagen. Änderungen am Wissen laufen über den Bereich „Wissensänderungen“.</div><div id="vPartnerwissen"/></div>;
+}
+
+// Pflicht-Passwortwechsel (Kundenportal): Start-Passwort → eigenes Passwort, Kennzeichen via clear_must_change_pw (Definer).
+function ForcePasswordChangeC({onDone,onCancel}){
+  const [pw,setPw]=useState(''); const [pw2,setPw2]=useState(''); const [err,setErr]=useState(''); const [busy,setBusy]=useState(false);
+  async function submit(){ setErr(''); if(pw.length<8){ setErr('Mindestens 8 Zeichen.'); return; } if(pw!==pw2){ setErr('Die Passwörter stimmen nicht überein.'); return; } setBusy(true);
+    try{ const {error}=await sb.auth.updateUser({password:pw}); if(error){ setErr(error.message||'Passwort konnte nicht gesetzt werden.'); setBusy(false); return; }
+      const {data:cleared,error:e2}=await sb.rpc('clear_must_change_pw'); if(e2||cleared!==true){ setErr('Passwort gesetzt, aber das Kennzeichen konnte nicht zurückgesetzt werden. Bitte an Ihren Ansprechpartner wenden.'); setBusy(false); return; }
+      onDone(); }catch(e){ setErr('Unerwarteter Fehler.'); setBusy(false); } }
+  const inp={width:'100%',boxSizing:'border-box',padding:'11px 13px',borderRadius:9,border:'1px solid #D5DEE0',fontSize:14,fontFamily:'inherit'};
+  return <div style={{position:'fixed',inset:0,zIndex:100000,background:'#F5F6F8',display:'flex',alignItems:'center',justifyContent:'center',padding:20}}>
+    <div style={{background:'#fff',border:'1px solid #E4E7EB',borderRadius:16,boxShadow:'0 24px 70px rgba(0,0,0,.18)',padding:'32px 34px',maxWidth:440,width:'100%',textAlign:'center'}}>
+      <div style={{fontSize:38}}>🔐</div>
+      <div style={{fontSize:22,fontWeight:800,color:'#0f172a',marginTop:6}}>Bitte legen Sie Ihr eigenes Passwort fest</div>
+      <div style={{fontSize:13,color:'#64748b',marginTop:8,lineHeight:1.6}}>Sie haben sich mit einem Start-Passwort angemeldet. Aus Sicherheitsgründen setzen Sie jetzt ein eigenes Passwort, bevor es weitergeht.</div>
+      <input type="password" value={pw} onChange={e=>setPw(e.target.value)} placeholder="Neues Passwort (mindestens 8 Zeichen)" style={{...inp,marginTop:18}} autoFocus/>
+      <input type="password" value={pw2} onChange={e=>setPw2(e.target.value)} placeholder="Passwort wiederholen" style={{...inp,marginTop:10}} onKeyDown={e=>{ if(e.key==='Enter') submit(); }}/>
+      {err&&<div style={{color:'#dc2626',fontSize:12,marginTop:10}}>⚠ {err}</div>}
+      <button disabled={busy} onClick={submit} style={{width:'100%',marginTop:16,padding:'12px',borderRadius:9,border:'none',background:'#0F5661',color:'#fff',fontWeight:800,fontSize:14,cursor:'pointer'}}>{busy?'Speichert…':'Passwort festlegen und weiter'}</button>
+      <button disabled={busy} onClick={onCancel} style={{width:'100%',marginTop:8,padding:'9px',borderRadius:9,border:'1px solid #E4E7EB',background:'#fff',color:'#64748b',fontSize:12,cursor:'pointer'}}>Abbrechen und abmelden</button>
+    </div>
+  </div>;
+}
 function KbChangesView({client}){
   const [rows,setRows]=useState(null); const [busy,setBusy]=useState(''); const [showDone,setShowDone]=useState(false);
   const [docs,setDocs]=useState({}); const [note,setNote]=useState({}); const [corr,setCorr]=useState({});   // corr: vom Kunden eingetippter Wert je Vorschlag
@@ -2660,6 +2881,7 @@ function App(){
   const [myPortals, setMyPortals]=useState([]);
   const [employees, setEmployees]=useState([]);
   const [msgUnread, setMsgUnread]=useState(0);
+  const [pendingPw,setPendingPw]=useState(null);   // {client} solange der Pflicht-Passwortwechsel offen ist
   const [kbOpen,setKbOpen]=useState(0); const [kbOld,setKbOld]=useState(false);   // offene Wissensänderungen (Zähler am Menüpunkt, rot ab 7 Tagen)
   useEffect(()=>{ if(!client) return; let alive=true; const calc=async()=>{ try{ const {data}=await sb.from('kb_fact_changes').select('proposed_at').eq('status','open'); if(!alive) return; const rows=data||[]; setKbOpen(rows.length); setKbOld(rows.some(r=>(Date.now()-new Date(r.proposed_at).getTime())>7*864e5)); }catch(e){} };
     calc(); const t=setInterval(calc,60000); return ()=>{ alive=false; clearInterval(t); }; },[client, view]);
@@ -2674,7 +2896,7 @@ function App(){
     gatingRef.current=true;
     try{
       const {data:au, error}=await sb.from('app_users')
-        .select('role_keys, full_name, staff_number, active, client_id').eq('user_id', session.user.id).single();
+        .select('role_keys, full_name, staff_number, active, client_id, must_change_pw').eq('user_id', session.user.id).single();
       if(error||!au){ gatingRef.current=false; setPortalDenied(false); setAuthMsg('Kein Benutzerprofil gefunden. Wende dich an deinen Ansprechpartner.'); return; }
       if(!au.active){ gatingRef.current=false; setPortalDenied(false); setAuthMsg('Dieser Zugang ist deaktiviert.'); return; }
       if(!au.role_keys||!au.role_keys.length){ gatingRef.current=false; setPortalDenied(false); setAuthMsg('Noch keine Rolle zugewiesen.'); return; }
@@ -2687,6 +2909,8 @@ function App(){
       if(!au.client_id){ gatingRef.current=false; setClientDenied(session.user.email); return; }
       const c=await buildClient(au, session.user);
       if(!c){ gatingRef.current=false; setPortalDenied(false); setAuthMsg('Kunde nicht gefunden (client_id="'+au.client_id+'"). Wende dich an deinen Ansprechpartner.'); return; }
+      // Pflicht-Passwortwechsel beim ersten Anmelden (app_users.must_change_pw): erst Dialog, dann Portal.
+      if(au.must_change_pw){ gatingRef.current=false; setPendingPw({client:c}); return; }
       setClient(c); setView('overview');
     }catch(e){ gatingRef.current=false; setPortalDenied(false); setAuthMsg('Verbindungsfehler beim Laden des Profils.'); }
   }
@@ -2734,6 +2958,7 @@ function App(){
   }, [client, msgReadTick]);
 
   if(clientDenied) return <ClientAccessDenied email={clientDenied}/>;
+  if(pendingPw) return <ForcePasswordChangeC onDone={()=>{ const c=pendingPw.client; setPendingPw(null); setClient(c); setView('overview'); }} onCancel={async()=>{ setPendingPw(null); try{ await sb.auth.signOut(); }catch(e){} }}/>;
   if(!client) return <LoginPage authMsg={authMsg} portalDenied={portalDenied} myPortals={myPortals}/>;
 
   const ALL_NAV_ITEMS=[
@@ -2743,6 +2968,7 @@ function App(){
     {key:'shifts',    label:'Dienstplan',           icon:'🗓', tab:'shifts'},
     {key:'quality',   label:'Qualitätsberichte',    icon:'⭐', tab:'quality'},
     {key:'arbeitsplan',label:'Optimierungen',       icon:'📋', tab:'arbeitsplan'},
+    {key:'wissen',    label:'Wissensdatenbank',     icon:'💬', tab:'wissen'},
     {key:'kbchanges', label:'Wissensänderungen',    icon:'✅', tab:'kbchanges'},
     {key:'training',  label:'Schulungen',           icon:'📚', tab:'training'},
     {key:'calendar',  label:'Termine & Kalender',   icon:'⊣', tab:'calendar'},
@@ -2769,6 +2995,7 @@ function App(){
       'messages':'<path d="M4.913 2.658c2.075-.27 4.19-.408 6.337-.408 2.147 0 4.262.139 6.337.408 1.922.25 3.291 1.861 3.405 3.727a4.403 4.403 0 0 0-1.032-.211 50.89 50.89 0 0 0-8.42 0c-2.358.196-4.04 2.19-4.04 4.434v4.286a4.47 4.47 0 0 0 2.433 3.984L7.28 21.53A.75.75 0 0 1 6 21v-4.03a48.527 48.527 0 0 1-1.087-.128C2.905 16.58 1.5 14.833 1.5 12.862V6.638c0-1.97 1.405-3.718 3.413-3.979Z"/> <path d="M15.75 7.5c-1.376 0-2.739.057-4.086.169C10.124 7.797 9 9.103 9 10.609v4.285c0 1.507 1.128 2.814 2.67 2.94 1.243.102 2.5.157 3.768.165l2.782 2.781a.75.75 0 0 0 1.28-.53v-2.39l.33-.026c1.542-.125 2.67-1.433 2.67-2.94v-4.286c0-1.505-1.125-2.811-2.664-2.94A49.392 49.392 0 0 0 15.75 7.5Z"/>',
       'showcases':'<path fill-rule="evenodd" d="M10.788 3.21c.448-1.077 1.976-1.077 2.424 0l2.082 5.006 5.404.434c1.164.093 1.636 1.545.749 2.305l-4.117 3.527 1.257 5.273c.271 1.136-.964 2.033-1.96 1.425L12 18.354 7.373 21.18c-.996.608-2.231-.29-1.96-1.425l1.257-5.273-4.117-3.527c-.887-.76-.415-2.212.749-2.305l5.404-.434 2.082-5.005Z" clip-rule="evenodd"/>',
       'reports':'<path d="M18.375 2.25c-1.035 0-1.875.84-1.875 1.875v15.75c0 1.035.84 1.875 1.875 1.875h.75c1.035 0 1.875-.84 1.875-1.875V4.125c0-1.036-.84-1.875-1.875-1.875h-.75ZM9.75 8.625c0-1.036.84-1.875 1.875-1.875h.75c1.036 0 1.875.84 1.875 1.875v11.25c0 1.035-.84 1.875-1.875 1.875h-.75a1.875 1.875 0 0 1-1.875-1.875V8.625ZM3 13.125c0-1.036.84-1.875 1.875-1.875h.75c1.036 0 1.875.84 1.875 1.875v6.75c0 1.035-.84 1.875-1.875 1.875h-.75A1.875 1.875 0 0 1 3 19.875v-6.75Z"/>',
+      'wissen':'<path fill-rule="evenodd" d="M4.804 21.644A6.707 6.707 0 0 0 6 21.75a6.721 6.721 0 0 0 3.583-1.029c.774.182 1.584.279 2.417.279 5.322 0 9.75-3.97 9.75-9 0-5.03-4.428-9-9.75-9s-9.75 3.97-9.75 9c0 2.409 1.025 4.587 2.674 6.192.232.226.277.428.254.543a3.73 3.73 0 0 1-.814 1.686.75.75 0 0 0 .44 1.223ZM8.25 10.875a1.125 1.125 0 1 0 0 2.25 1.125 1.125 0 0 0 0-2.25ZM10.875 12a1.125 1.125 0 1 1 2.25 0 1.125 1.125 0 0 1-2.25 0Zm4.875-1.125a1.125 1.125 0 1 0 0 2.25 1.125 1.125 0 0 0 0-2.25Z" clip-rule="evenodd"/>',
       'kbchanges':'<path fill-rule="evenodd" d="M8.603 3.799A4.49 4.49 0 0 1 12 2.25c1.357 0 2.573.6 3.397 1.549a4.49 4.49 0 0 1 3.498 1.307 4.491 4.491 0 0 1 1.307 3.497A4.49 4.49 0 0 1 21.75 12a4.49 4.49 0 0 1-1.549 3.397 4.491 4.491 0 0 1-1.307 3.497 4.491 4.491 0 0 1-3.497 1.307A4.49 4.49 0 0 1 12 21.75a4.49 4.49 0 0 1-3.397-1.549 4.49 4.49 0 0 1-3.498-1.306 4.491 4.491 0 0 1-1.307-3.498A4.49 4.49 0 0 1 2.25 12c0-1.357.6-2.573 1.549-3.397a4.49 4.49 0 0 1 1.307-3.497 4.49 4.49 0 0 1 3.497-1.307Zm7.007 6.387a.75.75 0 1 0-1.22-.872l-3.236 4.53L9.53 12.22a.75.75 0 0 0-1.06 1.06l2.25 2.25a.75.75 0 0 0 1.14-.094l3.75-5.25Z" clip-rule="evenodd"/>',
       'arbeitsplan':'<path fill-rule="evenodd" d="M7.502 6h7.128A3.375 3.375 0 0 1 18 9.375v9.375a3 3 0 0 0 3-3V6.108c0-1.505-1.125-2.811-2.664-2.94a48.972 48.972 0 0 0-.673-.05A3 3 0 0 0 15 1.5h-1.5a3 3 0 0 0-2.663 1.618c-.225.015-.45.032-.673.05C8.662 3.295 7.554 4.542 7.502 6ZM13.5 3A1.5 1.5 0 0 0 12 4.5h4.5A1.5 1.5 0 0 0 15 3h-1.5Z" clip-rule="evenodd"/><path fill-rule="evenodd" d="M3 9.375C3 8.339 3.84 7.5 4.875 7.5h9.75c1.036 0 1.875.84 1.875 1.875v11.25c0 1.035-.84 1.875-1.875 1.875h-9.75A1.875 1.875 0 0 1 3 20.625V9.375Zm9.586 4.594a.75.75 0 0 0-1.172-.938l-2.476 3.096-.908-.907a.75.75 0 0 0-1.06 1.06l1.5 1.5a.75.75 0 0 0 1.116-.062l3-3.75Z" clip-rule="evenodd"/>'
     };
@@ -2832,6 +3059,7 @@ function App(){
             {view==='quality'&&<span style={{display:'inline-flex',alignItems:'center',gap:7}}><span style={{display:'inline-flex'}} dangerouslySetInnerHTML={{__html:heroicon('quality',18)}} />Qualitätsberichte</span>}
             {view==='arbeitsplan'&&<span style={{display:'inline-flex',alignItems:'center',gap:7}}>📋 Optimierungen</span>}
             {view==='kbchanges'&&<span style={{display:'inline-flex',alignItems:'center',gap:7}}>✅ Wissensänderungen</span>}
+            {view==='wissen'&&<span style={{display:'inline-flex',alignItems:'center',gap:7}}>💬 Wissensdatenbank</span>}
           </span>
           <span className="topbar-badge">{client.project}</span>
           <div style={{marginLeft:'auto',fontSize:12,color:'var(--muted)'}}>
@@ -2850,6 +3078,7 @@ function App(){
           {view==='quality'&&<QualityView client={client}/>}
           {view==='arbeitsplan'&&<ClientPlanView client={client}/>}
           {view==='kbchanges'&&<KbChangesView client={client}/>}
+          {view==='wissen'&&<KbConnyView client={client}/>}
           {view==='reports'&&<ReportsView client={client}/>}
         </div>
       </div>
