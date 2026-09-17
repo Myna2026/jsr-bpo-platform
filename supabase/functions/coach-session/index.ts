@@ -66,48 +66,96 @@ async function gradeFree(q: any, a: any, agentName: string): Promise<{ points: n
 }
 
 // ── Pool: Stoff-Umfang + Abstand-Wiederholung, in Stufen aufgefüllt ───────────────────────────────────
-type PoolInfo = { exact: number; filled: number; fillFrom: string | null; note: string | null; due: number };
+type PoolInfo = { exact: number; filled: number; fillFrom: string | null; note: string | null; due: number; related: string[]; short: boolean; n: number };
+// ── Verwandtschaft von Themen (deterministisch, erklärbar): gemeinsame Wortstämme („Transfer“ in „Gruppentransfer“) oder dieselbe
+//    Sinngruppe (Familie ↔ Baby/Kinder/Schwangerschaft). Nur damit wird aufgefüllt; nie mit dem, was gerade da ist.
+const T_STOP = new Set(["beim", "bei", "im", "in", "und", "von", "zu", "zum", "zur", "der", "die", "das", "des", "fuer", "mit", "vor", "ort", "ohne", "via", "coaching", "ablaeufe", "werkzeuge", "prozess", "leitfaeden", "sonderfaelle", "sonderprozesse", "kontakt", "v2", "v3", "und", "kunde", "reisen", "gmbh"]);
+const T_CLUSTERS: string[][] = [
+  ["transfer", "ruecktransfer", "shuttle", "anreise", "abholung", "nachtankunft"],
+  ["baby", "kleinkind", "kind", "kinder", "familie", "schwangerschaft", "schwanger", "allein reisend"],
+  ["gepaeck", "handgepaeck", "koffer", "sondergepaeck", "freigepaeck"],
+  ["storno", "stornierung", "stornogebuehren", "umbuchung", "ruecktritt", "no-show", "noshow", "fristen", "teilstorno"],
+  ["flug", "flugzeiten", "airline", "airlines", "check-in", "checkin", "flugaenderung", "flugplan", "web-check-in", "flugprobleme", "fliegen", "erstattung"],
+  ["zahlung", "rechnung", "restzahlung", "anzahlung", "zahlungsverzug", "mahnstufe", "zahlungsarten", "reisebestaetigung"],
+  ["notfall", "notfallnummer", "reiseabbruch", "agentur vor ort"],
+  ["sonderfaelle", "sonderprozesse", "mobilitaetshilfen", "haustiere", "haftung", "schwangerschaft"],
+  ["hotel", "zimmer", "hotelsupplier", "unterkunft", "hotelgutschein", "angebotsverfuegbarkeit"],
+  ["dokumente", "reiseunterlagen", "reisedokumente", "sicherungsschein", "passagierdaten", "buchungsbestaetigung", "namensaenderung", "vorgangsnummer", "unterlagen"],
+  ["veranstalter", "reiseveranstalter", "veranstalterwechsel", "ota", "holidays.ch", "condor holidays"],
+  ["peakwork", "midoco", "travelviewer", "lpac", "einbuchen", "fulfillment", "einpflegen"],
+  ["gespraechsfuehrung", "telefonverhalten", "leitfaeden", "textvorlagen", "faq"],
+];
+const tNorm = (t: string) => norm(t).replace(/ä/g, "ae").replace(/ö/g, "oe").replace(/ü/g, "ue").replace(/ß/g, "ss");
+const tTokens = (t: string) => tNorm(t).split(/[^a-z0-9.-]+/).filter((w) => w.length >= 4 && !T_STOP.has(w));
+const tClusters = (t: string) => { const n = tNorm(t); const out: number[] = []; T_CLUSTERS.forEach((c, i) => { if (c.some((w) => n.includes(w))) out.push(i); }); return out; };
+// 0 = fremd · 1 = gleiche Sinngruppe · 2 = gemeinsamer Wortstamm (z. B. „Transfer“)
+function topicRelation(a: string, b: string): number {
+  if (a === b) return 3;
+  const ta = tTokens(a), tb = tTokens(b);
+  if (ta.some((x) => tb.some((y) => x === y || (x.length >= 5 && y.includes(x)) || (y.length >= 5 && x.includes(y))))) return 2;
+  const ca = tClusters(a), cb = tClusters(b); if (ca.some((c) => cb.includes(c))) return 1;
+  return 0;
+}
 async function buildPool(pid: string, s: any, n: number, kinds: string[], diff: string, settings: any, progress: Map<string, any>): Promise<{ list: any[]; info: PoolInfo }> {
   const hidden: string[] = (settings && settings.hidden_topics) || []; const allowedK: string[] = (settings && settings.allowed_kinds) || ["mc", "gap", "match", "order", "free"];
-  let q = admin.from("coach_questions").select("id,kind,difficulty,topic,zielgebiet,prompt").eq("project_id", pid).eq("status", "active").in("kind", allowedK);
-  const { data: all } = await q.limit(5000);
+  const { data: all } = await admin.from("coach_questions").select("id,kind,difficulty,topic,zielgebiet,prompt").eq("project_id", pid).eq("status", "active").in("kind", allowedK).limit(5000);
   const rows: any[] = (all || []).filter((x) => !hidden.includes(x.topic));
   const topic = s.mode === "topic" && s.topic ? String(s.topic) : null;
   const zg = s.mode === "sprint" && s.zielgebiet ? norm(String(s.zielgebiet)) : null;
   const zgRe = zg ? new RegExp("(^|[^a-z0-9])" + zg.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "([^a-z0-9]|$)") : null;
   const inScope = (x: any) => topic ? x.topic === topic : zgRe ? (zgRe.test(norm(x.zielgebiet || "")) || zgRe.test(norm(x.prompt))) : true;
-  const family = topic ? topic.split(" · ")[0] : null;
-  const related = (x: any) => !!(topic && x.topic !== topic && family && x.topic.split(" · ")[0] === family);
-  const tiers: { f: (x: any) => boolean; label: string | null }[] = [
+  // Zielgebiet: dieselbe Region (kb_regions: Insel/Region ↔ Orte) gilt als verwandt, z. B. Heraklion ↔ Kreta
+  let regionMates: Set<string> | null = null;
+  if (zg) { const { data: regs } = await admin.from("kb_regions").select("name,aliases,members").eq("project_id", pid).eq("status", "active");
+    const hit = (regs || []).filter((r: any) => [r.name, ...(r.aliases || []), ...(r.members || [])].some((m: string) => norm(m) === zg || zgRe!.test(norm(m))));
+    if (hit.length) regionMates = new Set(hit.flatMap((r: any) => [r.name, ...(r.aliases || []), ...(r.members || [])]).map((m: string) => norm(m))); }
+  const sameRegion = (x: any) => !!regionMates && !!x.zielgebiet && !inScope(x) && [...regionMates].some((m) => norm(x.zielgebiet) === m || norm(x.zielgebiet).includes(m));
+  const relScore: Record<string, number> = {}; if (topic) for (const x of rows) if (!(x.topic in relScore)) relScore[x.topic] = topicRelation(topic, x.topic);
+  const related = (x: any) => topic ? (relScore[x.topic] || 0) > 0 && x.topic !== topic : sameRegion(x);
+  const tiers: { f: (x: any) => boolean; label: string | null }[] = (topic || zg) ? [
     { f: (x) => inScope(x) && (diff === "mix" || x.difficulty === diff) && kinds.includes(x.kind), label: null },
     { f: (x) => inScope(x) && (diff === "mix" || x.difficulty === diff), label: "anderer Frageart" },
     { f: (x) => inScope(x), label: diff === "mix" ? null : "anderer Stufe" },
-    { f: (x) => related(x), label: "verwandten Themen" },
-    { f: (x) => !!zg && norm(x.zielgebiet || "").length > 0, label: "anderen Zielgebieten" },
-    { f: () => true, label: "allen Themen" },
-  ];
+    { f: (x) => related(x) && (diff === "mix" || x.difficulty === diff) && kinds.includes(x.kind), label: topic ? "verwandten Themen" : "derselben Region" },
+    { f: (x) => related(x), label: topic ? "verwandten Themen" : "derselben Region" },
+  ] : [ { f: () => true, label: null } ];
   const now = Date.now();
-  // Reihenfolge innerhalb einer Stufe: fällige Wiederholungen, dann Neues, dann nicht Fälliges
+  // Reihenfolge innerhalb einer Stufe: fällige Wiederholungen, dann Neues, dann nicht Fälliges; bei verwandten Themen die näheren zuerst
   const rank = (x: any) => { const p = progress.get(x.id); const due = p ? new Date(p.next_due).getTime() <= now : false; const isNew = !p;
-    return (due ? 0 : isNew ? 1 : 2) * 100 + Math.random() * 90; };   // Arten mischen sich zufällig (Freitext hat sein eigenes Kontingent)
-  // Kandidaten stufenweise sammeln (mehr als nötig, damit die Mischung Freitext ≤ 1/3 aufgeht), je Kandidat die Stufe merken
-  // Zwei Kontingente: Freitext höchstens ein Drittel, der Rest andere Arten. Beide werden stufenweise gefüllt (exakt zuerst, darin fällig vor neu).
-  const capFree = Math.max(1, Math.floor(n / 3)); const free: any[] = []; const rest: any[] = []; const seen = new Set<string>(); const seenPrompt = new Set<string>(); let fillFrom: string | null = null;
+    const near = topic ? (3 - (relScore[x.topic] || 0)) * 30 : 0;
+    return (due ? 0 : isNew ? 1 : 2) * 100 + near + Math.random() * 25; };
+  // Zwei Kontingente: Freitext höchstens ein Drittel, der Rest andere Arten. Beide stufenweise füllen (exakt zuerst, darin fällig vor neu).
+  const capFree = Math.max(1, Math.floor(n / 3)); const free: any[] = []; const rest: any[] = []; const seen = new Set<string>(); const seenPrompt = new Set<string>();
   const quotasFull = () => free.length >= capFree && rest.length >= n;
   const push = (x: any, tier: number) => { const k = norm(x.prompt); if (seenPrompt.has(k)) { seen.add(x.id); return; } const isFree = x.kind === "free"; if (isFree ? free.length >= capFree : rest.length >= n) return; seenPrompt.add(k); seen.add(x.id); (isFree ? free : rest).push({ ...x, _tier: tier }); };
   for (let i = 0; i < tiers.length && !quotasFull(); i++) {
-    const t = tiers[i]; const cand = rows.filter((x) => !seen.has(x.id) && t.f(x)).sort((a, b) => rank(a) - rank(b));
+    const t = tiers[i]; let cand = rows.filter((x) => !seen.has(x.id) && t.f(x)).sort((a, b) => rank(a) - rank(b));
+    if (i >= 3) { // Verwandtes: über die Themen verteilen (reihum), damit nicht ein großes Nachbarthema alles füllt
+      const groups = new Map<string, any[]>(); for (const x of cand) { const k = topic ? x.topic : (x.zielgebiet || ""); (groups.get(k) || groups.set(k, []).get(k))!.push(x); }
+      const order = [...groups.keys()].sort((a, b) => (topic ? (relScore[b] || 0) - (relScore[a] || 0) : 0)); const rr: any[] = [];
+      for (let k = 0; rr.length < cand.length; k++) for (const g of order) { const arr = groups.get(g)!; if (arr[k]) rr.push(arr[k]); }
+      cand = rr; }
     for (const x of cand) { if (quotasFull()) break; push(x, i); }
   }
+  // Gibt es nicht genug Passendes: lieber eine kurze Einheit als beliebige Fragen
   const restPick = rest.slice(0, n - Math.min(free.length, capFree));
-  const chosen = [...shuffle(restPick), ...free.slice(0, n - restPick.length)].slice(0, n);
-  const exact = chosen.filter((x) => x._tier === 0).length; for (const x of chosen.slice().sort((a, b) => a._tier - b._tier)) if (x._tier > 0 && tiers[x._tier].label) { fillFrom = tiers[x._tier].label; break; }
+  let chosen = [...restPick, ...free.slice(0, n - restPick.length)].slice(0, n);
+  const short = chosen.length < n;
+  // Reihenfolge: Thema zuerst, dann Verwandtes; innerhalb einer Stufe gemischt, Freitext jeweils am Ende
+  const inTier = (t: number) => { const g = chosen.filter((x) => x._tier === t); return [...shuffle(g.filter((x) => x.kind !== "free")), ...g.filter((x) => x.kind === "free")]; };
+  chosen = [...new Set(chosen.map((x) => x._tier))].sort((a, b) => a - b).flatMap(inTier);
+  const exact = chosen.filter((x) => x._tier <= 2).length; const filledFrom = chosen.filter((x) => x._tier > 2);
+  const relatedTopics = [...new Set(filledFrom.map((x) => topic ? x.topic : x.zielgebiet).filter(Boolean))] as string[];
+  const fillFrom = filledFrom.length ? (tiers[filledFrom[0]._tier].label) : null;
   const scopeLabel = topic ? "„" + topic + "“" : zg ? "„" + s.zielgebiet + "“" : null;
-  const note = exact >= n || !scopeLabel ? null : (exact === 0 ? "Zu " + scopeLabel + " gibt es auf dieser Stufe und Art keine Fragen, die Einheit ist aus " + (fillFrom || "anderen Fragen") + " aufgefüllt." : "Zu " + scopeLabel + " gibt es dafür nur " + exact + " Frage" + (exact === 1 ? "" : "n") + ", der Rest kommt aus " + (fillFrom || "anderen Fragen") + ".");
+  const note = !scopeLabel ? null
+    : (exact >= n) ? null
+    : (filledFrom.length ? "Zu " + scopeLabel + " gibt es " + exact + " passende Frage" + (exact === 1 ? "" : "n") + ", dazu " + filledFrom.length + " aus " + (topic ? "verwandten Themen (" + relatedTopics.slice(0, 3).join(", ") + (relatedTopics.length > 3 ? ", …" : "") + ")" : "derselben Region (" + relatedTopics.slice(0, 3).join(", ") + ")") + "."
+      : "Zu " + scopeLabel + " gibt es nur " + chosen.length + " passende Frage" + (chosen.length === 1 ? "" : "n") + ", deshalb ist die Einheit kürzer.");
   const ids = chosen.map((x) => x.id); const { data: full } = await admin.from("coach_questions").select("*").in("id", ids);
   const byId: Record<string, any> = {}; for (const r of (full || [])) byId[r.id] = r;
   const list = ids.map((id) => byId[id]).filter(Boolean);
-  return { list, info: { exact: Math.min(exact, list.length), filled: Math.max(0, list.length - exact), fillFrom, note, due: list.filter((x) => { const p = progress.get(x.id); return p && new Date(p.next_due).getTime() <= now; }).length } };
+  return { list, info: { exact: Math.min(exact, list.length), filled: filledFrom.length, fillFrom, note, related: relatedTopics, short, n: list.length, due: list.filter((x) => { const p = progress.get(x.id); return p && new Date(p.next_due).getTime() <= now; }).length } };
 }
 async function loadProgress(empId: string): Promise<Map<string, any>> { const { data } = await admin.from("coach_progress").select("question_id,box,next_due,seen,correct").eq("employee_id", empId); const m = new Map<string, any>(); for (const r of (data || [])) m.set(r.question_id, r); return m; }
 async function bumpProgress(empId: string, qid: string, points: number) {
@@ -132,13 +180,14 @@ Deno.serve(async (req) => {
     const { count } = await user.from("coach_questions").select("id", { count: "exact", head: true }).eq("project_id", ppid).eq("status", "active");
     if (!count) return json({ error: "Kein Zugriff oder für diesen Partner gibt es noch keine Fragen." }, 403);
     const { data: ppa } = await admin.from("partner_agents").select("name").eq("project_id", ppid).maybeSingle(); const pAgent = ppa?.name || "Coach";
-    if (action === "start") {
+    if (action === "start" || action === "plan") {
       const s = body.settings || {}; const settings = await settingsFor(ppid); const minutes = [2, 5, 10, 15].includes(Number(s.minutes)) ? Number(s.minutes) : (settings.default_minutes || 5); const n = countFor(minutes);
       const diff = ["leicht", "mittel", "schwer", "mix"].includes(s.difficulty) ? s.difficulty : (settings.default_difficulty || "mix");
       const kinds: string[] = Array.isArray(s.kinds) && s.kinds.length ? s.kinds : ["mc", "gap", "match", "order", "free"];
       const { list, info } = await buildPool(ppid, s, n, kinds, diff, settings, new Map());
+      if (action === "plan") return json({ ok: true, plan: { n: info.n, exact: info.exact, filled: info.filled, related: info.related, short: info.short, note: info.note, minutes, wanted: n } });
       if (!list.length) return json({ error: "Für diesen Partner gibt es noch keine Übungsfragen." }, 404);
-      return json({ ok: true, session_id: null, preview: true, agent: pAgent, fill: info, minutes, questions: list.map(publicQ) });
+      return json({ ok: true, session_id: null, preview: true, agent: pAgent, fill: info, minutes: info.short ? Math.max(1, Math.ceil(list.length / 1.2)) : minutes, questions: list.map(publicQ) });
     }
     if (action === "answer") {
       const { data: q } = await admin.from("coach_questions").select("*").eq("id", body.question_id).eq("project_id", ppid).maybeSingle(); if (!q) return json({ error: "Frage fehlt." }, 404);
@@ -160,7 +209,7 @@ Deno.serve(async (req) => {
   const pid = emp.project_id;
   const { data: pa } = await admin.from("partner_agents").select("name").eq("project_id", pid).maybeSingle(); const agentName = pa?.name || "Coach";
 
-  if (action === "start") {
+  if (action === "start" || action === "plan") {
     let s = body.settings || {}; let assignment: any = null; const settings = await settingsFor(pid);
     if (body.assignment_id) {
       const { data: as } = await admin.from("coach_assignments").select("*").eq("id", body.assignment_id).eq("employee_id", empId).eq("status", "open").maybeSingle();
@@ -172,10 +221,11 @@ Deno.serve(async (req) => {
     const kinds: string[] = Array.isArray(s.kinds) && s.kinds.length ? s.kinds.filter((k: string) => ["mc", "gap", "match", "order", "free"].includes(k)) : ["mc", "gap", "match", "order", "free"];
     const progress = await loadProgress(empId);
     const { list, info } = await buildPool(pid, s, n, kinds, diff, settings, progress);
+    if (action === "plan") return json({ ok: true, plan: { n: info.n, exact: info.exact, filled: info.filled, related: info.related, short: info.short, note: info.note, minutes, wanted: n } });
     if (!list.length) return json({ error: "Für dein Projekt gibt es noch keine Übungsfragen." }, 404);
     const { data: sess, error } = await admin.from("coach_sessions").insert({ employee_id: empId, project_id: pid, user_id: u.user.id, assignment_id: assignment ? assignment.id : null, settings: { mode: s.mode || "daily", topic: s.topic || null, zielgebiet: s.zielgebiet || null, minutes, difficulty: diff, kinds, assignment: assignment ? { id: assignment.id, by: assignment.assigned_by_name, note: assignment.note } : null }, question_ids: list.map((x) => x.id) }).select("id").single();
     if (error) return json({ error: error.message }, 500);
-    return json({ ok: true, session_id: sess.id, agent: agentName, minutes, fill: { exact: info.exact, note: info.note, due: info.due }, assignment: assignment ? { id: assignment.id, topic: assignment.topic, by: assignment.assigned_by_name, note: assignment.note } : null, questions: list.map(publicQ) });
+    return json({ ok: true, session_id: sess.id, agent: agentName, minutes: info.short ? Math.max(1, Math.ceil(list.length / 1.2)) : minutes, fill: { exact: info.exact, note: info.note, due: info.due }, assignment: assignment ? { id: assignment.id, topic: assignment.topic, by: assignment.assigned_by_name, note: assignment.note } : null, questions: list.map(publicQ) });
   }
 
   if (action === "answer") {

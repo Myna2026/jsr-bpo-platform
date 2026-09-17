@@ -107,7 +107,7 @@ function coStartScreen(host){
       +'<div class="co-nav"><button class="co-btn sec" id="coStepBack">Zurück</button><button class="co-btn" id="coStepNext">Weiter</button></div>';
   } else if(s.step===3){
     body='<div class="co-lbl">Dauer</div><div class="co-row" id="coMin">'+[2,5,10,15].map(function(m){ return '<button class="co-chip'+(s.minutes===m?' on':'')+'" data-v="'+m+'">'+m+' Min · '+coCountFor(m)+' Fragen</button>'; }).join('')+'</div>'
-      +(av.exact<need&&((s.mode==='topic'&&s.topic)||(s.mode==='sprint'&&s.zielgebiet))?'<div class="co-fill">Dazu gibt es '+av.exact+' passende Frage'+(av.exact===1?'':'n')+', die Einheit hat '+need+'. Der Rest kommt aus verwandten Themen.</div>':'')
+      +(av.exact<need&&((s.mode==='topic'&&s.topic)||(s.mode==='sprint'&&s.zielgebiet))?'<div class="co-fill">Dazu gibt es '+av.exact+' passende Frage'+(av.exact===1?'':'n')+'. Fehlt etwas, nimmt Conny nur wirklich Verwandtes dazu, sonst wird die Einheit kürzer.</div>':'')
       +'<div class="co-nav"><button class="co-btn sec" id="coStepBack">Zurück</button><button class="co-btn" id="coStepNext">Zur Startkarte</button></div>';
   } else {
     var was=s.mode==='topic'?(s.topic||'Zufall aus allen Themen'):s.mode==='sprint'?('Vor dem Gespräch: '+(s.zielgebiet||'zufälliges Zielgebiet')):'Tageseinheit, Mix aus allem';
@@ -115,10 +115,10 @@ function coStartScreen(host){
     body='<div class="co-card"><h3>'+coEsc(was)+'</h3><div class="co-facts">'
       +'<div class="co-fact"><div class="k">Schwierigkeit</div><div class="v">'+({mix:'Gemischt',leicht:'Leicht',mittel:'Mittel',schwer:'Schwer'}[s.difficulty])+'</div></div>'
       +'<div class="co-fact"><div class="k">Dauer</div><div class="v">'+s.minutes+' Min</div></div>'
-      +'<div class="co-fact"><div class="k">Fragen</div><div class="v">'+need+'</div></div>'
+      +'<div class="co-fact"><div class="k">Fragen</div><div class="v" id="coPlanN">…</div></div>'
       +'<div class="co-fact"><div class="k">Fragearten</div><div class="v" style="font-size:14px">'+kindsTxt+'</div></div></div>'
       +'<div class="co-sub" style="margin-top:12px">Eine Frage nach der anderen, im Vollbild. Nach jeder Antwort siehst du sofort, was stimmt und warum. Die Uhr läuft mit, sie entscheidet nichts. Abbrechen geht jederzeit oben rechts.</div>'
-      +(av.exact<need&&((s.mode==='topic'&&s.topic)||(s.mode==='sprint'&&s.zielgebiet))?'<div class="co-fill">Nur '+av.exact+' Fragen genau dazu, der Rest kommt aus verwandten Themen.</div>':'')
+      +'<div class="co-fill" id="coPlanNote" style="display:none"></div>'
       +'</div><div class="co-nav"><button class="co-btn sec" id="coStepBack">Ändern</button><button class="co-btn big" id="coGo" style="flex:1">Los geht’s</button></div>';
   }
   host.innerHTML='<div class="co" style="--acc:'+(ag.color||'#0F5661')+'">'
@@ -133,9 +133,14 @@ function coStartScreen(host){
   var nx=document.getElementById('coStepNext'); if(nx) nx.addEventListener('click',function(){ s.step=Math.min(4,s.step+1); coStartScreen(host); });
   var bk=document.getElementById('coStepBack'); if(bk) bk.addEventListener('click',function(){ s.step=Math.max(1,s.step-1); coStartScreen(host); });
   var go=document.getElementById('coGo'); if(go) go.addEventListener('click',function(){ coStart(host); });
+  if(s.step===4) coLoadPlan();
   host.querySelectorAll('.co-asgo').forEach(function(b){ b.addEventListener('click',function(){ coStart(host,b.getAttribute('data-id')); }); });
   if(!_coCtx.preview) coLoadHist();
 }
+// Startkarte: echte Anzahl und Zusammensetzung vom Motor (dieselbe Auswahl wie beim Start), statt einer Schätzung
+function coLoadPlan(){ var s=_coSet; var kinds=s.kinds==='auto'?null:(s.kinds==='mc'?['mc','match']:s.kinds==='gap'?['gap','order']:['free']);
+  coCall({action:'plan',settings:{mode:s.mode,topic:s.mode==='topic'?s.topic:null,zielgebiet:s.mode==='sprint'?s.zielgebiet:null,minutes:s.minutes,difficulty:s.difficulty,kinds:kinds}}).then(function(r){ var p=r.plan||{}; var el=document.getElementById('coPlanN'); if(el) el.textContent=p.n+(p.short?' statt '+p.wanted:''); var nt=document.getElementById('coPlanNote'); if(nt&&p.note){ nt.textContent=p.note; nt.style.display=''; } })
+  .catch(function(){ var el=document.getElementById('coPlanN'); if(el) el.textContent=coCountFor(s.minutes); }); }
 function coLoadHist(){ var el=document.getElementById('coHist'); if(!el)return;
   coCall({action:'history'}).then(function(h){ var ss=h.sessions||[];
     var kp='<div class="co-kpis"><div class="co-kpi"><b>'+(h.streak||0)+'</b><span>Tage in Folge</span></div><div class="co-kpi"><b>'+(h.due||0)+'</b><span>fällig zur Wiederholung</span></div><div class="co-kpi"><b>'+(h.learned||0)+'</b><span>sicher gelernt</span></div></div>';
