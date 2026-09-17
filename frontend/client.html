@@ -2019,7 +2019,7 @@ function ImpPlanGrid(P){
 // Nur Fragen (Lesezugang perm 'wissen' read/own → kb_retrieve liefert nur das eigene Projekt). Kein Upload, kein Register,
 // keine Lücken-Liste. Projekt kommt aus dem Kundenkonto (window._kbClientPid, gesetzt von KbConnyView).
 function kbClientPid(){ return window._kbClientPid||null; }
-var KB_AGENTS={'proj_cd_c9d0e1f2':{name:'Conny',color:'#F5B301',face_key:'carlos'},'proj_hc_a1b2c3d4':{name:'Holger',color:'#3B82F6',face_key:'holger'},'proj_gn_e5f6a7b8':{name:'Georg',color:'#EC4899',face_key:'georg'},'proj_fb_a3b4c5d6':{name:'Fabian',color:'#8B5CF6',face_key:'fabian'}};
+var KB_AGENTS={'proj_cd_c9d0e1f2':{name:'Conny',color:'#F5B301',face_key:'initial'},'proj_hc_a1b2c3d4':{name:'Holger',color:'#3B82F6',face_key:'holger'},'proj_gn_e5f6a7b8':{name:'Georg',color:'#EC4899',face_key:'georg'},'proj_fb_a3b4c5d6':{name:'Fabian',color:'#8B5CF6',face_key:'fabian'}};
 var KB_PNAMES={'proj_cd_c9d0e1f2':'Condor','proj_hc_a1b2c3d4':'HolidayCheck','proj_gn_e5f6a7b8':'Giganetz','proj_fb_a3b4c5d6':'Fabletics'};
 function kbFallbackAgent(pid){ var f=KB_AGENTS[pid]||{name:(KB_PNAMES[pid]||'Wissen'),color:'#0F5661',face_key:'default'}; return {project_id:pid,name:f.name,color:f.color,face_key:f.face_key,avatar_url:null,greeting:null}; }
 function kbEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
@@ -2042,7 +2042,10 @@ function kbFaceSvg(faceKey,color,size){ size=size||64; color=color||'#0F5661';
     +'<rect x="15.5" y="'+ear+'" width="5" height="8" rx="2.2" fill="#2b3550"/><rect x="43.5" y="'+ear+'" width="5" height="8" rx="2.2" fill="#2b3550"/>'
     +'<path d="M18 '+mic1+' Q13 '+mic2+' 25 '+mic2+'" stroke="#2b3550" stroke-width="2" fill="none"/><circle cx="25" cy="'+mic2+'" r="1.8" fill="#2b3550"/></svg>';
 }
-function kbAvatarHtml(a,size){ size=size||46; if(a&&a.avatar_url) return '<img src="'+String(a.avatar_url).replace(/"/g,'&quot;')+'" alt="" style="width:100%;height:100%;object-fit:cover;display:block">'; return kbFaceSvg((a&&a.face_key)||'default',(a&&a.color)||'#0F5661',size); }
+// Buchstaben-Zeichen statt Gesicht: face_key 'initial' (oder 'initial:X') → Kreis in Partnerfarbe mit dem Anfangsbuchstaben des Namens.
+function kbInitialSvg(letter, color, size){ size=size||64; color=color||'#0F5661'; var L=String(letter||'?').slice(0,1).toUpperCase();
+  return '<svg xmlns="http://www.w3.org/2000/svg" width="'+size+'" height="'+size+'" viewBox="0 0 64 64"><circle cx="32" cy="32" r="32" fill="'+color+'"/><text x="32" y="33" text-anchor="middle" dominant-baseline="central" font-family="Inter, system-ui, sans-serif" font-size="34" font-weight="800" fill="#ffffff">'+L+'</text></svg>'; }
+function kbAvatarHtml(a,size){ size=size||46; if(a&&a.avatar_url) return '<img src="'+String(a.avatar_url).replace(/"/g,'&quot;')+'" alt="" style="width:100%;height:100%;object-fit:cover;display:block">'; var fk=(a&&a.face_key)||'default'; if(fk.indexOf('initial')===0) return kbInitialSvg(fk.indexOf(':')>0?fk.split(':')[1]:((a&&a.name)||'?'),(a&&a.color)||'#0F5661',size); return kbFaceSvg(fk,(a&&a.color)||'#0F5661',size); }
 var KB_EMAIL_RE=/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
 function kbContacts(ans){
   var txt=[(ans&&ans.title)||''].concat(((ans&&ans.blocks)||[]).map(function(b){return b.text||'';})).join('   ');
@@ -2882,6 +2885,12 @@ function App(){
   const [employees, setEmployees]=useState([]);
   const [msgUnread, setMsgUnread]=useState(0);
   const [pendingPw,setPendingPw]=useState(null);   // {client} solange der Pflicht-Passwortwechsel offen ist
+  const [emptyTabs,setEmptyTabs]=useState(new Set());   // Tabs ohne Daten für diesen Kunden (werden ausgeblendet)
+  useEffect(()=>{ if(!client) return; let alive=true; (async()=>{ const empty=new Set();
+    try{ const {data}=await sb.from('presentations').select('id').eq('published',true).limit(1); if(!(data&&data.length)) empty.add('reports'); }catch(e){ empty.add('reports'); }
+    try{ const {data}=await sb.rpc('list_my_showcases'); if(!(Array.isArray(data)&&data.length)) empty.add('showcases'); }catch(e){ empty.add('showcases'); }
+    if(!((INVOICES[client.project_id]||[]).length)) empty.add('invoices');
+    if(alive){ setEmptyTabs(empty); if(empty.has(view)) setView('overview'); } })(); return ()=>{ alive=false; }; },[client&&client.id]);
   const [kbOpen,setKbOpen]=useState(0); const [kbOld,setKbOld]=useState(false);   // offene Wissensänderungen (Zähler am Menüpunkt, rot ab 7 Tagen)
   useEffect(()=>{ if(!client) return; let alive=true; const calc=async()=>{ try{ const {data}=await sb.from('kb_fact_changes').select('proposed_at').eq('status','open'); if(!alive) return; const rows=data||[]; setKbOpen(rows.length); setKbOld(rows.some(r=>(Date.now()-new Date(r.proposed_at).getTime())>7*864e5)); }catch(e){} };
     calc(); const t=setInterval(calc,60000); return ()=>{ alive=false; clearInterval(t); }; },[client, view]);
@@ -2979,7 +2988,9 @@ function App(){
     {key:'reports',   label:'Reporting',            icon:'📈', tab:'reports'},
   ];
   const vt = client.visible_tabs||{overview:true,calendar:true};
-  const navItems = ALL_NAV_ITEMS.filter(n=> n.tab==='reports' ? vt.reports!==false : (vt[n.tab]!==false&&(Object.keys(vt).length===0||vt[n.tab])));
+  // Leere Bereiche gar nicht anbieten: ein Tab ohne Daten wirkt unfertig. Datengetriebene Tabs werden beim Laden gefühlt
+  // (emptyTabs); Tabs ohne Ansicht im Portal (training, documents) erscheinen nie.
+  const navItems = ALL_NAV_ITEMS.filter(n=> n.tab==='reports' ? vt.reports!==false : (vt[n.tab]!==false&&(Object.keys(vt).length===0||vt[n.tab]))).filter(n=>!emptyTabs.has(n.key)&&!['training','documents'].includes(n.key));
 
   function getIcon(key){
     const ICONS = {
