@@ -2017,7 +2017,7 @@ function ImpPlanGrid(P){
 // Offene Vorschläge bleiben offen, bis jemand entscheidet: sichtbar alternd (rot ab 7 Tagen), nie automatisch übernommen.
 function KbChangesView({client}){
   const [rows,setRows]=useState(null); const [busy,setBusy]=useState(''); const [showDone,setShowDone]=useState(false);
-  const [docs,setDocs]=useState({}); const [note,setNote]=useState({});
+  const [docs,setDocs]=useState({}); const [note,setNote]=useState({}); const [corr,setCorr]=useState({});   // corr: vom Kunden eingetippter Wert je Vorschlag
   const load=async()=>{ try{ const {data}=await sb.from('kb_fact_changes').select('*').order('proposed_at',{ascending:true}); setRows(data||[]);
       const dids=[...new Set((data||[]).map(r=>r.source_document_id).filter(Boolean))];
       if(dids.length){ const {data:dd}=await sb.from('kb_documents').select('id,title').in('id',dids); const m={}; (dd||[]).forEach(d=>{ m[d.id]=d.title; }); setDocs(m); }
@@ -2025,8 +2025,9 @@ function KbChangesView({client}){
   useEffect(()=>{ load(); },[client&&client.project_id]);
   const days=ts=>Math.max(0,Math.floor((Date.now()-new Date(ts).getTime())/864e5));
   const fmt=ts=>{ if(!ts) return ''; const d=new Date(ts); const p=n=>String(n).padStart(2,'0'); return p(d.getDate())+'.'+p(d.getMonth()+1)+'.'+d.getFullYear(); };
-  const decide=async(c,decision)=>{ setBusy(c.id); try{ const {error}=await sb.rpc('kb_change_decide',{p_change:c.id,p_decision:decision,p_note:(note[c.id]||'').trim()||null}); if(error) throw error; await load(); }catch(e){ window.alert('Nicht gespeichert: '+((e&&e.message)||e)); } setBusy(''); };
-  const decideAll=async(list,decision)=>{ if(!window.confirm((decision==='approve'?'Alle '+list.length+' Vorschläge dieser Gruppe bestätigen?':'Alle '+list.length+' Vorschläge dieser Gruppe ablehnen?'))) return; setBusy('grp'); for(const c of list){ try{ await sb.rpc('kb_change_decide',{p_change:c.id,p_decision:decision,p_note:null}); }catch(e){} } await load(); setBusy(''); };
+  const corrected=c=>{ const v=(corr[c.id]==null?null:String(corr[c.id]).trim()); const base=c.change_kind==='delete'?'':(c.new_value||''); return (v!=null&&v!==''&&v!==base)?v:null; };
+  const decide=async(c,decision)=>{ setBusy(c.id); try{ const {error}=await sb.rpc('kb_change_decide',{p_change:c.id,p_decision:decision,p_note:(note[c.id]||'').trim()||null,p_value:decision==='approve'?corrected(c):null}); if(error) throw error; await load(); }catch(e){ window.alert('Nicht gespeichert: '+((e&&e.message)||e)); } setBusy(''); };
+  const decideAll=async(list,decision)=>{ if(!window.confirm((decision==='approve'?'Alle '+list.length+' Vorschläge dieser Gruppe bestätigen?':'Alle '+list.length+' Vorschläge dieser Gruppe ablehnen?'))) return; setBusy('grp'); for(const c of list){ try{ await sb.rpc('kb_change_decide',{p_change:c.id,p_decision:decision,p_note:null,p_value:decision==='approve'?corrected(c):null}); }catch(e){} } await load(); setBusy(''); };
   const open=(rows||[]).filter(r=>r.status==='open'); const done=(rows||[]).filter(r=>r.status!=='open').sort((a,b)=>String(b.decided_at||'').localeCompare(String(a.decided_at||'')));
   const KIND={new:['Neu','#0F5661','#E4EEF0'], update:['Änderung','#92400e','#fffbeb'], delete:['Löschung','#b91c1c','#fef2f2']};
   const groups=(()=>{ const m={}; open.forEach(r=>{ const k=r.source_document_id?('doc:'+r.source_document_id):'manual'; (m[k]=m[k]||{key:k,label:r.source_document_id?('Aus Dokument „'+(docs[r.source_document_id]||'…')+'“'):'Von Hand gepflegt',rows:[]}).rows.push(r); }); return Object.values(m); })();
@@ -2042,11 +2043,13 @@ function KbChangesView({client}){
       </div>
       <div style={{display:'flex',gap:14,alignItems:'flex-start',flexWrap:'wrap'}}>
         {c.change_kind!=='new'&&<div style={{flex:1,minWidth:160}}><div style={{fontSize:10.5,fontWeight:700,color:'#94a3b8',textTransform:'uppercase',letterSpacing:'.05em',marginBottom:2}}>Bisher{c.change_kind==='delete'?' (soll entfallen)':''}</div>{cell(c.old_value,c.change_kind==='delete')}</div>}
-        {c.change_kind!=='delete'&&<div style={{flex:1,minWidth:160}}><div style={{fontSize:10.5,fontWeight:700,color:'#94a3b8',textTransform:'uppercase',letterSpacing:'.05em',marginBottom:2}}>{c.change_kind==='new'?'Neuer Eintrag (gilt bereits, bitte prüfen)':'Neu'}</div>{cell(c.new_value,false)}</div>}
+        <div style={{flex:1,minWidth:160}}><div style={{fontSize:10.5,fontWeight:700,color:'#94a3b8',textTransform:'uppercase',letterSpacing:'.05em',marginBottom:2}}>{c.change_kind==='new'?'Neuer Eintrag (gilt bereits, bitte prüfen)':c.change_kind==='delete'?'Stattdessen richtiger Wert (optional)':'Neu'}{corrected(c)&&<span style={{marginLeft:6,color:'#0F5661'}}>· von Ihnen korrigiert</span>}</div>
+          <textarea value={corr[c.id]==null?(c.change_kind==='delete'?'':(c.new_value||'')):corr[c.id]} onChange={e=>setCorr(m=>({...m,[c.id]:e.target.value}))} rows={Math.min(4,Math.max(1,String(c.new_value||'').split('\n').length))} placeholder={c.change_kind==='delete'?'Leer lassen = Löschung bestätigen':''} style={{width:'100%',boxSizing:'border-box',padding:'7px 10px',border:'1px solid '+(corrected(c)?'#0F5661':'#cbd5e1'),borderRadius:8,fontSize:13.5,fontFamily:'inherit',resize:'vertical',background:corrected(c)?'#E4EEF0':'#fff'}}/>
+        </div>
       </div>
       {(c.source_locator||c.note)&&<div style={{fontSize:11.5,color:'#64748b',marginTop:6}}>{[c.source_locator&&('Fundstelle: '+c.source_locator), c.note].filter(Boolean).join(' · ')}</div>}
       <div style={{display:'flex',gap:8,alignItems:'center',marginTop:10,flexWrap:'wrap'}}>
-        <button disabled={busy===c.id} onClick={()=>decide(c,'approve')} style={{padding:'8px 14px',borderRadius:8,border:'none',background:'#059669',color:'#fff',fontWeight:800,cursor:'pointer'}}>✓ Bestätigen</button>
+        <button disabled={busy===c.id} onClick={()=>decide(c,'approve')} style={{padding:'8px 14px',borderRadius:8,border:'none',background:'#059669',color:'#fff',fontWeight:800,cursor:'pointer'}}>{corrected(c)?'✓ Mit meinem Wert bestätigen':(c.change_kind==='delete'?'✓ Löschung bestätigen':'✓ Bestätigen')}</button>
         <button disabled={busy===c.id} onClick={()=>decide(c,'reject')} style={{padding:'8px 14px',borderRadius:8,border:'1px solid #fecaca',background:'#fff',color:'#b91c1c',fontWeight:800,cursor:'pointer'}}>✕ Ablehnen</button>
         <input value={note[c.id]||''} onChange={e=>setNote(n=>({...n,[c.id]:e.target.value}))} placeholder="Kommentar (optional, z. B. warum abgelehnt)" style={{flex:'1 1 220px',padding:'7px 10px',border:'1px solid #cbd5e1',borderRadius:8,fontSize:12.5}}/>
       </div>
@@ -2057,7 +2060,7 @@ function KbChangesView({client}){
         <span style={{fontSize:28,fontWeight:800,color:open.length?(oldest>=7?'#b91c1c':'#92400e'):'#059669'}}>{open.length}</span>
         <span style={{fontSize:13,color:'#64748b'}}>{open.length===1?'offener Vorschlag':'offene Vorschläge'} zur Wissensdatenbank{oldest>=7?' · der älteste wartet seit '+oldest+' Tagen':''}</span>
       </div>
-      <div style={{fontSize:12.5,color:'#64748b',marginTop:6,lineHeight:1.5}}>Wenn wir in Ihrer Wissensdatenbank einen bestehenden Wert ändern oder entfernen wollen, gilt bis zu Ihrer Bestätigung weiterhin der bisherige Wert. Neue Einträge gelten sofort und sind hier zur Prüfung gelistet. Nichts wird automatisch übernommen, nichts verfällt.</div>
+      <div style={{fontSize:12.5,color:'#64748b',marginTop:6,lineHeight:1.5}}>Wenn wir in Ihrer Wissensdatenbank einen bestehenden Wert ändern oder entfernen wollen, gilt bis zu Ihrer Bestätigung weiterhin der bisherige Wert. Neue Einträge gelten sofort und sind hier zur Prüfung gelistet. Stimmt der neue Wert nicht ganz, tragen Sie rechts den richtigen ein und bestätigen: dann gilt Ihr Wert. Nichts wird automatisch übernommen, nichts verfällt.</div>
     </div></div>
     {rows===null?<div className="card"><div className="card-body" style={{color:'#64748b'}}>Lade…</div></div>
     : open.length===0?<div className="card"><div className="card-body" style={{color:'#64748b'}}>Keine offenen Vorschläge. Alles, was Conny weiß, ist von Ihnen bestätigt.</div></div>
@@ -2072,7 +2075,7 @@ function KbChangesView({client}){
       {showDone&&done.slice(0,100).map(c=>{ const k=KIND[c.change_kind]||KIND.update; const st={approved:['bestätigt','#059669'],rejected:['abgelehnt','#b91c1c'],withdrawn:['zurückgezogen','#64748b']}[c.status]||[c.status,'#64748b'];
         return <div key={c.id} style={{padding:'8px 14px',borderTop:'1px solid #eef2f7',fontSize:12.5,display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
           <span style={{fontSize:11,fontWeight:800,padding:'1px 7px',borderRadius:6,background:k[2],color:k[1]}}>{k[0]}</span>{c.zielgebiet&&<span style={{color:'#64748b'}}>{c.zielgebiet} ·</span>}<b>{c.label}</b>
-          {c.change_kind!=='new'&&<span style={{color:'#94a3b8',textDecoration:'line-through'}}>{c.old_value}</span>}{c.change_kind!=='delete'&&<span>→ {c.new_value}</span>}
+          {c.change_kind!=='new'&&<span style={{color:'#94a3b8',textDecoration:'line-through'}}>{c.old_value}</span>}{c.decided_value?<span>→ <s style={{color:'#94a3b8'}}>{c.new_value}</s> <b>{c.decided_value}</b> <span style={{color:'#0F5661',fontSize:11}}>(korrigiert)</span></span>:(c.change_kind!=='delete'&&<span>→ {c.new_value}</span>)}
           <span style={{marginLeft:'auto',fontWeight:700,color:st[1]}}>{st[0]}</span><span style={{color:'#64748b'}}>{fmt(c.decided_at)}{c.decided_by_name?' · '+c.decided_by_name:''}{c.decision_note?' · „'+c.decision_note+'“':''}</span>
         </div>; })}
     </div>}
