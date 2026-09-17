@@ -109,7 +109,7 @@ const config = {
       React: "readonly", ReactDOM: "readonly", XLSX: "readonly",
       supabase: "readonly", Babel: "readonly",
       JSRCalc: "readonly",   // geteilte Rechenkerne aus shared/jsr-calc.js (externes Script)
-      coSetCtx: "readonly", renderCoach: "readonly",   // Coach-Oberfläche aus shared/coach-ui.js (externes Script)
+      coSetCtx: "readonly", renderCoach: "readonly", coBootNav: "readonly", coHasStoff: "readonly", coResetPrefs: "readonly",   // Coach-Oberfläche aus shared/coach-ui.js (externes Script)
     },
   },
   plugins: { react },

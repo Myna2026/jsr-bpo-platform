@@ -1254,7 +1254,7 @@ const MENU_BADGES_DEFAULT = { assignments:{
 // Hauptmenü-Items für den Badge-Admin (Keys müssen zu navSections passen).
 const MENU_BADGE_MAIN_ITEMS = [
   {key:'start',label:'Start'},{key:'daily_tasks',label:'Tagesaufgaben'},{key:'meetingnotes',label:'Besprechungen'},{key:'clientmsgs',label:'Kundennachrichten'},{key:'arbeitsplan',label:'Optimierungen'},{key:'agents',label:'AI Kollegen'},{key:'datacheck',label:'Daten-Checks'},
-  {key:'wissen_system',label:'Wissen System'},{key:'wissensspeicher',label:'Partner fragen'},{key:'cockpit',label:'Cockpit'},{key:'productivity',label:'Produktivität'},
+  {key:'wissen_system',label:'Wissen System'},{key:'wissensspeicher',label:'Conny & Partner'},{key:'cockpit',label:'Cockpit'},{key:'productivity',label:'Produktivität'},
   {key:'performance',label:'Performance'},{key:'auswertung',label:'Auswertung'},{key:'callqa',label:'Call-Qualität'},{key:'shiftplan',label:'Schichtplanung'},{key:'checkin',label:'Check-in'},{key:'workforce',label:'Workforce (Beta)'},{key:'employees',label:'Mitarbeiter'},
   {key:'timetracking',label:'Zeiterfassung'},{key:'locations',label:'Standorte'},{key:'spaces',label:'Spaces & Seats'},
   {key:'payroll',label:'Löhne'},{key:'orgchart',label:'Organigramm'},{key:'absences',label:'Abwesenheiten'},{key:'calendar',label:'Kalender'},
@@ -7580,7 +7580,7 @@ function buildNavSections(f){
     ]},
     {sec:'Werkzeuge', items:[   // täglich gebrauchte Werkzeuge
       {key:'wissen_system',label:'Wissen',icon:'📖'},
-      {key:'wissensspeicher',label:'Partner fragen',icon:'💬'},   // Partner-Agenten fragen (Conny/Fabian/Holger/Georg)
+      {key:'wissensspeicher',label:'Conny & Partner',icon:'💬'},   // Partner-Agenten (Conny/Fabian/Holger/Georg): Fragen, Wissen, Coach
       ...(_isMgmt ? [{key:'nlquery',label:'Datenabfrage',icon:'🔎'}] : []),   // Management-only
       {key:'datacheck',label:'Daten-Checks',icon:'🩺'},
     ]},
@@ -41687,9 +41687,17 @@ function CoachAdmin({partner, partnerName, canEdit, showToast, team, agentOf}){
   const cancelAssign=async(a)=>{ if(!(await uiConfirm({title:'Zuweisung zurücknehmen', text:'Die Pflichteinheit wird zurückgenommen, der Mitarbeiter sieht sie nicht mehr.', confirmLabel:'Zurücknehmen'}))) return; try{ const {error}=await sb.from('coach_assignments').update({status:'cancelled'}).eq('id',a.id); if(error) throw error; loadAssign(); }catch(e){ showToast&&showToast('Fehlgeschlagen: '+((e&&e.message)||e),'error'); } };
 
   const [data,setData]=React.useState(null);      // {sessions, answers, questions, emps}
-  const [tab,setTab]=React.useState('entwicklung');
+  const [tab,setTab]=React.useState('probe');       // Üben (Probelauf) zuerst: dieselbe Ansicht wie im Mitarbeiter-Portal
+  // Einstellungen je Partner (coach_settings): gelten für Mitarbeiter-Einheiten UND den Probelauf hier
+  const CS_DEF={default_minutes:5,default_difficulty:'mix',allowed_kinds:null,hidden_topics:[],topic_cap:40,show_timer:true};
+  const [cs,setCs]=React.useState(null); const [csDirty,setCsDirty]=React.useState(false);
+  const loadCs=async()=>{ try{ const {data:d}=await sb.from('coach_settings').select('*').eq('project_id',partner).maybeSingle(); setCs({...CS_DEF,...(d||{}),allowed_kinds:(d&&d.allowed_kinds)||null,hidden_topics:(d&&d.hidden_topics)||[]}); setCsDirty(false); }catch(e){ setCs({...CS_DEF}); } };
+  React.useEffect(()=>{ if(partner) loadCs(); },[partner]);
+  const saveCs=async()=>{ setBusy('cs'); try{ const row={project_id:partner, default_minutes:Number(cs.default_minutes)||5, default_difficulty:cs.default_difficulty||'mix', allowed_kinds:(cs.allowed_kinds&&cs.allowed_kinds.length)?cs.allowed_kinds:null, hidden_topics:cs.hidden_topics||[], topic_cap:Math.max(5,Math.min(200,Number(cs.topic_cap)||40)), show_timer:cs.show_timer!==false, updated_by:(team&&team.user_id)||null, updated_at:new Date().toISOString()};
+      const {error}=await sb.from('coach_settings').upsert(row,{onConflict:'project_id'}); if(error) throw error; showToast&&showToast('Coach-Einstellungen gespeichert'); setCsDirty(false); try{ coResetPrefs(); }catch(e){} }catch(e){ showToast&&showToast('Speichern fehlgeschlagen: '+((e&&e.message)||e),'error'); } setBusy(''); };
+  const csSet=(k,v)=>{ setCs({...cs,[k]:v}); setCsDirty(true); };
   // Probelauf: dieselbe Oberfläche wie im Mitarbeiter-Portal (shared/coach-ui.js), nur ohne Speichern
-  React.useEffect(()=>{ if(tab!=='probe'||!partner) return; try{ coSetCtx({pid:partner, preview:true, hostId:'coHrHost', fallbackAgent:(pid)=>agentOf(pid)}); renderCoach(); }catch(e){ console.error(e); } },[tab,partner]);
+  React.useEffect(()=>{ if(tab!=='probe'||!partner||!data) return; try{ coSetCtx({pid:partner, preview:true, hostId:'coHrHost', fallbackAgent:(pid)=>agentOf(pid)}); renderCoach(); }catch(e){ console.error(e); } },[tab,partner,cs&&cs.updated_at,!!data]);   // erst wenn der Host im DOM ist (data geladen)
   const [qFilter,setQFilter]=React.useState({kind:'', status:'active', q:''});
   const [busy,setBusy]=React.useState('');
   const load=async()=>{ setData(null); try{
@@ -41697,7 +41705,7 @@ function CoachAdmin({partner, partnerName, canEdit, showToast, team, agentOf}){
     const [s,a,q,e]=await Promise.all([
       sbLoadAll((a,b)=>sb.from('coach_sessions').select('id,employee_id,settings,score,points,max_points,topic_scores,started_at,finished_at,status').eq('project_id',partner).eq('status','done').gte('finished_at',since).order('finished_at',{ascending:false}).range(a,b)),
       sbLoadAll((a,b)=>sb.from('coach_answers').select('id,session_id,question_id,employee_id,kind,topic,answer,points,feedback,flagged,flag_note,flag_resolved_at,answered_at').eq('project_id',partner).gte('answered_at',since).range(a,b)),
-      sbLoadAll((a,b)=>sb.from('coach_questions').select('id,kind,difficulty,topic,zielgebiet,prompt,status,gen_by,source_label,created_at').eq('project_id',partner).range(a,b)),
+      sbLoadAll((a,b)=>sb.from('coach_questions').select('id,kind,difficulty,topic,zielgebiet,prompt,status,gen_by,source_label,created_at,quality,judge_note,gen_version').eq('project_id',partner).range(a,b)),
       sb.from('employees_masked_lite').select('id,first_name,last_name,status').eq('project_id',partner).then(r=>r.data||[]).catch(()=>[]),
     ]);
     setData({sessions:s||[],answers:a||[],questions:q||[],emps:e||[]});
@@ -41728,11 +41736,15 @@ function CoachAdmin({partner, partnerName, canEdit, showToast, team, agentOf}){
   const KIND={mc:'Auswahl',gap:'Eintippen',match:'Zuordnung',order:'Reihenfolge',free:'Situation'};
   const Spark=({v})=>{ if(!v||v.length<2) return null; const w=90,h=22; const pts=v.map((x,i)=>(i/(v.length-1)*w).toFixed(1)+','+(h-2-(x/100)*(h-4)).toFixed(1)).join(' '); return <svg width={w} height={h}><polyline points={pts} fill="none" stroke="#0F5661" strokeWidth="1.5"/></svg>; };
   const card={background:'var(--card)',border:'1px solid var(--border)',borderRadius:12,padding:16,marginBottom:14};
-  return <div>
-    <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap',marginBottom:14}}>
-      {[['entwicklung','Entwicklung'],['zuweisen','Pflichteinheiten'+((assign||[]).filter(a=>a.status==='open').length?' ('+(assign||[]).filter(a=>a.status==='open').length+')':'')],['probe','Probelauf'],['luecken','Team-Lücken'],['meldungen','Meldungen'+(flagged.filter(f=>!f.flag_resolved_at).length?' ('+flagged.filter(f=>!f.flag_resolved_at).length+')':'')],['bank','Fragenbank']].map(([k,l])=><button key={k} className={'btn btn-sm'+(tab===k?' btn-primary':'')} onClick={()=>setTab(k)}>{l}</button>)}
-      <span style={{marginLeft:'auto',display:'flex',gap:4}}>{[[7,'7 Tage'],[30,'30 Tage'],[90,'90 Tage']].map(([d,l])=><button key={d} className={'btn btn-sm'+(days===d?' btn-primary':'')} onClick={()=>setDays(d)}>{l}</button>)}</span>
+  const openA=(assign||[]).filter(a=>a.status==='open').length, openF=flagged.filter(f=>!f.flag_resolved_at).length;
+  const RAIL=[['probe','Üben','dieselbe Einheit wie im Mitarbeiter-Portal'],['settings','Einstellungen','Dauer, Stufe, Fragearten, Themen, Uhr'],['zuweisen','Pflichteinheiten',openA?openA+' offen':'Thema, Dauer, Termin vorgeben'],['entwicklung','Entwicklung','je Mitarbeiter und Team-Lücken'],['meldungen','Meldungen',openF?openF+' offen':'unklare Fragen'],['bank','Fragenbank',qStats.active+' aktiv']];
+  const railBtn=([k,l,sub])=><button key={k} onClick={()=>setTab(k)} style={{display:'block',width:'100%',textAlign:'left',border:'none',borderLeft:'3px solid '+(tab===k?'var(--accent,#0F5661)':'transparent'),background:tab===k?'color-mix(in srgb, var(--accent,#0F5661) 8%, var(--card))':'transparent',padding:'9px 12px',cursor:'pointer',borderRadius:'0 8px 8px 0'}}><div style={{fontSize:13.5,fontWeight:tab===k?800:600,color:'var(--text)'}}>{l}{(k==='zuweisen'&&openA)||(k==='meldungen'&&openF)?<span style={{display:'inline-block',marginLeft:6,width:7,height:7,borderRadius:'50%',background:'#dc2626'}}/>:null}</div><div style={{fontSize:11,color:'var(--muted)'}}>{sub}</div></button>;
+  return <div style={{display:'grid',gridTemplateColumns:'minmax(150px,190px) 1fr',gap:18,alignItems:'start'}} className="co-adm">
+    <style>{'@media (max-width:760px){.co-adm{grid-template-columns:1fr !important} .co-adm .co-rail{display:flex;flex-wrap:wrap;gap:4px} .co-adm .co-rail button{width:auto !important;border-left:none !important;border-radius:8px !important}}'}</style>
+    <div className="co-rail" style={{position:'sticky',top:8}}>{RAIL.map(railBtn)}
+      {(tab==='entwicklung'||tab==='meldungen')&&<div style={{display:'flex',gap:3,padding:'10px 12px',flexWrap:'wrap'}}>{[[7,'7 T'],[30,'30 T'],[90,'90 T']].map(([d,l])=><button key={d} className={'btn btn-sm'+(days===d?' btn-primary':'')} onClick={()=>setDays(d)}>{l}</button>)}</div>}
     </div>
+    <div style={{minWidth:0}}>
     {data.error&&<div style={{...card,color:'#b91c1c'}}>Laden fehlgeschlagen: {data.error}</div>}
     {tab==='entwicklung'&&<div style={card}>
       <div style={{display:'flex',gap:20,flexWrap:'wrap',marginBottom:12}}>{[[sessions.length,'Einheiten'],[empRows.length,'Mitarbeiter geübt'],[answers.length,'Antworten'],[pct(answers.reduce((a,x)=>a+Number(x.points||0),0),answers.length)==null?'—':pct(answers.reduce((a,x)=>a+Number(x.points||0),0),answers.length)+' %','Team-Schnitt']].map(([v,l])=><div key={l}><div style={{fontSize:22,fontWeight:800,fontFamily:'var(--font-mono)'}}>{v}</div><div style={{fontSize:10.5,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em'}}>{l}</div></div>)}</div>
@@ -41741,6 +41753,20 @@ function CoachAdmin({partner, partnerName, canEdit, showToast, team, agentOf}){
         <tbody>{empRows.map(r=><tr key={r.id}><td style={{fontWeight:600}}>{r.name}</td><td style={{textAlign:'right',fontFamily:'var(--font-mono)'}}>{r.n}</td><td style={{textAlign:'right',fontFamily:'var(--font-mono)',fontWeight:800,color:col(r.pct)}}>{r.pct==null?'—':r.pct+' %'}</td><td><Spark v={r.series}/></td><td style={{textAlign:'right',fontFamily:'var(--font-mono)',fontWeight:700,color:r.trend==null?'var(--muted)':r.trend>=0?'#059669':'#dc2626'}}>{r.trend==null?'—':(r.trend>0?'+':'')+r.trend+' Pp'}</td><td style={{fontSize:12}}>{r.weak.map(([t,p])=><span key={t} style={{display:'inline-block',marginRight:6,padding:'1px 7px',borderRadius:6,background:'var(--surface-2)',color:col(p)}}>{t} {p} %</span>)}</td><td style={{textAlign:'right',color:'var(--muted)'}}>{fmtD(r.last)}</td></tr>)}</tbody></table>}
     </div>}
     {tab==='probe'&&<div><div style={{fontSize:12,color:'var(--muted)',marginBottom:10}}>Probelauf: genau die Einheit, die die Mitarbeiter von {partnerName} bekommen, mit denselben Fragen und derselben Bewertung. Es wird nichts gespeichert und nichts gezählt.</div><div id="coHrHost"/></div>}
+    {tab==='settings'&&(!cs?<div style={{padding:16,color:'var(--muted)',fontSize:13}}>Lädt…</div>:<div style={card}>
+      <div style={{fontSize:12,color:'var(--muted)',marginBottom:12}}>Gilt für alle Mitarbeiter von {partnerName} und für den Probelauf hier. Mitarbeiter können Dauer und Stufe je Einheit selbst ändern, die Vorgaben sind der Startwert. Ausgeblendete Themen und nicht erlaubte Fragearten kommen nie in eine Einheit.</div>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))',gap:14}}>
+        <div><div className="form-label">Dauer als Vorgabe</div><div style={{display:'flex',gap:4,flexWrap:'wrap'}}>{[2,5,10,15].map(m=><button key={m} className={'btn btn-sm'+(Number(cs.default_minutes)===m?' btn-primary':'')} onClick={()=>csSet('default_minutes',m)} disabled={!canEdit}>{m} Min</button>)}</div></div>
+        <div><div className="form-label">Schwierigkeit als Vorgabe</div><div style={{display:'flex',gap:4,flexWrap:'wrap'}}>{[['mix','Gemischt'],['leicht','Leicht'],['mittel','Mittel'],['schwer','Schwer']].map(([k,l])=><button key={k} className={'btn btn-sm'+(cs.default_difficulty===k?' btn-primary':'')} onClick={()=>csSet('default_difficulty',k)} disabled={!canEdit}>{l}</button>)}</div></div>
+        <div><div className="form-label">Uhr während der Einheit</div><label style={{display:'flex',gap:8,alignItems:'center',fontSize:13,cursor:'pointer'}}><input type="checkbox" checked={cs.show_timer!==false} onChange={e=>csSet('show_timer',e.target.checked)} disabled={!canEdit}/> Uhr rückwärts anzeigen (sie entscheidet nichts, am Ende kommt eine Frage)</label></div>
+        <div><div className="form-label">Deckel je Thema und Frageart</div><input className="form-input" type="number" min="5" max="200" style={{width:100}} value={cs.topic_cap} onChange={e=>csSet('topic_cap',e.target.value)} disabled={!canEdit}/><div style={{fontSize:11.5,color:'var(--muted)',marginTop:3}}>Mehr Fragen je Thema erzeugt der Generator nicht. Lieber wenige gute.</div></div>
+      </div>
+      <div className="form-label" style={{marginTop:14}}>Erlaubte Fragearten <span style={{fontWeight:500,color:'var(--muted)'}}>(nichts angehakt = alle)</span></div>
+      <div style={{display:'flex',gap:12,flexWrap:'wrap'}}>{Object.entries(KIND).map(([k,l])=>{ const on=!cs.allowed_kinds||cs.allowed_kinds.includes(k); const all=!cs.allowed_kinds; return <label key={k} style={{display:'flex',gap:6,alignItems:'center',fontSize:13,cursor:'pointer',opacity:all?.75:1}}><input type="checkbox" checked={on} disabled={!canEdit} onChange={e=>{ let arr=cs.allowed_kinds?cs.allowed_kinds.slice():Object.keys(KIND); arr=e.target.checked?arr.concat([k]).filter((x,i,a)=>a.indexOf(x)===i):arr.filter(x=>x!==k); csSet('allowed_kinds',arr.length===Object.keys(KIND).length?null:arr); }}/> {l} <span style={{color:'var(--muted)'}}>({questions.filter(q=>q.status==='active'&&q.kind===k).length})</span></label>; })}</div>
+      <div className="form-label" style={{marginTop:14}}>Themen <span style={{fontWeight:500,color:'var(--muted)'}}>(abgehakt = wird geübt)</span></div>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(280px,1fr))',gap:'4px 16px',maxHeight:300,overflowY:'auto',border:'1px solid var(--border)',borderRadius:8,padding:10}}>{(()=>{ const cnt={}; questions.filter(q=>q.status==='active').forEach(q=>{ cnt[q.topic]=(cnt[q.topic]||0)+1; }); const all=Object.keys(cnt).sort((a,b)=>a.localeCompare(b,'de')); (cs.hidden_topics||[]).forEach(t=>{ if(!all.includes(t)) all.push(t); }); return all.map(t=>{ const hid=(cs.hidden_topics||[]).includes(t); return <label key={t} style={{display:'flex',gap:6,alignItems:'center',fontSize:12.5,cursor:'pointer',opacity:hid?.6:1}}><input type="checkbox" checked={!hid} disabled={!canEdit} onChange={e=>{ const h=(cs.hidden_topics||[]).filter(x=>x!==t); csSet('hidden_topics',e.target.checked?h:h.concat([t])); }}/> <span style={{flex:1,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={t}>{t}</span><span style={{color:'var(--muted)'}}>{cnt[t]||0}</span></label>; }); })()}</div>
+      {canEdit&&<div style={{display:'flex',gap:8,alignItems:'center',marginTop:14}}><button className="btn btn-sm btn-primary" disabled={busy==='cs'||!csDirty} onClick={saveCs}>Speichern</button>{csDirty&&<span style={{fontSize:12,color:'#b45309'}}>Ungespeicherte Änderungen</span>}{cs.updated_at&&!csDirty&&<span style={{fontSize:12,color:'var(--muted)'}}>Stand {new Date(cs.updated_at).toLocaleString('de-DE',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</span>}</div>}
+    </div>)}
     {tab==='zuweisen'&&<div>
       {canAssign&&<div style={card}>
         <div style={{fontSize:13,fontWeight:800,marginBottom:4}}>Pflichteinheit zuweisen</div>
@@ -41761,7 +41787,8 @@ function CoachAdmin({partner, partnerName, canEdit, showToast, team, agentOf}){
           <tbody>{assign.filter(a=>a.status!=='cancelled').map(a=>{ const late=a.status==='open'&&a.due_date&&a.due_date<new Date().toISOString().slice(0,10); return <tr key={a.id}><td style={{fontWeight:600}}>{empName(a.employee_id)}</td><td>{a.topic||'Mix aus allem'}{a.note?<div style={{fontSize:11,color:'var(--muted)'}}>„{a.note}“</div>:null}</td><td style={{textAlign:'center'}}>{a.minutes} Min · {a.difficulty}</td><td style={{textAlign:'center',color:late?'#b91c1c':'inherit',fontWeight:late?800:400}}>{a.due_date?new Date(a.due_date+'T00:00:00').toLocaleDateString('de-DE'):'—'}{late?' ⚠':''}</td><td>{a.assigned_by_name||'—'}</td><td style={{textAlign:'center'}}><span className={'badge '+(a.status==='done'?'badge-green':late?'badge-red':'badge-amber')}>{a.status==='done'?'erledigt'+(a.done_at?' '+fmtD(a.done_at):''):late?'überfällig':'offen'}</span></td><td style={{textAlign:'right'}}>{canAssign&&a.status==='open'&&<button className="btn btn-sm" onClick={()=>cancelAssign(a)}>Zurücknehmen</button>}</td></tr>; })}</tbody></table>}
       </div>
     </div>}
-    {tab==='luecken'&&<div style={card}>
+    {tab==='entwicklung'&&<div style={card}>
+      <div style={{fontSize:14,fontWeight:800,marginBottom:4}}>Team-Lücken</div>
       <div style={{fontSize:12,color:'var(--muted)',marginBottom:10}}>Team-Schnitt je Thema über alle Antworten (mindestens 3). Unten steht, was das Team noch nicht sicher kann; das gehört in die nächste Schulung oder ins Register.</div>
       {topicRows.length===0?<div style={{color:'var(--muted)',fontSize:13}}>Noch zu wenige Antworten.</div>:
       <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(300px,1fr))',gap:'6px 24px'}}>{topicRows.map(r=><div key={r.t} style={{display:'flex',alignItems:'center',gap:10,fontSize:12.5}}><div style={{flex:1,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={r.t}>{r.t} <span style={{color:'var(--muted)'}}>· {r.n} Antw. · {r.emps} MA</span></div><div style={{width:120,height:8,borderRadius:4,background:'#eef2f4',overflow:'hidden'}}><div style={{width:r.pct+'%',height:'100%',background:col(r.pct)}}/></div><div style={{width:46,textAlign:'right',fontFamily:'var(--font-mono)',fontWeight:800,color:col(r.pct)}}>{r.pct} %</div></div>)}</div>}
@@ -41777,18 +41804,20 @@ function CoachAdmin({partner, partnerName, canEdit, showToast, team, agentOf}){
       </div>; })}
     </div>}
     {tab==='bank'&&<div style={card}>
-      <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:10,fontSize:12.5}}><span><b>{qStats.active}</b> aktiv</span><span><b>{qStats.blocked}</b> gesperrt</span><span><b>{qStats.stale}</b> veraltet (werden nachts erneuert)</span></div>
+      <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:6,fontSize:12.5}}><span><b>{qStats.active}</b> aktiv</span><span><b>{qStats.blocked}</b> vom Prüfer aussortiert oder gesperrt</span><span><b>{qStats.stale}</b> veraltet (werden nachts erneuert)</span></div>
+      <div style={{display:'flex',gap:6,flexWrap:'wrap',marginBottom:10,fontSize:11.5,color:'var(--muted)'}}>{Object.entries(KIND).map(([k,l])=>{ const n=questions.filter(q=>q.status==='active'&&q.kind===k); if(!n.length) return null; const d={}; n.forEach(q=>{ d[q.difficulty]=(d[q.difficulty]||0)+1; }); return <span key={k} style={{padding:'2px 8px',borderRadius:6,background:'var(--surface-2)'}}>{l} <b>{n.length}</b> <span>({['leicht','mittel','schwer'].filter(x=>d[x]).map(x=>x+' '+d[x]).join(', ')})</span></span>; })}<span style={{padding:'2px 8px'}}>Jede Frage wird von einem Prüfer bewertet (1 bis 5), nur ab 4 kommt sie in Einheiten.</span></div>
       <div style={{display:'flex',gap:6,flexWrap:'wrap',marginBottom:10}}>
         <select className="form-select" style={{width:'auto'}} value={qFilter.status} onChange={e=>setQFilter({...qFilter,status:e.target.value})}><option value="active">aktiv</option><option value="blocked">gesperrt</option><option value="stale">veraltet</option><option value="">alle</option></select>
         <select className="form-select" style={{width:'auto'}} value={qFilter.kind} onChange={e=>setQFilter({...qFilter,kind:e.target.value})}><option value="">alle Arten</option>{Object.entries(KIND).map(([k,l])=><option key={k} value={k}>{l}</option>)}</select>
         <input className="form-input" style={{flex:'1 1 200px'}} placeholder="Frage oder Thema suchen…" value={qFilter.q} onChange={e=>setQFilter({...qFilter,q:e.target.value})}/>
       </div>
       {qList.map(q=><div key={q.id} style={{borderTop:'1px solid var(--border)',padding:'8px 0',display:'flex',gap:10,alignItems:'flex-start'}}>
-        <div style={{flex:1,minWidth:0}}><div style={{fontSize:11,color:'var(--muted)'}}>{KIND[q.kind]} · {q.difficulty} · {q.topic}{q.zielgebiet?' · '+q.zielgebiet:''} · {q.gen_by==='ai'?'KI':'Regel'}</div><div style={{fontSize:13,fontWeight:600}}>{q.prompt}</div><div style={{fontSize:11,color:'var(--muted)'}}>Quelle: {q.source_label}</div></div>
+        <div style={{flex:1,minWidth:0}}><div style={{fontSize:11,color:'var(--muted)'}}>{KIND[q.kind]} · {q.difficulty} · {q.topic}{q.zielgebiet?' · '+q.zielgebiet:''} · {q.gen_by==='ai'?'KI':'Regel'}</div><div style={{fontSize:13,fontWeight:600}}>{q.prompt}</div><div style={{fontSize:11,color:'var(--muted)'}}>Quelle: {q.source_label}{q.quality!=null?<span> · Prüfer <b style={{color:q.quality>=4?'#059669':'#b45309'}}>{q.quality}/5</b>{q.judge_note?': '+q.judge_note:''}</span>:null}</div></div>
         {canEdit&&(q.status==='active'?<button className="btn btn-sm" disabled={busy===q.id} onClick={()=>blockQ(q,'blocked')}>Sperren</button>:q.status==='blocked'?<button className="btn btn-sm" disabled={busy===q.id} onClick={()=>blockQ(q,'active')}>Freigeben</button>:null)}
       </div>)}
       {qList.length>=80&&<div style={{fontSize:12,color:'var(--muted)',marginTop:8}}>Nur die ersten 80 Treffer, bitte enger suchen.</div>}
     </div>}
+    </div>
   </div>;
 }
 
@@ -42092,8 +42121,8 @@ function WissensspeicherView({projects, team, showToast}){
     <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:6}}>
       <span style={{display:'inline-flex',alignItems:'center',gap:8,fontSize:20,fontWeight:800}}>
         <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" style={{color:'var(--accent,#0F5661)'}}><path d="M4.913 2.658c2.075-.27 4.19-.408 6.337-.408 2.147 0 4.262.139 6.337.408 1.922.25 3.291 1.861 3.405 3.727a4.403 4.403 0 0 0-1.032-.211 50.89 50.89 0 0 0-8.42 0c-2.358.196-4.04 2.19-4.04 4.434v4.286a4.47 4.47 0 0 0 2.433 3.984L7.28 21.53A.75.75 0 0 1 6 21v-4.03a48.527 48.527 0 0 1-1.087-.128C2.905 16.58 1.5 14.833 1.5 12.862V6.638c0-1.97 1.405-3.718 3.413-3.98Z"/><path d="M15.75 7.5c-1.376 0-2.739.057-4.086.169C10.124 7.797 9 9.103 9 10.609v4.285c0 1.507 1.128 2.814 2.67 2.94 1.243.102 2.5.157 3.768.165l2.782 2.781a.75.75 0 0 0 1.28-.53v-2.39l.33-.026c1.542-.125 2.67-1.433 2.67-2.94v-4.286c0-1.505-1.125-2.811-2.664-2.94A49.392 49.392 0 0 0 15.75 7.5Z"/></svg>
-        Partner fragen</span>
-      <span style={{fontSize:12.5,color:'var(--muted)'}}>Frag den Partner-Agenten, Antwort nur aus den Unterlagen, mit Quelle</span>
+        Conny &amp; Partner</span>
+      <span style={{fontSize:12.5,color:'var(--muted)'}}>Fragen, Wissen und Coach je Partner, alles nur aus den Unterlagen</span>
     </div>
     {/* Partner-Auswahl */}
     <div style={{display:'flex',flexWrap:'wrap',gap:8,marginBottom:14}}>
@@ -42102,11 +42131,17 @@ function WissensspeicherView({projects, team, showToast}){
           background:on?('color-mix(in srgb, '+pc+' 15%, var(--card))'):'var(--card)',color:on?pc:'var(--text)',fontWeight:on?800:500,fontSize:13.5}}>{p.name}</button>; })}
     </div>
 
-    {/* Unter-Tabs */}
-    <div style={{display:'flex',gap:6,marginBottom:14,borderBottom:'1px solid var(--border)'}}>
-      {[['ask','Fragen'],['register','Register'],['docs','Dokumente'],['gaps','Lücken'],['coach','Coach']].concat(isMgmt?[['agent','Vollansicht']]:[]).map(([k,l])=>{ const on=mode===k;
-        return <button key={k} onClick={()=>{setMode(k);setEditF(null);}} style={{padding:'8px 14px',border:'none',borderBottom:'2px solid '+(on?'var(--accent,#0F5661)':'transparent'),background:'none',cursor:'pointer',color:on?'var(--text)':'var(--muted)',fontWeight:on?800:500,fontSize:13.5}}>{l}</button>; })}
-    </div>
+    {/* Reiter: Fragen | Wissen (Register, Dokumente, Lücken) | Coach | Steckbrief */}
+    {(()=>{ const group=(mode==='register'||mode==='docs'||mode==='gaps')?'wissen':mode; const ag=agentOf(partner);
+      return <React.Fragment>
+      <div style={{display:'flex',gap:6,marginBottom:(group==='wissen'?8:14),borderBottom:'1px solid var(--border)'}}>
+        {[['ask','Fragen'],['wissen','Wissen'],['coach','Coach']].concat(isMgmt?[['agent','Steckbrief']]:[]).map(([k,l])=>{ const on=group===k;
+          return <button key={k} onClick={()=>{setMode(k==='wissen'?'register':k);setEditF(null);}} style={{padding:'9px 16px',border:'none',borderBottom:'2px solid '+(on?ag.color:'transparent'),background:'none',cursor:'pointer',color:on?'var(--text)':'var(--muted)',fontWeight:on?800:500,fontSize:14}}>{l}</button>; })}
+      </div>
+      {group==='wissen'&&<div style={{display:'flex',gap:4,marginBottom:14}}>
+        {[['register','Register'],['docs','Dokumente'],['gaps','Lücken']].map(([k,l])=><button key={k} className={'btn btn-sm'+(mode===k?' btn-primary':'')} onClick={()=>{setMode(k);setEditF(null);}}>{l}</button>)}
+      </div>}
+      </React.Fragment>; })()}
 
     {/* Fragen (Antwort-Motor) — Konsole je Partner eingefärbt */}
     {mode==='ask'&&(()=>{ const ag=agentOf(partner);
