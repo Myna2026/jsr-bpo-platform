@@ -6,6 +6,9 @@
 //           Vorlage aus der Quelle, Teilpunkte, Sprachfehler zählen nicht) und gibt Auflösung + Quelle zurück
 //   finish  {session_id} → Ergebnis je Thema, Empfehlung (schwächstes Thema)
 //   history → letzte Einheiten + Themen-Schnitt des Mitarbeiters
+//   Pflichteinheit: start {assignment_id} nimmt Thema/Dauer/Schwierigkeit aus coach_assignments (keine Wahl), finish setzt sie auf done.
+//   Probelauf (HR): body.preview=true + project_id → wer die Fragen des Partners lesen darf (RLS), bekommt dieselbe Einheit,
+//   nichts wird gespeichert; grade bewertet zustandslos. So sehen wir, was die Leute bekommen.
 // Deploy: supabase functions deploy coach-session --no-verify-jwt --use-api
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
@@ -67,16 +70,52 @@ Deno.serve(async (req) => {
   const auth = req.headers.get("Authorization") || ""; if (!auth) return json({ error: "Nicht angemeldet." }, 401);
   const user = createClient(SB_URL, ANON, { global: { headers: { Authorization: auth } } });
   const { data: u } = await user.auth.getUser(); if (!u?.user?.id) return json({ error: "Sitzung ungültig." }, 401);
+  let body: any = {}; try { body = await req.json(); } catch { /* egal */ }
+  const action = String(body.action || "");
+  // ── Probelauf (HR/Teamleitung): keine Speicherung, Zugriff = darf die Fragen des Partners lesen ──
+  if (body.preview === true) {
+    const ppid = String(body.project_id || ""); if (!ppid) return json({ error: "Kein Partner angegeben." }, 400);
+    const { count } = await user.from("coach_questions").select("id", { count: "exact", head: true }).eq("project_id", ppid).eq("status", "active");
+    if (!count) return json({ error: "Kein Zugriff oder keine Fragen für diesen Partner." }, 403);
+    const { data: ppa } = await admin.from("partner_agents").select("name").eq("project_id", ppid).maybeSingle(); const pAgent = ppa?.name || "Coach";
+    if (action === "start") {
+      const s = body.settings || {}; const minutes = [2, 5, 10, 15].includes(Number(s.minutes)) ? Number(s.minutes) : 5; const n = countFor(minutes);
+      const diff = ["leicht", "mittel", "schwer", "mix"].includes(s.difficulty) ? s.difficulty : "mix";
+      const kinds: string[] = Array.isArray(s.kinds) && s.kinds.length ? s.kinds : ["mc", "gap", "match", "order", "free"];
+      let q = admin.from("coach_questions").select("*").eq("project_id", ppid).eq("status", "active").in("kind", kinds);
+      if (diff !== "mix") q = q.eq("difficulty", diff); if (s.mode === "topic" && s.topic) q = q.eq("topic", String(s.topic));
+      if (s.mode === "sprint" && s.zielgebiet) q = q.or("zielgebiet.ilike.%" + String(s.zielgebiet).replace(/[%,()]/g, "") + "%,prompt.ilike.%" + String(s.zielgebiet).replace(/[%,()]/g, "") + "%");
+      const { data: pool } = await q.limit(2000); if (!pool || !pool.length) return json({ error: "Dazu gibt es noch keine Übungsfragen." }, 404);
+      const capFree = Math.max(1, Math.floor(n / 3)); const free = shuffle(pool.filter((x: any) => x.kind === "free")).slice(0, capFree); const rest = shuffle(pool.filter((x: any) => x.kind !== "free")).slice(0, n - free.length);
+      return json({ ok: true, session_id: null, preview: true, agent: pAgent, questions: [...rest, ...free].slice(0, n).map(publicQ) });
+    }
+    if (action === "answer") {
+      const { data: q } = await admin.from("coach_questions").select("*").eq("id", body.question_id).eq("project_id", ppid).maybeSingle(); if (!q) return json({ error: "Frage fehlt." }, 404);
+      let g: any; try { g = q.kind === "mc" ? gradeMc(q, body.answer) : q.kind === "gap" ? gradeGap(q, body.answer) : q.kind === "match" ? gradeMatch(q, body.answer) : q.kind === "order" ? gradeOrder(q, body.answer) : await gradeFree(q, body.answer, pAgent); }
+      catch (e) { return json({ error: "Bewertung fehlgeschlagen: " + (e as Error).message }, 502); }
+      return json({ ok: true, answer_id: null, points: g.points, feedback: g.feedback, rubric: g.rubric || null, solution: q.answer, explanation: q.explanation, source: q.source_label, topic: q.topic });
+    }
+    if (action === "finish") { const rows: any[] = Array.isArray(body.results) ? body.results : []; const points = rows.reduce((a, r) => a + Number(r.points || 0), 0); const max = rows.length;
+      const topics: Record<string, { points: number; max: number }> = {}; for (const r of rows) { const t = topics[r.topic] = topics[r.topic] || { points: 0, max: 0 }; t.points += Number(r.points || 0); t.max += 1; }
+      const weakest = Object.entries(topics).sort((a, b) => a[1].points / a[1].max - b[1].points / b[1].max)[0];
+      return json({ ok: true, points, max, score: max ? Math.round(points / max * 100) / 100 : 0, topics, recommend: weakest && weakest[1].points / weakest[1].max < 1 ? weakest[0] : null, strong: null, preview: true }); }
+    if (action === "history") return json({ ok: true, sessions: [], topics: {}, agent: pAgent, preview: true });
+    return json({ error: "Unbekannte Aktion." }, 400);
+  }
   const { data: empId } = await user.rpc("get_my_employee_id"); if (!empId) return json({ error: "Kein Mitarbeiter-Datensatz verknüpft." }, 403);
   const { data: emp } = await admin.from("employees").select("id,project_id,first_name").eq("id", empId).maybeSingle();
   if (!emp?.project_id) return json({ error: "Kein Projekt hinterlegt." }, 403);
   const pid = emp.project_id;
-  let body: any = {}; try { body = await req.json(); } catch { /* egal */ }
-  const action = String(body.action || "");
   const { data: pa } = await admin.from("partner_agents").select("name").eq("project_id", pid).maybeSingle(); const agentName = pa?.name || "Coach";
 
   if (action === "start") {
-    const s = body.settings || {}; const minutes = [2, 5, 10, 15].includes(Number(s.minutes)) ? Number(s.minutes) : 5;
+    let s = body.settings || {}; let assignment: any = null;
+    if (body.assignment_id) {   // Pflichteinheit: Vorgaben gelten, keine Wahl
+      const { data: as } = await admin.from("coach_assignments").select("*").eq("id", body.assignment_id).eq("employee_id", empId).eq("status", "open").maybeSingle();
+      if (!as) return json({ error: "Diese Pflichteinheit gibt es nicht mehr oder sie ist schon erledigt." }, 404);
+      assignment = as; s = { mode: as.topic ? "topic" : (as.zielgebiet ? "sprint" : "daily"), topic: as.topic, zielgebiet: as.zielgebiet, minutes: as.minutes, difficulty: as.difficulty, kinds: null };
+    }
+    const minutes = [2, 5, 10, 15].includes(Number(s.minutes)) ? Number(s.minutes) : 5;
     const n = countFor(minutes); const diff = ["leicht", "mittel", "schwer", "mix"].includes(s.difficulty) ? s.difficulty : "mix";
     const kinds: string[] = Array.isArray(s.kinds) && s.kinds.length ? s.kinds.filter((k: string) => ["mc", "gap", "match", "order", "free"].includes(k)) : ["mc", "gap", "match", "order", "free"];
     let q = admin.from("coach_questions").select("*").eq("project_id", pid).eq("status", "active").in("kind", kinds);
@@ -105,9 +144,9 @@ Deno.serve(async (req) => {
       picked.push(x);
     }
     const list = [...shuffle(picked.filter((x) => x.kind !== "free")), ...picked.filter((x) => x.kind === "free")].slice(0, n);
-    const { data: sess, error } = await admin.from("coach_sessions").insert({ employee_id: empId, project_id: pid, user_id: u.user.id, settings: { mode: s.mode || "daily", topic: s.topic || null, zielgebiet: s.zielgebiet || null, minutes, difficulty: diff, kinds }, question_ids: list.map((x) => x.id) }).select("id").single();
+    const { data: sess, error } = await admin.from("coach_sessions").insert({ employee_id: empId, project_id: pid, user_id: u.user.id, assignment_id: assignment ? assignment.id : null, settings: { mode: s.mode || "daily", topic: s.topic || null, zielgebiet: s.zielgebiet || null, minutes, difficulty: diff, kinds, assignment: assignment ? { id: assignment.id, by: assignment.assigned_by_name, note: assignment.note } : null }, question_ids: list.map((x) => x.id) }).select("id").single();
     if (error) return json({ error: error.message }, 500);
-    return json({ ok: true, session_id: sess.id, agent: agentName, questions: list.map(publicQ) });
+    return json({ ok: true, session_id: sess.id, agent: agentName, assignment: assignment ? { id: assignment.id, topic: assignment.topic, by: assignment.assigned_by_name, note: assignment.note } : null, questions: list.map(publicQ) });
   }
 
   if (action === "answer") {
@@ -122,7 +161,7 @@ Deno.serve(async (req) => {
     catch (e) { return json({ error: "Bewertung fehlgeschlagen: " + (e as Error).message }, 502); }
     const { data: ans, error } = await admin.from("coach_answers").insert({ session_id: sess.id, question_id: q.id, employee_id: empId, project_id: pid, kind: q.kind, topic: q.topic, answer: body.answer ?? null, points: g.points, max_points: 1, feedback: g.feedback, rubric: g.rubric || null, seconds: Number.isFinite(body.seconds) ? Number(body.seconds) : null }).select("id").single();
     if (error) return json({ error: error.message }, 500);
-    return json({ ok: true, answer_id: ans.id, points: g.points, feedback: g.feedback, rubric: g.rubric || null, solution: q.answer, explanation: q.explanation, source: q.source_label });
+    return json({ ok: true, answer_id: ans.id, points: g.points, feedback: g.feedback, rubric: g.rubric || null, solution: q.answer, explanation: q.explanation, source: q.source_label, topic: q.topic });
   }
 
   if (action === "finish") {
@@ -133,6 +172,7 @@ Deno.serve(async (req) => {
     const topics: Record<string, { points: number; max: number }> = {}; for (const r of rows) { const t = topics[r.topic] = topics[r.topic] || { points: 0, max: 0 }; t.points += Number(r.points); t.max += 1; }
     const score = max ? Math.round(points / max * 100) / 100 : 0;
     await admin.from("coach_sessions").update({ status: rows.length ? "done" : "abandoned", points, max_points: max, score, topic_scores: topics, finished_at: new Date().toISOString() }).eq("id", sess.id);
+    if (sess.assignment_id && rows.length) await admin.from("coach_assignments").update({ status: "done", session_id: sess.id, done_at: new Date().toISOString() }).eq("id", sess.assignment_id).eq("status", "open");
     const weakest = Object.entries(topics).filter(([, v]) => v.max > 0).sort((a, b) => a[1].points / a[1].max - b[1].points / b[1].max)[0];
     const strongest = Object.entries(topics).filter(([, v]) => v.max > 0 && v.points / v.max >= 0.99)[0];
     return json({ ok: true, points, max, score, topics, recommend: weakest && weakest[1].points / weakest[1].max < 1 ? weakest[0] : null, strong: strongest ? strongest[0] : null });
