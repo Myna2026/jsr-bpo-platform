@@ -44,7 +44,13 @@ function coInjectCss(){ if(document.getElementById('cocss'))return; var st=docum
 '@media (max-width:640px){.co{padding:16px;border-radius:14px} .co-q{font-size:17px} .co-pair{grid-template-columns:1fr} .co-tl{grid-template-columns:1fr 90px 44px}}'
 ].join('\n'); document.head.appendChild(st); }
 function coEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-function coCall(body){ if(_coCtx.preview){ body=Object.assign({},body,{preview:true,project_id:_coCtx.pid}); } return sb.functions.invoke('coach-session',{body:body}).then(function(res){ if(res.error) throw res.error; if(res.data&&res.data.error) throw new Error(res.data.error); return res.data; }); }
+// Fehler lesbar machen: supabase-js meldet bei 4xx/5xx nur „non-2xx status code“; die eigentliche Meldung steht im Antwort-Body.
+function coCall(body){ if(_coCtx.preview){ body=Object.assign({},body,{preview:true,project_id:_coCtx.pid}); }
+  return sb.functions.invoke('coach-session',{body:body}).then(function(res){
+    if(res.error){ var ctx=res.error.context; var st=ctx&&ctx.status;
+      if(ctx&&typeof ctx.json==='function'){ return ctx.clone().json().then(function(j){ var m=(j&&(j.error||j.message))||res.error.message; console.error('[coach] '+(st||'')+' '+m, body); throw new Error(m+(st?' ('+st+')':'')); },function(){ console.error('[coach] '+(st||''), res.error); throw new Error(res.error.message+(st?' ('+st+')':'')); }); }
+      console.error('[coach]', res.error); throw res.error; }
+    if(res.data&&res.data.error) throw new Error(res.data.error); return res.data; }); }
 function renderCoach(){
   coInjectCss(); if(typeof kbInjectCss==='function') kbInjectCss();
   var host=document.getElementById(_coCtx.hostId||'vCoach'); if(!host)return;
