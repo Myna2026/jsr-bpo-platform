@@ -26485,6 +26485,7 @@ function ClientAccountsTab({projects, clients, setClients}){
     {key:'arbeitsplan', label:'Optimierungen',       icon:'📋'},
     {key:'wissen',      label:'Wissensdatenbank (Conny fragen)', icon:'💬'},
     {key:'kbchanges',   label:'Wissensänderungen (Freigabe)', icon:'✅'},
+    {key:'coach',       label:'Training (Coach-Entwicklung)', icon:'🎓'},
   ];
 
   function newClientTemplate(){
@@ -41672,6 +41673,93 @@ const KB_CSS = `
 .kbc-rueck b{color:color-mix(in srgb, var(--acc) 70%, #334155);display:block;font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px}
 .kbc-err{margin-top:22px;padding:16px 18px;border-radius:16px;background:rgba(220,38,38,.07);border:1px solid rgba(220,38,38,.32);color:#b91c1c;font-size:14px}
 `;
+// ── Coach im HR-Portal (S5): Entwicklung je Mitarbeiter, Team-Lücken je Thema, gemeldete Fragen, Fragenbank pflegen. ──
+// Liest coach_sessions/coach_answers/coach_questions über die internen RLS-Policies (Bereich 'wissen').
+function CoachAdmin({partner, partnerName, canEdit, showToast}){
+  const [days,setDays]=React.useState(30);
+  const [data,setData]=React.useState(null);      // {sessions, answers, questions, emps}
+  const [tab,setTab]=React.useState('entwicklung');
+  const [qFilter,setQFilter]=React.useState({kind:'', status:'active', q:''});
+  const [busy,setBusy]=React.useState('');
+  const load=async()=>{ setData(null); try{
+    const since=new Date(Date.now()-days*864e5).toISOString();
+    const [s,a,q,e]=await Promise.all([
+      sbLoadAll((a,b)=>sb.from('coach_sessions').select('id,employee_id,settings,score,points,max_points,topic_scores,started_at,finished_at,status').eq('project_id',partner).eq('status','done').gte('finished_at',since).order('finished_at',{ascending:false}).range(a,b)),
+      sbLoadAll((a,b)=>sb.from('coach_answers').select('id,session_id,question_id,employee_id,kind,topic,answer,points,feedback,flagged,flag_note,flag_resolved_at,answered_at').eq('project_id',partner).gte('answered_at',since).range(a,b)),
+      sbLoadAll((a,b)=>sb.from('coach_questions').select('id,kind,difficulty,topic,zielgebiet,prompt,status,gen_by,source_label,created_at').eq('project_id',partner).range(a,b)),
+      sb.from('employees_masked_lite').select('id,first_name,last_name,status').eq('project_id',partner).then(r=>r.data||[]).catch(()=>[]),
+    ]);
+    setData({sessions:s||[],answers:a||[],questions:q||[],emps:e||[]});
+  }catch(err){ setData({sessions:[],answers:[],questions:[],emps:[],error:(err&&err.message)||String(err)}); } };
+  React.useEffect(()=>{ if(partner) load(); },[partner,days]);
+  const empName=id=>{ const e=(data&&data.emps||[]).find(x=>x.id===id); return e?((e.first_name||'')+' '+(e.last_name||'')).trim():'Mitarbeiter'; };
+  const pct=(p,m)=>m?Math.round(p/m*100):null;
+  const col=v=>v==null?'var(--muted)':v>=80?'#059669':v>=60?'#d97706':'#dc2626';
+  const fmtD=ts=>{ const d=new Date(ts); return d.toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit'}); };
+  const blockQ=async(q,st)=>{ setBusy(q.id); try{ const {error}=await sb.from('coach_questions').update({status:st,updated_at:new Date().toISOString()}).eq('id',q.id); if(error) throw error; showToast&&showToast(st==='blocked'?'Frage gesperrt':'Frage wieder aktiv'); await load(); }catch(e){ showToast&&showToast('Fehlgeschlagen: '+((e&&e.message)||e),'error'); } setBusy(''); };
+  const resolveFlag=async(a)=>{ setBusy(a.id); try{ const {error}=await sb.from('coach_answers').update({flag_resolved_at:new Date().toISOString()}).eq('id',a.id); if(error) throw error; await load(); }catch(e){ showToast&&showToast('Fehlgeschlagen: '+((e&&e.message)||e),'error'); } setBusy(''); };
+  if(!data) return <div style={{padding:16,color:'var(--muted)',fontSize:13}}>Lädt…</div>;
+  const {sessions,answers,questions}=data;
+  // Entwicklung je Mitarbeiter
+  const byEmp={}; sessions.forEach(s=>{ (byEmp[s.employee_id]=byEmp[s.employee_id]||[]).push(s); });
+  const empRows=Object.keys(byEmp).map(id=>{ const ss=byEmp[id].slice().sort((a,b)=>String(a.finished_at).localeCompare(String(b.finished_at))); const tot=ss.reduce((a,s)=>({p:a.p+Number(s.points||0),m:a.m+Number(s.max_points||0)}),{p:0,m:0});
+    const half=Math.floor(ss.length/2); const first=ss.slice(0,half), last=ss.slice(half); const avg=arr=>{ const t=arr.reduce((a,s)=>({p:a.p+Number(s.points||0),m:a.m+Number(s.max_points||0)}),{p:0,m:0}); return pct(t.p,t.m); };
+    const topics={}; ss.forEach(s=>{ Object.entries(s.topic_scores||{}).forEach(([t,v])=>{ const x=topics[t]=topics[t]||{p:0,m:0}; x.p+=Number(v.points||0); x.m+=Number(v.max||0); }); });
+    const weak=Object.entries(topics).filter(([,v])=>v.m>=2).map(([t,v])=>[t,pct(v.p,v.m)]).sort((a,b)=>a[1]-b[1]).slice(0,3);
+    return {id,name:empName(id),n:ss.length,pct:pct(tot.p,tot.m),trend:(first.length&&last.length)?(avg(last)-avg(first)):null,last:ss[ss.length-1].finished_at,weak,series:ss.slice(-12).map(s=>Math.round((s.score||0)*100))}; }).sort((a,b)=>a.name.localeCompare(b.name,'de'));
+  // Team-Lücken je Thema (aus Antworten, Team-Schnitt)
+  const byTopic={}; answers.forEach(a=>{ const t=byTopic[a.topic]=byTopic[a.topic]||{p:0,m:0,n:0,emps:new Set()}; t.p+=Number(a.points||0); t.m+=1; t.n++; t.emps.add(a.employee_id); });
+  const topicRows=Object.entries(byTopic).map(([t,v])=>({t,pct:pct(v.p,v.m),n:v.n,emps:v.emps.size})).filter(r=>r.n>=3).sort((a,b)=>a.pct-b.pct);
+  const flagged=answers.filter(a=>a.flagged).sort((a,b)=>(a.flag_resolved_at?1:0)-(b.flag_resolved_at?1:0)||String(b.answered_at).localeCompare(String(a.answered_at)));
+  const qById=id=>questions.find(q=>q.id===id);
+  const qStats={active:questions.filter(q=>q.status==='active').length,blocked:questions.filter(q=>q.status==='blocked'&&q.source_label!=='(kein Stoff)').length,stale:questions.filter(q=>q.status==='stale').length};
+  const qList=questions.filter(q=>q.source_label!=='(kein Stoff)'&&(!qFilter.status||q.status===qFilter.status)&&(!qFilter.kind||q.kind===qFilter.kind)&&(!qFilter.q||(q.prompt+' '+q.topic).toLowerCase().includes(qFilter.q.toLowerCase()))).slice(0,80);
+  const KIND={mc:'Auswahl',gap:'Eintippen',match:'Zuordnung',order:'Reihenfolge',free:'Situation'};
+  const Spark=({v})=>{ if(!v||v.length<2) return null; const w=90,h=22; const pts=v.map((x,i)=>(i/(v.length-1)*w).toFixed(1)+','+(h-2-(x/100)*(h-4)).toFixed(1)).join(' '); return <svg width={w} height={h}><polyline points={pts} fill="none" stroke="#0F5661" strokeWidth="1.5"/></svg>; };
+  const card={background:'var(--card)',border:'1px solid var(--border)',borderRadius:12,padding:16,marginBottom:14};
+  return <div>
+    <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap',marginBottom:14}}>
+      {[['entwicklung','Entwicklung'],['luecken','Team-Lücken'],['meldungen','Meldungen'+(flagged.filter(f=>!f.flag_resolved_at).length?' ('+flagged.filter(f=>!f.flag_resolved_at).length+')':'')],['bank','Fragenbank']].map(([k,l])=><button key={k} className={'btn btn-sm'+(tab===k?' btn-primary':'')} onClick={()=>setTab(k)}>{l}</button>)}
+      <span style={{marginLeft:'auto',display:'flex',gap:4}}>{[[7,'7 Tage'],[30,'30 Tage'],[90,'90 Tage']].map(([d,l])=><button key={d} className={'btn btn-sm'+(days===d?' btn-primary':'')} onClick={()=>setDays(d)}>{l}</button>)}</span>
+    </div>
+    {data.error&&<div style={{...card,color:'#b91c1c'}}>Laden fehlgeschlagen: {data.error}</div>}
+    {tab==='entwicklung'&&<div style={card}>
+      <div style={{display:'flex',gap:20,flexWrap:'wrap',marginBottom:12}}>{[[sessions.length,'Einheiten'],[empRows.length,'Mitarbeiter geübt'],[answers.length,'Antworten'],[pct(answers.reduce((a,x)=>a+Number(x.points||0),0),answers.length)==null?'—':pct(answers.reduce((a,x)=>a+Number(x.points||0),0),answers.length)+' %','Team-Schnitt']].map(([v,l])=><div key={l}><div style={{fontSize:22,fontWeight:800,fontFamily:'var(--font-mono)'}}>{v}</div><div style={{fontSize:10.5,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em'}}>{l}</div></div>)}</div>
+      {empRows.length===0?<div style={{color:'var(--muted)',fontSize:13}}>Noch keine Einheiten bei {partnerName} im Zeitraum.</div>:
+      <table className="table" style={{width:'100%',fontSize:12.5}}><thead><tr><th style={{textAlign:'left'}}>Mitarbeiter</th><th style={{textAlign:'right'}}>Einheiten</th><th style={{textAlign:'right'}}>Schnitt</th><th>Verlauf</th><th style={{textAlign:'right'}}>Trend</th><th style={{textAlign:'left'}}>Schwächste Themen</th><th style={{textAlign:'right'}}>Zuletzt</th></tr></thead>
+        <tbody>{empRows.map(r=><tr key={r.id}><td style={{fontWeight:600}}>{r.name}</td><td style={{textAlign:'right',fontFamily:'var(--font-mono)'}}>{r.n}</td><td style={{textAlign:'right',fontFamily:'var(--font-mono)',fontWeight:800,color:col(r.pct)}}>{r.pct==null?'—':r.pct+' %'}</td><td><Spark v={r.series}/></td><td style={{textAlign:'right',fontFamily:'var(--font-mono)',fontWeight:700,color:r.trend==null?'var(--muted)':r.trend>=0?'#059669':'#dc2626'}}>{r.trend==null?'—':(r.trend>0?'+':'')+r.trend+' Pp'}</td><td style={{fontSize:12}}>{r.weak.map(([t,p])=><span key={t} style={{display:'inline-block',marginRight:6,padding:'1px 7px',borderRadius:6,background:'var(--surface-2)',color:col(p)}}>{t} {p} %</span>)}</td><td style={{textAlign:'right',color:'var(--muted)'}}>{fmtD(r.last)}</td></tr>)}</tbody></table>}
+    </div>}
+    {tab==='luecken'&&<div style={card}>
+      <div style={{fontSize:12,color:'var(--muted)',marginBottom:10}}>Team-Schnitt je Thema über alle Antworten (mindestens 3). Unten steht, was das Team noch nicht sicher kann; das gehört in die nächste Schulung oder ins Register.</div>
+      {topicRows.length===0?<div style={{color:'var(--muted)',fontSize:13}}>Noch zu wenige Antworten.</div>:
+      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(300px,1fr))',gap:'6px 24px'}}>{topicRows.map(r=><div key={r.t} style={{display:'flex',alignItems:'center',gap:10,fontSize:12.5}}><div style={{flex:1,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={r.t}>{r.t} <span style={{color:'var(--muted)'}}>· {r.n} Antw. · {r.emps} MA</span></div><div style={{width:120,height:8,borderRadius:4,background:'#eef2f4',overflow:'hidden'}}><div style={{width:r.pct+'%',height:'100%',background:col(r.pct)}}/></div><div style={{width:46,textAlign:'right',fontFamily:'var(--font-mono)',fontWeight:800,color:col(r.pct)}}>{r.pct} %</div></div>)}</div>}
+    </div>}
+    {tab==='meldungen'&&<div style={card}>
+      <div style={{fontSize:12,color:'var(--muted)',marginBottom:10}}>Mitarbeiter haben diese Fragen als unklar oder falsch gemeldet. Prüfen, bei Bedarf die Frage sperren, dann als erledigt markieren.</div>
+      {flagged.length===0?<div style={{color:'var(--muted)',fontSize:13}}>Keine Meldungen.</div>:flagged.map(a=>{ const q=qById(a.question_id); return <div key={a.id} style={{borderTop:'1px solid var(--border)',padding:'10px 0',opacity:a.flag_resolved_at?.55:1}}>
+        <div style={{fontSize:11,color:'var(--muted)'}}>{fmtD(a.answered_at)} · {empName(a.employee_id)} · {q?KIND[q.kind]+' · '+q.topic:''}{a.flag_resolved_at?' · erledigt':''}</div>
+        <div style={{fontSize:13,fontWeight:600,marginTop:2}}>{q?q.prompt:'(Frage nicht mehr vorhanden)'}</div>
+        {a.flag_note&&<div style={{fontSize:12.5,marginTop:3,padding:'6px 9px',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:7}}>„{a.flag_note}“</div>}
+        <div style={{fontSize:11.5,color:'var(--muted)',marginTop:3}}>Antwort des MA: {JSON.stringify(a.answer)} · {Math.round(Number(a.points||0)*100)} %{q?' · Quelle: '+q.source_label:''}</div>
+        {canEdit&&!a.flag_resolved_at&&<div style={{display:'flex',gap:6,marginTop:6}}>{q&&q.status==='active'&&<button className="btn btn-sm" disabled={busy===q.id} onClick={()=>blockQ(q,'blocked')}>Frage sperren</button>}<button className="btn btn-sm" disabled={busy===a.id} onClick={()=>resolveFlag(a)}>Erledigt</button></div>}
+      </div>; })}
+    </div>}
+    {tab==='bank'&&<div style={card}>
+      <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:10,fontSize:12.5}}><span><b>{qStats.active}</b> aktiv</span><span><b>{qStats.blocked}</b> gesperrt</span><span><b>{qStats.stale}</b> veraltet (werden nachts erneuert)</span></div>
+      <div style={{display:'flex',gap:6,flexWrap:'wrap',marginBottom:10}}>
+        <select className="form-select" style={{width:'auto'}} value={qFilter.status} onChange={e=>setQFilter({...qFilter,status:e.target.value})}><option value="active">aktiv</option><option value="blocked">gesperrt</option><option value="stale">veraltet</option><option value="">alle</option></select>
+        <select className="form-select" style={{width:'auto'}} value={qFilter.kind} onChange={e=>setQFilter({...qFilter,kind:e.target.value})}><option value="">alle Arten</option>{Object.entries(KIND).map(([k,l])=><option key={k} value={k}>{l}</option>)}</select>
+        <input className="form-input" style={{flex:'1 1 200px'}} placeholder="Frage oder Thema suchen…" value={qFilter.q} onChange={e=>setQFilter({...qFilter,q:e.target.value})}/>
+      </div>
+      {qList.map(q=><div key={q.id} style={{borderTop:'1px solid var(--border)',padding:'8px 0',display:'flex',gap:10,alignItems:'flex-start'}}>
+        <div style={{flex:1,minWidth:0}}><div style={{fontSize:11,color:'var(--muted)'}}>{KIND[q.kind]} · {q.difficulty} · {q.topic}{q.zielgebiet?' · '+q.zielgebiet:''} · {q.gen_by==='ai'?'KI':'Regel'}</div><div style={{fontSize:13,fontWeight:600}}>{q.prompt}</div><div style={{fontSize:11,color:'var(--muted)'}}>Quelle: {q.source_label}</div></div>
+        {canEdit&&(q.status==='active'?<button className="btn btn-sm" disabled={busy===q.id} onClick={()=>blockQ(q,'blocked')}>Sperren</button>:q.status==='blocked'?<button className="btn btn-sm" disabled={busy===q.id} onClick={()=>blockQ(q,'active')}>Freigeben</button>:null)}
+      </div>)}
+      {qList.length>=80&&<div style={{fontSize:12,color:'var(--muted)',marginTop:8}}>Nur die ersten 80 Treffer, bitte enger suchen.</div>}
+    </div>}
+  </div>;
+}
+
 function WissensspeicherView({projects, team, showToast}){
   const pw=(team&&team.perms&&team.perms.wissen)||{};
   const canEdit=pw.mode==='edit';
@@ -41984,7 +42072,7 @@ function WissensspeicherView({projects, team, showToast}){
 
     {/* Unter-Tabs */}
     <div style={{display:'flex',gap:6,marginBottom:14,borderBottom:'1px solid var(--border)'}}>
-      {[['ask','Fragen'],['register','Register'],['docs','Dokumente'],['gaps','Lücken']].concat(isMgmt?[['agent','Vollansicht']]:[]).map(([k,l])=>{ const on=mode===k;
+      {[['ask','Fragen'],['register','Register'],['docs','Dokumente'],['gaps','Lücken'],['coach','Coach']].concat(isMgmt?[['agent','Vollansicht']]:[]).map(([k,l])=>{ const on=mode===k;
         return <button key={k} onClick={()=>{setMode(k);setEditF(null);}} style={{padding:'8px 14px',border:'none',borderBottom:'2px solid '+(on?'var(--accent,#0F5661)':'transparent'),background:'none',cursor:'pointer',color:on?'var(--text)':'var(--muted)',fontWeight:on?800:500,fontSize:13.5}}>{l}</button>; })}
     </div>
 
@@ -42266,6 +42354,7 @@ function WissensspeicherView({projects, team, showToast}){
     </div>
     </React.Fragment>}
 
+    {mode==='coach'&&partner&&<CoachAdmin partner={partner} partnerName={partnerName(partner)} canEdit={canEdit} showToast={showToast}/>}
     {/* Lücken & Rückmeldungen (Lern-Mechanik): das System merkt sich Fragen, damit Menschen das Register pflegen */}
     {mode==='gaps'&&<div>
       <div style={{fontSize:12,color:'var(--muted)',marginBottom:12}}>Das System merkt sich Fragen und Rückmeldungen, damit ihr seht, was ins Register gehört. Die KI lernt daraus nicht von selbst, besser wird der Speicher durch eure Pflege.</div>

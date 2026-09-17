@@ -2239,6 +2239,52 @@ function ForcePasswordChangeC({onDone,onCancel}){
     </div>
   </div>;
 }
+// ── Training (Kunde, S6): Entwicklung je Mitarbeiter und Themenlücken des Teams. Nur Einheiten-Kopfdaten (coach_sessions,
+// RLS eigenes Projekt), KEINE Antworten, keine Freitexte, keine Wörtlichkeit (User 2026-09-18). Nur ansehen.
+function CoachClientView({client}){
+  const [days,setDays]=useState(30); const [rows,setRows]=useState(null); const [team,setTeam]=useState([]);
+  useEffect(()=>{ let alive=true; (async()=>{ setRows(null); try{
+      const since=new Date(Date.now()-days*864e5).toISOString();
+      const {data}=await sb.from('coach_sessions').select('id,employee_id,settings,score,points,max_points,topic_scores,finished_at').eq('status','done').gte('finished_at',since).order('finished_at',{ascending:false});
+      const tm=await loadEmployeesForClient(client&&client.project_id);
+      if(alive){ setRows(data||[]); setTeam(tm||[]); }
+    }catch(e){ if(alive) setRows([]); } })(); return ()=>{ alive=false; }; },[client&&client.project_id,days]);
+  const name=id=>{ const e=team.find(x=>x.id===id); return e?((e.first_name||'')+' '+(e.last_name||'')).trim():'Mitarbeiter'; };
+  const pct=(p,m)=>m?Math.round(p/m*100):null; const col=v=>v==null?'#94a3b8':v>=80?'#059669':v>=60?'#d97706':'#dc2626';
+  const fmtD=ts=>new Date(ts).toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit'});
+  const ss=rows||[];
+  const byEmp={}; ss.forEach(s=>{ (byEmp[s.employee_id]=byEmp[s.employee_id]||[]).push(s); });
+  const empRows=Object.keys(byEmp).map(id=>{ const list=byEmp[id].slice().sort((a,b)=>String(a.finished_at).localeCompare(String(b.finished_at))); const tot=list.reduce((a,s)=>({p:a.p+Number(s.points||0),m:a.m+Number(s.max_points||0)}),{p:0,m:0});
+    const half=Math.floor(list.length/2); const avg=arr=>{ const t=arr.reduce((a,s)=>({p:a.p+Number(s.points||0),m:a.m+Number(s.max_points||0)}),{p:0,m:0}); return pct(t.p,t.m); }; const trend=(half>0)?(avg(list.slice(half))-avg(list.slice(0,half))):null;
+    const topics={}; list.forEach(s=>{ Object.entries(s.topic_scores||{}).forEach(([t,v])=>{ const x=topics[t]=topics[t]||{p:0,m:0}; x.p+=Number(v.points||0); x.m+=Number(v.max||0); }); });
+    const weak=Object.entries(topics).filter(([,v])=>v.m>=2).map(([t,v])=>[t,pct(v.p,v.m)]).sort((a,b)=>a[1]-b[1]).slice(0,3);
+    return {id,name:name(id),n:list.length,pct:pct(tot.p,tot.m),trend,last:list[list.length-1].finished_at,weak,series:list.slice(-12).map(s=>Math.round((s.score||0)*100))}; }).sort((a,b)=>a.name.localeCompare(b.name,'de'));
+  const topics={}; ss.forEach(s=>{ Object.entries(s.topic_scores||{}).forEach(([t,v])=>{ const x=topics[t]=topics[t]||{p:0,m:0,emps:new Set()}; x.p+=Number(v.points||0); x.m+=Number(v.max||0); x.emps.add(s.employee_id); }); });
+  const topicRows=Object.entries(topics).map(([t,v])=>({t,pct:pct(v.p,v.m),m:v.m,emps:v.emps.size})).filter(r=>r.m>=3).sort((a,b)=>a.pct-b.pct);
+  const total=ss.reduce((a,s)=>({p:a.p+Number(s.points||0),m:a.m+Number(s.max_points||0)}),{p:0,m:0});
+  const Spark=({v})=>{ if(!v||v.length<2) return null; const w=90,h=22; const pts=v.map((x,i)=>(i/(v.length-1)*w).toFixed(1)+','+(h-2-(x/100)*(h-4)).toFixed(1)).join(' '); return <svg width={w} height={h}><polyline points={pts} fill="none" stroke="#0F5661" strokeWidth="1.5"/></svg>; };
+  return <div>
+    <div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap',marginBottom:14}}>
+      <span style={{fontSize:12.5,color:'#64748b',flex:'1 1 320px'}}>Ihr Team übt mit dem Coach aus Ihrer Wissensdatenbank. Sie sehen die Entwicklung je Mitarbeiter und die Themen, die das Team noch nicht sicher kann. Einzelne Antworten sind nicht einsehbar.</span>
+      {[[7,'7 Tage'],[30,'30 Tage'],[90,'90 Tage']].map(([d,l])=><button key={d} onClick={()=>setDays(d)} style={{padding:'6px 12px',borderRadius:8,border:'1px solid #cbd5e1',background:days===d?'#0f172a':'#fff',color:days===d?'#fff':'#0f172a',fontWeight:700,cursor:'pointer',fontSize:12}}>{l}</button>)}
+    </div>
+    {rows===null?<div className="card"><div className="card-body" style={{color:'#64748b'}}>Lade…</div></div>:<React.Fragment>
+      <div className="card" style={{marginBottom:14}}><div className="card-body" style={{display:'flex',gap:28,flexWrap:'wrap'}}>
+        {[[ss.length,'Einheiten'],[empRows.length,'Mitarbeiter aktiv'],[total.m?pct(total.p,total.m)+' %':'—','Team-Schnitt']].map(([v,l])=><div key={l}><div style={{fontSize:26,fontWeight:800,fontFamily:'var(--mono,ui-monospace,monospace)',color:'#0f172a'}}>{v}</div><div style={{fontSize:10.5,fontWeight:700,color:'#64748b',textTransform:'uppercase',letterSpacing:'.05em'}}>{l}</div></div>)}
+      </div></div>
+      <div className="card" style={{marginBottom:14}}><div className="card-header"><span className="card-title">Entwicklung je Mitarbeiter</span></div>
+        {empRows.length===0?<div className="card-body" style={{color:'#64748b'}}>Im Zeitraum wurde noch nicht geübt.</div>:
+        <div style={{overflowX:'auto'}}><table style={{width:'100%',fontSize:13}}><thead><tr><th style={{textAlign:'left'}}>Mitarbeiter</th><th style={{textAlign:'right'}}>Einheiten</th><th style={{textAlign:'right'}}>Schnitt</th><th>Verlauf</th><th style={{textAlign:'right'}}>Trend</th><th style={{textAlign:'left'}}>Übt noch</th><th style={{textAlign:'right'}}>Zuletzt</th></tr></thead>
+          <tbody>{empRows.map(r=><tr key={r.id}><td style={{fontWeight:600}}>{r.name}</td><td style={{textAlign:'right'}}>{r.n}</td><td style={{textAlign:'right',fontWeight:800,color:col(r.pct)}}>{r.pct==null?'—':r.pct+' %'}</td><td><Spark v={r.series}/></td><td style={{textAlign:'right',fontWeight:700,color:r.trend==null?'#94a3b8':r.trend>=0?'#059669':'#dc2626'}}>{r.trend==null?'—':(r.trend>0?'+':'')+r.trend+' Pp'}</td><td>{r.weak.map(([t,p])=><span key={t} style={{display:'inline-block',margin:'1px 6px 1px 0',padding:'1px 7px',borderRadius:6,background:'#f1f5f9',color:col(p),fontSize:12}}>{t} {p} %</span>)}</td><td style={{textAlign:'right',color:'#64748b'}}>{fmtD(r.last)}</td></tr>)}</tbody></table></div>}
+      </div>
+      <div className="card"><div className="card-header"><span className="card-title">Themen, die das Team noch nicht sicher kann</span></div>
+        <div className="card-body">{topicRows.length===0?<div style={{color:'#64748b'}}>Noch zu wenige Einheiten.</div>:
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(300px,1fr))',gap:'6px 24px'}}>{topicRows.map(r=><div key={r.t} style={{display:'flex',alignItems:'center',gap:10,fontSize:13}}><div style={{flex:1,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={r.t}>{r.t} <span style={{color:'#94a3b8'}}>· {r.emps} MA</span></div><div style={{width:120,height:8,borderRadius:4,background:'#eef2f4',overflow:'hidden'}}><div style={{width:r.pct+'%',height:'100%',background:col(r.pct)}}/></div><div style={{width:46,textAlign:'right',fontWeight:800,color:col(r.pct)}}>{r.pct} %</div></div>)}</div>}
+        </div></div>
+    </React.Fragment>}
+  </div>;
+}
+
 function KbChangesView({client}){
   const [rows,setRows]=useState(null); const [busy,setBusy]=useState(''); const [showDone,setShowDone]=useState(false);
   const [docs,setDocs]=useState({}); const [note,setNote]=useState({}); const [corr,setCorr]=useState({});   // corr: vom Kunden eingetippter Wert je Vorschlag
@@ -2890,6 +2936,7 @@ function App(){
     try{ const {data}=await sb.from('presentations').select('id').eq('published',true).limit(1); if(!(data&&data.length)) empty.add('reports'); }catch(e){ empty.add('reports'); }
     try{ const {data}=await sb.rpc('list_my_showcases'); if(!(Array.isArray(data)&&data.length)) empty.add('showcases'); }catch(e){ empty.add('showcases'); }
     if(!((INVOICES[client.project_id]||[]).length)) empty.add('invoices');
+    try{ const {count}=await sb.from('coach_questions').select('id',{count:'exact',head:true}).eq('status','active'); if(!count) empty.add('coach'); }catch(e){ empty.add('coach'); }
     if(alive){ setEmptyTabs(empty); if(empty.has(view)) setView('overview'); } })(); return ()=>{ alive=false; }; },[client&&client.id]);
   const [kbOpen,setKbOpen]=useState(0); const [kbOld,setKbOld]=useState(false);   // offene Wissensänderungen (Zähler am Menüpunkt, rot ab 7 Tagen)
   useEffect(()=>{ if(!client) return; let alive=true; const calc=async()=>{ try{ const {data}=await sb.from('kb_fact_changes').select('proposed_at').eq('status','open'); if(!alive) return; const rows=data||[]; setKbOpen(rows.length); setKbOld(rows.some(r=>(Date.now()-new Date(r.proposed_at).getTime())>7*864e5)); }catch(e){} };
@@ -2979,6 +3026,7 @@ function App(){
     {key:'arbeitsplan',label:'Optimierungen',       icon:'📋', tab:'arbeitsplan'},
     {key:'wissen',    label:'Wissensdatenbank',     icon:'💬', tab:'wissen'},
     {key:'kbchanges', label:'Wissensänderungen',    icon:'✅', tab:'kbchanges'},
+    {key:'coach',     label:'Training',             icon:'🎓', tab:'coach'},
     {key:'training',  label:'Schulungen',           icon:'📚', tab:'training'},
     {key:'calendar',  label:'Termine & Kalender',   icon:'⊣', tab:'calendar'},
     {key:'documents', label:'Dokumente',            icon:'📁', tab:'documents'},
@@ -3007,6 +3055,7 @@ function App(){
       'showcases':'<path fill-rule="evenodd" d="M10.788 3.21c.448-1.077 1.976-1.077 2.424 0l2.082 5.006 5.404.434c1.164.093 1.636 1.545.749 2.305l-4.117 3.527 1.257 5.273c.271 1.136-.964 2.033-1.96 1.425L12 18.354 7.373 21.18c-.996.608-2.231-.29-1.96-1.425l1.257-5.273-4.117-3.527c-.887-.76-.415-2.212.749-2.305l5.404-.434 2.082-5.005Z" clip-rule="evenodd"/>',
       'reports':'<path d="M18.375 2.25c-1.035 0-1.875.84-1.875 1.875v15.75c0 1.035.84 1.875 1.875 1.875h.75c1.035 0 1.875-.84 1.875-1.875V4.125c0-1.036-.84-1.875-1.875-1.875h-.75ZM9.75 8.625c0-1.036.84-1.875 1.875-1.875h.75c1.036 0 1.875.84 1.875 1.875v11.25c0 1.035-.84 1.875-1.875 1.875h-.75a1.875 1.875 0 0 1-1.875-1.875V8.625ZM3 13.125c0-1.036.84-1.875 1.875-1.875h.75c1.036 0 1.875.84 1.875 1.875v6.75c0 1.035-.84 1.875-1.875 1.875h-.75A1.875 1.875 0 0 1 3 19.875v-6.75Z"/>',
       'wissen':'<path fill-rule="evenodd" d="M4.804 21.644A6.707 6.707 0 0 0 6 21.75a6.721 6.721 0 0 0 3.583-1.029c.774.182 1.584.279 2.417.279 5.322 0 9.75-3.97 9.75-9 0-5.03-4.428-9-9.75-9s-9.75 3.97-9.75 9c0 2.409 1.025 4.587 2.674 6.192.232.226.277.428.254.543a3.73 3.73 0 0 1-.814 1.686.75.75 0 0 0 .44 1.223ZM8.25 10.875a1.125 1.125 0 1 0 0 2.25 1.125 1.125 0 0 0 0-2.25ZM10.875 12a1.125 1.125 0 1 1 2.25 0 1.125 1.125 0 0 1-2.25 0Zm4.875-1.125a1.125 1.125 0 1 0 0 2.25 1.125 1.125 0 0 0 0-2.25Z" clip-rule="evenodd"/>',
+      'coach':'<path d="M11.7 2.805a.75.75 0 0 1 .6 0A60.65 60.65 0 0 1 22.83 8.72a.75.75 0 0 1-.231 1.337 49.948 49.948 0 0 0-9.902 3.912l-.003.002c-.114.06-.227.119-.34.18a.75.75 0 0 1-.707 0A50.88 50.88 0 0 0 7.5 12.173v-.224c0-.131.067-.248.172-.311a54.615 54.615 0 0 1 4.653-2.52.75.75 0 0 0-.65-1.352 56.123 56.123 0 0 0-4.78 2.589 1.858 1.858 0 0 0-.859 1.228 49.803 49.803 0 0 0-4.634-1.527.75.75 0 0 1-.231-1.337A60.653 60.653 0 0 1 11.7 2.805Z"/><path d="M13.06 15.473a48.45 48.45 0 0 1 7.666-3.282c.134 1.414.22 2.843.255 4.285a.75.75 0 0 1-.46.711 47.87 47.87 0 0 0-8.105 4.342.75.75 0 0 1-.832 0 47.87 47.87 0 0 0-8.104-4.342.75.75 0 0 1-.461-.71c.035-1.442.121-2.87.255-4.286.921.304 1.83.634 2.726.99v1.27a1.5 1.5 0 0 0-.14 2.508c-.09.38-.222.753-.397 1.11.452.213.901.434 1.346.66a6.727 6.727 0 0 0 .551-1.607 1.5 1.5 0 0 0 .14-2.67v-.645a48.549 48.549 0 0 1 3.44 1.667 2.25 2.25 0 0 0 2.12 0Z"/>',
       'kbchanges':'<path fill-rule="evenodd" d="M8.603 3.799A4.49 4.49 0 0 1 12 2.25c1.357 0 2.573.6 3.397 1.549a4.49 4.49 0 0 1 3.498 1.307 4.491 4.491 0 0 1 1.307 3.497A4.49 4.49 0 0 1 21.75 12a4.49 4.49 0 0 1-1.549 3.397 4.491 4.491 0 0 1-1.307 3.497 4.491 4.491 0 0 1-3.497 1.307A4.49 4.49 0 0 1 12 21.75a4.49 4.49 0 0 1-3.397-1.549 4.49 4.49 0 0 1-3.498-1.306 4.491 4.491 0 0 1-1.307-3.498A4.49 4.49 0 0 1 2.25 12c0-1.357.6-2.573 1.549-3.397a4.49 4.49 0 0 1 1.307-3.497 4.49 4.49 0 0 1 3.497-1.307Zm7.007 6.387a.75.75 0 1 0-1.22-.872l-3.236 4.53L9.53 12.22a.75.75 0 0 0-1.06 1.06l2.25 2.25a.75.75 0 0 0 1.14-.094l3.75-5.25Z" clip-rule="evenodd"/>',
       'arbeitsplan':'<path fill-rule="evenodd" d="M7.502 6h7.128A3.375 3.375 0 0 1 18 9.375v9.375a3 3 0 0 0 3-3V6.108c0-1.505-1.125-2.811-2.664-2.94a48.972 48.972 0 0 0-.673-.05A3 3 0 0 0 15 1.5h-1.5a3 3 0 0 0-2.663 1.618c-.225.015-.45.032-.673.05C8.662 3.295 7.554 4.542 7.502 6ZM13.5 3A1.5 1.5 0 0 0 12 4.5h4.5A1.5 1.5 0 0 0 15 3h-1.5Z" clip-rule="evenodd"/><path fill-rule="evenodd" d="M3 9.375C3 8.339 3.84 7.5 4.875 7.5h9.75c1.036 0 1.875.84 1.875 1.875v11.25c0 1.035-.84 1.875-1.875 1.875h-9.75A1.875 1.875 0 0 1 3 20.625V9.375Zm9.586 4.594a.75.75 0 0 0-1.172-.938l-2.476 3.096-.908-.907a.75.75 0 0 0-1.06 1.06l1.5 1.5a.75.75 0 0 0 1.116-.062l3-3.75Z" clip-rule="evenodd"/>'
     };
@@ -3071,6 +3120,7 @@ function App(){
             {view==='arbeitsplan'&&<span style={{display:'inline-flex',alignItems:'center',gap:7}}>📋 Optimierungen</span>}
             {view==='kbchanges'&&<span style={{display:'inline-flex',alignItems:'center',gap:7}}>✅ Wissensänderungen</span>}
             {view==='wissen'&&<span style={{display:'inline-flex',alignItems:'center',gap:7}}>💬 Wissensdatenbank</span>}
+            {view==='coach'&&<span style={{display:'inline-flex',alignItems:'center',gap:7}}>🎓 Training</span>}
           </span>
           <span className="topbar-badge">{client.project}</span>
           <div style={{marginLeft:'auto',fontSize:12,color:'var(--muted)'}}>
@@ -3090,6 +3140,7 @@ function App(){
           {view==='arbeitsplan'&&<ClientPlanView client={client}/>}
           {view==='kbchanges'&&<KbChangesView client={client}/>}
           {view==='wissen'&&<KbConnyView client={client}/>}
+          {view==='coach'&&<CoachClientView client={client}/>}
           {view==='reports'&&<ReportsView client={client}/>}
         </div>
       </div>
