@@ -88,8 +88,12 @@ function factLine(f: any): string {
   const head = f.topic + (f.zielgebiet ? " / " + f.zielgebiet : "") + (q ? " (" + q + ")" : "");
   return "- [" + head + "] " + f.label + ": " + f.value + gil + "  (Quelle: " + src + loc + ")";
 }
+// Dokumentart sichtbar machen: Coaching-Wissen (Schulungsunterlage) getrennt von Zielgebiets- und Ablaufinfos, damit Conny
+// die Quelle einordnet („aus der Schulungsunterlage“) und bei Gesprächsführungs-Fragen den Leitfaden bevorzugt.
+const KIND_LABEL: Record<string, string> = { coaching: "Schulungsunterlage", zielgebiet: "Zielgebiet", faq: "FAQ", ablauf: "Ablauf", agb: "AGB", produkt: "Produkt" };
 function chunkLine(c: any): string {
-  return "- [" + (c.doc_title || "Dokument") + (c.section ? " / " + c.section : "") + "] " + String(c.content || "").slice(0, 800);
+  const kind = c.doc_kind && KIND_LABEL[c.doc_kind] ? KIND_LABEL[c.doc_kind] + ": " : "";
+  return "- [" + kind + (c.doc_title || "Dokument") + (c.section ? " / " + c.section : "") + (c.page ? ", S. " + c.page : "") + "] " + String(c.content || "").slice(0, 800);
 }
 function relatedLine(f: any): string {
   const head = f.topic + (f.zielgebiet ? " / " + f.zielgebiet : "");
@@ -121,13 +125,22 @@ function buildOverview(question: string, facts: any[], overview: any[], overview
   // Direkter Treffer: ein Stichwort benennt ein Thema (\"Transfer\", \"Notfallnummer\", \"Storno\") → die passenden Fakten
   // direkt zeigen statt nur aufzuzählen. Präfix-Vergleich auf Thema und Bezeichnung, ohne Diakritika.
   const score = (f: any) => { const t = norm(String(f.topic || "")), l = norm(String(f.label || "")); let best = 0;
-    for (const w of qWords) { if (t.startsWith(w)) best = Math.max(best, 3); else if (t.includes(w)) best = Math.max(best, 2); else if (l.includes(w)) best = Math.max(best, 1); }
+    for (const w of qWords) { if (t.startsWith(w)) best += 3; else if (t.includes(w)) best += 2; else if (l.includes(w)) best += 1; }   // Summe: mehr abgedeckte Stichworte = besser
     return best; };
   const seen = new Set<string>();
-  const direct = pool.map((f) => ({ f, sc: score(f) })).filter((x) => x.sc > 0).sort((a, b) => b.sc - a.sc)
-    .filter((x) => { const k = norm(String(x.f.value || "")); if (seen.has(k)) return false; seen.add(k); return true; })
-    .slice(0, 6).map((x) => x.f);
-  if (direct.length) {
+  const scored = pool.map((f) => ({ f, sc: score(f) })).filter((x) => x.sc > 0).sort((a, b) => b.sc - a.sc);
+  const direct = scored.filter((x) => { const k = norm(String(x.f.value || "")); if (seen.has(k)) return false; seen.add(k); return true; }).slice(0, 6).map((x) => x.f);
+  const factBest = scored.length ? scored[0].sc : 0;
+  // Dokument-Treffer vorab bewerten: Überschrift (Abschnittsanfang) schlägt einen schwachen Fakten-Treffer (nur Bezeichnung).
+  const chunkScore = (c: any) => { const sec = norm(String(c.section || "")), head = norm(String(c.content || "").slice(0, 160)), body = norm(String(c.content || "")); let best = 0;
+    for (const w of qWords) { if (head.includes(w)) best += 3; else if (sec.includes(w)) best += 2; else if (body.includes(w)) best += 1; }
+    return best; };
+  const chunkRanked = chunks.map((c) => ({ c, sc: chunkScore(c) })).filter((x) => x.sc >= 2).sort((a, b) => b.sc - a.sc);
+  const chunkBest = chunkRanked.length ? chunkRanked[0].sc : 0;
+  // Welcher Weg deckt mehr Stichworte ab? "AVRA Kontakt": Fakten kennen nur "Kontakt", der AVRA-Abschnitt kennt beide → Abschnitt.
+  const coverF = qWords.filter((w) => scored.some((x) => { const t = norm(String(x.f.topic || "")), l = norm(String(x.f.label || "")); return t.includes(w) || l.includes(w); })).length;
+  const coverC = qWords.filter((w) => chunkRanked.slice(0, 3).some((x) => norm(String(x.c.content || "")).includes(w) || norm(String(x.c.section || "")).includes(w))).length;
+  if (direct.length && !(chunkBest >= 3 && (factBest < 3 || coverC > coverF))) {
     const blocks = direct.map((f) => ({ kind: "info", title: String(f.label || f.topic), text: String(f.value || ""), source: f.source === "manual" ? "manuell gepflegt" : (f.source_title || "Register") }));
     const usedTopics = new Set(direct.map((f) => f.topic));
     const others: string[] = [];
@@ -137,6 +150,20 @@ function buildOverview(question: string, facts: any[], overview: any[], overview
       blocks: (luecke ? [{ kind: "info", title: null, text: "Zu \"" + luecke + "\" steht nichts in meinen Unterlagen.", source: null }] : []).concat(blocks),
       related: others.slice(0, 4).map((t) => ({ label: t, question: t + (zg ? " " + zg : "") })),
       sources: [...new Set(blocks.map((b) => b.source).filter(Boolean))],
+      rueckfrage: null, luecke: luecke || null, note: "", auto_overview: true,
+    };
+  }
+  // Direkter Dokument-Treffer: Stichwort steht im Abschnittsnamen oder am Anfang des Abschnitts (Überschrift) →
+  // den Abschnitt selbst zeigen (z. B. "Telefonverhalten" → Leitfaden aus der Schulungsunterlage).
+  const dChunks = chunkRanked.slice(0, 3).map((x) => x.c);
+  if (dChunks.length) {
+    const lbl = (c: any) => (c.doc_kind && KIND_LABEL[c.doc_kind] ? KIND_LABEL[c.doc_kind] + ": " : "") + (c.doc_title || "Dokument") + (c.section ? " / " + c.section : "");
+    const blocks = dChunks.map((c) => ({ kind: "info", title: String(c.section || c.doc_title || ""), text: String(c.content || "").slice(0, 1200), source: lbl(c) }));
+    return {
+      known: true, intent: "erklaerung", title: question.charAt(0).toUpperCase() + question.slice(1),
+      blocks: (luecke ? [{ kind: "info", title: null, text: "Zu \"" + luecke + "\" steht nichts in meinen Unterlagen.", source: null }] : []).concat(blocks),
+      related: topics.slice(0, 3).map((t) => ({ label: t, question: t + (zg ? " " + zg : "") })),
+      sources: [...new Set(blocks.map((b) => b.source))],
       rueckfrage: null, luecke: luecke || null, note: "", auto_overview: true,
     };
   }
@@ -180,6 +207,23 @@ Deno.serve(async (req) => {
   if (!r || r.ok === false) return json({ error: "Kein Zugriff auf diesen Partner." }, 403);
   const facts: any[] = Array.isArray(r.facts) ? r.facts : [];
   const chunks: any[] = Array.isArray(r.chunks) ? r.chunks : [];
+  // Überschriften-Treffer: bei Stichworten zusätzlich Abschnitte holen, die mit dem Stichwort BEGINNEN oder deren
+  // Abschnittsname es enthält (Firmenname wie "AVRA", Kapitel wie "Telefonverhalten"). Die Volltext-Rangfolge lässt
+  // solche kurzen Kontakt-/Kapitel-Abschnitte sonst hinter langen Tabellenzeilen zurück. RLS gilt (Nutzer-Client).
+  if (keyword) {
+    const words = question.replace(/[?!.,;:]+/g, " ").split(/\s+/).filter((w) => w.length >= 3);
+    for (const w of words) {
+      const safe = w.replace(/[%_,()]/g, "");
+      if (!safe) continue;
+      const { data: hh } = await sb.from("kb_chunks").select("id,section,content,document_id,kb_documents(title,doc_kind)")
+        .eq("project_id", projectId).or("content.ilike." + safe + "%,section.ilike.%" + safe + "%").limit(6);
+      for (const h of (hh || [])) {
+        if (chunks.some((c) => c.id === h.id)) continue;
+        const d: any = (h as any).kb_documents || {};
+        chunks.push({ id: h.id, section: h.section, content: h.content, document_id: h.document_id, doc_title: d.title, doc_kind: d.doc_kind, heading_hit: true });
+      }
+    }
+  }
   const related: any[] = Array.isArray(r.related) ? r.related : [];
   const overview: any[] = Array.isArray(r.overview) ? r.overview : [];
   const overviewZg: string[] = Array.isArray(r.overview_zg) ? r.overview_zg : [];
@@ -213,6 +257,7 @@ Deno.serve(async (req) => {
     "- Die Abschnitte können mehrere Zielgebiete/Fälle enthalten (die Unterlagen sind oft Tabellen mit einer Zeile je Ort). Nutze nur die Zeile(n), die zum gefragten Ort/Fall passen; ist der gefragte Ort dabei, beantworte die Frage daraus.\n" +
     "- Mehrdeutige Frage (Hotel oder Flughafen; welche Saison; welcher Veranstalter): known=false und stelle in 'rueckfrage' die eine nötige Rückfrage, statt zu raten.\n" +
     "- LÜCKE ERKENNEN: Nennt die Frage ein KONKRETES Sachthema, zu dem im WISSEN nichts steht (z. B. Waldbrand, Unwetter, Streik, Erdbeben, andere Naturereignisse oder Sonderlagen) — AUCH wenn du zum genannten Ort eine Übersicht zeigen kannst — dann trage dieses fehlende Thema kurz in 'luecke' ein (z. B. 'Waldbrand / Naturereignisse'). So landet es auf der Lückenliste und wir wissen, was wir beim Partner anfragen müssen. Generische Füllwörter (Problem, Frage, Hilfe, Info) sind KEINE Lücke -> luecke=null. Steht das Thema im Wissen -> null. Das gilt UNABHÄNGIG davon, ob du sonst antwortest oder eine Übersicht zeigst.\n" +
+    "- DOKUMENTARTEN: Abschnitte tragen ihre Art vorne in der Klammer (Schulungsunterlage, Zielgebiet, FAQ). Fragen zu Gesprächsführung, Telefonverhalten, Umgang mit dem Kunden, Werkzeugen (Peakwork, Midoco, Travelviewer) und internen Prozessen beantwortest du bevorzugt aus der Schulungsunterlage; Fragen zu Ort, Treffpunkt, Agentur, Notfallnummer bevorzugt aus Register und Zielgebiet. Bei Unklarheit zählt alles. Nenne die Art in der Quelle mit.\n" +
     "- STICHWORTE: Eingaben aus ein bis drei Wörtern ohne Satz (\"Transfer Mallorca\", \"Storno\", \"Notfallnummer Kos\") sind Stichworte vom Telefon und bedeuten: alles Wichtige zu diesem Thema an diesem Ort. Behandle sie genau wie die ausformulierte Frage (\"Transfer Mallorca\" = \"Kunde findet den Transfer auf Mallorca nicht / wie läuft der Transfer auf Mallorca\"). Gibt es dazu einen passenden Fakt oder Abschnitt, antworte DIREKT damit (known=true). Gibt es mehrere Aspekte, gib die Übersicht mit related-Punkten. NIEMALS known=false, wenn im Wissen etwas zu den Stichworten steht.\n" +
     "- VAGE FRAGE = ÜBERSICHT: Nennt die Frage nur einen Ort oder ein Thema ohne konkreten Bedarf (\"Problem Rhodos\", \"Frage zu Mallorca\", \"was gibt es zu Kos\") UND es gibt unten einen Abschnitt ÜBERSICHT ZUM ZIELGEBIET: sag NIEMALS 'steht nicht drin'. Antworte dann known=true, intent='uebersicht'. Sag in einem kurzen info-Block, WAS du zu dem Zielgebiet hast, nach Art gruppiert (z. B. Notfallnummer, örtliche Agentur, Treffpunkt am Flughafen, Rücktransfer/Abläufe). Lege für die einzelnen Kategorien 'related'-Punkte an (je ein anklickbarer Punkt mit der konkreten Frage, z. B. label 'Notfallnummer', question 'Notfallnummer Rhodos'). Stelle in 'rueckfrage' die eine Frage, worum es genau geht. Genau wie ein Kollege: \"Zu Rhodos habe ich das und das, was brauchst du?\" Nenne nur Kategorien, die wirklich in der ÜBERSICHT stehen, und nur bei uebersicht: gib KEINE konkreten Nummern/Werte im Block aus (die kommen erst auf die konkrete Rückfrage).\n\n" +
     "SO ANTWORTEST DU (wenn known=true) — als LEITFADEN zum Abarbeiten, nicht als Fließtext:\n" +
@@ -245,7 +290,7 @@ Deno.serve(async (req) => {
   // Eine echte Rückfrage bei einem ausformulierten Satz bleibt erhalten; bei Stichworten ist die Übersicht die bessere Rückfrage.
   const llmKnown = out.known === true;
   const llmLuecke = (typeof out.luecke === "string" && out.luecke.trim()) ? out.luecke.trim().slice(0, 120) : null;
-  const hasData = facts.length > 0 || overview.length > 0 || chunks.length >= 3;
+  const hasData = facts.length > 0 || overview.length > 0 || chunks.length > 0;
   const hasRueck = typeof out.rueckfrage === "string" && out.rueckfrage.trim();
   const emptyKnown = llmKnown && !(Array.isArray(out.blocks) && out.blocks.some((b: any) => b && b.text));
   if (hasData && ((!llmKnown && (keyword || !hasRueck)) || emptyKnown)) {
