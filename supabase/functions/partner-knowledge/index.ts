@@ -99,6 +99,62 @@ function overviewLine(f: any): string {
   const head = f.topic + (f.zielgebiet ? " / " + f.zielgebiet : "");
   return "- [" + head + "] " + f.label + ": " + f.value;
 }
+// Stichwort-Eingabe: 1-3 Wörter, kein Satz, kein Fragewort. Am Telefon tippt niemand ganze Sätze ("Transfer Mallorca").
+function isKeywordInput(q: string): boolean {
+  const words = q.replace(/[?!.,;:]+/g, " ").trim().split(/\s+/).filter(Boolean);
+  if (!words.length || words.length > 3) return false;
+  return !/^(wie|was|wo|wann|warum|wieso|welche[rs]?|wer|kann|ist|gibt|hat|muss|soll|darf)$/i.test(words[0]);
+}
+// Übersicht ohne KI, direkt aus den Treffern: lieber zeigen, was da ist, als nichts. Greift, wenn die KI trotz
+// Treffern known=false liefert (LLM-Varianz bei kurzen Eingaben) oder die Eingabe so kurz ist, dass eine Übersicht
+// der ehrlichere Einstieg ist. Fakten werden nach Thema gruppiert; jedes Thema wird ein anklickbarer related-Punkt.
+function buildOverview(question: string, facts: any[], overview: any[], overviewZg: string[], chunks: any[], luecke: string | null): any {
+  const pool = (overview.length ? overview : facts).filter((f) => f && f.topic);
+  const zg = overviewZg.length ? overviewZg[0] : ([...new Set(pool.map((f) => f.zielgebiet).filter(Boolean))] as string[])[0] || null;
+  const topics: string[] = [];
+  for (const f of pool) { if (!topics.includes(f.topic)) topics.push(f.topic); }
+  const docs: string[] = [];
+  for (const c of chunks) { const d = (c.doc_title || "") + (c.section ? " / " + c.section : ""); if (d && !docs.includes(d)) docs.push(d); }
+  const norm = (x: string) => x.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const qWords = question.replace(/[?!.,;:]+/g, " ").split(/\s+/).map(norm).filter((w) => w.length >= 4);
+  const subject = zg ? (qWords.some((w) => norm(zg).includes(w)) ? zg : question + " (" + zg + ")") : question;
+  // Direkter Treffer: ein Stichwort benennt ein Thema (\"Transfer\", \"Notfallnummer\", \"Storno\") → die passenden Fakten
+  // direkt zeigen statt nur aufzuzählen. Präfix-Vergleich auf Thema und Bezeichnung, ohne Diakritika.
+  const score = (f: any) => { const t = norm(String(f.topic || "")), l = norm(String(f.label || "")); let best = 0;
+    for (const w of qWords) { if (t.startsWith(w)) best = Math.max(best, 3); else if (t.includes(w)) best = Math.max(best, 2); else if (l.includes(w)) best = Math.max(best, 1); }
+    return best; };
+  const seen = new Set<string>();
+  const direct = pool.map((f) => ({ f, sc: score(f) })).filter((x) => x.sc > 0).sort((a, b) => b.sc - a.sc)
+    .filter((x) => { const k = norm(String(x.f.value || "")); if (seen.has(k)) return false; seen.add(k); return true; })
+    .slice(0, 6).map((x) => x.f);
+  if (direct.length) {
+    const blocks = direct.map((f) => ({ kind: "info", title: String(f.label || f.topic), text: String(f.value || ""), source: f.source === "manual" ? "manuell gepflegt" : (f.source_title || "Register") }));
+    const usedTopics = new Set(direct.map((f) => f.topic));
+    const others: string[] = [];
+    for (const f of pool) { if (!usedTopics.has(f.topic) && f.topic && !others.includes(f.topic)) others.push(f.topic); }
+    return {
+      known: true, intent: "erklaerung", title: question.charAt(0).toUpperCase() + question.slice(1) + (zg && !qWords.some((w) => norm(zg).includes(w)) ? " (" + zg + ")" : ""),
+      blocks: (luecke ? [{ kind: "info", title: null, text: "Zu \"" + luecke + "\" steht nichts in meinen Unterlagen.", source: null }] : []).concat(blocks),
+      related: others.slice(0, 4).map((t) => ({ label: t, question: t + (zg ? " " + zg : "") })),
+      sources: [...new Set(blocks.map((b) => b.source).filter(Boolean))],
+      rueckfrage: null, luecke: luecke || null, note: "", auto_overview: true,
+    };
+  }
+  const parts: string[] = [];
+  if (luecke) parts.push("Zu \"" + luecke + "\" steht nichts in meinen Unterlagen.");
+  if (topics.length) parts.push("Zu " + subject + " hab ich: " + topics.slice(0, 12).join(", ") + (topics.length > 12 ? " und mehr" : "") + ".");
+  if (!topics.length && docs.length) parts.push("Dazu hab ich Abschnitte in: " + docs.slice(0, 5).join("; ") + ".");
+  const related = topics.slice(0, 6).map((t) => ({ label: t, question: t + (zg ? " " + zg : "") }));
+  if (!topics.length) docs.slice(0, 4).forEach((d) => related.push({ label: d.split(" / ").pop() || d, question: (d.split(" / ").pop() || d) + " " + question }));
+  const sources = [...new Set([...pool.map((f) => f.source === "manual" ? "manuell gepflegt" : (f.source_title || "Register")), ...docs])].slice(0, 4);
+  return {
+    known: true, intent: "uebersicht", title: subject + ": was brauchst du genau?",
+    blocks: [{ kind: "info", title: null, text: parts.join(" "), source: sources[0] || null }],
+    related, sources,
+    rueckfrage: "Worum geht es genau? Tipp einen der Punkte an oder schreib ein zweites Stichwort.",
+    luecke: luecke || null, note: "", auto_overview: true,
+  };
+}
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
@@ -118,6 +174,7 @@ Deno.serve(async (req) => {
   if (!projectId) return json({ error: "Kein Partner angegeben." }, 400);
   if (!ANTHROPIC_KEY) return json({ error: "Der KI-Schlüssel ist noch nicht hinterlegt." }, 503);
 
+  const keyword = isKeywordInput(question);
   const { data: r, error: re } = await sb.rpc("kb_retrieve", { p_project: projectId, p_q: question, p_limit: 8 });
   if (re) return json({ error: "Suche fehlgeschlagen: " + re.message }, 502);
   if (!r || r.ok === false) return json({ error: "Kein Zugriff auf diesen Partner." }, 403);
@@ -156,6 +213,7 @@ Deno.serve(async (req) => {
     "- Die Abschnitte können mehrere Zielgebiete/Fälle enthalten (die Unterlagen sind oft Tabellen mit einer Zeile je Ort). Nutze nur die Zeile(n), die zum gefragten Ort/Fall passen; ist der gefragte Ort dabei, beantworte die Frage daraus.\n" +
     "- Mehrdeutige Frage (Hotel oder Flughafen; welche Saison; welcher Veranstalter): known=false und stelle in 'rueckfrage' die eine nötige Rückfrage, statt zu raten.\n" +
     "- LÜCKE ERKENNEN: Nennt die Frage ein KONKRETES Sachthema, zu dem im WISSEN nichts steht (z. B. Waldbrand, Unwetter, Streik, Erdbeben, andere Naturereignisse oder Sonderlagen) — AUCH wenn du zum genannten Ort eine Übersicht zeigen kannst — dann trage dieses fehlende Thema kurz in 'luecke' ein (z. B. 'Waldbrand / Naturereignisse'). So landet es auf der Lückenliste und wir wissen, was wir beim Partner anfragen müssen. Generische Füllwörter (Problem, Frage, Hilfe, Info) sind KEINE Lücke -> luecke=null. Steht das Thema im Wissen -> null. Das gilt UNABHÄNGIG davon, ob du sonst antwortest oder eine Übersicht zeigst.\n" +
+    "- STICHWORTE: Eingaben aus ein bis drei Wörtern ohne Satz (\"Transfer Mallorca\", \"Storno\", \"Notfallnummer Kos\") sind Stichworte vom Telefon und bedeuten: alles Wichtige zu diesem Thema an diesem Ort. Behandle sie genau wie die ausformulierte Frage (\"Transfer Mallorca\" = \"Kunde findet den Transfer auf Mallorca nicht / wie läuft der Transfer auf Mallorca\"). Gibt es dazu einen passenden Fakt oder Abschnitt, antworte DIREKT damit (known=true). Gibt es mehrere Aspekte, gib die Übersicht mit related-Punkten. NIEMALS known=false, wenn im Wissen etwas zu den Stichworten steht.\n" +
     "- VAGE FRAGE = ÜBERSICHT: Nennt die Frage nur einen Ort oder ein Thema ohne konkreten Bedarf (\"Problem Rhodos\", \"Frage zu Mallorca\", \"was gibt es zu Kos\") UND es gibt unten einen Abschnitt ÜBERSICHT ZUM ZIELGEBIET: sag NIEMALS 'steht nicht drin'. Antworte dann known=true, intent='uebersicht'. Sag in einem kurzen info-Block, WAS du zu dem Zielgebiet hast, nach Art gruppiert (z. B. Notfallnummer, örtliche Agentur, Treffpunkt am Flughafen, Rücktransfer/Abläufe). Lege für die einzelnen Kategorien 'related'-Punkte an (je ein anklickbarer Punkt mit der konkreten Frage, z. B. label 'Notfallnummer', question 'Notfallnummer Rhodos'). Stelle in 'rueckfrage' die eine Frage, worum es genau geht. Genau wie ein Kollege: \"Zu Rhodos habe ich das und das, was brauchst du?\" Nenne nur Kategorien, die wirklich in der ÜBERSICHT stehen, und nur bei uebersicht: gib KEINE konkreten Nummern/Werte im Block aus (die kommen erst auf die konkrete Rückfrage).\n\n" +
     "SO ANTWORTEST DU (wenn known=true) — als LEITFADEN zum Abarbeiten, nicht als Fließtext:\n" +
     "- BLICKWINKEL erkennen: Beschreibt die Frage eine Situation (\"Der Kunde findet seinen Transfer nicht\")? -> intent=anleitung. Will sie verstehen, wie etwas abläuft? -> intent=erklaerung.\n" +
@@ -172,7 +230,7 @@ Deno.serve(async (req) => {
     const resp = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-      body: JSON.stringify({ model: MODEL, max_tokens: 1300, system, tools: [ANTWORT_TOOL], tool_choice: { type: "tool", name: "antwort" }, messages: [{ role: "user", content: "FRAGE: " + question }] }),
+      body: JSON.stringify({ model: MODEL, max_tokens: 1300, system, tools: [ANTWORT_TOOL], tool_choice: { type: "tool", name: "antwort" }, messages: [{ role: "user", content: (keyword ? "STICHWORT-EINGABE (kein Satz, vom Telefon): " : "FRAGE: ") + question }] }),
     });
     const data = await resp.json();
     if (!resp.ok) return json({ error: "KI-Fehler: " + (data?.error?.message || resp.status) }, 502);
@@ -183,7 +241,20 @@ Deno.serve(async (req) => {
   }
 
   const out = tool.input || {};
-  const known = out.known === true;
+  // Netz: known=false trotz Treffern (Fakten oder Zielgebiets-Übersicht vorhanden) → lieber die Übersicht zeigen als nichts.
+  // Eine echte Rückfrage bei einem ausformulierten Satz bleibt erhalten; bei Stichworten ist die Übersicht die bessere Rückfrage.
+  const llmKnown = out.known === true;
+  const llmLuecke = (typeof out.luecke === "string" && out.luecke.trim()) ? out.luecke.trim().slice(0, 120) : null;
+  const hasData = facts.length > 0 || overview.length > 0 || chunks.length >= 3;
+  const hasRueck = typeof out.rueckfrage === "string" && out.rueckfrage.trim();
+  const emptyKnown = llmKnown && !(Array.isArray(out.blocks) && out.blocks.some((b: any) => b && b.text));
+  if (hasData && ((!llmKnown && (keyword || !hasRueck)) || emptyKnown)) {
+    const res: any = buildOverview(question, facts, overview, overviewZg, chunks, llmLuecke);
+    res.used = { facts: facts.length, chunks: chunks.length, overview: overview.length };
+    res.query_id = await logQuery(projectId, uid, question, res);
+    return json(res);
+  }
+  const known = llmKnown;
   let blocks = known && Array.isArray(out.blocks)
     ? out.blocks.filter((b: any) => b && b.text).map((b: any) => ({
         kind: ["schritt", "hinweis", "notfall", "info", "kundensatz"].includes(b.kind) ? b.kind : "info",
