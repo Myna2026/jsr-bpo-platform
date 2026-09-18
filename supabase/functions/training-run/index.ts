@@ -95,7 +95,7 @@ Deno.serve(async (req) => {
     if (!list.length) return json({ error: "Keine Fragen gefunden." }, 404);
     await admin.from("training_runs").update({ mode, topic, run_questions: mode === "assigned" ? null : list, max: list.length, status: "running", updated_at: new Date().toISOString() }).eq("id", run.id);
     const title = mode === "random" ? "Überraschung: quer durch die Themen" : mode === "topic" ? topic : t.title;
-    const intro = mode === "assigned" ? t.intro : mode === "random" ? "Miriam mischt dir " + list.length + " Fragen quer durch alle Themen. Mal Fakten, mal Situationen. Nach jeder Antwort erklärt sie, warum es so ist, was du bei Einwänden sagst und wie du es im Gespräch anwendest." : list.length + " Fragen zum Thema „" + topic + "“. Nach jeder Antwort erklärt Miriam, warum es so ist, was du bei Einwänden sagst und wie du es im Gespräch anwendest.";
+    const intro = mode === "assigned" ? t.intro : mode === "random" ? list.length + " Fragen quer durch alle Themen, jedes Mal anders." : list.length + " Fragen zum Thema „" + topic + "“.";
     return json({ ok: true, unit: { title, intro, n: list.length, minutes: mode === "assigned" ? t.minutes_est : Math.max(3, Math.round(list.length * 1.5)), topics: mode === "assigned" ? (t.topics || []) : [...new Set(list.map((x: any) => x.topic))], kinds: [...new Set(list.map((x: any) => x.kind))], mode } });
   }
 

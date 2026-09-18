@@ -12,7 +12,7 @@ const cors = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers
 const json = (b: unknown, s = 200) => { if (s >= 400) console.error("[training-build] " + s + " " + JSON.stringify(b)); return new Response(JSON.stringify(b), { status: s, headers: { ...cors, "Content-Type": "application/json" } }); };
 const admin = createClient(SB_URL, SERVICE);
 
-const INTRO_TOOL = { name: "intro", input_schema: { type: "object", properties: { intro: { type: "string", description: "Begrüßung zur Schulung: 3-4 kurze Sätze. Worum es geht, warum es im Alltag zählt, was die Person danach kann. Duzen, warm, ohne Floskeln, keine Gedankenstriche." }, minutes: { type: "integer", description: "geschätzte Dauer in Minuten" } }, required: ["intro", "minutes"] } };
+const INTRO_TOOL = { name: "intro", input_schema: { type: "object", properties: { intro: { type: "string", description: "Begrüßung zur Schulung: GENAU EIN Satz, höchstens 20 Wörter, sagt worum es geht. Duzen, warm, ohne Floskeln, keine Gedankenstriche, kein Hallo." }, minutes: { type: "integer", description: "geschätzte Dauer in Minuten" } }, required: ["intro", "minutes"] } };
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
@@ -45,7 +45,7 @@ Deno.serve(async (req) => {
   for (const x of missing) if (built[x.id]) await admin.from("coach_questions").update({ layers: built[x.id], layers_at: new Date().toISOString() }).eq("id", x.id);
   // 4) Intro
   let intro = "", minutes = Math.max(3, Math.round(list.length * 1.5));
-  try { const r = await claudeTool("Du bist Miriam, KI-Trainerin von TIVE 360°. Du begrüßt eine Kollegin zu einer kurzen Schulung. Duzen, warm, konkret, keine Floskeln, keine Gedankenstriche.", "Schulung: " + title + "\nThemen: " + (topics.length ? topics.join(", ") : [...new Set(list.map((x) => x.topic))].join(", ")) + "\nAnzahl Fragen: " + list.length + "\nArten: " + [...new Set(list.map((x) => x.kind))].join(", "), INTRO_TOOL, 500); intro = String(r.intro || ""); if (r.minutes) minutes = Math.max(3, Math.min(60, Number(r.minutes))); } catch (_e) { /* Intro bleibt leer */ }
+  try { const r = await claudeTool("Du bist Miriam, KI-Trainerin von TIVE 360°. Du begrüßt eine Kollegin zu einer kurzen Schulung mit genau einem Satz: worum es geht. Duzen, warm, konkret, keine Floskeln, keine Gedankenstriche.", "Schulung: " + title + "\nThemen: " + (topics.length ? topics.join(", ") : [...new Set(list.map((x) => x.topic))].join(", ")) + "\nAnzahl Fragen: " + list.length + "\nArten: " + [...new Set(list.map((x) => x.kind))].join(", "), INTRO_TOOL, 500); intro = String(r.intro || ""); if (r.minutes) minutes = Math.max(3, Math.min(60, Number(r.minutes))); } catch (_e) { /* Intro bleibt leer */ }
   const out = list.map((x) => { const l = layers[x.id] || {}; return { id: x.id, kind: x.kind, difficulty: x.difficulty, topic: x.topic, zielgebiet: x.zielgebiet, prompt: x.prompt, options: x.options, answer: x.answer, explanation: x.explanation, source_label: x.source_label, why: l.why || null, objection: l.objection || null, apply: l.apply || null }; });
   return json({ ok: true, intro, minutes, questions: out, topics: [...new Set(out.map((x) => x.topic))] });
 });
