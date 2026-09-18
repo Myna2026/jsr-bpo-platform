@@ -76,7 +76,7 @@ Deno.serve(async (req) => {
   const run = await loadRun(String(body.run || "")); if (!run) return json({ error: "Durchlauf nicht gefunden." }, 404);
   const { data: t } = await admin.from("trainings").select("*").eq("id", run.training_id).maybeSingle(); if (!t) return json({ error: "Schulung nicht gefunden." }, 404);
   const qs: any[] = (run.mode !== "assigned" && Array.isArray(run.run_questions)) ? run.run_questions : (t.questions || []); const ag = await agentInfo(t.agent_key);
-  const unitTitle = run.mode === "random" ? "Überraschung: quer durch die Themen" : run.mode === "topic" ? (run.topic || "Thema") : t.title;
+  const unitTitle = run.mode === "random" ? "Zufall: quer durch die Themen" : run.mode === "topic" ? (run.topic || "Thema") : t.title;
 
   if (action === "abandon") {   // Einheit abbrechen: bleibt als abgebrochen liegen, neuer Durchlauf zur Wahl
     if (run.status === "running" || run.status === "pending") await admin.from("training_runs").update({ status: "abandoned", updated_at: new Date().toISOString() }).eq("id", run.id);
@@ -98,7 +98,7 @@ Deno.serve(async (req) => {
       list = pickUnit(bank, topic, wantN); }
     if (!list.length) return json({ error: "Keine Fragen gefunden." }, 404);
     await admin.from("training_runs").update({ mode, topic, run_questions: mode === "assigned" ? null : list, max: list.length, status: "running", updated_at: new Date().toISOString() }).eq("id", run.id);
-    const title = mode === "random" ? "Überraschung: quer durch die Themen" : mode === "topic" ? topic : t.title;
+    const title = mode === "random" ? "Zufall: quer durch die Themen" : mode === "topic" ? topic : t.title;
     const stufe = diff === "mix" ? "" : (list.every((x: any) => x.difficulty === diff) ? ", Stufe " + diff : ", gemischt (auf Stufe " + diff + " gibt es zu wenige)");
     const intro = mode === "assigned" ? t.intro : mode === "random" ? list.length + " Fragen quer durch alle Themen" + stufe + ", jedes Mal anders." : list.length + " Fragen zum Thema „" + topic + "“" + stufe + ".";
     return json({ ok: true, unit: { title, intro, n: list.length, minutes: mode === "assigned" ? t.minutes_est : Math.max(3, Math.round(list.length * 1.5)), topics: mode === "assigned" ? (t.topics || []) : [...new Set(list.map((x: any) => x.topic))], kinds: [...new Set(list.map((x: any) => x.kind))], mode } });
