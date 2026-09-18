@@ -91,11 +91,16 @@ Deno.serve(async (req) => {
   if (action === "choose") {
     if (run.status !== "pending") return json({ error: "Dieser Durchlauf läuft schon." }, 409);
     const mode = ["assigned", "random", "topic"].includes(body.mode) ? body.mode : "assigned"; let list: any[] = []; let topic: string | null = null;
-    if (mode === "assigned") list = t.questions || []; else { const bank = await bankFor(t.project_id); topic = mode === "topic" ? String(body.topic || "") : null; if (mode === "topic" && !bank.some((q) => q.topic === topic)) return json({ error: "Zu diesem Thema gibt es noch keine Fragen." }, 404); list = pickUnit(bank, topic, UNIT_N); }
+    // Optional (Thema, auch Zufall): Schwierigkeit und Länge; ohne Angabe gemischt und 8 Fragen
+    const diff = ["leicht", "mittel", "schwer"].includes(body.difficulty) ? body.difficulty : "mix"; const wantN = Math.max(3, Math.min(15, Number(body.count) || UNIT_N));
+    if (mode === "assigned") list = t.questions || []; else { let bank = await bankFor(t.project_id); topic = mode === "topic" ? String(body.topic || "") : null; if (mode === "topic" && !bank.some((q) => q.topic === topic)) return json({ error: "Zu diesem Thema gibt es noch keine Fragen." }, 404);
+      if (diff !== "mix") { const only = bank.filter((q) => q.difficulty === diff && (!topic || q.topic === topic)); if (only.length >= 3) bank = bank.filter((q) => q.difficulty === diff); }   // zu wenig auf der Stufe: gemischt bleibt
+      list = pickUnit(bank, topic, wantN); }
     if (!list.length) return json({ error: "Keine Fragen gefunden." }, 404);
     await admin.from("training_runs").update({ mode, topic, run_questions: mode === "assigned" ? null : list, max: list.length, status: "running", updated_at: new Date().toISOString() }).eq("id", run.id);
     const title = mode === "random" ? "Überraschung: quer durch die Themen" : mode === "topic" ? topic : t.title;
-    const intro = mode === "assigned" ? t.intro : mode === "random" ? list.length + " Fragen quer durch alle Themen, jedes Mal anders." : list.length + " Fragen zum Thema „" + topic + "“.";
+    const stufe = diff === "mix" ? "" : (list.every((x: any) => x.difficulty === diff) ? ", Stufe " + diff : ", gemischt (auf Stufe " + diff + " gibt es zu wenige)");
+    const intro = mode === "assigned" ? t.intro : mode === "random" ? list.length + " Fragen quer durch alle Themen" + stufe + ", jedes Mal anders." : list.length + " Fragen zum Thema „" + topic + "“" + stufe + ".";
     return json({ ok: true, unit: { title, intro, n: list.length, minutes: mode === "assigned" ? t.minutes_est : Math.max(3, Math.round(list.length * 1.5)), topics: mode === "assigned" ? (t.topics || []) : [...new Set(list.map((x: any) => x.topic))], kinds: [...new Set(list.map((x: any) => x.kind))], mode } });
   }
 
