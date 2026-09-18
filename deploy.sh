@@ -150,6 +150,8 @@ rsync -az --progress "$LOCAL_DIR/root-login.html" "$SERVER:$REMOTE_BASE/root/log
 echo "→ Stempeluhr..."
 rsync -az --progress "$LOCAL_DIR/stempel.html" "$SERVER:$REMOTE_BASE/hr/stempel.html"
 rsync -az --progress "$LOCAL_DIR/stempel.html" "$SERVER:$REMOTE_BASE/root/stempel.html"
+echo "→ Schulung per Link (öffentlich, Token + PIN)..."
+rsync -az --progress "$LOCAL_DIR/schulung.html" "$SERVER:$REMOTE_BASE/root/schulung.html"
 
 echo "→ Öffentliche Präsentationsseite (Login-frei, nutzt shared/presentation-slides.js)..."
 rsync -az --progress "$LOCAL_DIR/praesentation.html" "$SERVER:$REMOTE_BASE/hr/praesentation.html"

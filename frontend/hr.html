@@ -1254,7 +1254,7 @@ const MENU_BADGES_DEFAULT = { assignments:{
 // Hauptmenü-Items für den Badge-Admin (Keys müssen zu navSections passen).
 const MENU_BADGE_MAIN_ITEMS = [
   {key:'start',label:'Start'},{key:'daily_tasks',label:'Tagesaufgaben'},{key:'meetingnotes',label:'Besprechungen'},{key:'clientmsgs',label:'Kundennachrichten'},{key:'arbeitsplan',label:'Optimierungen'},{key:'agents',label:'AI Kollegen'},{key:'datacheck',label:'Daten-Checks'},
-  {key:'wissen_system',label:'Wissen System'},{key:'wissensspeicher',label:'Conny & Partner'},{key:'cockpit',label:'Cockpit'},{key:'productivity',label:'Produktivität'},
+  {key:'wissen_system',label:'Wissen System'},{key:'wissensspeicher',label:'Conny & Partner'},{key:'schulungen',label:'Schulungen'},{key:'cockpit',label:'Cockpit'},{key:'productivity',label:'Produktivität'},
   {key:'performance',label:'Performance'},{key:'auswertung',label:'Auswertung'},{key:'callqa',label:'Call-Qualität'},{key:'shiftplan',label:'Schichtplanung'},{key:'checkin',label:'Check-in'},{key:'workforce',label:'Workforce (Beta)'},{key:'employees',label:'Mitarbeiter'},
   {key:'timetracking',label:'Zeiterfassung'},{key:'locations',label:'Standorte'},{key:'spaces',label:'Spaces & Seats'},
   {key:'payroll',label:'Löhne'},{key:'orgchart',label:'Organigramm'},{key:'absences',label:'Abwesenheiten'},{key:'calendar',label:'Kalender'},
@@ -7581,6 +7581,7 @@ function buildNavSections(f){
     {sec:'Werkzeuge', items:[   // täglich gebrauchte Werkzeuge
       {key:'wissen_system',label:'Wissen',icon:'📖'},
       {key:'wissensspeicher',label:'Conny & Partner',icon:'💬'},   // Partner-Agenten (Conny/Fabian/Holger/Georg): Fragen, Wissen, Coach
+      {key:'schulungen',label:'Schulungen',icon:'🎓'},   // Miriam: Schulung per Link (Token + Mitarbeiter-PIN)
       ...(_isMgmt ? [{key:'nlquery',label:'Datenabfrage',icon:'🔎'}] : []),   // Management-only
       {key:'datacheck',label:'Daten-Checks',icon:'🩺'},
     ]},
@@ -7736,7 +7737,7 @@ const PERM_AREA_OF_KEY = (()=>{ const m={}; const A={
     praesent:['praesentation'], feedback:['feedback'], meeting:['meetingnotes'], kalender:['calendar'],
     datenpflege:['dataimport','uploads','uploadplan','datacheck','recmkt'],
     schulung:['training_plans','timeline','elearning','knowledge','test_editor','test_preview','wissen_system'],
-    wissen:['wissensspeicher'],
+    wissen:['wissensspeicher','schulungen'],
   };
   Object.keys(A).forEach(area=>A[area].forEach(k=>{ m[k]=area; })); return m; })();
 // Schnitt 3 ist gebaut, aber noch NICHT scharf: erst wenn die Rollen-Parität (hr/projektleiter/teamlead)
@@ -41821,6 +41822,133 @@ function CoachAdmin({partner, partnerName, canEdit, showToast, team, agentOf}){
   </div>;
 }
 
+// ═══ Schulungen per Link (Miriam): anlegen (Miriam baut aus der geprüften Fragenbank + drei Ebenen), prüfen, freigeben,
+//     Link kopieren, Ergebnisse je Durchlauf (Zeit, Punkte, Miriams Rückmeldung), Gast-PINs für Personen ohne Mitarbeiter-PIN.
+//     Öffentliche Seite: tive360.de/schulung.html?t=<token> (PIN = time_pins oder training_guests). Recht: Bereich wissen. ═══
+function SchulungenView({projects, team, showToast}){
+  const pw=(team&&team.perms&&team.perms.wissen)||{}; const canEdit=pw.mode==='edit';
+  const scope=pw.projects||'all'; const allowed=scope==='all'?null:scope==='list'?(pw.project_ids||[]):[];
+  const partners=(projects||[]).filter(p=>p&&p.id&&(allowed===null||allowed.includes(p.id))).slice().sort((a,b)=>String(a.name).localeCompare(String(b.name),'de'));
+  const [partner,setPartner]=React.useState(''); React.useEffect(()=>{ if(!partner&&partners.length) setPartner(partners.find(p=>p.id==='proj_cd_c9d0e1f2')?'proj_cd_c9d0e1f2':partners[0].id); },[partners.length]);
+  const pname=id=>{ const p=partners.find(x=>x.id===id); return p?p.name:id; };
+  const [list,setList]=React.useState(null); const [runs,setRuns]=React.useState({}); const [sel,setSel]=React.useState(null);   // gewählte Schulung (Detail)
+  const [mode,setMode]=React.useState('list');   // list | new | detail
+  const [guests,setGuests]=React.useState(null); const [gName,setGName]=React.useState(''); const [busy,setBusy]=React.useState('');
+  const [topicsAll,setTopicsAll]=React.useState([]);
+  const [draft,setDraft]=React.useState({title:'',topics:[],count:8}); const [built,setBuilt]=React.useState(null); const [open,setOpen]=React.useState({});
+  const [runSel,setRunSel]=React.useState(null);
+  const LINK=t=>'https://tive360.de/schulung.html?t='+t;
+  const load=async()=>{ if(!partner) return; setList(null); try{
+      const {data}=await sb.from('trainings').select('id,title,status,token,topics,minutes_est,expires_at,created_at,created_by_name,questions').eq('project_id',partner).order('created_at',{ascending:false});
+      const rows=data||[]; setList(rows);
+      if(rows.length){ const {data:rr}=await sb.from('training_runs').select('id,training_id,name,mode,topic,status,started_at,finished_at,seconds,points,max,score,summary,splits,answers').in('training_id',rows.map(r=>r.id)).order('started_at',{ascending:false}); const m={}; (rr||[]).forEach(r=>{ (m[r.training_id]=m[r.training_id]||[]).push(r); }); setRuns(m); } else setRuns({});
+      const {data:tq}=await sb.from('coach_questions').select('topic').eq('project_id',partner).eq('status','active').gte('quality',4).limit(5000); const cnt={}; (tq||[]).forEach(x=>{ cnt[x.topic]=(cnt[x.topic]||0)+1; }); setTopicsAll(Object.keys(cnt).sort((a,b)=>a.localeCompare(b,'de')).map(t=>({t,n:cnt[t]})));
+    }catch(e){ setList([]); showToast&&showToast('Laden fehlgeschlagen: '+((e&&e.message)||e),'error'); } };
+  const loadGuests=async()=>{ try{ const {data}=await sb.from('training_guests').select('*').order('created_at',{ascending:false}); setGuests(data||[]); }catch(e){ setGuests([]); } };
+  React.useEffect(()=>{ load(); setMode('list'); setSel(null); },[partner]); React.useEffect(()=>{ loadGuests(); },[]);
+  const copy=t=>{ try{ navigator.clipboard.writeText(t); showToast&&showToast('Link kopiert'); }catch(e){} };
+  const token=()=>{ const a=new Uint8Array(18); crypto.getRandomValues(a); return btoa(String.fromCharCode.apply(null,a)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); };
+  const build=async()=>{ if(!draft.title.trim()){ showToast&&showToast('Titel fehlt','error'); return; } setBusy('build'); setBuilt(null); try{
+      const {data,error}=await sb.functions.invoke('training-build',{body:{project_id:partner,title:draft.title.trim(),topics:draft.topics,count:Number(draft.count)||8}});
+      if(error){ let msg=error.message; try{ const j=await error.context.json(); msg=j.error||msg; }catch(e){} throw new Error(msg); } if(data&&data.error) throw new Error(data.error);
+      setBuilt({intro:data.intro||'',minutes:data.minutes,questions:data.questions||[],topics:data.topics||[]}); }catch(e){ showToast&&showToast('Miriam konnte nicht bauen: '+((e&&e.message)||e),'error'); } setBusy(''); };
+  const save=async(status)=>{ if(!built||!built.questions.length) return; setBusy('save'); try{
+      const row={project_id:partner,title:draft.title.trim(),intro:built.intro,topics:built.topics,minutes_est:built.minutes,questions:built.questions,status,token:status==='live'?token():null,created_by:(team&&team.user_id)||null,created_by_name:(team&&team.name)||null};
+      const {data,error}=await sb.from('trainings').insert(row).select('*').single(); if(error) throw error; showToast&&showToast(status==='live'?'Schulung freigegeben, Link ist aktiv':'Entwurf gespeichert'); setBuilt(null); setDraft({title:'',topics:[],count:8}); await load(); setSel(data); setMode('detail'); }catch(e){ showToast&&showToast('Speichern fehlgeschlagen: '+((e&&e.message)||e),'error'); } setBusy(''); };
+  const setStatus=async(t,status)=>{ setBusy(t.id); try{ const patch={status,updated_at:new Date().toISOString()}; if(status==='live'&&!t.token) patch.token=token(); const {data,error}=await sb.from('trainings').update(patch).eq('id',t.id).select('*').single(); if(error) throw error; setSel(data); await load(); }catch(e){ showToast&&showToast('Fehlgeschlagen: '+((e&&e.message)||e),'error'); } setBusy(''); };
+  const setExpiry=async(t,d)=>{ try{ const {data,error}=await sb.from('trainings').update({expires_at:d?new Date(d+'T23:59:59').toISOString():null}).eq('id',t.id).select('*').single(); if(error) throw error; setSel(data); load(); }catch(e){ showToast&&showToast('Fehlgeschlagen: '+((e&&e.message)||e),'error'); } };
+  const delTraining=async(t)=>{ if(!(await uiConfirm({title:'Schulung löschen', text:'„'+t.title+'“ mit allen Durchläufen löschen? Der Link funktioniert danach nicht mehr.', confirmLabel:'Löschen', danger:true}))) return; try{ const {error}=await sb.from('trainings').delete().eq('id',t.id); if(error) throw error; setMode('list'); setSel(null); load(); }catch(e){ showToast&&showToast('Fehlgeschlagen: '+((e&&e.message)||e),'error'); } };
+  const addGuest=async()=>{ if(!gName.trim()) return; setBusy('guest'); try{ let code=''; for(let i=0;i<20;i++){ const c=String(1000+Math.floor(Math.random()*9000)); const {count}=await sb.from('training_guests').select('id',{count:'exact',head:true}).eq('code',c); if(!count){ code=c; break; } } if(!code) throw new Error('Kein freier PIN gefunden');
+      const {error}=await sb.from('training_guests').insert({name:gName.trim(),code,created_by:(team&&team.user_id)||null}); if(error){ if(/duplicate|unique/i.test(error.message)) throw new Error('PIN ist schon vergeben, bitte noch einmal.'); throw error; } setGName(''); loadGuests(); }catch(e){ showToast&&showToast('Fehlgeschlagen: '+((e&&e.message)||e),'error'); } setBusy(''); };
+  const toggleGuest=async(g)=>{ try{ await sb.from('training_guests').update({active:!g.active}).eq('id',g.id); loadGuests(); }catch(e){} };
+  const fmtD=ts=>ts?new Date(ts).toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit',year:'2-digit'}):'—'; const fmtT=s=>{ s=Math.max(0,Math.round(s||0)); return Math.floor(s/60)+':'+(s%60<10?'0':'')+(s%60); };
+  const col=v=>v==null?'var(--muted)':v>=80?'#059669':v>=60?'#d97706':'#dc2626'; const KIND={mc:'Auswahl',gap:'Eintippen',match:'Zuordnung',order:'Reihenfolge',free:'Situation'};
+  const card={background:'var(--card)',border:'1px solid var(--border)',borderRadius:12,padding:16,marginBottom:14};
+  const doneRuns=t=>(runs[t.id]||[]).filter(r=>r.status==='done');
+  const StatusPill=({s})=><span style={{padding:'2px 9px',borderRadius:999,fontSize:11.5,fontWeight:800,background:s==='live'?'#ecfdf5':s==='draft'?'#fffbeb':'#f1f5f9',color:s==='live'?'#065f46':s==='draft'?'#92400e':'#475569'}}>{s==='live'?'Link aktiv':s==='draft'?'Entwurf':'Geschlossen'}</span>;
+  const QRow=({q,i,onRemove})=><div style={{borderTop:'1px solid var(--border)',padding:'10px 0'}}>
+    <div style={{display:'flex',gap:10,alignItems:'flex-start'}}>
+      <div style={{width:26,height:26,borderRadius:'50%',background:'#eef2f4',fontWeight:800,fontSize:12,display:'flex',alignItems:'center',justifyContent:'center',flex:'0 0 auto'}}>{i+1}</div>
+      <div style={{flex:1,minWidth:0}}><div style={{fontSize:11,color:'var(--muted)'}}>{KIND[q.kind]} · {q.difficulty} · {q.topic}{q.zielgebiet?' · '+q.zielgebiet:''}</div><div style={{fontSize:13.5,fontWeight:600}}>{q.prompt}</div>
+        <div style={{display:'flex',gap:6,marginTop:4,flexWrap:'wrap',fontSize:11.5}}>{[['why','Warum'],['objection','Einwand'],['apply','Anwendung']].map(([k,l])=><span key={k} style={{padding:'1px 7px',borderRadius:6,background:q[k]?'#ecfdf5':'#fef2f2',color:q[k]?'#065f46':'#991b1b'}}>{l}{q[k]?'':' fehlt'}</span>)}<button className="btn btn-sm" style={{padding:'0 8px',minHeight:22,fontSize:11.5}} onClick={()=>setOpen({...open,[q.id]:!open[q.id]})}>{open[q.id]?'Zuklappen':'Ebenen lesen'}</button></div>
+        {open[q.id]&&<div style={{marginTop:8,fontSize:13,display:'grid',gap:8}}>
+          <div><b>Richtig:</b> {q.kind==='mc'?((q.options||[]).find(o=>o.key===(q.answer||{}).key)||{}).text:q.kind==='gap'?((q.answer||{}).accept||[])[0]:q.kind==='free'?((q.answer||{}).model_answer||((q.answer||{}).must||[]).join('; ')):q.kind==='order'?((q.answer||{}).sequence||[]).join(' → '):JSON.stringify((q.answer||{}).pairs||{})}</div>
+          {q.why&&<div><b>Warum:</b> {q.why}</div>}{q.objection&&<div><b>Einwand:</b> „{q.objection.customer}“ <br/><b>Du:</b> {q.objection.you}</div>}{q.apply&&<div><b>Anwendung:</b> {q.apply}</div>}
+          <div style={{color:'var(--muted)',fontSize:11.5}}>Quelle: {q.source_label}</div></div>}
+      </div>
+      {onRemove&&<button className="btn btn-sm" onClick={()=>onRemove(q)} title="Aus der Schulung nehmen">✕</button>}
+    </div></div>;
+  return <div style={{maxWidth:980,margin:'0 auto',padding:'8px 4px'}}>
+    <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:6,flexWrap:'wrap'}}>
+      <span style={{fontSize:20,fontWeight:800}}>Schulungen</span><span style={{fontSize:12.5,color:'var(--muted)'}}>Miriam führt per Link durch eine Schulung. Wer den Link öffnet, gibt seine Mitarbeiter-PIN ein und wählt: die Schulung des Links, „Überrasch mich“ oder ein Thema.</span>
+    </div>
+    <div style={{display:'flex',flexWrap:'wrap',gap:8,marginBottom:14}}>{partners.map(p=>{ const on=p.id===partner; return <button key={p.id} onClick={()=>setPartner(p.id)} style={{padding:'7px 14px',borderRadius:20,border:'1px solid '+(on?'#b45309':'var(--border)'),cursor:'pointer',background:on?'#fff7ed':'var(--card)',color:on?'#b45309':'var(--text)',fontWeight:on?800:500,fontSize:13.5}}>{p.name}</button>; })}</div>
+    <div style={{display:'flex',gap:6,marginBottom:14,borderBottom:'1px solid var(--border)'}}>{[['list','Schulungen'],['new','Neue Schulung'],['guests','Gast-PINs']].filter(([k])=>k!=='new'||canEdit).map(([k,l])=>{ const on=mode===k||(k==='list'&&mode==='detail'); return <button key={k} onClick={()=>{ setMode(k); if(k!=='list') setSel(null); }} style={{padding:'9px 16px',border:'none',borderBottom:'2px solid '+(on?'#b45309':'transparent'),background:'none',cursor:'pointer',color:on?'var(--text)':'var(--muted)',fontWeight:on?800:500,fontSize:14}}>{l}</button>; })}</div>
+
+    {mode==='list'&&<div>
+      {list===null?<div style={{padding:16,color:'var(--muted)',fontSize:13}}>Lädt…</div>:!list.length?<div style={card}><div style={{fontSize:13.5,color:'var(--muted)'}}>Noch keine Schulung für {pname(partner)}. {canEdit?'Leg unter „Neue Schulung“ die erste an: Miriam baut sie aus der geprüften Fragenbank.':''}</div></div>:
+      list.map(t=>{ const dr=doneRuns(t); const avg=dr.length?Math.round(dr.reduce((a,r)=>a+Number(r.score||0),0)/dr.length*100):null; return <div key={t.id} style={{...card,cursor:'pointer',display:'flex',gap:14,alignItems:'center',flexWrap:'wrap'}} onClick={()=>{ setSel(t); setRunSel(null); setMode('detail'); }}>
+        <div style={{flex:'1 1 260px',minWidth:0}}><div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}><b style={{fontSize:15}}>{t.title}</b><StatusPill s={t.status}/></div><div style={{fontSize:12,color:'var(--muted)',marginTop:2}}>{(t.questions||[]).length} Fragen · ca. {t.minutes_est||'?'} Min · {(t.topics||[]).slice(0,3).join(', ')}{(t.topics||[]).length>3?' …':''} · angelegt {fmtD(t.created_at)}{t.created_by_name?' von '+t.created_by_name:''}{t.expires_at?' · gültig bis '+fmtD(t.expires_at):''}</div></div>
+        <div style={{display:'flex',gap:18}}><div style={{textAlign:'center'}}><div style={{fontSize:20,fontWeight:800,fontFamily:'var(--font-mono)'}}>{dr.length}</div><div style={{fontSize:10.5,color:'var(--muted)',fontWeight:700,textTransform:'uppercase'}}>Durchläufe</div></div><div style={{textAlign:'center'}}><div style={{fontSize:20,fontWeight:800,fontFamily:'var(--font-mono)',color:col(avg)}}>{avg==null?'—':avg+' %'}</div><div style={{fontSize:10.5,color:'var(--muted)',fontWeight:700,textTransform:'uppercase'}}>Schnitt</div></div></div>
+        {t.status==='live'&&t.token&&<button className="btn btn-sm" onClick={e=>{ e.stopPropagation(); copy(LINK(t.token)); }}>Link kopieren</button>}
+      </div>; })}
+    </div>}
+
+    {mode==='detail'&&sel&&<div>
+      <button className="btn btn-sm" style={{marginBottom:10}} onClick={()=>{ setMode('list'); setSel(null); }}>← Alle Schulungen</button>
+      <div style={card}>
+        <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}><h3 style={{margin:0,fontSize:18}}>{sel.title}</h3><StatusPill s={sel.status}/></div>
+        <div style={{fontSize:12.5,color:'var(--muted)',marginTop:4}}>{(sel.questions||[]).length} Fragen · ca. {sel.minutes_est||'?'} Min · {(sel.topics||[]).join(', ')}</div>
+        {sel.intro&&<div style={{fontSize:13.5,marginTop:8,padding:'10px 12px',background:'var(--bg)',borderRadius:8,whiteSpace:'pre-wrap'}}>{sel.intro}</div>}
+        {sel.status==='live'&&sel.token&&<div style={{display:'flex',gap:8,alignItems:'center',marginTop:12,flexWrap:'wrap'}}><input className="form-input" readOnly value={LINK(sel.token)} style={{flex:'1 1 320px',fontFamily:'var(--font-mono)',fontSize:12.5}} onFocus={e=>e.target.select()}/><button className="btn btn-sm btn-primary" onClick={()=>copy(LINK(sel.token))}>Link kopieren</button><a className="btn btn-sm" href={LINK(sel.token)} target="_blank" rel="noopener">Öffnen</a></div>}
+        {canEdit&&<div style={{display:'flex',gap:8,alignItems:'center',marginTop:12,flexWrap:'wrap'}}>
+          {sel.status!=='live'&&<button className="btn btn-sm btn-primary" disabled={busy===sel.id} onClick={()=>setStatus(sel,'live')}>Freigeben, Link aktivieren</button>}
+          {sel.status==='live'&&<button className="btn btn-sm" disabled={busy===sel.id} onClick={()=>setStatus(sel,'closed')}>Link schließen</button>}
+          <label style={{fontSize:12.5,display:'flex',gap:6,alignItems:'center'}}>Gültig bis <input type="date" className="form-input" style={{width:'auto'}} value={sel.expires_at?new Date(sel.expires_at).toISOString().slice(0,10):''} onChange={e=>setExpiry(sel,e.target.value)}/></label>
+          <button className="btn btn-sm" style={{marginLeft:'auto',color:'#b91c1c'}} onClick={()=>delTraining(sel)}>Löschen</button></div>}
+      </div>
+      <div style={card}><div style={{fontSize:14,fontWeight:800,marginBottom:4}}>Ergebnisse <span style={{color:'var(--muted)',fontWeight:500}}>· {doneRuns(sel).length} abgeschlossen</span></div>
+        {!doneRuns(sel).length?<div style={{fontSize:13,color:'var(--muted)'}}>Noch kein Durchlauf.</div>:
+        <table className="table" style={{width:'100%',fontSize:12.5}}><thead><tr><th style={{textAlign:'left'}}>Wer</th><th style={{textAlign:'left'}}>Was</th><th style={{textAlign:'right'}}>Datum</th><th style={{textAlign:'right'}}>Ergebnis</th><th style={{textAlign:'right'}}>Zeit</th><th></th></tr></thead>
+          <tbody>{doneRuns(sel).map(r=><tr key={r.id} style={{cursor:'pointer',background:runSel&&runSel.id===r.id?'var(--bg)':'transparent'}} onClick={()=>setRunSel(runSel&&runSel.id===r.id?null:r)}><td style={{fontWeight:600}}>{r.name}</td><td>{r.mode==='random'?'Überraschung':r.mode==='topic'?'Thema: '+(r.topic||''):'Schulung'}</td><td style={{textAlign:'right',color:'var(--muted)'}}>{fmtD(r.finished_at)}</td><td style={{textAlign:'right',fontFamily:'var(--font-mono)',fontWeight:800,color:col(Math.round((r.score||0)*100))}}>{Math.round((r.score||0)*100)} %</td><td style={{textAlign:'right',fontFamily:'var(--font-mono)'}}>{fmtT(r.seconds)}</td><td style={{textAlign:'right',color:'var(--muted)'}}>{runSel&&runSel.id===r.id?'▲':'▼'}</td></tr>)}</tbody></table>}
+        {runSel&&<div style={{marginTop:12,padding:'12px 14px',background:'var(--bg)',borderRadius:10}}>
+          <div style={{fontSize:13,fontWeight:800}}>{runSel.name} · {Math.round((runSel.score||0)*100)} % · {fmtT(runSel.seconds)} Min</div>
+          {runSel.summary&&<div style={{fontSize:13.5,marginTop:6,whiteSpace:'pre-wrap'}}><b>Miriam:</b> {runSel.summary}</div>}
+          <div style={{display:'flex',gap:6,flexWrap:'wrap',marginTop:6}}>{((runSel.splits||{}).strengths||[]).map((s,i)=><span key={'s'+i} style={{padding:'2px 8px',borderRadius:999,background:'#ecfdf5',color:'#065f46',fontSize:12}}>✓ {s}</span>)}{((runSel.splits||{}).gaps||[]).map((s,i)=><span key={'g'+i} style={{padding:'2px 8px',borderRadius:999,background:'#fff7ed',color:'#9a3412',fontSize:12}}>→ {s}</span>)}</div>
+          <div style={{marginTop:8}}>{(runSel.answers||[]).map((a,i)=><div key={i} style={{fontSize:12.5,borderTop:'1px solid var(--border)',padding:'6px 0',display:'flex',gap:10}}><span style={{width:20,color:'var(--muted)',fontWeight:700}}>{i+1}</span><span style={{flex:1}}>{a.topic}<span style={{color:'var(--muted)'}}> · {KIND[a.kind]}</span>{a.feedback?<div style={{color:'var(--muted)',fontSize:12}}>{a.feedback}</div>:null}</span><span style={{fontFamily:'var(--font-mono)',color:col(Math.round(Number(a.points||0)*100)),fontWeight:800}}>{Math.round(Number(a.points||0)*100)} %</span><span style={{fontFamily:'var(--font-mono)',color:'var(--muted)',width:44,textAlign:'right'}}>{fmtT(a.seconds)}</span></div>)}</div>
+        </div>}
+      </div>
+      <div style={card}><div style={{fontSize:14,fontWeight:800,marginBottom:4}}>Fragen dieser Schulung</div><div style={{fontSize:12,color:'var(--muted)',marginBottom:6}}>Eingefrorene Kopie: bleibt gleich, auch wenn die Fragenbank sich ändert.</div>{(sel.questions||[]).map((q,i)=><QRow key={q.id||i} q={q} i={i}/>)}</div>
+    </div>}
+
+    {mode==='new'&&canEdit&&<div>
+      <div style={card}>
+        <div style={{fontSize:14,fontWeight:800,marginBottom:8}}>1 · Was soll geschult werden?</div>
+        <div className="form-label">Titel</div><input className="form-input" placeholder="z. B. Transfer und Gepäck bei Condor" value={draft.title} onChange={e=>setDraft({...draft,title:e.target.value})}/>
+        <div className="form-label" style={{marginTop:10}}>Themen <span style={{fontWeight:500,color:'var(--muted)'}}>(nichts gewählt = alle Themen)</span></div>
+        <div style={{display:'flex',gap:6,flexWrap:'wrap',maxHeight:220,overflowY:'auto',border:'1px solid var(--border)',borderRadius:8,padding:8}}>{topicsAll.map(x=>{ const on=draft.topics.includes(x.t); return <button key={x.t} onClick={()=>setDraft({...draft,topics:on?draft.topics.filter(t=>t!==x.t):draft.topics.concat([x.t])})} style={{padding:'5px 11px',borderRadius:999,border:'1px solid '+(on?'#b45309':'var(--border)'),background:on?'#fff7ed':'var(--card)',color:on?'#b45309':'var(--text)',fontSize:12.5,cursor:'pointer',fontWeight:on?800:500}}>{x.t} <span style={{opacity:.7}}>{x.n}</span></button>; })}</div>
+        <div style={{display:'flex',gap:12,alignItems:'center',marginTop:10,flexWrap:'wrap'}}><label style={{fontSize:13,display:'flex',gap:6,alignItems:'center'}}>Anzahl Fragen <input type="number" min="3" max="25" className="form-input" style={{width:80}} value={draft.count} onChange={e=>setDraft({...draft,count:e.target.value})}/></label>
+          <button className="btn btn-sm btn-primary" disabled={busy==='build'} onClick={build}>{busy==='build'?'Miriam baut die Schulung … (etwa eine halbe Minute)':'Miriam baut die Schulung'}</button></div>
+        <div style={{fontSize:12,color:'var(--muted)',marginTop:6}}>Miriam nimmt nur geprüfte Fragen (Prüfer 4 von 5 oder besser), ähnliche Situationen nur einmal, und baut zu jeder Frage die drei Ebenen aus den Unterlagen. Du prüfst, streichst, gibst frei.</div>
+      </div>
+      {built&&<div style={card}>
+        <div style={{fontSize:14,fontWeight:800,marginBottom:8}}>2 · Prüfen und freigeben <span style={{color:'var(--muted)',fontWeight:500}}>· {built.questions.length} Fragen · ca. {built.minutes} Min</span></div>
+        <div className="form-label">Begrüßung (Miriam)</div><textarea className="form-input" rows="3" value={built.intro} onChange={e=>setBuilt({...built,intro:e.target.value})}/>
+        <div style={{marginTop:10}}>{built.questions.map((q,i)=><QRow key={q.id} q={q} i={i} onRemove={x=>setBuilt({...built,questions:built.questions.filter(y=>y.id!==x.id)})}/>)}</div>
+        <div style={{display:'flex',gap:8,marginTop:12,flexWrap:'wrap'}}><button className="btn btn-sm btn-primary" disabled={busy==='save'||!built.questions.length} onClick={()=>save('live')}>Freigeben und Link erzeugen</button><button className="btn btn-sm" disabled={busy==='save'} onClick={()=>save('draft')}>Als Entwurf speichern</button><button className="btn btn-sm" onClick={build} disabled={busy==='build'}>Neu bauen</button></div>
+      </div>}
+    </div>}
+
+    {mode==='guests'&&<div style={card}>
+      <div style={{fontSize:14,fontWeight:800,marginBottom:4}}>Gast-PINs</div>
+      <div style={{fontSize:12.5,color:'var(--muted)',marginBottom:10}}>Mitarbeiter nutzen ihre Stempel-PIN. Für Personen ohne Mitarbeiterdatensatz (Management, neue Kollegen vor dem ersten Tag, Kunden zum Testen) legst du hier einen Gast-PIN an. Er gilt für alle Schulungslinks.</div>
+      {canEdit&&<div style={{display:'flex',gap:8,marginBottom:12,flexWrap:'wrap'}}><input className="form-input" style={{flex:'1 1 220px'}} placeholder="Name" value={gName} onChange={e=>setGName(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter') addGuest(); }}/><button className="btn btn-sm btn-primary" disabled={busy==='guest'} onClick={addGuest}>PIN anlegen</button></div>}
+      {guests===null?<div style={{color:'var(--muted)',fontSize:13}}>Lädt…</div>:!guests.length?<div style={{color:'var(--muted)',fontSize:13}}>Noch keine Gast-PINs.</div>:
+      <table className="table" style={{width:'100%',fontSize:13}}><thead><tr><th style={{textAlign:'left'}}>Name</th><th>PIN</th><th style={{textAlign:'left'}}>Notiz</th><th style={{textAlign:'right'}}>Angelegt</th><th></th></tr></thead><tbody>{guests.map(g=><tr key={g.id} style={{opacity:g.active?1:.5}}><td style={{fontWeight:600}}>{g.name}</td><td style={{textAlign:'center',fontFamily:'var(--font-mono)',fontWeight:800,letterSpacing:3}}>{g.code}</td><td style={{color:'var(--muted)'}}>{g.note||''}</td><td style={{textAlign:'right',color:'var(--muted)'}}>{fmtD(g.created_at)}</td><td style={{textAlign:'right'}}>{canEdit&&<button className="btn btn-sm" onClick={()=>toggleGuest(g)}>{g.active?'Sperren':'Freigeben'}</button>}</td></tr>)}</tbody></table>}
+    </div>}
+  </div>;
+}
+
 function WissensspeicherView({projects, team, showToast}){
   const pw=(team&&team.perms&&team.perms.wissen)||{};
   const canEdit=pw.mode==='edit';
@@ -47905,6 +48033,7 @@ function App(){
       'training_plans':'<path d="M11.25 4.533A9.707 9.707 0 0 0 6 3a9.735 9.735 0 0 0-3.25.555.75.75 0 0 0-.5.707v14.25a.75.75 0 0 0 1 .707A8.237 8.237 0 0 1 6 18.75c1.995 0 3.823.707 5.25 1.886V4.533ZM12.75 20.636A8.214 8.214 0 0 1 18 18.75c.966 0 1.89.166 2.75.47a.75.75 0 0 0 1-.708V4.262a.75.75 0 0 0-.5-.707A9.735 9.735 0 0 0 18 3a9.707 9.707 0 0 0-5.25 1.533v16.103Z"/>',
       'timeline':'<path fill-rule="evenodd" d="M4.755 10.059a7.5 7.5 0 0 1 12.548-3.364l1.903 1.903h-3.183a.75.75 0 1 0 0 1.5h4.992a.75.75 0 0 0 .75-.75V4.356a.75.75 0 0 0-1.5 0v3.18l-1.9-1.9A9 9 0 0 0 3.306 9.67a.75.75 0 1 0 1.45.388Zm15.408 3.352a.75.75 0 0 0-.919.53 7.5 7.5 0 0 1-12.548 3.364l-1.902-1.903h3.183a.75.75 0 0 0 0-1.5H2.984a.75.75 0 0 0-.75.75v4.992a.75.75 0 0 0 1.5 0v-3.18l1.9 1.9a9 9 0 0 0 15.059-4.035.75.75 0 0 0-.53-.918Z" clip-rule="evenodd"/>',
       'knowledge':'<path d="M12 .75a8.25 8.25 0 0 0-4.135 15.39c.686.398 1.115 1.008 1.134 1.623a.75.75 0 0 0 .577.706c.352.083.71.148 1.074.195.323.041.6-.218.6-.544v-4.661a6.714 6.714 0 0 1-.937-.171.75.75 0 1 1 .374-1.453 5.261 5.261 0 0 0 2.626 0 .75.75 0 1 1 .374 1.452 6.712 6.712 0 0 1-.937.172v4.66c0 .327.277.586.6.545.364-.047.722-.112 1.074-.195a.75.75 0 0 0 .577-.706c.02-.615.448-1.225 1.134-1.623A8.25 8.25 0 0 0 12 .75Z"/> <path fill-rule="evenodd" d="M9.013 19.9a.75.75 0 0 1 .877-.597 11.319 11.319 0 0 0 4.22 0 .75.75 0 1 1 .28 1.473 12.819 12.819 0 0 1-4.78 0 .75.75 0 0 1-.597-.876ZM9.754 22.344a.75.75 0 0 1 .824-.668 13.682 13.682 0 0 0 2.844 0 .75.75 0 1 1 .156 1.492 15.156 15.156 0 0 1-3.156 0 .75.75 0 0 1-.668-.824Z" clip-rule="evenodd"/>',
+      'schulungen':'<path d="M11.7 2.805a.75.75 0 0 1 .6 0A60.65 60.65 0 0 1 22.83 8.72a.75.75 0 0 1-.231 1.337 49.948 49.948 0 0 0-9.902 3.912l-.003.002c-.114.06-.227.119-.34.18a.75.75 0 0 1-.707 0A50.88 50.88 0 0 0 7.5 12.173v-.224c0-.131.067-.248.172-.311a54.615 54.615 0 0 1 4.653-2.52.75.75 0 0 0-.65-1.352 56.123 56.123 0 0 0-4.78 2.589 1.858 1.858 0 0 0-.859 1.228 49.803 49.803 0 0 0-4.634-1.527.75.75 0 0 1-.231-1.337A60.653 60.653 0 0 1 11.7 2.805Z"/><path d="M13.06 15.473a48.45 48.45 0 0 1 7.666-3.282c.134 1.414.22 2.843.255 4.284a.75.75 0 0 1-.46.71 47.87 47.87 0 0 0-8.105 4.342.75.75 0 0 1-.832 0 47.87 47.87 0 0 0-8.104-4.342.75.75 0 0 1-.461-.71c.035-1.442.121-2.87.255-4.286.921.304 1.83.634 2.726.99v1.27a1.5 1.5 0 0 0-.14 2.508c-.09.38-.222.753-.397 1.11.452.213.901.434 1.346.66a6.727 6.727 0 0 0 .551-1.607 1.5 1.5 0 0 0 .14-2.67v-.645a48.549 48.549 0 0 1 3.44 1.667 2.25 2.25 0 0 0 2.12 0Z"/><path d="M4.462 19.462c.42-.419.753-.89 1-1.395.453.214.902.435 1.347.662a6.742 6.742 0 0 1-1.286 1.794.75.75 0 0 1-1.06-1.06Z"/>',
       'wissensspeicher':'<path d="M4.913 2.658c2.075-.27 4.19-.408 6.337-.408 2.147 0 4.262.139 6.337.408 1.922.25 3.291 1.861 3.405 3.727a4.403 4.403 0 0 0-1.032-.211 50.89 50.89 0 0 0-8.42 0c-2.358.196-4.04 2.19-4.04 4.434v4.286a4.47 4.47 0 0 0 2.433 3.984L7.28 21.53A.75.75 0 0 1 6 21v-4.03a48.527 48.527 0 0 1-1.087-.128C2.905 16.58 1.5 14.833 1.5 12.862V6.638c0-1.97 1.405-3.718 3.413-3.98Z"/><path d="M15.75 7.5c-1.376 0-2.739.057-4.086.169C10.124 7.797 9 9.103 9 10.609v4.285c0 1.507 1.128 2.814 2.67 2.94 1.243.102 2.5.157 3.768.165l2.782 2.781a.75.75 0 0 0 1.28-.53v-2.39l.33-.026c1.542-.125 2.67-1.433 2.67-2.94v-4.286c0-1.505-1.125-2.811-2.664-2.94A49.392 49.392 0 0 0 15.75 7.5Z"/>',
       'mgmtcalls':'<path fill-rule="evenodd" d="M7.502 6h7.128A3.375 3.375 0 0 1 18 9.375v9.375a3 3 0 0 0 3-3V6.108c0-1.505-1.125-2.811-2.664-2.94a48.972 48.972 0 0 0-.673-.05A3 3 0 0 0 15 1.5h-1.5a3 3 0 0 0-2.663 1.618c-.225.015-.45.032-.673.05C8.662 3.295 7.554 4.542 7.502 6ZM13.5 3A1.5 1.5 0 0 0 12 4.5h4.5A1.5 1.5 0 0 0 15 3h-1.5Z" clip-rule="evenodd"/><path fill-rule="evenodd" d="M3 9.375C3 8.339 3.84 7.5 4.875 7.5h9.75c1.036 0 1.875.84 1.875 1.875v11.25c0 1.035-.84 1.875-1.875 1.875h-9.75A1.875 1.875 0 0 1 3 20.625V9.375Zm4.125 2.625a.75.75 0 0 0 0 1.5h.008a.75.75 0 0 0 0-1.5H7.125Zm-.75 3.375a.75.75 0 0 1 .75-.75h.008a.75.75 0 0 1 0 1.5H7.125a.75.75 0 0 1-.75-.75Zm.75 2.625a.75.75 0 0 0 0 1.5h.008a.75.75 0 0 0 0-1.5H7.125ZM9 12a.75.75 0 0 1 .75-.75h3a.75.75 0 0 1 0 1.5h-3A.75.75 0 0 1 9 12Zm.75 2.25a.75.75 0 0 0 0 1.5h3a.75.75 0 0 0 0-1.5h-3ZM9 17.25a.75.75 0 0 1 .75-.75h3a.75.75 0 0 1 0 1.5h-3a.75.75 0 0 1-.75-.75Z" clip-rule="evenodd"/>',
       'langarchiv':'<path d="M2.25 6a3 3 0 0 1 3-3h13.5a3 3 0 0 1 3 3v1.5a1.5 1.5 0 0 1-1.5 1.5H3.75a1.5 1.5 0 0 1-1.5-1.5V6Z"/><path fill-rule="evenodd" d="M3.75 10.5h16.5v7.5a3 3 0 0 1-3 3H6.75a3 3 0 0 1-3-3v-7.5Zm5.25 3a.75.75 0 0 1 .75-.75h4.5a.75.75 0 0 1 0 1.5h-4.5a.75.75 0 0 1-.75-.75Z" clip-rule="evenodd"/>',
@@ -48216,6 +48345,7 @@ function App(){
           {view==='uploads'&&<UploadHubView team={team} projects={projects} onNavigate={dqNavigate}/>}
           {view==='dataimport'&&<DataImportView projects={projects} employees={employees}/>}
           {view==='wissensspeicher'&&<WissensspeicherView projects={projects} team={team} showToast={showToast}/>}
+          {view==='schulungen'&&<SchulungenView projects={projects} team={team} showToast={showToast}/>}
           {view==='uploadplan'&&<UploadScheduleAdminView team={team} projects={projects}/>}
           {view==='recmkt'&&<RecruitingMarketingView employees={employees}/>}
           {view==='nlquery'&&<NlQueryView team={team}/>}
