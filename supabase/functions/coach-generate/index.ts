@@ -40,12 +40,16 @@ const lbl = (f: any) => { const q = f.qualifier && typeof f.qualifier === "objec
 const isFactish = (f: any) => !!f.value && !NO_TOPIC.test(String(f.topic || "")) && String(f.value).length <= 120 && (f.zielgebiet || ["kontakt", "zeit", "preis", "regel"].includes(f.info_type));
 const isProse = (f: any) => !!f.value && !NO_TOPIC.test(String(f.topic || "")) && !isFactish(f) && String(f.value).length >= 40;
 
+// Tipp-Frage nur als echte Situation: eine Nummer, die man dem Kunden am Telefon durchgibt (Notfall/Agentur vor Ort je Zielgebiet).
+// Interne Kontakte, Supplier-Adressen und Coaching-Felder sind KEINE Tippfragen (User: „Das ist keine Frage, das ist ein Datenbankfeld“).
+const gapWorthy = (f: any, v: string) => !!f.zielgebiet && /\d{6,}/.test(v.replace(/\s/g, "")) && /notfall|agentur vor ort|hotline|notruf/i.test(String(f.label || "") + " " + String(f.topic || ""));
+const gapPrompt = (f: any) => "Ein Kunde ruft aus " + f.zielgebiet + " an, es ist dringend, und er braucht sofort die Nummer der Agentur vor Ort. Nachschlagen geht nicht. Welche Nummer gibst du ihm durch?";
 // ── Regeln: Tippen (Nummern/Adressen) + Zuordnung ───────────────────────────────────────────────────
 function ruleQuestions(facts: any[], docTitles: Record<string, string>): Q[] {
   const out: Q[] = []; const byTopic: Record<string, any[]> = {}; for (const f of facts) (byTopic[f.topic] = byTopic[f.topic] || []).push(f);
   for (const f of facts) {
-    const v = String(f.value || ""); if (!isFactish(f) || v.length > 40 || !(/\d{5,}/.test(v) || /^\S+@\S+\.\S+$/.test(v))) continue;
-    out.push({ kind: "gap", difficulty: digits(v).length >= 8 ? "schwer" : "mittel", topic: f.topic, zielgebiet: f.zielgebiet || null, prompt: "Ein Kunde wartet in der Leitung, nachschlagen geht nicht. Wie lautet " + (f.zielgebiet ? "für " + f.zielgebiet + " " : "") + "die Angabe „" + lbl(f) + "“?", options: null, answer: { accept: [v] },
+    const v = String(f.value || ""); if (!isFactish(f) || v.length > 40 || !gapWorthy(f, v)) continue;
+    out.push({ kind: "gap", difficulty: digits(v).length >= 8 ? "schwer" : "mittel", topic: f.topic, zielgebiet: f.zielgebiet || null, prompt: gapPrompt(f), options: null, answer: { accept: [v] },
       explanation: lbl(f) + ": " + v, source_kind: "fact", source_id: f.id, source_label: srcLabel(f, docTitles), source_stamp: f.updated_at, gen_by: "rule" });
   }
   for (const t of Object.keys(byTopic)) {
