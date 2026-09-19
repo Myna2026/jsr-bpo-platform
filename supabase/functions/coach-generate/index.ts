@@ -43,7 +43,7 @@ const isProse = (f: any) => !!f.value && !NO_TOPIC.test(String(f.topic || "")) &
 // Tipp-Frage nur als echte Situation: eine Nummer, die man dem Kunden am Telefon durchgibt (Notfall/Agentur vor Ort je Zielgebiet).
 // Interne Kontakte, Supplier-Adressen und Coaching-Felder sind KEINE Tippfragen (User: „Das ist keine Frage, das ist ein Datenbankfeld“).
 const gapWorthy = (f: any, v: string) => !!f.zielgebiet && /\d{6,}/.test(v.replace(/\s/g, "")) && /notfall|agentur vor ort|hotline|notruf/i.test(String(f.label || "") + " " + String(f.topic || ""));
-const gapPrompt = (f: any) => "Ein Kunde ruft aus " + f.zielgebiet + " an, es ist dringend, und er braucht sofort die Nummer der Agentur vor Ort. Nachschlagen geht nicht. Welche Nummer gibst du ihm durch?";
+const gapPrompt = (f: any) => "Ein Kunde ruft aus " + String(f.zielgebiet).split(" / ").pop() + " an, es ist dringend, und er braucht sofort die Nummer der Agentur vor Ort. Welche Nummer gibst du ihm durch?";
 // ── Regeln: Tippen (Nummern/Adressen) + Zuordnung ───────────────────────────────────────────────────
 function ruleQuestions(facts: any[], docTitles: Record<string, string>): Q[] {
   const out: Q[] = []; const byTopic: Record<string, any[]> = {}; for (const f of facts) (byTopic[f.topic] = byTopic[f.topic] || []).push(f);
@@ -52,91 +52,25 @@ function ruleQuestions(facts: any[], docTitles: Record<string, string>): Q[] {
     out.push({ kind: "gap", difficulty: digits(v).length >= 8 ? "schwer" : "mittel", topic: f.topic, zielgebiet: f.zielgebiet || null, prompt: gapPrompt(f), options: null, answer: { accept: [v] },
       explanation: lbl(f) + ": " + v, source_kind: "fact", source_id: f.id, source_label: srcLabel(f, docTitles), source_stamp: f.updated_at, gen_by: "rule" });
   }
+  // Zuordnung: nur Nummern, die man dem Kunden durchgibt (Notfall/Agentur vor Ort). Ein Trainer würde sagen: „Vier Kunden rufen
+  // gleichzeitig an …“. Ortsnamen kurz (letzter Teil von „Griechenland / Kos“), jede Nummer nur einmal im Satz.
+  const shortZg = (z: string) => String(z || "").split(" / ").pop()!.trim();
   for (const t of Object.keys(byTopic)) {
     if (NO_TOPIC.test(t)) continue;
-    const rows = byTopic[t].filter((x) => x.zielgebiet && x.value && String(x.value).length <= 80 && (/\d{5,}/.test(String(x.value)) || /@/.test(String(x.value)) || String(x.value).length <= 30));
-    const byZg: Record<string, any> = {}; for (const r of rows) if (!byZg[r.zielgebiet]) byZg[r.zielgebiet] = r;
+    const rows = byTopic[t].filter((x) => x.zielgebiet && x.value && gapWorthy(x, String(x.value)));
+    const byZg: Record<string, any> = {}; for (const r of rows) { const k = shortZg(r.zielgebiet); if (!byZg[k]) byZg[k] = r; }
     const zgs = Object.keys(byZg); if (zgs.length < 4) continue;
-    for (let round = 0; round < Math.min(3, Math.floor(zgs.length / 4)); round++) {
-      const pick = shuffle(zgs).slice(0, 4).map((z) => byZg[z]); if (new Set(pick.map((p) => norm(p.value))).size < 4) continue;
-      const pairs: Record<string, string> = {}; pick.forEach((p) => { pairs[p.zielgebiet] = String(p.value); });
-      out.push({ kind: "match", difficulty: "mittel", topic: t, zielgebiet: null, prompt: "Vier Kunden, vier Zielgebiete: ordne zu, was jeweils gilt (" + t + ").", options: { left: pick.map((p) => p.zielgebiet), right: shuffle(pick.map((p) => String(p.value))) }, answer: { pairs },
-        explanation: pick.map((p) => p.zielgebiet + ": " + p.value).join(" · "), source_kind: "fact", source_id: pick[0].id, source_label: srcLabel(pick[0], docTitles), source_stamp: pick[0].updated_at, gen_by: "rule" });
+    for (let round = 0; round < Math.min(4, Math.floor(zgs.length / 4)); round++) {
+      const pick: any[] = []; const seenV = new Set<string>(); for (const z of shuffle(zgs)) { const r = byZg[z]; const v = digits(r.value); if (seenV.has(v)) continue; seenV.add(v); pick.push(r); if (pick.length === 4) break; }
+      if (pick.length < 4) continue;
+      const names = pick.map((p) => shortZg(p.zielgebiet)); const pairs: Record<string, string> = {}; pick.forEach((p) => { pairs[shortZg(p.zielgebiet)] = String(p.value); });
+      out.push({ kind: "match", difficulty: "mittel", topic: t, zielgebiet: null, prompt: "Vier Kunden rufen gleichzeitig an, aus " + names.slice(0, 3).join(", ") + " und " + names[3] + ". Alle brauchen sofort die Nummer der Agentur vor Ort. Welche Nummer gehört zu welchem Ort?", options: { left: names, right: shuffle(pick.map((p) => String(p.value))) }, answer: { pairs },
+        explanation: names.map((n, i) => n + ": " + pick[i].value).join(" · "), source_kind: "fact", source_id: pick[0].id, source_label: srcLabel(pick[0], docTitles), source_stamp: pick[0].updated_at, gen_by: "rule" });
     }
   }
   return out;
 }
 
-// ── KI: Auswahlfragen als Situation, Ablenker nur aus echten Nachbarwerten ───────────────────────────
-const MC_TOOL = { name: "auswahlfragen", input_schema: { type: "object", properties: { fragen: { type: "array", items: { type: "object", properties: {
-  fact_id: { type: "string" }, skip: { type: "boolean", description: "true, wenn aus diesem Eintrag keine sinnvolle Frage wird (kein passender Ablenker, Wert ist ein Satz, Platzhalter)" },
-  difficulty: { type: "string", enum: ["leicht", "mittel"], description: "leicht = 3 Optionen, mittel = 4 Optionen" },
-  prompt: { type: "string", description: "Situation am Telefon in 1-2 Sätzen, dann die Frage. Duzen. Keine erfundenen Namen, Nummern, Daten." },
-  distractor_ids: { type: "array", items: { type: "string" }, description: "IDs der Nachbar-Einträge, deren Werte als falsche Antworten dienen (2 bei leicht, 3 bei mittel). Nur aus der Liste NACHBARN. Nahe, glaubwürdige Werte." },
-  explanation: { type: "string", description: "Merk-Satz zur richtigen Antwort, 1 Satz" },
-}, required: ["fact_id", "skip"] } } }, required: ["fragen"] } };
-async function aiMc(batch: any[], siblingsOf: (f: any) => any[], docTitles: Record<string, string>): Promise<Q[]> {
-  if (!ANTHROPIC_KEY) return [];
-  const byId: Record<string, any> = {}; for (const f of batch) byId[f.id] = f;
-  const sibMap: Record<string, any[]> = {};
-  const txt = batch.map((f) => { const sibs = siblingsOf(f); sibMap[f.id] = sibs; for (const s of sibs) byId[s.id] = s;
-    return "EINTRAG " + f.id + "\n  Thema: " + f.topic + (f.zielgebiet ? " · Zielgebiet: " + f.zielgebiet : "") + "\n  Bezeichnung: " + lbl(f) + "\n  Wert (richtige Antwort, wörtlich): " + f.value +
-      "\n  NACHBARN (mögliche falsche Antworten):\n" + (sibs.length ? sibs.map((s) => "    - " + s.id + " · " + (s.zielgebiet ? s.zielgebiet + " · " : "") + lbl(s) + ": " + s.value).join("\n") : "    (keine)"); }).join("\n\n");
-  const system = "Du baust Übungsfragen für Call-Center-Kräfte eines Reiseveranstalters. Jede Frage ist eine kurze SITUATION am Telefon (ein Kunde ruft an, will etwas wissen, steht irgendwo), danach die eigentliche Frage. " +
-    "Die richtige Antwort ist immer der angegebene Wert; die falschen Antworten wählst du NUR aus den NACHBARN (per ID), und zwar die nächstliegenden, glaubwürdigen (gleiche Art: Nummer neben Nummer, Frist neben Frist). " +
-    "Wenn die Nachbarn nicht als Ablenker taugen oder der Wert ein ganzer Satz/Ablauf ist: skip=true. Keine erfundenen Namen, Nummern oder Daten in der Situation. Duze. Kurz.";
-  const r = await claude(system, txt, MC_TOOL, 3500);
-  const out: Q[] = [];
-  for (const q of (r.fragen || [])) {
-    const f = byId[q.fact_id]; if (!f || q.skip || !q.prompt) continue;
-    const sibs = sibMap[f.id] || []; const want = q.difficulty === "leicht" ? 2 : 3;
-    const ds = (q.distractor_ids || []).map((id: string) => sibs.find((s) => s.id === id)).filter(Boolean).filter((s: any, i: number, arr: any[]) => arr.findIndex((x) => norm(x.value) === norm(s.value)) === i && norm(s.value) !== norm(f.value) && !norm(s.value).includes(norm(f.value)) && !norm(f.value).includes(norm(s.value)));
-    if (ds.length < want) continue;
-    const opts = shuffle([{ v: String(f.value), why: null, id: f.id }, ...ds.slice(0, want).map((s: any) => ({ v: String(s.value), why: (s.zielgebiet ? s.zielgebiet + ": " : "") + lbl(s), id: s.id }))]).map((o, i) => ({ key: "ABCD"[i], text: o.v, why: o.why, _id: o.id }));
-    const key = opts.find((o) => o._id === f.id)!.key;
-    out.push({ kind: "mc", difficulty: q.difficulty === "leicht" ? "leicht" : "mittel", topic: f.topic, zielgebiet: f.zielgebiet || null, prompt: String(q.prompt).trim(), options: opts.map(({ key, text, why }) => ({ key, text, why })), answer: { key },
-      explanation: (q.explanation && String(q.explanation).trim()) || (lbl(f) + ": " + f.value), source_kind: "fact", source_id: f.id, source_label: srcLabel(f, docTitles), source_stamp: f.updated_at, gen_by: "ai" });
-  }
-  return out;
-}
-
-// ── KI: Situationen (free) + Reihenfolgen (order) aus Prosa (Fakten-Sätze und Abschnitte) ───────────
-const SIT_TOOL = { name: "situationen", input_schema: { type: "object", properties: { fragen: { type: "array", items: { type: "object", properties: {
-  ref: { type: "string", description: "ID des Eintrags/Abschnitts" }, kind: { type: "string", enum: ["free", "order"] },
-  prompt: { type: "string", description: "free: konkrete Situation am Telefon (der Kunde sagt/will …) + 'Was sagst/tust du?'; order: 'Bringe die Schritte in die richtige Reihenfolge: …'. Keine erfundenen Namen/Nummern/Daten." },
-  must: { type: "array", items: { type: "string" }, description: "free: 2-4 Kernpunkte WÖRTLICH aus dem Text (kurze Phrasen), die in einer guten Antwort vorkommen müssen" },
-  nice: { type: "array", items: { type: "string" } },
-  model_answer: { type: "string", description: "free: So klingt es gut: 1-3 Sätze, wie die Kollegin es dem Kunden sagen würde, nur aus dem Text, in Sie-Form" },
-  steps: { type: "array", items: { type: "string" }, description: "order: 3-6 Schritte in der RICHTIGEN Reihenfolge, knapp aus dem Text" },
-  explanation: { type: "string" }, difficulty: { type: "string", enum: ["mittel", "schwer"] },
-}, required: ["ref", "kind", "prompt", "explanation"] } } }, required: ["fragen"] } };
-async function aiSituations(items: { ref: string; text: string; head: string; src: any }[]): Promise<Q[]> {
-  if (!ANTHROPIC_KEY || !items.length) return [];
-  const system = "Du baust Übungs-SITUATIONEN für Call-Center-Kräfte aus Auszügen einer Schulungsunterlage. Nur, was wörtlich im Text steht. " +
-    "free = eine Lage am Telefon, in die die Kollegin gerät, mit der Frage, was sie sagt oder tut; must = die Kernpunkte wörtlich aus dem Text; model_answer = wie sie es dem Kunden sagen würde (Sie-Form, nur aus dem Text). " +
-    "Gute Situation: die Kollegin muss eine ENTSCHEIDUNG treffen oder eine REGEL anwenden, deren Antwort im Text eindeutig steht (Was darf sie zusagen? Was muss sie zuerst prüfen? Wohin leitet sie weiter? Welche Frist gilt?). " +
-    "Die Situation darf die Antwort nicht verraten und nicht bloß fragen, was man anklickt. Schlechte Situation: banal, Antwort steht schon in der Frage, oder der Text gibt nur eine Stichwortliste her. " +
-    "order = ein echter Ablauf mit klarer Reihenfolge. Gibt ein Auszug keine brauchbare Situation her: auslassen (lieber keine als eine schwache). Keine Platzhalter, keine Beispielnummern, keine erfundenen Namen. Höchstens 2 Fragen je Auszug. Duze die Kollegin.";
-  const txt = items.map((it) => "AUSZUG " + it.ref + " [" + it.head + "]:\n" + it.text).join("\n\n---\n\n");
-  const r = await claude(system, txt, SIT_TOOL, 4000);
-  const out: Q[] = [];
-  for (const q of (r.fragen || [])) {
-    const it = items.find((x) => x.ref === q.ref); if (!it || !q.prompt) continue;
-    const base = { topic: it.src.topic, zielgebiet: null, source_kind: it.src.source_kind, source_id: it.src.source_id, source_label: it.src.source_label, source_stamp: it.src.source_stamp, gen_by: "ai" };
-    if (q.kind === "free") {
-      const must = (q.must || []).filter((m: string) => m && overlap(m, it.text)).slice(0, 4); if (must.length < 2) continue;
-      const nice = (q.nice || []).filter((m: string) => m && overlap(m, it.text)).slice(0, 2);
-      const model = q.model_answer && overlap(q.model_answer, it.text) ? String(q.model_answer).trim() : null;
-      out.push({ kind: "free", difficulty: "schwer", prompt: String(q.prompt).trim(), options: null, answer: { must, nice, model_answer: model }, explanation: String(q.explanation || "").trim(), ...base });
-    } else if (q.kind === "order") {
-      const steps = (q.steps || []).filter((s: string) => s && overlap(s, it.text)); if (steps.length < 3 || steps.length > 6 || steps.length !== (q.steps || []).length) continue;
-      out.push({ kind: "order", difficulty: q.difficulty === "mittel" ? "mittel" : "schwer", prompt: String(q.prompt).trim(), options: shuffle(steps), answer: { sequence: steps }, explanation: String(q.explanation || "").trim(), ...base });
-    }
-  }
-  return out;
-}
-
-// ── Prüfer: Note 1..5 je Frage, nur >= 4 wird aktiv ───────────────────────────────────────────────────
 const JUDGE_TOOL = { name: "pruefung", input_schema: { type: "object", properties: { noten: { type: "array", items: { type: "object", properties: {
   n: { type: "integer" }, score: { type: "integer", minimum: 1, maximum: 5, description: "5 = klar, eindeutig, realistisch am Telefon, Antwortmöglichkeiten sinnvoll; 3 = holprig oder trivial; 1 = unsinnig, mehrdeutig, Platzhalter, mehrere richtige Antworten" },
   note: { type: "string", description: "1 Satz Begründung" } }, required: ["n", "score"] } } }, required: ["noten"] } };
@@ -150,7 +84,8 @@ async function judge(qs: Q[]): Promise<void> {
      "  Kernpunkte: " + (q.answer.must || []).join(" | ") + (q.answer.model_answer ? "\n  Musterantwort: " + q.answer.model_answer : ""))).join("\n\n");
   const system = "Du prüfst Übungsfragen für Call-Center-Kräfte eines Reiseveranstalters, streng und ehrlich. Bewerte jede Frage 1 bis 5.\n" +
     "Für Auswahl (mc), Situationen (free) und Reihenfolgen (order): menschlich sinnvoll = realistische Lage am Telefon, eindeutige Frage, Antwortmöglichkeiten derselben Art (nicht eine Nummer neben einem Satz), genau eine richtige Antwort, keine Platzhalter, nicht trivial durch Wortwiederholung aus der Frage.\n" +
-    "Für Tippen (gap) und Zuordnung (match): das sind bewusst Drills für Nummern und Adressen, KEINE Situation nötig. Hier zählt nur: Ist eindeutig, welcher Wert gemeint ist, und ist der Wert ein Wert (Nummer, Adresse, Frist), kein Satz? Dann 4 oder 5.";
+    "Für Tippen (gap) und Zuordnung (match): Drills für die Nummern der Agentur vor Ort, die man dem Kunden im Notfall durchgibt. Ein Trainer lässt solche Nummern bewusst üben; werte sie NICHT als unrealistisch ab, weil man nachschlagen könnte. Hier zählt nur: eindeutig, welcher Wert gemeint ist, und ein Wert (Nummer), kein Satz. Dann 4 oder 5.\n" +
+    "Maßstab für ALLE Arten: Würde ein Trainer die Frage so stellen? Eine Frage, die nur einen Feldnamen oder eine Bezeichnung aus einer Datenbank vorliest („Wie lautet die Angabe X?“), ist keine Frage: 1 oder 2.";
   const r = await claude(system, txt, JUDGE_TOOL, 2500);
   for (const n of (r.noten || [])) { const q = qs[(n.n || 0) - 1]; if (q) { q.quality = Math.max(1, Math.min(5, Number(n.score) || 1)); q.judge_note = n.note ? String(n.note).slice(0, 300) : null; } }
   for (const q of qs) if (q.quality == null) { q.quality = 3; q.judge_note = "nicht bewertet"; }
@@ -238,6 +173,16 @@ Deno.serve(async (req) => {
       } catch (e) { console.error("[coach-generate] " + pid + " " + (e as Error).message); }
     }
   };
+  // Nachprüfung der ganzen Bank mit dem Trainer-Maßstab: {"recheck":true,"project_id":…,"limit":80}; sperrt unter 4
+  if (body.recheck === true) {
+    const pid = onlyProject!; const lim = Math.max(8, Math.min(200, Number(body.limit) || 80));
+    const { data: rows } = await sb.from("coach_questions").select("*").eq("project_id", pid).eq("status", "active").not("judge_note", "ilike", "Trainer-Maßstab:%").limit(lim);
+    const list: Q[] = (rows || []) as any; let blocked = 0;
+    for (let i = 0; i < list.length; i += 8) { const part = list.slice(i, i + 8); part.forEach((q: any) => { q.quality = null; }); try { await judge(part); } catch (_e) { continue; }
+      for (const q of part as any[]) { const ok = (q.quality || 0) >= 4; if (!ok) blocked++; await sb.from("coach_questions").update({ quality: q.quality, judge_note: "Trainer-Maßstab: " + (q.judge_note || ""), status: ok ? "active" : "blocked", updated_at: new Date().toISOString() }).eq("id", q.id); } }
+    const { count } = await sb.from("coach_questions").select("id", { count: "exact", head: true }).eq("project_id", pid).eq("status", "active").not("judge_note", "ilike", "Trainer-Maßstab:%");
+    return json({ ok: true, checked: list.length, blocked, remaining: count || 0 });
+  }
   if (body.sync === true) { const out: any[] = []; for (const pid of projects) out.push(await runProject(pid, chunkLimit, factLimit, doJudge)); return json({ ok: true, report: out }); }
   EdgeRuntime.waitUntil(work());
   return json({ ok: true, started: true, projects, portion: { ai_limit: chunkLimit, fact_limit: factLimit }, hops });
