@@ -35,6 +35,11 @@ Deno.serve(async (req) => {
   const similar = (a: Set<string>, b: Set<string>) => { let hit = 0; for (const w of a) if (b.has(w)) hit++; return hit / Math.max(1, Math.min(a.size, b.size)) >= 0.6; };
   const picked: any[] = []; const bags: Set<string>[] = []; let freeN = 0;
   for (let k = 0; picked.length < n; k++) { let any = false; for (const t of order) { const arr = groups.get(t) || []; const x = arr[k]; if (!x) continue; any = true; if (picked.length >= n) break; const bg = bag(x); if (bags.some((b) => similar(b, bg))) continue; if (x.kind === "free") { if (freeN >= capFree) continue; freeN++; } bags.push(bg); picked.push(x); } if (!any) break; }
+  // Freitext-Deckel hat Plätze offen gelassen, obwohl es Stoff gibt: mit Situationen nachfüllen, Themen ohne Frage zuerst
+  if (picked.length < n) { // reihum über die Themen, Themen ohne Frage zuerst, damit kein Thema leer ausgeht
+    const cnt: Record<string, number> = {}; for (const x of picked) cnt[x.topic] = (cnt[x.topic] || 0) + 1;
+    const rest = rows.filter((x) => !picked.includes(x) && !bags.some((b) => similar(b, bag(x))));
+    while (picked.length < n && rest.length) { rest.sort((a, b) => (cnt[a.topic] || 0) - (cnt[b.topic] || 0)); const x = rest.shift()!; bags.push(bag(x)); picked.push(x); cnt[x.topic] = (cnt[x.topic] || 0) + 1; } }
   if (!picked.length) return json({ error: "Zu diesen Themen gibt es keine geprüften Fragen." }, 404);
   // Freitext ans Ende, Rest gemischt
   const list = [...shuffle(picked.filter((x) => x.kind !== "free")), ...picked.filter((x) => x.kind === "free")];

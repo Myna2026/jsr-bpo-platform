@@ -39,6 +39,10 @@ function pickUnit(bank: any[], topic: string | null, n: number) {
   const similar = (a: Set<string>, b: Set<string>) => { let hit = 0; for (const w of a) if (b.has(w)) hit++; return hit / Math.max(1, Math.min(a.size, b.size)) >= 0.6; };
   const picked: any[] = []; const bags: Set<string>[] = []; let freeN = 0;
   for (let k = 0; picked.length < n; k++) { let any = false; for (const t of order) { const x = (groups.get(t) || [])[k]; if (!x) continue; any = true; if (picked.length >= n) break; const bg = bag(x); if (bags.some((b) => similar(b, bg))) continue; if (x.kind === "free") { if (freeN >= capFree) continue; freeN++; } bags.push(bg); picked.push(x); } if (!any) break; }
+  if (picked.length < n) { // reihum über die Themen, Themen ohne Frage zuerst, damit kein Thema leer ausgeht
+    const cnt: Record<string, number> = {}; for (const x of picked) cnt[x.topic] = (cnt[x.topic] || 0) + 1;
+    const rest = rows.filter((x) => !picked.includes(x) && !bags.some((b) => similar(b, bag(x))));
+    while (picked.length < n && rest.length) { rest.sort((a, b) => (cnt[a.topic] || 0) - (cnt[b.topic] || 0)); const x = rest.shift()!; bags.push(bag(x)); picked.push(x); cnt[x.topic] = (cnt[x.topic] || 0) + 1; } }
   const list = [...shuffle(picked.filter((x) => x.kind !== "free")), ...picked.filter((x) => x.kind === "free")];
   return list.map((x) => ({ id: x.id, kind: x.kind, difficulty: x.difficulty, topic: x.topic, zielgebiet: x.zielgebiet, prompt: x.prompt, options: x.options, answer: x.answer, explanation: x.explanation, source_label: x.source_label, why: x.layers?.why || null, objection: x.layers?.objection || null, apply: x.layers?.apply || null }));
 }
