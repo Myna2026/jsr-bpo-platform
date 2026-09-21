@@ -8,6 +8,7 @@
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="shared/coach-ui.js?v=__BUILD_ID__"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -796,7 +797,7 @@ function Overview({client, onOpenTeam, employees, posCats}){
       <div className="grid-4">
         {[
           {label:'Agenten',val:agents.length,color:'var(--blue)',icon:'users'},
-          {label:'Skills abgedeckt',val:skills.length,color:'var(--blue)',icon:'viewfinder-circle'},
+          ...(skills.length>1?[{label:'Skills abgedeckt',val:skills.length,color:'var(--blue)',icon:'viewfinder-circle'}]:[]),   // nur bei mehr als einem Skill (Condor: einer, sagt nichts)
           {label:'Offene Rechnungen',val:openInv.length,color:openInv.length>0?'var(--amber)':'var(--green)',icon:'document-text'},
         ].map((k,i)=>(
           <div key={i} className="kpi">
@@ -807,8 +808,8 @@ function Overview({client, onOpenTeam, employees, posCats}){
         ))}
       </div>
 
-      {/* Skills Overview */}
-      <div className="card">
+      {/* Skills Overview: nur, wenn das Team mehr als einen Skill hat */}
+      {skills.length>1&&<div className="card">
         <div className="card-header"><span className="card-title" style={{display:'inline-flex',alignItems:'center',gap:7}}><span style={{display:'inline-flex',color:'var(--blue)'}} dangerouslySetInnerHTML={{__html:heroicon('viewfinder-circle',18)}} />Skills in Ihrem Team</span></div>
         <div className="card-body">
           <div style={{display:'flex',flexWrap:'wrap',gap:8}}>
@@ -823,7 +824,7 @@ function Overview({client, onOpenTeam, employees, posCats}){
             })}
           </div>
         </div>
-      </div>
+      </div>}
 
       {/* Team-Vorschau (Leadership + Team) */}
       <div className="card">
@@ -2217,8 +2218,50 @@ function kbSendFb(helpful){ if(!_kbAns||!_kbAns.query_id)return;
 }
 // React-Hülle: mountet die Vanilla-Konsole; bei Partnerwechsel neu aufbauen.
 function KbConnyView({client}){
-  useEffect(()=>{ window._kbClientPid=(client&&client.project_id)||null; try{ renderPartnerwissen(); }catch(e){ console.error(e); } },[client&&client.project_id]);
-  return <div><div style={{fontSize:12.5,color:'#64748b',marginBottom:10}}>Ihre Wissensdatenbank zum internen Gebrauch: Fragen stellen, Antworten mit Quelle aus Ihren Unterlagen. Änderungen am Wissen laufen über den Bereich „Wissensänderungen“.</div><div id="vPartnerwissen"/></div>;
+  const pid=(client&&client.project_id)||null;
+  const [tab,setTab]=useState('ask');   // ask | register | coach
+  const [hasCoach,setHasCoach]=useState(false);
+  const agent=kbFallbackAgent(pid);
+  useEffect(()=>{ window._kbClientPid=pid; if(tab==='ask'){ try{ renderPartnerwissen(); }catch(e){ console.error(e); } } },[pid,tab]);
+  useEffect(()=>{ if(!pid) return; sb.from('coach_questions').select('id',{count:'exact',head:true}).eq('project_id',pid).eq('status','active').then(r=>setHasCoach(!!r.count)).catch(()=>setHasCoach(false)); },[pid]);
+  // Coach: dieselbe Oberfläche wie im Mitarbeiter-Portal (shared/coach-ui.js), im Probelauf-Modus: Condor übt selbst, nichts wird gespeichert
+  useEffect(()=>{ if(tab!=='coach'||!pid) return; try{ coSetCtx({pid, preview:true, hostId:'kbClientCoach', fallbackAgent:()=>agent, greet:'Üben Sie selbst mit '+agent.name+': dieselben Fragen, die Ihr Team bekommt. Ergebnisse werden nicht gespeichert.'}); renderCoach(); }catch(e){ console.error(e); } },[tab,pid]);
+  const tabs=[['ask','Fragen'],['register','Register']].concat(hasCoach?[['coach','Coach']]:[]);
+  return <div>
+    <div style={{display:'flex',gap:4,marginBottom:12,borderBottom:'1px solid #e2e8f0'}}>{tabs.map(([k,l])=><button key={k} onClick={()=>setTab(k)} style={{padding:'9px 16px',border:'none',borderBottom:'2px solid '+(tab===k?agent.color:'transparent'),marginBottom:-1,background:'none',cursor:'pointer',color:tab===k?'#0f172a':'#64748b',fontWeight:tab===k?800:600,fontSize:14,fontFamily:'inherit'}}>{l}</button>)}</div>
+    {tab==='ask'&&<div><div style={{fontSize:12.5,color:'#64748b',marginBottom:10}}>Ihre Wissensdatenbank zum internen Gebrauch: Fragen stellen, Antworten mit Quelle aus Ihren Unterlagen. Änderungen am Wissen laufen über den Bereich „Wissensänderungen“.</div><div id="vPartnerwissen"/></div>}
+    {tab==='register'&&<KbRegisterClient pid={pid} agent={agent}/>}
+    {tab==='coach'&&<div><div style={{fontSize:12.5,color:'#64748b',marginBottom:10}}>Üben wie Ihr Team: Thema, Schwierigkeit und Dauer wählen, dann geht es los. Ihre Durchläufe werden nicht gespeichert und zählen nirgends.</div><div id="kbClientCoach"/></div>}
+  </div>;
+}
+// Register nur lesen (Kunde): nach Zielgebiet oder Thema blättern, suchen; Werte und Quelle je Eintrag. Kein Bearbeiten.
+function KbRegisterClient({pid, agent}){
+  const [facts,setFacts]=useState(null); const [docs,setDocs]=useState({}); const [mode,setMode]=useState('zg'); const [q,setQ]=useState(''); const [open,setOpen]=useState(null);
+  useEffect(()=>{ if(!pid) return; let alive=true; (async()=>{ const all=[]; for(let from=0;;from+=1000){ const {data,error}=await sb.from('kb_facts').select('id,topic,zielgebiet,info_type,label,value,qualifier,source_document_id,source_locator,valid_from,valid_to,updated_at').eq('project_id',pid).eq('status','active').order('topic').order('label').range(from,from+999); if(error||!data||!data.length) break; all.push(...data); if(data.length<1000) break; }
+    const {data:dd}=await sb.from('kb_documents').select('id,title').eq('project_id',pid); const m={}; (dd||[]).forEach(d=>{ m[d.id]=d.title; }); if(alive){ setDocs(m); setFacts(all); } })(); return ()=>{ alive=false; }; },[pid]);
+  if(!pid) return null; if(facts===null) return <div className="card"><div className="card-body" style={{color:'#64748b'}}>Lade das Register…</div></div>;
+  const norm=s=>String(s||'').toLowerCase(); const qq=norm(q.trim());
+  const list=qq?facts.filter(f=>[f.topic,f.zielgebiet,f.label,f.value].some(v=>norm(v).includes(qq))):facts;
+  const keyOf=f=>mode==='zg'?(f.zielgebiet||'Allgemein (ohne Zielgebiet)'):f.topic; const groups={}; list.forEach(f=>{ (groups[keyOf(f)]=groups[keyOf(f)]||[]).push(f); });
+  const keys=Object.keys(groups).sort((a,b)=>a.startsWith('Allgemein')?1:b.startsWith('Allgemein')?-1:a.localeCompare(b,'de'));
+  const qual=f=>f.qualifier&&typeof f.qualifier==='object'?Object.entries(f.qualifier).filter(([,v])=>v).map(([k,v])=>k+' '+v).join(', '):'';
+  const src=f=>[f.source_document_id&&docs[f.source_document_id], f.source_locator].filter(Boolean).join(', ');
+  const isContact=v=>/@/.test(v)||/\d{5,}/.test(String(v).replace(/\s/g,''));
+  return <div>
+    <div className="card" style={{marginBottom:12}}><div className="card-body" style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'center'}}>
+      <div style={{display:'inline-flex',border:'1px solid #e2e8f0',borderRadius:10,overflow:'hidden'}}>{[['zg','Nach Zielgebiet'],['topic','Nach Thema']].map(([k,l])=><button key={k} onClick={()=>{ setMode(k); setOpen(null); }} style={{padding:'8px 14px',border:'none',background:mode===k?agent.color:'#fff',color:mode===k?'#fff':'#334155',fontWeight:700,fontSize:13,cursor:'pointer',fontFamily:'inherit'}}>{l}</button>)}</div>
+      <input value={q} onChange={e=>{ setQ(e.target.value); setOpen(null); }} placeholder="Suchen: Ort, Thema, Bezeichnung oder Wert" style={{flex:'1 1 240px',padding:'9px 12px',border:'1px solid #cbd5e1',borderRadius:10,fontSize:13.5,fontFamily:'inherit'}}/>
+      <span style={{fontSize:12.5,color:'#64748b'}}><b style={{color:'#0f172a'}}>{list.length}</b> Einträge · {keys.length} {mode==='zg'?'Zielgebiete':'Themen'} · nur lesen</span>
+    </div></div>
+    {!keys.length&&<div className="card"><div className="card-body" style={{color:'#64748b'}}>Nichts gefunden.</div></div>}
+    {keys.map(k=>{ const rows=groups[k]; const isOpen=open===k||(qq&&keys.length<=6); return <div key={k} className="card" style={{marginBottom:10,overflow:'hidden'}}>
+      <div onClick={()=>setOpen(isOpen&&!qq?null:k)} style={{display:'flex',alignItems:'center',gap:10,padding:'12px 16px',cursor:'pointer',background:isOpen?'#f8fafc':'#fff'}}><span style={{fontWeight:800,fontSize:14.5,flex:1}}>{k}</span><span style={{fontSize:12,color:'#64748b'}}>{rows.length} Einträge</span><span style={{color:'#94a3b8',fontSize:12}}>{isOpen?'▲':'▼'}</span></div>
+      {isOpen&&<div style={{borderTop:'1px solid #eef2f7'}}>{rows.map(f=><div key={f.id} style={{display:'grid',gridTemplateColumns:'minmax(160px,1.1fr) minmax(200px,1.6fr)',gap:'4px 16px',padding:'10px 16px',borderTop:'1px solid #f1f5f9',fontSize:13.5}}>
+        <div><div style={{fontWeight:600}}>{f.label}{qual(f)?<span style={{color:'#64748b',fontWeight:400}}> ({qual(f)})</span>:null}</div><div style={{fontSize:11.5,color:'#94a3b8'}}>{mode==='zg'?f.topic:(f.zielgebiet||'')}</div></div>
+        <div><div style={{whiteSpace:'pre-wrap',wordBreak:'break-word',fontFamily:isContact(f.value)?'var(--font-mono)':'inherit',fontWeight:isContact(f.value)?700:400}}>{f.value}</div>{(src(f)||f.valid_to)&&<div style={{fontSize:11.5,color:'#94a3b8',marginTop:2}}>{[src(f)&&('Quelle: '+src(f)), f.valid_to&&('gültig bis '+new Date(f.valid_to).toLocaleDateString('de-DE'))].filter(Boolean).join(' · ')}</div>}</div>
+      </div>)}</div>}
+    </div>; })}
+  </div>;
 }
 
 // Pflicht-Passwortwechsel (Kundenportal): Start-Passwort → eigenes Passwort, Kennzeichen via clear_must_change_pw (Definer).

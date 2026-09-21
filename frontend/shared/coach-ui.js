@@ -5,7 +5,7 @@
    Braucht: window.sb (Supabase-Client), Host-Element (_coCtx.hostId), optional kbAvatarHtml/kbInjectCss aus dem Portal.
    Eingebunden per <script src="shared/coach-ui.js?v=__BUILD_ID__">. ═══ */
 var _coAvail=null,_coAg=null,_coSess=null,_coQ=[],_coIdx=0,_coT0=0,_coBusy=false,_coOrder=null,_coAssign=null,_coFill=null,_coRes=[],_coStart=0,_coTimer=null,_coMinutes=5,_coOver=false,_coKey=null;
-var _coCtx={pid:null,agent:null,preview:false,hostId:'vCoach',avatarHtml:null,fallbackAgent:null};
+var _coCtx={pid:null,agent:null,preview:false,hostId:'vCoach',avatarHtml:null,fallbackAgent:null,greet:null};
 var _coSet={mode:'daily',topic:'',zielgebiet:'',minutes:5,difficulty:'mix',kinds:'auto',step:1};
 function coSetCtx(c){ for(var k in c) _coCtx[k]=c[k]; }
 function coAvatar(ag,size){ try{ if(_coCtx.avatarHtml) return _coCtx.avatarHtml(ag,size); if(typeof kbAvatarHtml==='function') return kbAvatarHtml(ag,size); }catch(e){} return '<div style="width:100%;height:100%;border-radius:50%;background:'+(ag&&ag.color||'#0F5661')+';color:#fff;display:flex;align-items:center;justify-content:center;font-weight:800">'+String((ag&&ag.name)||'C').charAt(0)+'</div>'; }
@@ -87,7 +87,7 @@ function coStartScreen(host){
   var ag=_coAg, a=_coAvail, s=_coSet; var name=coEsc(ag.name||'Coach');
   var av0=coAvailFor(s); if(s.difficulty!=='mix'&&!av0.diffs[s.difficulty]) s.difficulty='mix'; var av1=coAvailFor(s); var kindOk={auto:true,mc:!!(av1.kinds.mc||av1.kinds.match),gap:!!(av1.kinds.gap||av1.kinds.order),free:!!av1.kinds.free}; if(!kindOk[s.kinds]) s.kinds='auto';
   var av=coAvailFor(s); var need=coCountFor(s.minutes);
-  var greet=_coCtx.preview?'Probelauf: genau die Einheit, die die Mitarbeiter bekommen. Nichts wird gespeichert.':(a.today>0?('Heute schon '+a.today+' Einheit'+(a.today>1?'en':'')+'. Noch eine?'):'Heute noch nicht geübt. Fünf Minuten reichen.');
+  var greet=_coCtx.greet?_coCtx.greet:_coCtx.preview?'Probelauf: genau die Einheit, die die Mitarbeiter bekommen. Nichts wird gespeichert.':(a.today>0?('Heute schon '+a.today+' Einheit'+(a.today>1?'en':'')+'. Noch eine?'):'Heute noch nicht geübt. Fünf Minuten reichen.');
   var asg=(a.assignments||[]);
   var asgHtml=asg.length?'<div class="co-lbl" style="color:#b91c1c;margin-top:4px">Pflichteinheiten · '+asg.length+' offen</div><div class="co-asg">'+asg.map(function(x){ var due=x.due_date?new Date(x.due_date+'T00:00:00').toLocaleDateString('de-DE'):null; return '<div class="co-asgrow'+(x.overdue?' late':'')+'"><div style="flex:1;min-width:0"><b>'+coEsc(x.topic||(x.zielgebiet?'Vor dem Gespräch: '+x.zielgebiet:'Mix aus allem'))+'</b><div class="co-asgmeta">'+x.minutes+' Min · '+coCountFor(x.minutes)+' Fragen · '+({mix:'gemischt',leicht:'leicht',mittel:'mittel',schwer:'schwer'}[x.difficulty]||x.difficulty)+(due?' · bis '+due+(x.overdue?' (überfällig)':''):'')+(x.assigned_by_name?' · von '+coEsc(x.assigned_by_name):'')+'</div>'+(x.note?'<div class="co-asgnote">„'+coEsc(x.note)+'“</div>':'')+'</div><button class="co-btn co-asgo" data-id="'+x.id+'">Jetzt machen</button></div>'; }).join('')+'</div>':'';
   var stepBar='<div class="co-steps">'+[[1,'Was'],[2,'Wie'],[3,'Wie lange'],[4,'Start']].map(function(x){ return '<b class="'+(s.step===x[0]?'on':(s.step>x[0]?'done':''))+'" data-step="'+x[0]+'">'+x[0]+' '+x[1]+'</b>'; }).join('')+'</div>';
