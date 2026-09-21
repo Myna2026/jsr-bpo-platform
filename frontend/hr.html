@@ -3718,11 +3718,14 @@ function EmployeeModal({emp, projects, employees, onSave, onClose, initialTab, o
     return Math.round(rate * hrs * 22);
   })();
 
+  // Reiner Lead (Teamleitung/Projektleitung ohne HR/Management/Finance): Gehalt und Bank sind serverseitig maskiert; die Reiter
+  // wären leer und irreführend („Kein Stundenlohn hinterlegt“). Deshalb gar nicht zeigen, ebenso den Vergütungsblock im Vertrag.
+  const viewerLead = isLeadOnlyRoles(((window.__viewer||{}).role_keys)||[]);
   const TABS = [
     {id:'profil',    label:'Profil',    icon:'👤'},
     {id:'vertrag',   label:'Vertrag',   icon:'📝'},
-    {id:'gehalt',    label:'Gehalt',    icon:'💶'},
-    {id:'bank',      label:'Bank',      icon:'🏦'},
+    ...(viewerLead?[]:[{id:'gehalt',    label:'Gehalt',    icon:'💶'},
+    {id:'bank',      label:'Bank',      icon:'🏦'}]),
     {id:'hr',        label:'HR',        icon:'📋'},
     {id:'hardware',   label:'Hardware',  icon:'🖥'},
     {id:'stunden',    label:'Stunden',   icon:'⏱'},
@@ -4432,7 +4435,7 @@ function EmployeeModal({emp, projects, employees, onSave, onClose, initialTab, o
                       ['Beginn', (form.contract?.start||form.contract_start)||'—'],
                       ['Ende', (form.contract?.end||form.contract_end)||'Unbefristet'],
                       ['Laufzeit', (()=>{ const s=form.contract?.start||form.contract_start, en=form.contract?.end||form.contract_end; if(!s) return '—'; if(!en) return 'Unbefristet'; const mo=Math.max(0,Math.round((new Date(en)-new Date(s))/(1000*60*60*24*30.44))); return mo+' Monate'; })()],
-                      ['Stundenlohn', form.hourly_rate?(form.hourly_rate+' €/h'):'—'],
+                      ...(viewerLead?[]:[['Stundenlohn', form.hourly_rate?(form.hourly_rate+' €/h'):'—']]),
                       ['Stunden/Tag', form.work_hours?(form.work_hours+'h'):'—'],
                       ['Arbeitsmodell', form.work_model||'—'],
                       ['Unterzeichnet am', (form.contract?.signed_at)||((form.contract?.signed_manual||form.contract_signed_manual)?'manuell':'—')],
@@ -4506,8 +4509,8 @@ function EmployeeModal({emp, projects, employees, onSave, onClose, initialTab, o
                       disabled={isTerminated}/>
                   </div>
                 </div>
-                {/* ── ERWEITERTE VERTRAGSFELDER ── */}
-                <div style={{borderTop:'1px solid var(--border)',marginTop:14,paddingTop:14}}>
+                {/* ── ERWEITERTE VERTRAGSFELDER (Vergütung): für reine Leads verborgen ── */}
+                {!viewerLead&&<div style={{borderTop:'1px solid var(--border)',marginTop:14,paddingTop:14}}>
                   <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',
                     letterSpacing:'.06em',marginBottom:12}}>⚙️ Erweiterte Vertragsoptionen</div>
 
@@ -4632,7 +4635,7 @@ function EmployeeModal({emp, projects, employees, onSave, onClose, initialTab, o
                   <div style={{fontSize:10,color:'var(--muted)',marginTop:4}}>
                     * Pflichtfelder für Gehaltsabrechnung und Stundenkonto
                   </div>
-                </div>
+                </div>}
 
               </div>
             </div>
@@ -5491,9 +5494,9 @@ function EmployeeList({employees, setEmployees, projects, seedSearch, navFilter,
               <th style={thStyle('language')} onClick={()=>toggleSort('language')}>
                 Sprache{sortIcon('language')}
               </th>
-              <th style={thStyle('salary')} onClick={()=>toggleSort('salary')}>
+              {!isLeadOnlyRoles(((window.__viewer||{}).role_keys)||[])&&<th style={thStyle('salary')} onClick={()=>toggleSort('salary')}>
                 Gehalt{sortIcon('salary')}
-              </th>
+              </th>}
               <th title="Pflegestand: bei Lücken werden die fehlenden Bereiche benannt (Vertrag-PDF, Vertragsdaten, Profil, Bank, Projekt)">Pflege</th>
               <th>Aktionen</th>
             </tr>
@@ -5554,9 +5557,9 @@ function EmployeeList({employees, setEmployees, projects, seedSearch, navFilter,
                         :<span style={{color:'var(--muted)'}}>—</span>;
                     })()}
                   </td>
-                  <td style={{fontSize:11,fontFamily:'var(--mono)',color:'var(--muted)'}}>
+                  {!isLeadOnlyRoles(((window.__viewer||{}).role_keys)||[])&&<td style={{fontSize:11,fontFamily:'var(--mono)',color:'var(--muted)'}}>
                     {isTerminated?'—':(()=>{const n=empMonthlyCost(e);return n>0?Number(n).toLocaleString('de-DE')+' '+paySym(e):'—';})()}
-                  </td>
+                  </td>}
                   <td><CareBadges emp={e} fpMap={_fpMap} contractDocs={contractDocs}/></td>
                   <td>
                     <div style={{display:'flex',gap:6,flexWrap:'wrap',alignItems:'stretch'}}>
@@ -10325,7 +10328,10 @@ function cockpitRoleOf(team){ const rk=(team&&team.role_keys)||[];
 }
 // Cockpit = vereinheitlichter Registry-Renderer (rollenabhängige Reihenfolge/Ausblendung, gepinnte
 // Aufgaben + Upload). Mobil bleibt CockpitMobile (eigene Fassung).
-function Cockpit({employees, projects, plans, forecast, onAbsence, team, onNavigate, isMobileW, setEmployees, showToast}){
+function Cockpit({employees, projects:projectsAll, plans, forecast, onAbsence, team, onNavigate, isMobileW, setEmployees, showToast}){
+  // Reiner Lead: nur das eigene Projekt (fremde Projekt-Chips wären leer, RLS liefert dazu nichts)
+  const _leadOnlyProj=(team&&isLeadOnlyRoles(team.role_keys))?(team.project_id||(((employees||[]).find(e=>e&&e.project_id)||{}).project_id)||null):null;
+  const projects=_leadOnlyProj?(projectsAll||[]).filter(p=>p&&p.id===_leadOnlyProj):projectsAll;
   // Personalkosten/Marge sind Management/Finance-Sache — für HR ausblenden (sonst falsche Summen aus maskierten Gehältern).
   const isFullFin=(team&&(team.role_keys||[]).some(r=>r==='management'||r==='finance'));
   // 27e: Payslips liegen in Supabase (Legacy-localStorage-Store nach Cleanup leer). Einmaliger Load fuer den Task-Count.
@@ -13712,11 +13718,10 @@ function SimpleShiftView({employees, projects, team, showToast}){
   const isoWeek=d=>{const x=new Date(Date.UTC(d.getFullYear(),d.getMonth(),d.getDate()));const dw=x.getUTCDay()||7;x.setUTCDate(x.getUTCDate()+4-dw);const y1=new Date(Date.UTC(x.getUTCFullYear(),0,1));return Math.ceil((((x-y1)/86400000)+1)/7);};
   const DOW=['Mo','Di','Mi','Do','Fr','Sa','So'];
 
-  const projList=(projects||[]).filter(p=>p&&p.id&&p.status!=='inactive');
+  // Leads (projektleiter/teamlead) planen nur ihr eigenes Projekt: der Wähler zeigt nur dieses (fremde Chips wären leer und verwirrend).
+  const _leadProj = (team && isLeadOnlyRoles(team.role_keys)) ? (team.project_id||(((employees||[]).find(e=>e&&e.project_id)||{}).project_id)||null) : null;
+  const projList=(projects||[]).filter(p=>p&&p.id&&p.status!=='inactive'&&(!_leadProj||p.id===_leadProj));
   const [projId,setProjId]=useState(()=>{try{const s=localStorage.getItem('jsr_shiftplan_proj');if(s&&projList.some(p=>p.id===s))return s;}catch(e){} return (projList[0]&&projList[0].id)||'';});
-  // Leads (projektleiter/teamlead) sehen mehrere Projekte im Wähler, planen aber nur ihr eigenes. Ihre maskierte
-  // Mitarbeiterliste enthält nur ihr Projekt -> darauf vorwählen, sonst bliebe der Plan auf einem Fremdprojekt leer.
-  const _leadProj = (team && isLeadOnlyRoles(team.role_keys)) ? (((employees||[]).find(e=>e&&e.project_id)||{}).project_id||null) : null;
   // WICHTIG: _leadProjReady (nicht nur _leadProj) in der Dep-Liste. Mitarbeiter und Projekte laden
   // unabhaengig; laden die MA zuerst, ist projList beim ersten Feuern noch leer -> some()=false -> kein Set,
   // und da _leadProj sich danach nicht mehr aendert, feuerte der Effekt nie erneut (leerer Lead-Plan).
@@ -47384,8 +47389,10 @@ function App(){
         email: session.user.email
       };
       // Pflicht-Passwortwechsel beim Erstlogin: erst Dialog, dann handleLogin.
+      window.__viewer=loginPayload;
       if(au.must_change_pw){ gatingRef.current=false; setPendingPw({userId: session.user.id, login: loginPayload}); return; }
       if(event==='SIGNED_IN') logActivity('login', 'session', session.user.id, au.full_name || session.user.email); // nur echte Logins, nicht Session-Restore
+      window.__viewer=loginPayload;   // Rollen des Anmelders für Komponenten ohne team-Prop (z. B. EmployeeModal: Lead sieht keine Gehalts-/Bank-Reiter)
       handleLogin(loginPayload);
       // 4a-3: Login-Auto-Sync entfernt — GDoc-Sync nur manuell.
     }catch(e){ gatingRef.current=false; setPortalDenied(false); setAuthMsg('Verbindungsfehler beim Laden des Profils.'); }
