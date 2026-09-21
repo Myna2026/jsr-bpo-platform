@@ -9,7 +9,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-preview",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 const json = (b: unknown, status = 200) =>
@@ -188,7 +188,9 @@ Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ error: "POST erwartet" }, 405);
   const auth = req.headers.get("Authorization") || "";
   if (!auth) return json({ error: "Nicht angemeldet." }, 401);
-  const sb = createClient(SB_URL, ANON, { global: { headers: { Authorization: auth } } });
+  // Admin-Vorschau: Kopfzeile x-preview weiterreichen, dann gelten in kb_retrieve die Rechte des Zielnutzers (read-only)
+  const previewHdr = req.headers.get("x-preview") || "";
+  const sb = createClient(SB_URL, ANON, { global: { headers: previewHdr ? { Authorization: auth, "x-preview": previewHdr } : { Authorization: auth } } });
 
   const { data: udata } = await sb.auth.getUser();
   if (!udata?.user?.id) return json({ error: "Sitzung ungültig." }, 401);

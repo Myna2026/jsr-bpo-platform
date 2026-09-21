@@ -7,7 +7,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const SB_URL = Deno.env.get("SUPABASE_URL")!, ANON = Deno.env.get("SUPABASE_ANON_KEY")!, SERVICE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const cors = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type", "Access-Control-Allow-Methods": "POST, OPTIONS" };
+const cors = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-preview", "Access-Control-Allow-Methods": "POST, OPTIONS" };
 const json = (b: unknown, s = 200) => { if (s >= 400) console.error("[coach-session] " + s + " " + JSON.stringify(b)); return new Response(JSON.stringify(b), { status: s, headers: { ...cors, "Content-Type": "application/json" } }); };
 import { norm, digits, shuffle, publicQ, gradeMc, gradeGap, gradeMatch, gradeOrder, gradeFree } from "../_shared/coach_grade.ts";
 const admin = createClient(SB_URL, SERVICE);
@@ -118,9 +118,12 @@ async function bumpProgress(empId: string, qid: string, points: number) {
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   const auth = req.headers.get("Authorization") || ""; if (!auth) return json({ error: "Nicht angemeldet." }, 401);
-  const user = createClient(SB_URL, ANON, { global: { headers: { Authorization: auth } } });
+  // Admin-Vorschau (x-preview): nur der zustandslose Probelauf; echte Einheiten würden im Namen des Zielnutzers gespeichert
+  const previewHdr = req.headers.get("x-preview") || "";
+  const user = createClient(SB_URL, ANON, { global: { headers: previewHdr ? { Authorization: auth, "x-preview": previewHdr } : { Authorization: auth } } });
   const { data: u } = await user.auth.getUser(); if (!u?.user?.id) return json({ error: "Sitzung ungültig, bitte Seite neu laden." }, 401);
   let body: any = {}; try { body = await req.json(); } catch { /* egal */ }
+  if (previewHdr && body.preview !== true) return json({ error: "In der Vorschau nur ansehen: Einheiten werden nicht gestartet oder gespeichert." }, 403);
   const action = String(body.action || "");
   const settingsFor = async (pid: string) => (await admin.from("coach_settings").select("*").eq("project_id", pid).maybeSingle()).data || {};
 

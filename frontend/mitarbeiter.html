@@ -544,6 +544,7 @@ td.muted{color:var(--muted);}
 <!-- Supabase JS v2 (UMD → window.supabase.createClient) -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="shared/jsr-calc.js?v=__BUILD_ID__"></script>
+<script src="shared/preview.js?v=__BUILD_ID__"></script>
 <script src="shared/coach-ui.js?v=__BUILD_ID__"></script>
 </head>
 <body>
@@ -895,7 +896,7 @@ var SB_KEY = 'sb_publishable_exKYOG6Znhj_JlO0v6erQQ_q0HWWiyl';
 var PORTAL = 'mitarbeiter';                          // dieses Portal
 var PORTAL_LABELS = {client:'Client Portal', mitarbeiter:'Mitarbeiter Portal', hr:'HR Portal'};
 var PORTAL_URLS   = {client:'https://client.tive360.de/', mitarbeiter:'https://mitarbeiter.tive360.de/', hr:'https://hr.tive360.de/'};
-var sb = window.supabase.createClient(SB_URL, SB_KEY);
+var sb = window.supabase.createClient(SB_URL, SB_KEY, (window.PREVIEW&&window.PREVIEW.id)?window.previewClientOptions():undefined);   // Admin-Vorschau
 
 // Aktivitaets-Protokoll: CURRENT_USER wird in gateSession gesetzt. logActivity ist
 // fire-and-forget (kein await, Fehler geschluckt) — blockiert nie einen Vorgang.
@@ -1606,7 +1607,9 @@ function passwordLogin(){
 function gateSession(session, event){
   if(AUTH_GATING || !session || !session.user) return;
   AUTH_GATING = true;
-  var authUser = session.user;
+  // Admin-Vorschau: erst Zielnutzer aus der Datenbank holen, dann normal weiter (shared/preview.js)
+  if(window.PREVIEW&&window.PREVIEW.id&&!window.PREVIEW.who){ window.previewWhoami(sb).then(function(who){ AUTH_GATING=false; if(!who){ denied('Die Vorschau ist abgelaufen oder ungültig. Bitte im HR-Portal unter „Vorschau als“ neu starten.'); return; } window.previewMuteRealtime(sb); gateSession(window.previewSession(session, who), event); }); return; }
+  var authUser = session.user; var inPreview=!!(window.PREVIEW&&window.PREVIEW.who);
   sb.from('app_users').select('role_keys, full_name, staff_number, active, employee_id, must_change_pw')
     .eq('user_id', authUser.id).single()
     .then(function(r){
@@ -1615,7 +1618,7 @@ function gateSession(session, event){
       CURRENT_USER = { id: authUser.id, name: au.full_name || authUser.email }; // Identitaet fuers Protokoll
       if(!au.active){ AUTH_GATING=false; denied('Dieser Account ist deaktiviert.'); return; }
       if(!au.role_keys || !au.role_keys.length){ AUTH_GATING=false; denied('Noch keine Rolle zugewiesen. Bitte an HR/Management wenden.'); return; }
-      if(au.must_change_pw){ AUTH_GATING=false; showForcePwDialog(session); return; }
+      if(au.must_change_pw&&!inPreview){ AUTH_GATING=false; showForcePwDialog(session); return; }
       sb.from('roles_definitions').select('role_key, portals').in('role_key', au.role_keys)
         .then(function(rr){
           if(rr.error){ AUTH_GATING=false; denied(rr.error.message); return; }
@@ -1626,9 +1629,10 @@ function gateSession(session, event){
           buildME(au, authUser).then(function(me){
             if(!me){ AUTH_GATING=false; return; } // denied() wurde in buildME dispatched
             ME = me;
-            if(event==='SIGNED_IN') logActivity('login', 'session', authUser.id, au.full_name || authUser.email); // nur echte Logins
+            if(event==='SIGNED_IN'&&!inPreview) logActivity('login', 'session', authUser.id, au.full_name || authUser.email); // nur echte Logins
             buildPortalSwitcher(MY_PORTALS);
             boot();
+            if(inPreview){ setTimeout(function(){ try{ window.previewBanner(sb, window.PREVIEW.who); }catch(e){} }, 300); }
             // Zentrale Config (Urlaub/Feiertage/Tagesberichte) aus app_config laden, dann neu rendern.
             loadAppConfigForMA().then(function(){ applyReportVisibility(); renderCurrentViewOnRealtime(); });
             loadMyVacAccount().then(function(){ renderCurrentViewOnRealtime(); });   // Urlaubskonto (Topf A)
