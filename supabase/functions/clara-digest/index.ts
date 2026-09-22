@@ -74,6 +74,10 @@ Deno.serve(async (req)=>{
   const { data:obs } = await sb.from("agent_observations").select("title").eq("agent_key","clara").eq("day",day);
   const notes = (obs||[]).map((o:any)=>o.title).join(" ");
   // Auto-Parken: wie viele hat Clara heute frueh (Cron 05:40) in den Pool geparkt? Nur zaehlen, wenn der letzte Lauf VON HEUTE ist.
+  // Potenzial Zukunft: wer ist heute (oder überfällig) zur Wiedervorlage dran? Nur anzeigen, wenn es welche gibt.
+  const { data: pfAll } = await sb.from("cvs").select("id,first_name,last_name,extra").eq("status","potential_future");
+  const pfDue = (pfAll || []).map((c: any) => ({ name: ((c.first_name || "") + " " + (c.last_name || "")).trim() || "Bewerber", due: (c.extra || {}).future_due || "", reason: (c.extra || {}).future_reason || "" }))
+    .filter((r: any) => r.due && r.due <= day).sort((a: any, b: any) => a.due.localeCompare(b.due));
   const { data:apCfg } = await sb.from("app_config").select("value").eq("key","jsr_clara_auto_v1").maybeSingle();
   const _lr:any = (apCfg as any)?.value?.auto_park?.last_run;
   const parkedN = (_lr && String(_lr.at||"").slice(0,10)===day) ? (Number(_lr.parked)||0) : 0;
@@ -137,6 +141,11 @@ Deno.serve(async (req)=>{
       +'<td style="padding-right:8px;"><span style="display:inline-block;background:#fde68a;color:#8a5a00;font-weight:bold;font-size:14px;padding:7px 13px;border-radius:20px;">&#9733; GUT '+qGut+'</span></td>'
       +'<td><span style="display:inline-block;background:#eef0f4;color:#6b7280;font-weight:bold;font-size:14px;padding:7px 13px;border-radius:20px;">Rest '+qRest+'</span></td>'
       +'</tr></table></td></tr>'
+    +(pfDue.length ? '<tr><td style="padding:14px 22px 2px;"><div style="font-size:12px;color:#6b7280;font-weight:bold;text-transform:uppercase;letter-spacing:.04em;margin-bottom:9px;">Potenzial Zukunft &middot; heute wiedervorlegen</div>'
+      + pfDue.map((r: any) => '<div style="font-size:13.5px;color:#374151;padding:5px 0;border-top:1px solid #eef0f4;"><b>' + r.name.replace(/</g, "&lt;") + '</b>'
+        + (r.reason ? ' <span style="color:#6b7280;">&middot; ' + r.reason.replace(/</g, "&lt;") + '</span>' : '')
+        + ' <span style="color:#7c3aed;">&middot; f&auml;llig ' + r.due.split("-").reverse().join(".") + '</span></div>').join("")
+      + '<div style="margin-top:8px;"><a href="' + portal + '/hr.html?goto=potenzial" style="color:' + acc + ';font-size:12.5px;">Zu Potenzial Zukunft</a></div></td></tr>' : '')
     +(parkedN>0 ? '<tr><td style="padding:12px 22px 2px;"><div style="font-size:13px;color:#374151;">&#9851; In den Pool geparkt (zu lange unbearbeitet): <b style="color:#0891b2;">'+parkedN+'</b> <span style="color:#9ca3af;">— aus dem Trichter genommen, keine Absage; im Bewerber-Pool auffindbar.</span></div></td></tr>' : '')
     +'<tr><td style="padding:16px 22px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f6f4fb;border-left:4px solid '+acc+';border-radius:10px;"><tr>'
       +'<td width="58" valign="top" style="padding:14px 0 14px 14px;"><img src="'+photo+'" width="40" height="40" alt="Clara" style="border-radius:20px;display:block;"></td>'
@@ -150,13 +159,15 @@ Deno.serve(async (req)=>{
     +"Davon neu: "+neu+"\nDubletten offen: "+dub+"\n\n"
     +"Sprachniveau: hoch "+hoch+", mittel "+mit+", niedrig "+nied+", unbekannt "+unb+"\n"
     +"Qualität: TOP "+qTop+", GUT "+qGut+", Rest "+qRest+"\n"
-    +(parkedN>0?("In den Pool geparkt (zu lange unbearbeitet): "+parkedN+"\n"):"")+"\n"
+    +(parkedN>0?("In den Pool geparkt (zu lange unbearbeitet): "+parkedN+"\n"):"")
+    +(pfDue.length?("\nPotenzial Zukunft, heute wiedervorlegen:\n"+pfDue.map((r:any)=>"- "+r.name+(r.reason?" ("+r.reason+")":"")+", fällig "+r.due.split("-").reverse().join(".")).join("\n")+"\n"):"")+"\n"
     +obsText+"\n\nZum Recruiting: "+recruitLink+"\n\n— Clara, digitale Kollegin im Recruiting";
   const slackText = "*Recruiting heute Morgen · "+dateLbl+"*\n"
     +"📥 Bewerbungen heute: *"+nt+"*  ("+arrow+")\n🆕 Davon neu: *"+neu+"*    👥 Dubletten offen: *"+dub+"*\n"
     +"Sprache: hoch "+hoch+" · mittel "+mit+" · niedrig "+nied+" · unbekannt "+unb+"\n"
     +"Qualität: ⭐ TOP "+qTop+" · ★ GUT "+qGut+" · Rest "+qRest+"\n"
-    +(parkedN>0?("♻️ In den Pool geparkt: *"+parkedN+"*\n"):"")+"\n"+obsText+"\n_— Clara_";
+    +(parkedN>0?("♻️ In den Pool geparkt: *"+parkedN+"*\n"):"")
+    +(pfDue.length?("⭐ Potenzial Zukunft, heute wiedervorlegen: *"+pfDue.length+"*\n"+pfDue.map((r:any)=>"• "+r.name+(r.reason?" ("+r.reason+")":"")).join("\n")+"\n"):"")+"\n"+obsText+"\n_— Clara_";
 
   if(sp.get("dry")==="1") return json({ dry:true, day, obsText, textFb, html });
 
