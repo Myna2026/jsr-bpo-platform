@@ -44665,6 +44665,17 @@ function MaxDaySummary({team, employees, events, overrides}){
   </div>;
 }
 function CalendarView({team, projects, employees, showToast, isMobileW, jumpTo, onJumpConsumed, onNavigate}){
+  // Erinnerung 15 Minuten vor dem Termin: jeder schaltet sie für sich selbst (calendar_reminder_prefs, RLS = eigene Zeile)
+  const [remOn,setRemOn]=useState(null);
+  const myEmpId=(team&&team.employee_id)||null;
+  useEffect(()=>{ let alive=true; if(!myEmpId){ setRemOn(undefined); return; }
+    sb.from('calendar_reminder_prefs').select('enabled').eq('employee_id',myEmpId).maybeSingle()
+      .then(r=>{ if(alive) setRemOn(r&&r.data?r.data.enabled!==false:true); }).catch(()=>{ if(alive) setRemOn(true); });
+    return ()=>{ alive=false; }; },[myEmpId]);
+  const toggleRem=async()=>{ if(!myEmpId) return; const next=!remOn; setRemOn(next);
+    try{ const {error}=await sb.from('calendar_reminder_prefs').upsert({employee_id:myEmpId, enabled:next, updated_at:new Date().toISOString()},{onConflict:'employee_id'}); if(error) throw error;
+      showToast&&showToast(next?'Erinnerungen an: 15 Minuten vor deinen Terminen':'Erinnerungen aus'); }
+    catch(e){ setRemOn(!next); showToast&&showToast('⚠ '+((e&&e.message)||'Speichern fehlgeschlagen'),'error'); } };
   const [events,setEvents]=useState([]);
   const [overrides,setOverrides]=useState({});   // `${event_id}|${date}` -> row
   const [loading,setLoading]=useState(true);
@@ -44786,6 +44797,8 @@ function CalendarView({team, projects, employees, showToast, isMobileW, jumpTo, 
                 <button className="btn btn-sm" style={{border:'none',borderRadius:0,background:mode==='month'?'#0F5661':'transparent',color:mode==='month'?'#fff':'var(--text)'}} onClick={()=>setMode('month')}>Monat</button>
                 <button className="btn btn-sm" style={{border:'none',borderRadius:0,background:mode==='day'?'#0F5661':'transparent',color:mode==='day'?'#fff':'var(--text)'}} onClick={()=>setMode('day')}>Tag</button>
               </div>}
+          {remOn!==undefined&&remOn!==null&&<button className="btn btn-sm" onClick={toggleRem} title="15 Minuten vor deinen Terminen eine Nachricht per Mail und Slack"
+            style={{borderColor:remOn?'#2563eb':'var(--border)',color:remOn?'#2563eb':'var(--muted)',fontWeight:700}}>{remOn?'🔔 Erinnerung an':'🔕 Erinnerung aus'}</button>}
           <button className="btn btn-sm" style={{background:'#0F5661',color:'#fff'}} onClick={()=>setEditing('new')}>+ Termin</button>
         </div>
       </div>
@@ -44939,7 +44952,7 @@ function CalendarView({team, projects, employees, showToast, isMobileW, jumpTo, 
 function CalEventEditor({ev, projects, employees, onClose, onSaved, onDelete, myName, uid, showToast}){
   const isAuto=!!(ev&&ev.kind==='auto');
   const [f,setF]=useState(()=>({
-    title: ev?ev.title:'', description: ev?(ev.description||''):'', meeting_url: ev?(ev.meeting_url||''):'', project_id: ev?(ev.project_id||''):'',
+    title: ev?ev.title:'', description: ev?(ev.description||''):'', location: ev?(ev.location||''):'', meeting_url: ev?(ev.meeting_url||''):'', project_id: ev?(ev.project_id||''):'',
     start_date: ev?String(ev.start_date).slice(0,10):isoLocal(new Date()),
     start_time: ev&&ev.start_time?String(ev.start_time).slice(0,5):'', end_time: ev&&ev.end_time?String(ev.end_time).slice(0,5):'',
     recurrence: ev?ev.recurrence:'none', until_date: ev&&ev.until_date?String(ev.until_date).slice(0,10):'',
@@ -44956,7 +44969,7 @@ function CalEventEditor({ev, projects, employees, onClose, onSaved, onDelete, my
   async function save(){
     if(!f.title.trim()){ showToast&&showToast('⚠ Titel fehlt'); return; }
     setBusy(true);
-    const row={ title:f.title.trim(), description:f.description.trim()||null, meeting_url:f.meeting_url.trim()||null, project_id:f.project_id||null,
+    const row={ title:f.title.trim(), description:f.description.trim()||null, location:f.location.trim()||null, meeting_url:f.meeting_url.trim()||null, project_id:f.project_id||null,
       start_date:f.start_date, start_time:f.start_time||null, end_time:f.end_time||null,
       recurrence:f.recurrence, until_date:f.until_date||null, visible_roles:f.visible_roles,
       participants:f.participants, important:!!f.important, updated_at:new Date().toISOString() };
@@ -44975,6 +44988,7 @@ function CalEventEditor({ev, projects, employees, onClose, onSaved, onDelete, my
         <div style={{display:'flex',flexDirection:'column',gap:10}}>
           <div><label style={{fontSize:12,fontWeight:600}}>Titel</label><input style={inp} value={f.title} onChange={e=>set('title',e.target.value)}/></div>
           <div><label style={{fontSize:12,fontWeight:600}}>Beschreibung</label><textarea style={{...inp,minHeight:56,resize:'vertical'}} value={f.description} onChange={e=>set('description',e.target.value)}/></div>
+          <div><label style={{fontSize:12,fontWeight:600}}>📍 Ort (optional)</label><input style={inp} placeholder="z. B. Büro Prishtina, Besprechungsraum 2" value={f.location} onChange={e=>set('location',e.target.value)}/></div>
           <div><label style={{fontSize:12,fontWeight:600}}>🎥 Video-Link (optional)</label><input style={inp} type="url" placeholder="https://teams.live.com/… oder Zoom-Link" value={f.meeting_url} onChange={e=>set('meeting_url',e.target.value)}/><div style={{fontSize:11,color:'var(--muted)',marginTop:3}}>Erscheint im Termin als anklickbarer „Beitreten"-Knopf.</div></div>
           <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
             <div style={{flex:'1 1 140px'}}><label style={{fontSize:12,fontWeight:600}}>Projekt</label>
