@@ -78,6 +78,35 @@ Deno.serve(async (req)=>{
   const { data: pfAll } = await sb.from("cvs").select("id,first_name,last_name,extra").eq("status","potential_future");
   const pfDue = (pfAll || []).map((c: any) => ({ name: ((c.first_name || "") + " " + (c.last_name || "")).trim() || "Bewerber", due: (c.extra || {}).future_due || "", reason: (c.extra || {}).future_reason || "" }))
     .filter((r: any) => r.due && r.due <= day).sort((a: any, b: any) => a.due.localeCompare(b.due));
+  // Termine ohne Ergebnis: gebuchter Termin liegt in der Vergangenheit, der Bewerber steht aber noch in der
+  // Termin-/Interviewphase und niemand hat seither etwas eingetragen. Ohne dieses Nachfassen wäre die
+  // Nicht-erschienen-Quote löchrig und damit wertlos (User 2026-09-22).
+  const OPEN_ST = ["cv_confirmed","invited","interview","selection1"];
+  const { data: pastInv } = await sb.from("interview_invites")
+    .select("cv_id,booked_slot,booked_form")
+    .eq("status","booked")
+    .lt("booked_slot", day + "T00:00:00Z")
+    .gte("booked_slot", new Date(Date.now() - 21 * 864e5).toISOString())    // nur die letzten drei Wochen
+    .order("booked_slot", { ascending: false });
+  const openIds = [...new Set((pastInv || []).map((i: any) => i.cv_id))];
+  let noResult: any[] = [];
+  if (openIds.length) {
+    const { data: openCvs } = await sb.from("cvs").select("id,first_name,last_name,status,status_changed_at,extra").in("id", openIds).in("status", OPEN_ST);
+    const byId: Record<string, any> = {}; for (const c of (openCvs || [])) byId[c.id] = c;
+    const seen = new Set<string>();
+    for (const inv of (pastInv || [])) {
+      const c = byId[inv.cv_id]; if (!c || seen.has(c.id)) continue;         // nur der jüngste Termin je Bewerber
+      seen.add(c.id);
+      const slot = String(inv.booked_slot || "");
+      const moved = c.status_changed_at && String(c.status_changed_at) > slot;   // jemand hat nach dem Termin etwas eingetragen
+      const ns = (c.extra || {}).noshow || null;
+      const marked = ns && ns.last_at && String(ns.last_at) > slot;
+      if (moved || marked) continue;
+      noResult.push({ name: ((c.first_name || "") + " " + (c.last_name || "")).trim() || "Bewerber",
+        when: slot.slice(0, 10).split("-").reverse().join("."), form: inv.booked_form === "office" ? "Büro" : inv.booked_form === "phone" ? "Telefon" : "Teams" });
+    }
+    noResult = noResult.slice(0, 12);
+  }
   const { data:apCfg } = await sb.from("app_config").select("value").eq("key","jsr_clara_auto_v1").maybeSingle();
   const _lr:any = (apCfg as any)?.value?.auto_park?.last_run;
   const parkedN = (_lr && String(_lr.at||"").slice(0,10)===day) ? (Number(_lr.parked)||0) : 0;
@@ -146,6 +175,12 @@ Deno.serve(async (req)=>{
         + (r.reason ? ' <span style="color:#6b7280;">&middot; ' + r.reason.replace(/</g, "&lt;") + '</span>' : '')
         + ' <span style="color:#7c3aed;">&middot; f&auml;llig ' + r.due.split("-").reverse().join(".") + '</span></div>').join("")
       + '<div style="margin-top:8px;"><a href="' + portal + '/hr.html?goto=potenzial" style="color:' + acc + ';font-size:12.5px;">Zu Potenzial Zukunft</a></div></td></tr>' : '')
+    +(noResult.length ? '<tr><td style="padding:14px 22px 2px;"><div style="font-size:12px;color:#6b7280;font-weight:bold;text-transform:uppercase;letter-spacing:.04em;margin-bottom:9px;">Termine ohne Ergebnis</div>'
+      + noResult.map((r: any) => '<div style="font-size:13.5px;color:#374151;padding:5px 0;border-top:1px solid #eef0f4;"><b>' + r.name.replace(/</g, "&lt;") + '</b>'
+        + ' <span style="color:#6b7280;">&middot; ' + r.form + ' am ' + r.when + '</span>'
+        + ' <span style="color:#b91c1c;">&middot; erschienen oder nicht?</span></div>').join("")
+      + '<div style="margin-top:8px;font-size:12px;color:#6b7280;">Bitte im Kanban eintragen, sonst fehlt die Zahl in der Auswertung.</div>'
+      + '<div style="margin-top:6px;"><a href="' + portal + '/hr.html?goto=kanban" style="color:' + acc + ';font-size:12.5px;">Zum Kanban</a></div></td></tr>' : '')
     +(parkedN>0 ? '<tr><td style="padding:12px 22px 2px;"><div style="font-size:13px;color:#374151;">&#9851; In den Pool geparkt (zu lange unbearbeitet): <b style="color:#0891b2;">'+parkedN+'</b> <span style="color:#9ca3af;">— aus dem Trichter genommen, keine Absage; im Bewerber-Pool auffindbar.</span></div></td></tr>' : '')
     +'<tr><td style="padding:16px 22px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f6f4fb;border-left:4px solid '+acc+';border-radius:10px;"><tr>'
       +'<td width="58" valign="top" style="padding:14px 0 14px 14px;"><img src="'+photo+'" width="40" height="40" alt="Clara" style="border-radius:20px;display:block;"></td>'
@@ -160,6 +195,7 @@ Deno.serve(async (req)=>{
     +"Sprachniveau: hoch "+hoch+", mittel "+mit+", niedrig "+nied+", unbekannt "+unb+"\n"
     +"Qualität: TOP "+qTop+", GUT "+qGut+", Rest "+qRest+"\n"
     +(parkedN>0?("In den Pool geparkt (zu lange unbearbeitet): "+parkedN+"\n"):"")
+    +(noResult.length?("\nTermine ohne Ergebnis (bitte eintragen):\n"+noResult.map((r:any)=>"- "+r.name+" ("+r.form+" am "+r.when+")").join("\n")+"\n"):"")
     +(pfDue.length?("\nPotenzial Zukunft, heute wiedervorlegen:\n"+pfDue.map((r:any)=>"- "+r.name+(r.reason?" ("+r.reason+")":"")+", fällig "+r.due.split("-").reverse().join(".")).join("\n")+"\n"):"")+"\n"
     +obsText+"\n\nZum Recruiting: "+recruitLink+"\n\n— Clara, digitale Kollegin im Recruiting";
   const slackText = "*Recruiting heute Morgen · "+dateLbl+"*\n"
@@ -167,6 +203,7 @@ Deno.serve(async (req)=>{
     +"Sprache: hoch "+hoch+" · mittel "+mit+" · niedrig "+nied+" · unbekannt "+unb+"\n"
     +"Qualität: ⭐ TOP "+qTop+" · ★ GUT "+qGut+" · Rest "+qRest+"\n"
     +(parkedN>0?("♻️ In den Pool geparkt: *"+parkedN+"*\n"):"")
+    +(noResult.length?("❓ Termine ohne Ergebnis: *"+noResult.length+"*\n"+noResult.map((r:any)=>"• "+r.name+" ("+r.form+" am "+r.when+")").join("\n")+"\n"):"")
     +(pfDue.length?("⭐ Potenzial Zukunft, heute wiedervorlegen: *"+pfDue.length+"*\n"+pfDue.map((r:any)=>"• "+r.name+(r.reason?" ("+r.reason+")":"")).join("\n")+"\n"):"")+"\n"+obsText+"\n_— Clara_";
 
   if(sp.get("dry")==="1") return json({ dry:true, day, obsText, textFb, html });

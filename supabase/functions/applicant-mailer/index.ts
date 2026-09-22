@@ -269,6 +269,47 @@ async function runPhase(phaseKey: string, status: string, ph: any, sender: any, 
   }
   return r;
 }
+// ── Geplatzter Termin: neuer Buchungslink ────────────────────────────────────
+// Wer nicht erschienen ist (oder rechtzeitig abgesagt hat), steht wieder in der Terminvereinbarung und trägt
+// extra.noshow.rebook_pending. Clara schickt EINMAL einen neuen Link, freundlich, ohne Vorwurf. Eigener
+// Versandzweck (noshow_rebook), damit die Phase-2-Sperre ihn nicht blockiert und die Zahlen getrennt bleiben.
+// Kein Versand möglich (Automatik aus, keine Mailadresse, keine Standard-Interviewer) -> Übergabe an Deonita,
+// damit niemand still liegen bleibt.
+async function clearRebookPending(cv: any, patch: Record<string, unknown>) {
+  const ex = (cv.extra && typeof cv.extra === "object") ? { ...cv.extra } : {};
+  const ns = (ex.noshow && typeof ex.noshow === "object") ? { ...ex.noshow } : {};
+  ns.rebook_pending = null;
+  Object.assign(ns, patch);
+  ex.noshow = ns;
+  await sb.from("cvs").update({ extra: ex }).eq("id", cv.id);
+}
+async function handoverRebook(cv: any, reason: string, note: string) {
+  await sb.from("clara_handovers").insert({ cv_id: cv.id, reason, phase: "cv_confirmed", note });
+  await clearRebookPending(cv, { rebook_manual_at: new Date().toISOString(), rebook_manual_reason: reason });
+}
+async function runNoShowRebook(cfg2: any, sender: any, dry: boolean, budget: { left: number }) {
+  const r: any = { sent: 0, handover: 0, skipped: 0, failed: 0, capped: 0 };
+  const on = !!(cfg2.noshow_rebook && cfg2.noshow_rebook.enabled);
+  const p2 = (cfg2.phases && cfg2.phases.phase2) || {};
+  const hasInterviewers = Array.isArray(p2.participant_ids) && p2.participant_ids.length > 0;
+  const { data: cands } = await sb.from("cvs").select("id,first_name,email,status,extra").eq("status", "cv_confirmed").limit(300);
+  for (const cv of (cands || [])) {
+    const ns = (cv.extra && cv.extra.noshow) || null;
+    if (!ns || !ns.rebook_pending) continue;
+    if (await hasOpenHandover(cv.id)) { r.skipped++; continue; }     // gehört schon Deonita
+    if (dry) { r.sent += (on && hasInterviewers && cv.email) ? 1 : 0; r.handover += (on && hasInterviewers && cv.email) ? 0 : 1; continue; }
+    if (!on) { await handoverRebook(cv, "noshow_rebook", "Termin geplatzt, neuer Termin nötig (Automatik aus)"); r.handover++; continue; }
+    if (!cv.email || !String(cv.email).includes("@")) { await handoverRebook(cv, "no_email", "Termin geplatzt, keine Mailadresse: bitte anrufen"); r.handover++; continue; }
+    if (!hasInterviewers) { await handoverRebook(cv, "noshow_rebook", "Termin geplatzt, keine Standard-Interviewer hinterlegt"); r.handover++; continue; }
+    if (budget.left <= 0) { r.capped++; continue; }
+    const link = await createInterviewLink(cv.id, p2);
+    if (!link) { r.failed++; continue; }
+    const res = await sendPhaseMail(cv, (cfg2.noshow_rebook && cfg2.noshow_rebook.template) || "noshow_rebook", link, sender, "noshow_rebook", "auto");
+    if (res.ok) { r.sent++; budget.left--; await clearRebookPending(cv, { rebook_sent_at: new Date().toISOString() }); }
+    else r.failed++;
+  }
+  return r;
+}
 // Sprachniveau-Gate: neue Bewerber unter der Schwelle aussortieren (Status -> abgelehnt + Marker) und eine
 // freundliche Absage terminieren (Versand throttled über runDueRejections). NUR neue ab Einschalten
 // (created_at >= activated_at); Bestand unberührt. Kein Niveau -> nicht aussortieren (Mensch entscheidet).
@@ -395,6 +436,8 @@ Deno.serve(async (req) => {
         async (cvId) => { const { data } = await sb.from("interview_invites").select("status").eq("cv_id", cvId).order("created_at", { ascending: false }).limit(1); return !!(data && data[0] && data[0].status === "booked"); },
         async (cvId) => { const { data } = await sb.from("interview_invites").select("token").eq("cv_id", cvId).order("created_at", { ascending: false }).limit(1); return (data && data[0]) ? PUBLIC_BASE + "/termin.html?t=" + data[0].token : null; });
     }
+    // Geplatzte Termine: neuer Buchungslink (oder Übergabe an Deonita, wenn Clara nicht senden kann).
+    out.noshow_rebook = await runNoShowRebook(cfg2, sender, dry, budget);
     // Fällige Absagen (48h) — unabhängig von den Phasen-Schaltern; jede Absage prüft ihren eigenen Ausgang-Schalter.
     out.rejects = await runDueRejections(cfg2, sender, dry, budget);
     out.budget_left = budget.left;

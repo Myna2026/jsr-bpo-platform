@@ -3090,13 +3090,14 @@ function TerminateModal({emp, onConfirm, onClose}){
   const [notice, setNotice]=useState('');            // Kündigungsdatum (optional, Fristbeginn)
   const [mode, setMode]=useState('arbeitet');        // Modalität der Zwischenzeit
   const [reason, setReason]=useState('');
+  const [never, setNever]=useState(false);           // nie angetreten: zählt nicht als Kündigung
   const MODES=[
     {v:'arbeitet',       l:'Arbeitet bis zum Austritt', d:'bleibt planbar bis zum Austrittsdatum, Lohn läuft', status:'active'},
     {v:'frei_bezahlt',   l:'Freigestellt (bezahlt)',    d:'nicht mehr planbar, Lohn läuft bis Austritt weiter', status:'freigestellt_bezahlt'},
     {v:'frei_unbezahlt', l:'Freigestellt (unbezahlt)',  d:'nicht mehr planbar, kein Lohn', status:'freigestellt_unbezahlt'},
     {v:'sofort',         l:'Sofort beendet',            d:'sofort raus aus allem, kein weiterer Lohn', status:'terminated'},
   ];
-  const cur=MODES.find(m=>m.v===mode)||MODES[0];
+  const cur=never?MODES[3]:(MODES.find(m=>m.v===mode)||MODES[0]);   // nie angetreten = sofort beendet, keine Zwischenzeit
   const bad = !exit || (notice && notice>exit);
   return(
     <div className="modal-overlay">
@@ -3112,7 +3113,11 @@ function TerminateModal({emp, onConfirm, onClose}){
             <div className="form-group"><label className="form-label">Kündigungsdatum (optional)</label><input className="form-input" type="date" value={notice} onChange={e=>setNotice(e.target.value)}/></div>
           </div>
           {notice&&notice>exit&&<div style={{fontSize:12,color:'var(--red)',marginTop:-6,marginBottom:10}}>⚠ Kündigungsdatum liegt nach dem Austritt.</div>}
-          <div className="form-group">
+          <label style={{display:'flex',gap:9,alignItems:'flex-start',padding:'9px 11px',marginBottom:12,borderRadius:8,border:'1px solid '+(never?'var(--amber)':'var(--border)'),background:never?'var(--amber-bg, #fffbeb)':'var(--surface)',cursor:'pointer'}}>
+            <input type="checkbox" checked={never} onChange={e=>setNever(e.target.checked)} style={{marginTop:2}}/>
+            <span><span style={{fontWeight:600,fontSize:13}}>Nie angetreten</span><span style={{display:'block',fontSize:11,color:'var(--muted)'}}>Die Person hat die Arbeit nie aufgenommen. Der Datensatz bleibt erhalten, zählt aber nicht als Kündigung, sondern wird in der Statistik getrennt ausgewiesen.</span></span>
+          </label>
+          <div className="form-group" style={{display:never?'none':undefined}}>
             <label className="form-label">Zwischenzeit bis zum Austritt</label>
             {MODES.map(m=>(
               <label key={m.v} style={{display:'flex',gap:8,alignItems:'flex-start',padding:'7px 10px',marginBottom:4,borderRadius:8,border:'1px solid '+(mode===m.v?'var(--blue)':'var(--border)'),background:mode===m.v?'var(--blue-bg)':'var(--surface)',cursor:'pointer'}}>
@@ -3121,12 +3126,12 @@ function TerminateModal({emp, onConfirm, onClose}){
               </label>
             ))}
           </div>
-          <div className="form-group"><label className="form-label">Grund / Notiz</label><textarea className="form-input" rows={2} value={reason} onChange={e=>setReason(e.target.value)} placeholder="z.B. Häufige Abwesenheit, Leistungsprobleme..."/></div>
-          <div style={{fontSize:12,color:'var(--dim)'}}>Status wird auf <strong>{statusLabel(cur.status)}</strong> gesetzt. Die Daten bleiben erhalten.</div>
+          <div className="form-group"><label className="form-label">Grund / Notiz</label><textarea className="form-input" rows={2} value={reason} onChange={e=>setReason(e.target.value)} placeholder={never?'z.B. nie angetreten, nicht erschienen':'z.B. Häufige Abwesenheit, Leistungsprobleme...'}/></div>
+          <div style={{fontSize:12,color:'var(--dim)'}}>Status wird auf <strong>{statusLabel(cur.status)}</strong> gesetzt. Die Daten bleiben erhalten.{never?' Zählt nicht in die Kündigungsquote.':''}</div>
         </div>
         <div className="modal-footer">
           <button className="btn" onClick={onClose}>Abbrechen</button>
-          <button className="btn btn-red" disabled={bad} onClick={()=>onConfirm({exit, notice, status:cur.status, reason})}>🚫 Kündigung bestätigen</button>
+          <button className="btn btn-red" disabled={bad} onClick={()=>onConfirm({exit, notice, status:cur.status, reason, never})}>🚫 Kündigung bestätigen</button>
         </div>
       </div>
     </div>
@@ -3780,7 +3785,9 @@ function EmployeeModal({emp, projects, employees, onSave, onClose, initialTab, o
               const st=emp.status; const exit=emp.termination_date||emp.terminated_at, notice=emp.notice_date, note=emp.termination_reason;
               const off=['terminated','freigestellt_bezahlt','freigestellt_unbezahlt'].includes(st) || (st==='active'&&exit);
               if(!off) return null;
-              const head = st==='active' ? '🚫 Kündigung erfasst (arbeitet bis Austritt)' : (statusIcon(st)+' '+statusLabel(st));
+              const nie = empNeverStarted(emp);
+              const head = nie ? '🚫 Nie angetreten (zählt nicht als Kündigung)'
+                : (st==='active' ? '🚫 Kündigung erfasst (arbeitet bis Austritt)' : (statusIcon(st)+' '+statusLabel(st)));
               return (<div style={{margin:'12px 0 4px',padding:'10px 14px',background:'var(--red-bg)',border:'1px solid rgba(239,68,68,.3)',borderRadius:'var(--r)'}}>
                 <div style={{fontWeight:700,fontSize:13,color:'var(--red)'}}>{head}</div>
                 <div style={{fontSize:12,color:'var(--muted)',marginTop:3,display:'flex',gap:16,flexWrap:'wrap'}}>
@@ -9938,7 +9945,8 @@ function cockpitMonthMetrics(employees, cvsDb, selYear, selM0, range){
   const monLabels=monDays.map(d=>d.getDate()+'. '+MON[d.getMonth()]);
   const dSick=monDays.map(d=>(employees||[]).filter(e=>empWorksDay(e,d)&&(e.absences||[]).some(a=>a&&a.type==='sick'&&covers(a,d))).length);
   const dVac=monDays.map(d=>(employees||[]).filter(e=>empWorksDay(e,d)&&(e.absences||[]).some(a=>a&&a.type==='vacation'&&covers(a,d))).length);
-  const dKuend=monDays.map(d=>(employees||[]).filter(e=>{ const td=e&&e.termination_date; return td&&sameDay(new Date(td),d); }).length);
+  // „Nie angetreten" zaehlt hier bewusst NICHT mit (eigene Zahl nieM), sonst verfaelscht es die Kuendigungsquote.
+  const dKuend=monDays.map(d=>(employees||[]).filter(e=>{ const td=e&&e.termination_date; return td&&sameDay(new Date(td),d)&&!empNeverStarted(e); }).length);
   const days30=[]; { const b=new Date(); b.setHours(0,0,0,0); for(let i=29;i>=0;i--){ const d=new Date(b); d.setDate(b.getDate()-i); days30.push(d); } }
   const labels30=days30.map(d=>d.getDate()+'. '+MON[d.getMonth()]);
   const dCv=days30.map(d=>cvDates.filter(x=>sameDay(x,d)).length);
@@ -9948,7 +9956,8 @@ function cockpitMonthMetrics(employees, cvsDb, selYear, selM0, range){
   const krankM=metricAbsenceDays(employees,'sick',_wFrom,_wTo);
   const urlaubM=metricAbsenceDays(employees,'vacation',_wFrom,_wTo);
   const kuendM=metricTerminations(employees,_wFrom,_wTo);
-  return {monLabels,dSick,dVac,dKuend,labels30,dCv,krankM,urlaubM,kuendM};
+  const nieM=metricNeverStarted(employees,_wFrom,_wTo);
+  return {monLabels,dSick,dVac,dKuend,labels30,dCv,krankM,urlaubM,kuendM,nieM};
 }
 function CockpitMobile({employees, projects, plans, team, onNavigate, onAbsence, cvsDb, payslipsDb, feedbackTodayDb, setEmployees, showToast, monthOff, setMonthOff}){
   const isFullFin=(team&&(team.role_keys||[]).some(r=>r==='management'||r==='finance'));   // Personalkosten/Marge nur Management/Finance
@@ -10527,7 +10536,7 @@ function Cockpit({employees, projects:projectsAll, plans, forecast, onAbsence, t
     const tiles6=[
       {val:M.krankM,label:'Krankheitstage',sub:_subKrank,color:'#dc2626',daily:M.dSick,labels:M.monLabels,fmt:_uPer},
       {val:M.urlaubM,label:'Urlaubstage',sub:_subKrank,color:'#d97706',daily:M.dVac,labels:M.monLabels,fmt:_uPer},
-      {val:M.kuendM,label:'Kündigungen',sub:_subKrank,color:'#b91c1c',daily:M.dKuend,labels:M.monLabels,fmt:_uKu},
+      {val:M.kuendM,label:'Kündigungen',sub:(M.nieM?_subKrank+' · '+M.nieM+'× nie angetreten (nicht gezählt)':_subKrank),color:'#b91c1c',daily:M.dKuend,labels:M.monLabels,fmt:_uKu},
       {val:inbox.length,label:'Bewerbungen',sub:'ungesichtet',color:'#6366f1',nav:'kanban',daily:M.dCv,labels:M.labels30,fmt:_uCv},
     ];
     // S1b: Block-Registry — Reihenfolge + Aus-/Einblenden per User (Drag im Bearbeiten-Modus).
@@ -19850,6 +19859,7 @@ function MailboxView({team, showToast}){
 }
 function CVModal({cv, projects, team, onSave, onClose, initialTab}){
   const [pfModal,setPfModal]=useState(null);   // „Potenzial Zukunft“ setzen/ändern (Datum + Grund)
+  const [nsModal,setNsModal]=useState(null);   // „Termin geplatzt“ (nicht erschienen / rechtzeitig abgesagt)
   // Role helpers
   // C4b: role_keys statt des alten Rollen-Felds. Admin-Sicht = is_admin (management|hr).
   const roleKeys = (team&&team.role_keys)||[];
@@ -20672,6 +20682,23 @@ function CVModal({cv, projects, team, onSave, onClose, initialTab}){
                   <button type="button" className="btn btn-sm" style={{borderColor:'#7c3aed',color:'#7c3aed',fontWeight:700}} onClick={()=>setPfModal(form)}>⭐ Potenzial Zukunft{form.status==='potential_future'?' ändern':''}</button>
                   {form.status==='potential_future'&&<span style={{fontSize:12,color:'var(--muted)'}}>Wiedervorlage {pfFmtDe(pfGet(form,'future_due'))}{pfGet(form,'future_reason')?' · '+pfGet(form,'future_reason'):''}</span>}
                 </div>
+                {/* Termin geplatzt: zählt getrennt nach Telefon und Büro, zweimal nicht erschienen führt in den Pool */}
+                {(NS_PHASES[form.status]||nsCount(form)>0)&&(<>
+                  <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em',marginBottom:8}}>Termin geplatzt</div>
+                  <div style={{display:'flex',flexWrap:'wrap',gap:8,alignItems:'center',marginBottom:10}}>
+                    {NS_PHASES[form.status]&&<button type="button" className="btn btn-sm" style={{borderColor:'#b91c1c',color:'#b91c1c',fontWeight:700}} onClick={()=>setNsModal(form)}>Nicht erschienen / abgesagt</button>}
+                    {nsCount(form)>0&&<span style={{fontSize:11.5,fontWeight:800,padding:'2px 9px',borderRadius:999,background:'#fef2f2',color:'#b91c1c',border:'1px solid #fecaca'}}>⚠ {nsBadgeText(form)}</span>}
+                  </div>
+                  {(()=>{ const n=nsOf(form); const evs=(n&&Array.isArray(n.events))?n.events.slice().reverse():[];
+                    if(!evs.length) return null;
+                    return <div style={{marginBottom:12,border:'1px solid var(--border)',borderRadius:10,overflow:'hidden'}}>
+                      {evs.map((e,i)=>(<div key={i} style={{padding:'7px 11px',fontSize:12,borderTop:i?'1px solid var(--border)':'none',display:'flex',gap:8,flexWrap:'wrap',alignItems:'baseline'}}>
+                        <b style={{color:e.kind==='noshow'?'#b91c1c':'var(--text)'}}>{e.kind==='noshow'?'Nicht erschienen':'Rechtzeitig abgesagt'}</b>
+                        <span style={{color:'var(--muted)'}}>{nsPhaseLabelOf(e.phase)} · {pfFmtDe(e.at)}{e.by?' · '+e.by:''}</span>
+                        {e.note&&<span style={{width:'100%',color:'var(--muted)'}}>{e.note}</span>}
+                      </div>))}
+                    </div>; })()}
+                </>)}
                 <div style={{fontSize:11,fontWeight:700,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.06em',marginBottom:8}}>Abschluss</div>
                 <div style={{display:'flex',flexWrap:'wrap',gap:6}}>
                   {STATUS_FLOW.filter(s=>s.terminal && !['contract','training_planned','training','active','inactive','terminated','freigestellt_bezahlt','freigestellt_unbezahlt','converted'].includes(s.key)).map(s=>{
@@ -20770,6 +20797,7 @@ function CVModal({cv, projects, team, onSave, onClose, initialTab}){
         </div>
       </div>
       {pfModal&&<PotentialFutureModal cv={{...form, id:(cv&&cv.id)||form.id}} showToast={(m,t)=>{ try{ window.__toast&&window.__toast(m,t); }catch(e){} }} onClose={()=>setPfModal(null)} onSaved={()=>{ onClose&&onClose(); }}/>}
+      {nsModal&&<NoShowModal cv={{...form, id:(cv&&cv.id)||form.id}} showToast={(m,t)=>{ try{ window.__toast&&window.__toast(m,t); }catch(e){} }} onClose={()=>setNsModal(null)} onSaved={()=>{ onClose&&onClose(); }}/>}
     </div>
   );
 }
@@ -21412,9 +21440,20 @@ function PhoneActionView({team, showToast}){
 // Alle von Clara automatisch geparkten Bewerber (Leerlauf in Frühphase) + manuell dorthin gesetzte.
 // Durchsuchbar, mit Grund + Datum + Ursprungsphase; „Zurückholen" setzt auf die Ursprungsphase zurück und
 // bumpt last_worked_at (saveCvToDB) → wird nicht sofort wieder geparkt. Das ist unser Bewerbervorrat.
-const POOL_REASON_LABEL={ idle_10d:'Leerlauf (Frist überschritten)', idle:'Leerlauf', manual:'manuell in den Pool' };
+const POOL_REASON_LABEL={ idle_10d:'Leerlauf (Frist überschritten)', idle:'Leerlauf', manual:'manuell in den Pool', noshow_2:'zweimal nicht erschienen' };
 // ═══ Potenzial Zukunft: bewusst zurückgestellte gute Bewerber mit Wiedervorlage und Grund (NICHT der Pool, dort parkt
 //     Clara automatisch). Fällige stehen oben und sind rot. Zurückholen führt in die Phase zurück, aus der sie kamen. ═══
+// ═══ Nicht erschienen: Bewerber, die zum vereinbarten Termin nicht kamen (User 2026-09-22).
+//     Erstes Mal → zurück in die Terminvereinbarung, Clara schickt einen neuen Buchungslink.
+//     Zweites Mal (egal ob Telefon oder Büro) → Pool. Rechtzeitige Absagen zählen NICHT mit, sie sind
+//     etwas anderes als Nichterscheinen; sonst misst die Auswertung Höflichkeit statt Verbindlichkeit.
+//     Ablage: extra.noshow = {count, phone, office, last_at, last_phase, rebook_pending, events:[…]}
+const NS_LIMIT=2;                                   // ab hier in den Pool, keine dritte Einladung
+const NS_PHASES={ invited:'phone', interview:'office', selection1:'office' };   // wo ein Termin platzen kann
+const nsOf=c=>{ const n=pfGet(c,'noshow'); return (n&&typeof n==='object'&&!Array.isArray(n))?n:null; };
+const nsCount=c=>{ const n=nsOf(c); return n?(Number(n.count)||0):0; };
+const nsPhaseLabelOf=k=> k==='phone'?'Telefoninterview':'Interview im Büro';
+const nsBadgeText=c=>{ const k=nsCount(c); return k?(k+'× nicht erschienen'):null; };
 const PF_STATUS='potential_future';
 const pfGet=(c,k)=> (c&&c.extra&&c.extra[k]!=null)?c.extra[k]:(c?c[k]:null);
 const pfDaysTo=d=>{ if(!d) return null; const t=new Date(String(d).slice(0,10)+'T00:00:00'); const now=new Date(); now.setHours(0,0,0,0); return Math.round((t-now)/864e5); };
@@ -21455,6 +21494,75 @@ function PotentialFutureModal({cv, onClose, onSaved, showToast}){
       <div style={{display:'flex',gap:8,marginTop:18,justifyContent:'flex-end'}}>
         <button className="btn btn-sm" onClick={onClose}>Abbrechen</button>
         <button className="btn btn-sm btn-primary" disabled={busy} onClick={save}>{isEdit?'Wiedervorlage speichern':'In Potenzial Zukunft legen'}</button>
+      </div>
+    </div>
+  </div>;
+}
+// Schreibt das Ergebnis eines geplatzten Termins. Ein Aufruf für beide Fälle, damit Zählung, Vermerk und
+// Folgeschritt nie auseinanderlaufen. Gibt zurück, ob der Bewerber in den Pool gewandert ist.
+async function nsMark(cv, kind, note){
+  const now=new Date().toISOString();
+  const phaseKind=NS_PHASES[cv.status]||'office';
+  const prev=nsOf(cv)||{};
+  const isNo=(kind==='noshow');
+  const ev={at:now, phase:phaseKind, kind, note:String(note||'').trim()||null, by:(CURRENT_USER&&CURRENT_USER.name)||null};
+  const next={
+    count:(Number(prev.count)||0)+(isNo?1:0),
+    phone:(Number(prev.phone)||0)+((isNo&&phaseKind==='phone')?1:0),
+    office:(Number(prev.office)||0)+((isNo&&phaseKind==='office')?1:0),
+    cancels:(Number(prev.cancels)||0)+(isNo?0:1),
+    last_at:now, last_phase:phaseKind, last_kind:kind,
+    events:[...(Array.isArray(prev.events)?prev.events:[]), ev].slice(-20)
+  };
+  const toPool = isNo && next.count>=NS_LIMIT;
+  next.rebook_pending = toPool?null:now;    // Clara schickt den neuen Buchungslink (applicant-mailer)
+  const ex={...(cv.extra||{}), noshow:next};
+  if(toPool){ ex.parked_reason='noshow_2'; ex.parked_at=isoLocal(new Date()); ex.parked_from=cv.status; }
+  const clean={...cv, status: toPool?'pool':'cv_confirmed', status_changed_at:now, extra:ex};
+  ['noshow','parked_reason','parked_at','parked_from'].forEach(k=>{ delete clean[k]; });   // nur in extra führen
+  await saveCvToDB(clean);
+  return {clean, toPool, count:next.count};
+}
+// Fenster: Was ist passiert? Nicht erschienen zählt, rechtzeitig abgesagt nicht.
+function NoShowModal({cv, onClose, onSaved, showToast}){
+  const [kind,setKind]=React.useState('noshow');
+  const [note,setNote]=React.useState('');
+  const [busy,setBusy]=React.useState(false);
+  const name=((cv.first_name||'')+' '+(cv.last_name||'')).trim()||'Bewerber';
+  const phaseKind=NS_PHASES[cv.status]||'office';
+  const had=nsCount(cv);
+  const willPool=(kind==='noshow')&&(had+1>=NS_LIMIT);
+  const save=async()=>{
+    setBusy(true);
+    try{
+      const r=await nsMark(cv, kind, note);
+      showToast&&showToast(r.toPool?'In den Pool gelegt: zweimal nicht erschienen':(kind==='noshow'?'Vermerkt, zurück in die Terminvereinbarung':'Absage vermerkt, zurück in die Terminvereinbarung'));
+      onSaved&&onSaved(r.clean); onClose();
+    }catch(e){ showToast&&showToast('⚠ '+((e&&e.message)||'DB'),'error'); }
+    setBusy(false);
+  };
+  const opt=(v,l,d)=>(
+    <label key={v} style={{display:'flex',gap:9,alignItems:'flex-start',padding:'9px 11px',marginBottom:6,borderRadius:9,cursor:'pointer',
+      border:'1px solid '+(kind===v?'var(--blue)':'var(--border)'),background:kind===v?'var(--blue-bg)':'var(--surface)'}}>
+      <input type="radio" name="nskind" checked={kind===v} onChange={()=>setKind(v)} style={{marginTop:3}}/>
+      <span><span style={{fontWeight:700,fontSize:13.5}}>{l}</span><span style={{display:'block',fontSize:11.5,color:'var(--muted)',lineHeight:1.45}}>{d}</span></span>
+    </label>);
+  return <div style={{position:'fixed',inset:0,zIndex:9000,background:'rgba(15,23,42,.45)',display:'flex',alignItems:'center',justifyContent:'center',padding:20}} onClick={e=>{ if(e.target===e.currentTarget) onClose(); }}>
+    <div style={{background:'var(--card)',borderRadius:14,padding:'22px 24px',maxWidth:520,width:'100%',boxShadow:'0 24px 70px rgba(0,0,0,.25)'}}>
+      <div style={{fontSize:18,fontWeight:800}}>Termin geplatzt</div>
+      <div style={{fontSize:13,color:'var(--muted)',marginTop:4,lineHeight:1.5}}>{name} · {nsPhaseLabelOf(phaseKind)}{had?(' · bisher '+had+'× nicht erschienen'):''}</div>
+      <div style={{marginTop:14}}>
+        {opt('noshow','Nicht erschienen','Zählt. Erstes Mal: zurück in die Terminvereinbarung, Clara schickt einen neuen Buchungslink.')}
+        {opt('cancel','Rechtzeitig abgesagt','Zählt nicht. Auch hier geht es zurück in die Terminvereinbarung mit neuem Buchungslink.')}
+      </div>
+      {willPool&&<div style={{padding:'10px 13px',borderRadius:10,background:'#fef2f2',border:'1px solid #fecaca',color:'#b91c1c',fontSize:12.5,fontWeight:600,lineHeight:1.5}}>
+        Das ist das zweite Mal. {name} geht damit in den Bewerber-Pool, keine dritte Einladung. Zurückholen bleibt möglich, mit sichtbarem Hinweis.
+      </div>}
+      <div className="form-label" style={{marginTop:12}}>Notiz <span style={{fontWeight:400,color:'var(--muted)'}}>(optional)</span></div>
+      <input className="form-input" placeholder="z. B. krank gemeldet, nicht erreichbar" value={note} onChange={e=>setNote(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter') save(); }}/>
+      <div style={{display:'flex',gap:8,marginTop:18,justifyContent:'flex-end'}}>
+        <button className="btn btn-sm" onClick={onClose}>Abbrechen</button>
+        <button className="btn btn-sm btn-primary" disabled={busy} onClick={save}>Speichern</button>
       </div>
     </div>
   </div>;
@@ -21538,7 +21646,10 @@ function PoolView({cvList, setCvList, showToast}){
   const fmtDe=s=>{ if(!s) return '—'; const p=String(s).slice(0,10).split('-'); return p.length===3?(p[2]+'.'+p[1]+'.'+p[0]):s; };
   async function restore(cv){
     const from=pget(cv,'parked_from')||'cv_inbound';
-    if(!(await uiConfirm({title:'Aus dem Pool zurückholen', text:'Bewerber zurück in den Trichter holen?', items:[((cv.first_name||'')+' '+(cv.last_name||'')).trim()||'Bewerber','zurück nach: '+phaseLabel(from)], confirmLabel:'Zurückholen'}))) return;
+    // Zweimal nicht erschienen: Zurückholen bleibt erlaubt (Krankheit, Notfall), aber nie unbemerkt.
+    const _ns=nsCount(cv);
+    const _warn=_ns>=NS_LIMIT?'⚠ '+_ns+'× nicht erschienen — nur zurückholen, wenn der Grund geklärt ist':null;
+    if(!(await uiConfirm({title:'Aus dem Pool zurückholen', text:_warn||'Bewerber zurück in den Trichter holen?', items:[((cv.first_name||'')+' '+(cv.last_name||'')).trim()||'Bewerber','zurück nach: '+phaseLabel(from)].concat(_warn?[_warn]:[]), confirmLabel:'Zurückholen'}))) return;
     // Sowohl die per cvWithAlias hochgespiegelten Top-Level-Keys ALS AUCH extra bereinigen, sonst landen sie via extraOverflow wieder in extra.
     const clean={...cv}; delete clean.parked_reason; delete clean.parked_at; delete clean.parked_from;
     const ex={...(cv.extra||{})}; delete ex.parked_reason; delete ex.parked_at; delete ex.parked_from;
@@ -21575,7 +21686,8 @@ function PoolView({cvList, setCvList, showToast}){
                 <div style={{width:34,height:34,borderRadius:'50%',background:cv.photo_color||'#0891b2',display:'flex',alignItems:'center',justifyContent:'center',color:'#fff',fontWeight:700,fontSize:13,flexShrink:0}}>
                   {(cv.first_name||'?')[0]}{(cv.last_name||'?')[0]}</div>
                 <div style={{minWidth:160,flex:'1 1 200px'}}>
-                  <div style={{fontWeight:700,fontSize:14}}>{cv.first_name} {cv.last_name}</div>
+                  <div style={{fontWeight:700,fontSize:14,display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>{cv.first_name} {cv.last_name}
+                    {nsBadgeText(cv)&&<span style={{fontSize:10.5,fontWeight:800,padding:'1px 7px',borderRadius:999,background:'#fef2f2',color:'#b91c1c',border:'1px solid #fecaca'}}>⚠ {nsBadgeText(cv)}</span>}</div>
                   <div style={{fontSize:11.5,color:'var(--muted)'}}>{[cv.phone,cv.email].filter(Boolean).join(' · ')||'—'}</div>
                 </div>
                 <div style={{fontSize:12,color:'var(--muted)',minWidth:150}}>
@@ -22449,6 +22561,45 @@ const LANGUAGE_TEST_QUESTIONS = [
 
 
 // ── Language Test Page (separate view) ───────────────────
+// ── Nicht erschienen je Quelle und Kampagne ──────────────────────────────────
+// Quote = nicht erschienen / gebuchte Termine im Zeitraum (nicht je Bewerber, sonst wäre sie geschönt).
+// Zahlen kommen aus noshow_stats (Datenbank), weil die Kampagne über windsor_leads hängt und die
+// Bewerberliste im Browser gedeckelt ist. Rechtzeitige Absagen stehen daneben, zählen aber nicht in die Quote.
+function NoShowStats({from, to, isMobileW}){
+  const [d,setD]=React.useState(null);
+  React.useEffect(()=>{ let alive=true; setD(null);
+    sb.rpc('noshow_stats',{p_from:from,p_to:to}).then(r=>{ if(alive) setD((r&&r.data)||{error:'keine Daten'}); }).catch(()=>{ if(alive) setD({error:'Abfrage fehlgeschlagen'}); });
+    return ()=>{ alive=false; }; },[from,to]);
+  if(!d) return <div style={{fontSize:12,color:'var(--muted)',padding:'10px 0'}}>Lädt…</div>;
+  if(d.error) return <div style={{fontSize:12,color:'var(--muted)',padding:'10px 0'}}>{d.error}</div>;
+  const g=d.gesamt||{};
+  const pct=(a,b)=> b>0?Math.round(a/b*100):null;
+  const quote=v=>{ const q=pct(v.nicht_erschienen,v.termine); return q==null?'—':(q+' %'); };
+  const qcol=v=>{ const q=pct(v.nicht_erschienen,v.termine); return q==null?'var(--muted)':(q>=30?'#dc2626':q>=15?'#d97706':'#059669'); };
+  const head={fontSize:10.5,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.04em',padding:'0 0 5px'};
+  const rows=(list,keyName)=> (list||[]).filter(r=>r.termine>0||r.nicht_erschienen>0).map((r,i)=>(
+    <div key={i} style={{display:'flex',alignItems:'center',gap:8,padding:'6px 0',borderTop:'1px solid var(--border)',fontSize:12.5}}>
+      <span style={{flex:1,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={r[keyName]||'—'}>{r[keyName]||'—'}</span>
+      <span style={{width:52,textAlign:'right',color:'var(--muted)'}}>{r.termine}</span>
+      <span style={{width:40,textAlign:'right',fontWeight:700}}>{r.nicht_erschienen}</span>
+      <span style={{width:52,textAlign:'right',fontWeight:800,color:qcol(r)}}>{quote(r)}</span>
+    </div>));
+  const colHead=(l)=>(<div style={{display:'flex',gap:8,fontSize:10.5,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.04em'}}>
+      <span style={{flex:1}}>{l}</span><span style={{width:52,textAlign:'right'}}>Termine</span><span style={{width:40,textAlign:'right'}}>n. e.</span><span style={{width:52,textAlign:'right'}}>Quote</span></div>);
+  return <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:14,padding:'14px 16px',marginTop:14}}>
+    <div style={{display:'flex',alignItems:'baseline',gap:10,flexWrap:'wrap',marginBottom:10}}>
+      <div style={{fontSize:13,fontWeight:800}}>Nicht erschienen</div>
+      <div style={{fontSize:12,color:'var(--muted)'}}>{g.nicht_erschienen||0} von {g.termine||0} Terminen{(g.termine>0)?(' · '+Math.round((g.nicht_erschienen||0)/g.termine*100)+' %'):''} · Telefon {g.telefon||0}, Büro {g.buero||0} · {g.abgesagt||0} rechtzeitig abgesagt</div>
+    </div>
+    <div style={{display:'grid',gridTemplateColumns:isMobileW?'1fr':'1fr 1fr',gap:18}}>
+      <div>{colHead('Quelle')}{rows(d.quellen,'quelle').length?rows(d.quellen,'quelle'):<div style={{fontSize:12,color:'var(--muted)',padding:'8px 0'}}>Noch keine Termine im Zeitraum.</div>}</div>
+      <div>{colHead('Kampagne')}{rows(d.kampagnen,'kampagne').length?rows(d.kampagnen,'kampagne'):<div style={{fontSize:12,color:'var(--muted)',padding:'8px 0'}}>Keine Kampagne zugeordnet (nur Meta-Bewerbungen tragen eine).</div>}</div>
+    </div>
+    <div style={{fontSize:11,color:'var(--muted)',marginTop:10,lineHeight:1.5}}>
+      Nenner sind die <b>gebuchten Termine</b> im Zeitraum, Zähler die Vermerke aus dem Kanban. Rechtzeitige Absagen zählen nicht in die Quote, sie stehen nur daneben. Gezählt wird ab Einführung des Knopfes, rückwirkend gibt es die Daten nicht.
+    </div>
+  </div>;
+}
 // ── Bewerber-Trichter (Auswertung) — kumulierte Reach je Stufe, Abgänge separat ──
 // Ehrlich: Momentaufnahme nach Eingangsdatum (cv_date / cv_received_at), KEINE Status-Historie
 // (die speichern wir nicht) → Abgänge sind nicht stufengenau zuordenbar, darum separat.
@@ -22532,6 +22683,7 @@ function RecruitingFunnel({cvList, employees, isMobileW}){
           <div style={{fontSize:11,color:'#166534',lineHeight:1.5}}>⚠ Diese Stufe zählt nur Übernahmen <b>ab jetzt</b> (Markierung <code>source='cv'</code> seit 2026-08-04). Frühere Übernahmen fehlen hier, der Wert wird über die kommenden Wochen vollständig.</div>
         </div>
       </div>
+      <NoShowStats from={range==='all'?'2000-01-01':(range==='month'?(ym+'-01'):d30)} to={today} isMobileW={isMobileW}/>
     </div>
   );
 }
@@ -22751,6 +22903,7 @@ function RecruitingKanban({employees, setEmployees, cvList, setCvList, projects,
   function nextStatus(s){ const i=FORWARD.indexOf(s); return (i>=0 && i<FORWARD.length-1) ? FORWARD[i+1] : null; }
 
   const [pfCv,setPfCv]=useState(null);   // „Potenzial Zukunft“ aus dem Kanban setzen
+  const [nsCv,setNsCv]=useState(null);   // „Nicht erschienen / abgesagt“ aus dem Kanban
   // Zentrale Statuswechsel-Logik — für Drag UND den "→"-Knopf identisch.
   async function moveTo(item, newStatus){
     if(!item || !newStatus) return;
@@ -22836,6 +22989,7 @@ function RecruitingKanban({employees, setEmployees, cvList, setCvList, projects,
           <AgentAvatar agentKey="clara" size={12} color={(AI_AGENTS.clara&&AI_AGENTS.clara.accent)||'#0F5661'} live={false}/>
           <span style={{fontSize:8.5,fontWeight:600,color:'var(--muted)'}}>von Clara</span></div>}
         {sf&&<div style={{marginBottom:3}}><span style={{fontSize:8.5,padding:'1px 6px',borderRadius:8,fontWeight:700,background:sf.color+'22',color:sf.color}}>{sf.label}</span></div>}
+        {!isEmp&&nsBadgeText(item)&&<div style={{marginBottom:3}}><span title="Zum vereinbarten Termin nicht erschienen" style={{fontSize:8.5,padding:'1px 6px',borderRadius:8,fontWeight:800,background:'#fef2f2',color:'#b91c1c',border:'1px solid #fecaca'}}>⚠ {nsBadgeText(item)}</span></div>}
         <div style={{color:'var(--muted)',fontSize:10,display:'flex',gap:4,flexWrap:'wrap'}}>
           {item.language_level&&<span>{item.language_level}</span>}
           {item.location&&<span>{item.location==='Tirana'?'🇦🇱':'🇽🇰'}</span>}
@@ -22845,6 +22999,13 @@ function RecruitingKanban({employees, setEmployees, cvList, setCvList, projects,
         {hi&&q.chips.length>0&&<div style={{display:'flex',gap:3,flexWrap:'wrap',marginTop:3}}>
           {q.chips.map((c,i)=><span key={i} style={{fontSize:8.5,fontWeight:700,padding:'0 5px',borderRadius:8,background:'#fef3c7',color:'#92400e'}}>{c}</span>)}
         </div>}
+        {!isEmp&&NS_PHASES[item.status]&&(
+          <button onClick={e=>{e.stopPropagation(); setNsCv(item);}}
+            title="Termin geplatzt: nicht erschienen oder rechtzeitig abgesagt"
+            style={{marginTop:5,width:'100%',padding:'3px',border:'1px solid #fecaca',borderRadius:4,background:'#fef2f2',color:'#b91c1c',fontSize:9.5,fontWeight:700,cursor:'pointer'}}>
+            Termin geplatzt
+          </button>
+        )}
         {item.status==='cv_accepted'&&(
           <button onClick={e=>{e.stopPropagation();confirmCV(item.id,item._type);}}
             style={{marginTop:5,width:'100%',padding:'3px',border:'none',borderRadius:4,background:'var(--green)',color:'white',fontSize:10,fontWeight:700,cursor:'pointer'}}>
@@ -22858,6 +23019,7 @@ function RecruitingKanban({employees, setEmployees, cvList, setCvList, projects,
   return(
     <div>
       {pfCv&&<PotentialFutureModal cv={pfCv} showToast={showToast} onClose={()=>setPfCv(null)} onSaved={()=>setPfCv(null)}/>}
+      {nsCv&&<NoShowModal cv={nsCv} showToast={showToast} onClose={()=>setNsCv(null)} onSaved={()=>{ setNsCv(null); if(setCvList) loadCvsFromDB().then(setCvList); }}/>}
       {selectedItem&&(
         selectedItem._type==='cv'
           ?<CVModal
@@ -30978,6 +31140,7 @@ const METRIC_REGISTRY = {
   krankheitstage:     { label:'Krankheitstage',        unit:'',    kind:'absence_days', absType:'sick' },
   urlaubstage:        { label:'Urlaubstage',           unit:'',    kind:'absence_days', absType:'vacation' },
   kuendigungen:       { label:'Kündigungen',           unit:'',    kind:'terminations' },
+  nie_angetreten:     { label:'Nie angetreten',        unit:'',    kind:'never_started' },
   abwesenheitsquote:  { label:'Abwesenheitsquote',     unit:'%',   kind:'absence_rate' },
 };
 function _metricAgg(rows, m){
@@ -31023,8 +31186,22 @@ function metricAbsenceDays(employees, type, fromStr, toStr){
   });
   return total;
 }
+// „Nie angetreten": angelegt, aber nie mit der Arbeit begonnen (Vertrag unterschrieben, Person erschien nicht).
+// Der Datensatz bleibt als gekuendigt erhalten, zaehlt aber NICHT als Kuendigung, sonst verfaelscht er die Quote.
+// Erkennung: gesetzter Merker (extra.never_started, flach via empWithExtra) ODER der Vermerk im Grundtext (Altfaelle).
+function empNeverStarted(e){
+  if(!e) return false;
+  const f=(e.never_started!==undefined)?e.never_started:(e.extra&&e.extra.never_started);
+  if(f===true||f==='true') return true;
+  return /nie\s*angetreten/i.test(String(e.termination_reason||''));
+}
+function _termInRange(e, fromStr, toStr){ const td=e&&e.termination_date; if(!td) return false; const d=String(td).slice(0,10); return d>=fromStr&&d<=toStr; }
 function metricTerminations(employees, fromStr, toStr){
-  return (employees||[]).filter(e=>{ const td=e&&e.termination_date; if(!td) return false; const d=String(td).slice(0,10); return d>=fromStr&&d<=toStr; }).length;
+  return (employees||[]).filter(e=>_termInRange(e, fromStr, toStr) && !empNeverStarted(e)).length;
+}
+// Getrennte Zahl: Austritte im Zeitraum, die nie angetreten sind.
+function metricNeverStarted(employees, fromStr, toStr){
+  return (employees||[]).filter(e=>_termInRange(e, fromStr, toStr) && empNeverStarted(e)).length;
 }
 // Abwesenheitsquote: Ausfall-Stunden / Kapazitäts-Stunden. Nenner = KAPAZITÄT (MA-Sollzeit je Werktag,
 // feiertagsbereinigt für MA, die nicht an Feiertagen arbeiten), NICHT der Schichtplan — die kanonische Definition.
@@ -31075,7 +31252,9 @@ async function _metricEmployeeKind(key, m, from, to, scope, ctx){
   if(!Array.isArray(emps)) return {error:'employees fehlen (ctx.employees)', label:m.label, grain:m.kind};
   if(m.kind==='absence_days'){ const v=metricAbsenceDays(emps, m.absType, from, to);
     return { key, label:m.label, unit:m.unit||'', value:v, grain:'day', estimate:false, precisionLabel:'tagesgenau', coverage:'Tage '+from+' bis '+to, rows:v, noData:false }; }
-  if(m.kind==='terminations'){ const v=metricTerminations(emps, from, to);
+  if(m.kind==='terminations'){ const v=metricTerminations(emps, from, to); const ns=metricNeverStarted(emps, from, to);
+    return { key, label:m.label, unit:m.unit||'', value:v, grain:'day', estimate:false, precisionLabel:'tagesgenau, ohne „nie angetreten"', coverage:'Tage '+from+' bis '+to+(ns?' (zusaetzlich '+ns+' nie angetreten)':''), rows:v, noData:false }; }
+  if(m.kind==='never_started'){ const v=metricNeverStarted(emps, from, to);
     return { key, label:m.label, unit:m.unit||'', value:v, grain:'day', estimate:false, precisionLabel:'tagesgenau', coverage:'Tage '+from+' bis '+to, rows:v, noData:false }; }
   if(m.kind==='absence_rate'){ const r=metricAbsenceRate(emps, from, to);
     return { key, label:m.label, unit:'%', value:r.rate, grain:'day', estimate:false, precisionLabel:'tagesgenau (Nenner: Kapazität)', coverage:'Ausfall '+Math.round(r.absH)+' h / Kapazität '+Math.round(r.capH)+' h', rows:1, noData:(r.rate===null) }; }
@@ -43665,7 +43844,7 @@ function ClaraRejectionLog({showToast}){
 // Das ist der sichtbare Teil der Exklusivität: hier stehen die, die JETZT dem Menschen gehören.
 function ClaraHandoverList({showToast}){
   const [rows,setRows]=React.useState(null);
-  const REASON={ no_email:{t:'Keine Mailadresse, Clara kann nicht anschreiben',c:'#dc2626'}, no_completion:{t:'Vervollständigungs-Link nicht ausgefüllt (Frist erreicht)',c:'#b45309'}, no_booking:{t:'Kein Termin gebucht (Frist erreicht)',c:'#b45309'}, hard_cap:{t:'Über der Bearbeitungsgrenze',c:'#dc2626'} };
+  const REASON={ noshow_rebook:{t:'Termin geplatzt: bitte neuen Termin ausmachen',c:'#dc2626'}, no_email:{t:'Keine Mailadresse, Clara kann nicht anschreiben',c:'#dc2626'}, no_completion:{t:'Vervollständigungs-Link nicht ausgefüllt (Frist erreicht)',c:'#b45309'}, no_booking:{t:'Kein Termin gebucht (Frist erreicht)',c:'#b45309'}, hard_cap:{t:'Über der Bearbeitungsgrenze',c:'#dc2626'} };
   const fmtd=(s)=>{ if(!s) return ''; const d=new Date(s); const p=n=>String(n).padStart(2,'0'); return p(d.getDate())+'.'+p(d.getMonth()+1)+'.'; };
   const load=async()=>{
     const {data}=await sb.from('clara_handovers').select('*').is('resolved_at',null).order('created_at',{ascending:true});
@@ -43710,6 +43889,7 @@ function ClaraSteuerung({showToast, isMgmt, employees}){
   const TPL_META=[
     {key:'phase1_eingang',  label:'Phase 1: Eingangsbestätigung',  grp:'Phasen'},
     {key:'phase2_termin',   label:'Phase 2: Termineinladung',       grp:'Phasen'},
+    {key:'noshow_rebook',   label:'Neuer Termin nach geplatztem Termin', grp:'Phasen'},
     {key:'reject_by_us',    label:'Absage durch uns',               grp:'Absagen'},
     {key:'reject_by_client',label:'Absage Kunde',                   grp:'Absagen'},
     {key:'no_contact',      label:'Kein Kontakt möglich',           grp:'Absagen'},
@@ -43733,6 +43913,8 @@ function ClaraSteuerung({showToast, isMgmt, employees}){
   const setLangMax=(v)=>{ const n=clone(); if(!n.language_gate) n.language_gate={enabled:false,min_level:'B2'}; n.language_gate.max_new_per_run=Math.min(10,Math.max(1,parseInt(v,10)||5)); saveCfg(n); };
   // Auto-Parken: stale Frühphasen-Bewerber in den Pool (kein Trichter, keine Absage). Frist einstellbar.
   const toggleAutoPark=()=>{ const n=clone(); if(!n.auto_park) n.auto_park={idle_days:10}; n.auto_park.enabled=!n.auto_park.enabled; saveCfg(n); };
+  // Neuer Buchungslink nach geplatztem Termin. Aus = Clara übergibt an Deonita, damit niemand liegen bleibt.
+  const toggleRebook=()=>{ const n=clone(); if(!n.noshow_rebook) n.noshow_rebook={template:'noshow_rebook'}; n.noshow_rebook.enabled=!n.noshow_rebook.enabled; saveCfg(n); };
   const setParkDays=(v)=>{ const n=clone(); if(!n.auto_park) n.auto_park={enabled:false}; n.auto_park.idle_days=Math.max(1,parseInt(v,10)||10); saveCfg(n); };
   const [langOld,setLangOld]=React.useState(null);   // Bestandsbewerber unter der Schwelle (Info, nicht betroffen)
   const _lgMin=cfg&&cfg.language_gate&&cfg.language_gate.min_level;
@@ -43769,6 +43951,7 @@ function ClaraSteuerung({showToast, isMgmt, employees}){
           <div style={{display:'flex',flexDirection:'column',gap:7}}>
             {[['phase1','Phase 1: Eingangsbestätigung + Vervollständigungs-Link'],['phase2','Phase 2: Termineinladung']].map(([p,l])=>(
               <div key={p} style={{display:'flex',alignItems:'center',gap:10,fontSize:13.5}}>{chk(!!(cfg.phases[p]&&cfg.phases[p].enabled),()=>togglePhase(p))}<span>{l}</span></div>))}
+            <div style={{display:'flex',alignItems:'center',gap:10,fontSize:13.5}}>{chk(!!(cfg.noshow_rebook&&cfg.noshow_rebook.enabled),toggleRebook)}<span>Neuer Buchungslink nach geplatztem Termin <span style={{color:'var(--muted)',fontSize:12}}>(aus: Clara übergibt an Deonita)</span></span></div>
             {[['rejected_by_us','Absage durch uns'],['rejected_by_client','Absage Kunde'],['no_contact','Kein Kontakt möglich']].map(([r,l])=>(
               <div key={r} style={{display:'flex',alignItems:'center',gap:10,fontSize:13.5}}>{chk(!!(cfg.rejects[r]&&cfg.rejects[r].enabled),()=>toggleReject(r))}<span>{l} <span style={{color:'var(--muted)',fontSize:12}}>(Absage 48 h verzögert)</span></span></div>))}
           </div>
@@ -44944,19 +45127,19 @@ function CalendarView({team, projects, employees, showToast, isMobileW, jumpTo, 
         </div>
       ); })()}
 
-      {editing&&<CalEventEditor ev={editing==='new'?null:editing} projects={projects} employees={employees} onClose={()=>setEditing(null)} onSaved={()=>{setEditing(null);load();}} onDelete={deleteEvent} myName={myName} uid={uid} showToast={showToast}/>}
+      {editing&&<CalEventEditor ev={editing==='new'?null:editing} projects={projects} employees={employees} onClose={()=>setEditing(null)} onSaved={()=>{setEditing(null);load();}} onDelete={deleteEvent} myName={myName} uid={uid} myEmpId={myEmpId} showToast={showToast}/>}
     </div>
   );
 }
 
-function CalEventEditor({ev, projects, employees, onClose, onSaved, onDelete, myName, uid, showToast}){
+function CalEventEditor({ev, projects, employees, onClose, onSaved, onDelete, myName, uid, myEmpId, showToast}){
   const isAuto=!!(ev&&ev.kind==='auto');
   const [f,setF]=useState(()=>({
     title: ev?ev.title:'', description: ev?(ev.description||''):'', location: ev?(ev.location||''):'', meeting_url: ev?(ev.meeting_url||''):'', project_id: ev?(ev.project_id||''):'',
     start_date: ev?String(ev.start_date).slice(0,10):isoLocal(new Date()),
     start_time: ev&&ev.start_time?String(ev.start_time).slice(0,5):'', end_time: ev&&ev.end_time?String(ev.end_time).slice(0,5):'',
     recurrence: ev?ev.recurrence:'none', until_date: ev&&ev.until_date?String(ev.until_date).slice(0,10):'',
-    visible_roles: ev?(ev.visible_roles||[]):[], participants: ev?(ev.participants||[]):[], important: ev?!!ev.important:false
+    visible_roles: ev?(ev.visible_roles||[]):[], participants: ev?(ev.participants||[]):(myEmpId?[myEmpId]:[]), important: ev?!!ev.important:false
   }));
   const [busy,setBusy]=useState(false);
   const [pSearch,setPSearch]=useState('');
@@ -45039,6 +45222,7 @@ function CalEventEditor({ev, projects, employees, onClose, onSaved, onDelete, my
                 ); })}
               </div>
               <div style={{fontSize:11,color:'var(--muted)',marginTop:4}}>Management und HR sehen alle Termine. Andere sehen nur, wozu sie eingeladen sind oder was sie selbst angelegt haben.</div>
+              {f.start_time&&f.participants.length===0&&<div style={{fontSize:11,color:'var(--amber)',marginTop:4,fontWeight:600}}>⚠ Ohne Teilnehmer geht die Erinnerung 15 Minuten vorher nur an dich als Ersteller.</div>}
             </div>
             <label style={{display:'flex',alignItems:'center',gap:8,fontSize:13,fontWeight:600,cursor:'pointer'}}>
               <input type="checkbox" checked={f.important} onChange={e=>set('important',e.target.checked)}/> ⭐ Wichtig — hebt den Termin im Kalender hervor
@@ -48021,9 +48205,12 @@ function App(){
     if(!keepOpen) setAbsenceModal(null);
     else setAbsenceModal(emp);
   }
-  async function confirmTerminate({exit, notice, status, reason}){
+  async function confirmTerminate({exit, notice, status, reason, never}){
     // Austrittsdatum → terminated_at (wird zu termination_date normalisiert). Kündigungsdatum + Notiz an den MA.
-    const emp={...terminateModal, status, terminated_at:exit, termination_reason:reason||''};
+    // „Nie angetreten": fester Merker (never_started) + Vermerk im Grundtext; die Statistik zählt ihn getrennt.
+    const _note = never ? (String(reason||'').trim() ? 'Nie angetreten: '+String(reason).trim() : 'nie angetreten') : (reason||'');
+    const emp={...terminateModal, status, terminated_at:exit, termination_reason:_note, never_started: !!never};
+    if(emp.extra && typeof emp.extra==='object' && !Array.isArray(emp.extra)) emp.extra={...emp.extra, never_started: !!never};
     if(notice) emp.notice_date=notice;
     try{ await saveEmployeeToDB(emp); }
     catch(e){ showToast('⚠ Kündigung fehlgeschlagen: '+dbErrMsg(e),'error'); return; }

@@ -41,11 +41,24 @@ Deno.serve(async (req) => {
   const today = iso(now);
   const nowMin = now.getHours() * 60 + now.getMinutes();
 
-  const { data: evs } = await sb.from("calendar_events").select("id,title,description,location,start_date,start_time,end_time,recurrence,until_date,participants,meeting_url,project_id,kind");
+  const { data: evs } = await sb.from("calendar_events").select("id,title,description,location,start_date,start_time,end_time,recurrence,until_date,participants,meeting_url,project_id,kind,created_by");
+  // Wer den Termin angelegt hat, wird mit erinnert: sonst bekäme ausgerechnet der Organisator nichts
+  // (2026-09-22 beim Test aufgefallen — Termin ohne Teilnehmerliste ging an niemanden).
+  const creatorUids = [...new Set((evs || []).map((e: any) => e.created_by).filter(Boolean))];
+  const creatorEmp: Record<string, string> = {};
+  if (creatorUids.length) {
+    const { data: aus } = await sb.from("app_users").select("user_id,employee_id").in("user_id", creatorUids);
+    for (const a of (aus || [])) if (a.employee_id) creatorEmp[a.user_id] = a.employee_id;
+  }
+  const recipientsOf = (ev: any): string[] => {
+    const list = Array.isArray(ev.participants) ? ev.participants.filter(Boolean) : [];
+    const own = ev.created_by ? creatorEmp[ev.created_by] : null;
+    return [...new Set(own ? [...list, own] : list)];
+  };
   const due: any[] = [];
   for (const ev of (evs || [])) {
     if (!ev.start_time) continue;                                  // ohne Uhrzeit keine Erinnerung
-    if (!(ev.participants && ev.participants.length)) continue;     // ohne Teilnehmer niemanden zu erinnern
+    if (!recipientsOf(ev).length) continue;                         // niemanden zu erinnern (kein Teilnehmer, kein Ersteller)
     if (!occursToday(ev, now)) continue;
     const [h, m] = hhmm(ev.start_time).split(":").map(Number);
     const diff = (h * 60 + m) - nowMin;                             // Minuten bis zum Start
@@ -58,7 +71,7 @@ Deno.serve(async (req) => {
   if (!due.length) return json({ ok: true, checked: (evs || []).length, due: 0 });
 
   // Teilnehmer auflösen (Mitarbeiter → Mail) und Abschaltungen lesen
-  const ids = [...new Set(due.flatMap((e: any) => e.participants))];
+  const ids = [...new Set(due.flatMap((e: any) => recipientsOf(e)))];
   const { data: emps } = await sb.from("employees").select("id,first_name,last_name,email,email_internal").in("id", ids);
   const empBy: Record<string, any> = {}; for (const e of (emps || [])) empBy[e.id] = e;
   const { data: prefs } = await sb.from("calendar_reminder_prefs").select("employee_id,enabled").in("employee_id", ids);
@@ -95,8 +108,9 @@ Deno.serve(async (req) => {
       const mr = sender ? await smtpSend(sender, previewTo, "[Probe] " + subject, html) : { ok: false, error: "kein Absender" };
       return json({ ok: true, preview: true, event: ev.title, mail: mr.ok ? "sent" : mr.error });
     }
-    if (dry) { previewHtml = html; results.push({ event: ev.title, start, empfaenger: ev.participants.map((id: string) => empBy[id] && (empBy[id].email_internal || empBy[id].email)).filter(Boolean), abgeschaltet: ev.participants.filter((id: string) => off.has(id)).length }); continue; }
-    for (const empId of ev.participants) {
+    const recips = recipientsOf(ev);
+    if (dry) { previewHtml = html; results.push({ event: ev.title, start, empfaenger: recips.map((id: string) => empBy[id] && (empBy[id].email_internal || empBy[id].email)).filter(Boolean), abgeschaltet: recips.filter((id: string) => off.has(id)).length }); continue; }
+    for (const empId of recips) {
       if (off.has(empId)) { results.push({ event: ev.title, emp: empId, skipped: "abgeschaltet" }); continue; }
       const emp = empBy[empId]; const to = emp && (emp.email_internal || emp.email);
       if (!to) { results.push({ event: ev.title, emp: empId, skipped: "keine Mail" }); continue; }
