@@ -121,8 +121,12 @@ Deno.serve(async (req) => {
     if (!CASE_RX.test(caseNo.toUpperCase())) return json({ error: "Die Casenummer muss mit CS oder IMS beginnen, gefolgt von Ziffern (z. B. CS5006433)." }, 400);
     if (opt.status.length && !opt.status.includes(String(e.status || ""))) return json({ error: "Bitte einen Status wählen." }, 400);
     if (opt.action.length && !opt.action.includes(String(e.action || ""))) return json({ error: "Bitte auswählen, was gemacht wurde." }, 400);
-    const closed = e.closed === true || e.closed === "ja";
-    const isClose = closed && String(e.action) === opt.close_action;
+    // „abgeschlossen = ja" gilt NUR bei „Angebot angenommen" (User 2026-09-23). Deshalb wird es aus der
+    // Maßnahme abgeleitet und nicht vom Browser übernommen: sonst entstehen Zeilen wie „WVL, abgeschlossen ja".
+    // Bewusst auch für „Case geschlossen" und „Kündigung in K7 erfasst": inhaltlich abgeschlossen, aber ohne
+    // Verkauf, also kein Umsatz und Spalte E bleibt nein. Wenn Giganetz es anders will, hier ändern.
+    const closed = String(e.action) === opt.close_action;
+    const isClose = closed;
     const row: any = { project_id: ses.link.project_id, skill: ses.link.skill, employee_id: ses.employee_id, work_date: date,
       case_no: caseNo.toUpperCase(), status: String(e.status), closed, action: String(e.action), note: (String(e.note || "").trim() || null), created_via: "agent" };
     if (isClose) {

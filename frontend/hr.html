@@ -41144,10 +41144,21 @@ function CpoTrackView({team, employees, showToast}){
   const revenue=closes.reduce((a,r)=>a+(Number(r.cpo_amount)||0),0);
   const empName=id=>{ const e=(employees||[]).find(x=>x&&x.id===id); return e?((e.first_name||'')+' '+(e.last_name||'')).trim():'—'; };
   // Aufschlüsselung
-  const byOut={}; closes.forEach(r=>{ const k=r.outcome||'?'; (byOut[k]=byOut[k]||{n:0,rev:0}); byOut[k].n++; byOut[k].rev+=Number(r.cpo_amount)||0; });
+  const byOut={}; closes.forEach(r=>{ const k=r.outcome||'?'; (byOut[k]=byOut[k]||{n:0,rev:0,l1:0,l2:0}); byOut[k].n++; byOut[k].rev+=Number(r.cpo_amount)||0;
+    if(r.discount_level===1) byOut[k].l1++; if(r.discount_level===2) byOut[k].l2++; });
   const lvl1=closes.filter(r=>r.discount_level===1).length, lvl2=closes.filter(r=>r.discount_level===2).length;
+  const rev1=closes.filter(r=>r.discount_level===1).reduce((a,r)=>a+(Number(r.cpo_amount)||0),0);
+  const rev2=closes.filter(r=>r.discount_level===2).reduce((a,r)=>a+(Number(r.cpo_amount)||0),0);
+  // Vorgänge ohne Abschluss: reine Dokumentation. Getrennt gezählt, je Maßnahme und je Status — das ist die
+  // Kontaktstatistik, nicht der Umsatz.
+  const docs=live.filter(r=>!r.is_close);
+  const byAction={}; docs.forEach(r=>{ const k=r.action||'—'; byAction[k]=(byAction[k]||0)+1; });
+  const byStatus={}; live.forEach(r=>{ const k=r.status||'—'; byStatus[k]=(byStatus[k]||0)+1; });
+  const actRows=Object.keys(byAction).map(k=>({k,n:byAction[k]})).sort((a,b)=>b.n-a.n);
+  const statRows=Object.keys(byStatus).map(k=>({k,n:byStatus[k]})).sort((a,b)=>b.n-a.n);
   const byEmp={}; live.forEach(r=>{ const k=r.employee_id; (byEmp[k]=byEmp[k]||{n:0,cl:0,rev:0,l2:0});
     byEmp[k].n++; if(r.is_close){ byEmp[k].cl++; byEmp[k].rev+=Number(r.cpo_amount)||0; if(r.discount_level===2) byEmp[k].l2++; } });
+  const teamRev=revenue;
   const empRows=Object.keys(byEmp).map(id=>({id, name:empName(id), ...byEmp[id]})).sort((a,b)=>b.rev-a.rev||b.n-a.n);
   const listed=(showCancelled?all:live).slice().sort((a,b)=>String(b.work_date+b.created_at).localeCompare(String(a.work_date+a.created_at)));
   async function cancelEntry(r){
@@ -41185,31 +41196,65 @@ function CpoTrackView({team, employees, showToast}){
     </div>
     <div style={{display:'flex',gap:12,flexWrap:'wrap',marginBottom:14}}>
       {tile(cpoEur(revenue),'Umsatz',closes.length+(closes.length===1?' Abschluss':' Abschlüsse'),'#0f766e')}
-      {tile(String(closes.length),'Abschlüsse', live.length+' Vorgänge gesamt')}
+      {tile(String(closes.length),'Abschlüsse', 'von '+live.length+' Vorgängen')}
+      {tile(String(docs.length),'Ohne Abschluss','Dokumentation, kein Umsatz')}
       {tile(closes.length?cpoEur(revenue/closes.length):'—','Ø CPO','je Abschluss')}
       {tile(closes.length?(Math.round(lvl2/closes.length*100)+' %'):'—','Anteil Stufe 2','Stufe 1: '+lvl1+' · Stufe 2: '+lvl2)}
+      {tile(live.length?(Math.round(closes.length/live.length*100)+' %'):'—','Abschlussquote','Abschlüsse je Vorgang')}
     </div>
     <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(280px,1fr))',gap:12,marginBottom:14}}>
       <div style={{border:'1px solid var(--border)',borderRadius:12,padding:'12px 14px',background:'var(--card)'}}>
-        <div style={{fontSize:13,fontWeight:800,marginBottom:8}}>Nach Tarifart</div>
-        {Object.keys(CPO_OUT_LABEL).map(k=>{ const o=byOut[k]||{n:0,rev:0}; const pct=closes.length?Math.round(o.n/closes.length*100):0;
-          return <div key={k} style={{marginBottom:8}}>
+        <div style={{fontSize:13,fontWeight:800,marginBottom:8}}>Nach Tarifart und Rabattstufe</div>
+        {Object.keys(CPO_OUT_LABEL).map(k=>{ const o=byOut[k]||{n:0,rev:0,l1:0,l2:0}; const pct=closes.length?Math.round(o.n/closes.length*100):0;
+          return <div key={k} style={{marginBottom:9}}>
             <div style={{display:'flex',justifyContent:'space-between',fontSize:12.5,marginBottom:3}}>
               <span style={{fontWeight:600}}>{CPO_OUT_LABEL[k]}</span><span style={{color:'var(--muted)'}}>{o.n}× · {cpoEur(o.rev)}</span></div>
             <div style={{height:7,borderRadius:4,background:'var(--surface-2)',overflow:'hidden'}}>
               <div style={{width:pct+'%',height:'100%',background:CPO_OUT_COLOR[k]}}/></div>
+            <div style={{fontSize:11,color:'var(--muted)',marginTop:2}}>Stufe 1: {o.l1} · Stufe 2: {o.l2}</div>
           </div>; })}
+        <div style={{borderTop:'1px solid var(--border)',marginTop:6,paddingTop:6,fontSize:12,color:'var(--muted)'}}>
+          Umsatz nach Stufe: Stufe 1 <b style={{color:'var(--text)'}}>{cpoEur(rev1)}</b> · Stufe 2 <b style={{color:'var(--text)'}}>{cpoEur(rev2)}</b>
+        </div>
+      </div>
+      <div style={{border:'1px solid var(--border)',borderRadius:12,padding:'12px 14px',background:'var(--card)'}}>
+        <div style={{fontSize:13,fontWeight:800,marginBottom:8}}>Kontakte ohne Abschluss</div>
+        {!actRows.length?<div style={{fontSize:12.5,color:'var(--muted)'}}>Keine Vorgänge ohne Abschluss im Zeitraum.</div>:
+          actRows.map(r=>{ const pct=docs.length?Math.round(r.n/docs.length*100):0;
+            return <div key={r.k} style={{marginBottom:6}}>
+              <div style={{display:'flex',justifyContent:'space-between',fontSize:12.5,marginBottom:2}}>
+                <span>{r.k}</span><span style={{color:'var(--muted)',fontWeight:700}}>{r.n}</span></div>
+              <div style={{height:6,borderRadius:4,background:'var(--surface-2)',overflow:'hidden'}}>
+                <div style={{width:pct+'%',height:'100%',background:'#94a3b8'}}/></div>
+            </div>; })}
+        <div style={{borderTop:'1px solid var(--border)',marginTop:8,paddingTop:6}}>
+          <div style={{fontSize:12,fontWeight:800,color:'var(--muted)',marginBottom:4}}>Nach Status (alle Vorgänge)</div>
+          {statRows.map(r=>(<div key={r.k} style={{display:'flex',justifyContent:'space-between',fontSize:12.5,padding:'2px 0'}}>
+            <span>{r.k}</span><span style={{fontWeight:700}}>{r.n}</span></div>))}
+        </div>
       </div>
       <div style={{border:'1px solid var(--border)',borderRadius:12,padding:'12px 14px',background:'var(--card)'}}>
         <div style={{fontSize:13,fontWeight:800,marginBottom:8}}>Je Mitarbeiter</div>
         {!empRows.length?<div style={{fontSize:12.5,color:'var(--muted)'}}>Keine Vorgänge im Zeitraum.</div>:
-          <div style={{maxHeight:260,overflowY:'auto'}}>{empRows.map(e=>(
+          <div style={{maxHeight:280,overflowY:'auto'}}>
+            <div style={{display:'flex',gap:8,fontSize:10.5,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.04em',paddingBottom:3}}>
+              <span style={{flex:1}}>Mitarbeiter</span><span style={{width:52,textAlign:'right'}}>Vorg.</span>
+              <span style={{width:44,textAlign:'right'}}>Abschl.</span><span style={{width:44,textAlign:'right'}}>Stufe 2</span>
+              <span style={{width:84,textAlign:'right'}}>Umsatz</span></div>
+            {empRows.map(e=>(
             <div key={e.id} style={{display:'flex',alignItems:'center',gap:8,padding:'5px 0',borderTop:'1px solid var(--border)',fontSize:12.5}}>
               <span style={{flex:1,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',fontWeight:600}}>{e.name}</span>
-              <span style={{width:60,textAlign:'right',color:'var(--muted)'}}>{e.n} Vorg.</span>
-              <span style={{width:52,textAlign:'right'}}>{e.cl}×</span>
+              <span style={{width:52,textAlign:'right',color:'var(--muted)'}}>{e.n}</span>
+              <span style={{width:44,textAlign:'right'}}>{e.cl}</span>
+              <span style={{width:44,textAlign:'right',color:'var(--muted)'}}>{e.cl?Math.round(e.l2/e.cl*100)+'%':'—'}</span>
               <span style={{width:84,textAlign:'right',fontWeight:800,fontFamily:'var(--mono)'}}>{cpoEur(e.rev)}</span>
-            </div>))}</div>}
+            </div>))}
+            <div style={{display:'flex',gap:8,padding:'6px 0 0',borderTop:'2px solid var(--border)',fontSize:12.5,fontWeight:800}}>
+              <span style={{flex:1}}>Team</span><span style={{width:52,textAlign:'right'}}>{live.length}</span>
+              <span style={{width:44,textAlign:'right'}}>{closes.length}</span>
+              <span style={{width:44,textAlign:'right'}}>{closes.length?Math.round(lvl2/closes.length*100)+'%':'—'}</span>
+              <span style={{width:84,textAlign:'right',fontFamily:'var(--mono)'}}>{cpoEur(teamRev)}</span></div>
+          </div>}
       </div>
     </div>
     <div style={{border:'1px solid var(--border)',borderRadius:12,background:'var(--card)',overflow:'hidden'}}>
