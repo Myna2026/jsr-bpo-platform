@@ -43,8 +43,15 @@ async function options() {
     close_action: v.close_action || "Angebot angenommen",
   };
 }
+// Ohne Token: wenn genau EIN Zugang aktiv ist, nimm den. Das erlaubt die kurze Adresse /retention ohne
+// Token in der URL. Gibt es mehrere, muss der Link den Token tragen — sonst landet jemand im falschen Mandat.
+// Der Token ist ohnehin kein Passwort; angemeldet wird mit der persönlichen PIN.
 async function linkOf(token: string) {
-  if (!token || !/^[A-Za-z0-9_-]{6,64}$/.test(token)) return null;
+  if (!token) {
+    const { data } = await admin.from("cpo_links").select("token,project_id,skill,label,active").eq("active", true);
+    return (data && data.length === 1) ? data[0] : null;
+  }
+  if (!/^[A-Za-z0-9_-]{6,64}$/.test(token)) return null;
   const { data } = await admin.from("cpo_links").select("token,project_id,skill,label,active").eq("token", token).maybeSingle();
   return (data && data.active) ? data : null;
 }
@@ -80,7 +87,7 @@ Deno.serve(async (req) => {
     const link = await linkOf(String(body.token || ""));
     if (!link) return json({ error: "Dieser Link ist nicht (mehr) gültig." }, 404);
     const { data: proj } = await admin.from("projects").select("name").eq("id", link.project_id).maybeSingle();
-    return json({ ok: true, project: (proj && proj.name) || link.project_id, skill: link.skill, label: link.label,
+    return json({ ok: true, token: link.token, project: (proj && proj.name) || link.project_id, skill: link.skill, label: link.label,
       options: await options(), outcomes: OUTCOMES, tariffs: await tariffs(link.project_id, link.skill) });
   }
 

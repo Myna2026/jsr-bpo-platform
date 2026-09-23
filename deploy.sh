@@ -153,8 +153,10 @@ rsync -az --progress "$LOCAL_DIR/stempel.html" "$SERVER:$REMOTE_BASE/root/stempe
 echo "→ Schulung per Link (öffentlich, Token + PIN)..."
 rsync -az --progress "$LOCAL_DIR/schulung.html" "$SERVER:$REMOTE_BASE/root/schulung.html"
 
-echo "→ CPO-Erfassung (öffentlich, Token + PIN)..."
-rsync -az --progress "$LOCAL_DIR/cpo.html" "$SERVER:$REMOTE_BASE/root/cpo.html"
+echo "→ Retention Overview (öffentlich, PIN; kurze Adresse /retention)..."
+stamp_rsync "$LOCAL_DIR/cpo.html" "$REMOTE_BASE/root/cpo.html"
+# Kurze Adresse tive360.de/retention: Caddy loest /retention ueber try_files {path}.html auf.
+stamp_rsync "$LOCAL_DIR/cpo.html" "$REMOTE_BASE/root/retention.html"
 
 echo "→ Öffentliche Präsentationsseite (Login-frei, nutzt shared/presentation-slides.js)..."
 rsync -az --progress "$LOCAL_DIR/praesentation.html" "$SERVER:$REMOTE_BASE/hr/praesentation.html"
