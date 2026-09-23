@@ -694,7 +694,7 @@ function DemoCockpit({client}){
   useEffect(()=>{ let alive=true; (async()=>{
     const [c,e]=await Promise.all([
       sb.from('kpi_config_client_view').select('id,name,unit'),
-      sb.from('kpi_entries_client_view').select('kpi_id,kw,year,value')
+      sb.from('kpi_entries_client_view').select('kpi_id,kw,year,value,weight,numerator')
     ]);
     if(!alive) return; setCfg(c.data||[]); setEnt(e.data||[]);
   })(); return ()=>{alive=false;}; },[client.project_id]);
@@ -704,9 +704,39 @@ function DemoCockpit({client}){
   const idsFor=names=>cfg.filter(c=>names.includes(c.name)).map(c=>c.id);
   const ourIds=new Set(cfg.map(c=>c.id));
   const rows=ent.filter(r=>ourIds.has(r.kpi_id));
-  const avg=(ids,keys)=>{ const set=new Set(ids); const kk=new Set(keys.map(x=>x.y+'-'+x.kw)); const vs=rows.filter(r=>set.has(r.kpi_id)&&kk.has(r.year+'-'+r.kw)).map(r=>Number(r.value)).filter(v=>!isNaN(v)); return vs.length? vs.reduce((a,b)=>a+b,0)/vs.length : null; };
+  // Zusammenfassen über Agenten und Wochen: IMMER über Zähler und Nenner, nie als Mittelwert von Prozentwerten.
+  //   numerator vorhanden (CR: Offene+OSL, Mails/h: Mails) -> Σ Zähler ÷ Σ Nenner
+  //   nur weight  (CSAT: Bewertungen, AHT/ACW: Answered)   -> Σ (Wert × Gewicht) ÷ Σ Gewicht
+  //   kein Gewicht (z. B. QM: Zahl der bewerteten Gespräche liegt nicht vor) -> Mittelwert, sichtbar gekennzeichnet.
+  // Teilweise vorhandene Gewichte zählen als „kein Gewicht": halb gewichtet wäre eine erfundene Genauigkeit.
+  const inPeriod=(r,kk)=>kk.has(r.year+'-'+r.kw);
+  const sumOf=(names,kk)=>{ const set=new Set(idsFor(names)); if(!set.size) return null;
+    const rs=rows.filter(r=>set.has(r.kpi_id)&&inPeriod(r,kk)&&!isNaN(Number(r.value)));
+    return rs.length?rs.reduce((a,r)=>a+Number(r.value),0):null; };
+  const agg=(ids,keys,opts)=>{ const set=new Set(ids); const kk=new Set(keys.map(x=>x.y+'-'+x.kw));
+    // Conversion zuerst aus den Mengen rechnen: Σ Buchungen ÷ Σ Sales Calls. Das ist die Rechnung des
+    // Auftraggebers und deckt alle Wochen ab, auch die ohne mitgelieferte Gewichte am Einzelwert.
+    if(opts&&opts.ratio){ const calls=sumOf(opts.ratio.den,kk);
+      const a=sumOf(opts.ratio.num[0],kk), b=opts.ratio.num[1]?sumOf(opts.ratio.num[1],kk):null;
+      const book=(a==null&&b==null)?null:((a||0)+(b||0));
+      if(calls&&book!=null) return {v:book/calls*100, weighted:true, note:null}; }
+    const rs=rows.filter(r=>set.has(r.kpi_id)&&inPeriod(r,kk)&&!isNaN(Number(r.value)));
+    if(!rs.length) return {v:null, weighted:false, note:null};
+    const w=r=>{ const x=Number(r.weight); return (r.weight!=null&&!isNaN(x)&&x>0)?x:null; };
+    const wr=rs.filter(r=>w(r)!=null);
+    if(wr.length){
+      const num=r=>{ const x=Number(r.numerator); return (r.numerator!=null&&!isNaN(x))?x:(Number(r.value)*w(r)); };
+      const tw=wr.reduce((a,r)=>a+w(r),0);
+      if(tw>0){ const tn=wr.reduce((a,r)=>a+num(r),0);   // numerator ist in der Sicht schon passend skaliert
+        const miss=rs.length-wr.length;
+        return {v:tn/tw, weighted:true, note:miss?(miss+' von '+rs.length+' Werten ohne Gewicht, nicht mitgerechnet'):null}; }
+    }
+    return {v:rs.reduce((a,r)=>a+Number(r.value),0)/rs.length, weighted:false, note:null};
+  };
   const yk=[...new Set(rows.map(r=>r.year+'|'+r.kw))].map(s=>{const p=s.split('|');return {y:+p[0],kw:+p[1]};}).sort((a,b)=>b.y-a.y||b.kw-a.kw);
-  const KPIS=[{name:'CSAT',names:['CSAT'],unit:'%',better:'up'},{name:'AHT',names:['AHT'],unit:'min',better:'down'},{name:'Conversion',names:['Conversion','CR'],unit:'%',better:'up'}];
+  const KPIS=[{name:'CSAT',names:['CSAT'],unit:'%',better:'up'},{name:'AHT',names:['AHT'],unit:'min',better:'down'},
+    {name:'Conversion',names:['Conversion','CR'],unit:'%',better:'up',
+     ratio:{num:[['Offline Buchungen'],['OSL-Buchungen']], den:['Sales Calls']}}];
   const anyData = rows.length>0 && KPIS.some(k=>idsFor(k.names).length>0);
   if(!anyData) return null;   // Kein KPI-Datenbestand fürs Projekt → Cockpit weglassen (nichts Leeres zeigen)
   let periods;
@@ -722,13 +752,17 @@ function DemoCockpit({client}){
     </div>
     <div className="card-body">
       <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:14}}>
-        {KPIS.map(k=>{ const ids=idsFor(k.names); const now=avg(ids,periods.now), prev=avg(ids,periods.prev);
+        {KPIS.map(k=>{ const ids=idsFor(k.names); const nowA=agg(ids,periods.now,k), prevA=agg(ids,periods.prev,k);
+          const now=nowA.v, prev=prevA.v;
           const delta=(now!=null&&prev!=null)?now-prev:null;
           const good=delta==null?null:(Math.abs(delta)<0.05?null:(k.better==='up'?delta>0:delta<0));
           const arrow=delta==null?'':(delta>0.05?'▲':delta<-0.05?'▼':'▬');
           const col=good==null?'#94a3b8':(good?'#16a34a':'#dc2626');
           return <div key={k.name} style={{background:'#f8fafc',borderRadius:14,padding:'16px 18px'}}>
-            <div style={{fontSize:12.5,fontWeight:700,color:'#64748b'}}>{k.name}</div>
+            <div style={{fontSize:12.5,fontWeight:700,color:'#64748b'}}>{k.name}
+              {now!=null&&!nowA.weighted&&<span title="Einfacher Mittelwert: für diese Kennzahl liegen keine Gewichte (Anzahl der Gespräche) vor." style={{marginLeft:6,fontSize:10.5,fontWeight:800,color:'#b45309',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:6,padding:'0 5px'}}>Ø ungewichtet</span>}
+              {now!=null&&nowA.weighted&&nowA.note&&<span title={nowA.note} style={{marginLeft:6,fontSize:10.5,fontWeight:800,color:'#64748b'}}>*</span>}
+            </div>
             <div style={{fontSize:30,fontWeight:800,color:'#0f172a',lineHeight:1.1,marginTop:4}}>{now!=null?now.toFixed(1):'—'}<span style={{fontSize:15,fontWeight:600,color:'#94a3b8'}}> {k.unit}</span></div>
             <div style={{fontSize:12.5,marginTop:6,display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
               <span style={{color:col,fontWeight:800}}>{arrow} {delta!=null?((delta>0?'+':'')+delta.toFixed(1)):'—'}</span>
@@ -736,7 +770,7 @@ function DemoCockpit({client}){
             </div>
           </div>; })}
       </div>
-      <div style={{fontSize:11.5,color:'#94a3b8',marginTop:10}}>{periods.nowLbl} · Teamdurchschnitt · Vergleich zur Vorperiode</div>
+      <div style={{fontSize:11.5,color:'#94a3b8',marginTop:10}}>{periods.nowLbl} · Teamwert über alle Gespräche gerechnet (nicht Mittelwert der Wochen) · Vergleich zur Vorperiode</div>
     </div>
   </div>;
 }

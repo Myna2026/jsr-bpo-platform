@@ -260,25 +260,35 @@ Diese Prinzipien ziehen sich durch das ganze System — beim Bauen einhalten:
    `cvs.source`, `data_imports`, Marker wie `gsrc`/`rsrc`/`psrc` (geliefert/
    Rückmeldung/Plan), „gerechnet"-Kennzeichnung auf Berichtsfolien. Nie eine Zahl
    zeigen, ohne dass klar ist, woher sie kommt.
-2. **Kein stiller Rückfall.** Keine erfundenen/Dummy-Daten bei leerem Ergebnis.
+2. **Durchschnitte über Zähler und Nenner.** Quoten und Mittelwerte werden NIE aus
+   Prozentwerten gemittelt, sondern aus ihren Bestandteilen gerechnet: CR = Σ Buchungen
+   ÷ Σ Sales Calls, Mails/h = Σ Mails ÷ Σ Stunden, AHT/ACW gewichtet nach angenommenen
+   Anrufen, CSAT nach Anzahl Bewertungen, Call-Qualität = Σ Punkte ÷ Σ erreichbare Punkte.
+   Gilt über Agenten UND über Wochen (Monat = Σ der Bestandteile, nicht Ø der Wochen).
+   Gibt es kein Gewicht in den Daten (QM: Zahl der bewerteten Gespräche; CR ohne
+   Buchungszahlen), bleibt der Mittelwert — dann aber **sichtbar gekennzeichnet**
+   (Ø-Zeichen in HR-Ansichten, „Ø ungewichtet" im Kundenportal). Ehrlich ungenau
+   statt falsch genau. Belegt 2026-09-23 am August 2026: Mails/h gewichtet 7,92 gegen
+   Mittelwert 10,20, der Kundenwert liegt bei 7,8.
+3. **Kein stiller Rückfall.** Keine erfundenen/Dummy-Daten bei leerem Ergebnis.
    Loads sind an den Login gekoppelt (sonst läuft RLS anonym ins Leere); echte
    Fehler werden sichtbar gemacht, nicht durch Fake-Fallbacks kaschiert. Kein
    Fallback vom CV-Skill auf den Projekt-Skill.
-3. **Eine Wahrheit je Größe.** Nichts doppelt speichern: `position → category`
+4. **Eine Wahrheit je Größe.** Nichts doppelt speichern: `position → category`
    abgeleitet; `contract.start` = einzige Eintritts-Wahrheit; Stundenlohn ergibt
    sich aus Monatsgehalt; KPIs über `kpi_id`; Schicht-/Verfügbarkeits-Regeln in
    geteilten Top-Level-Funktionen (`shiftEmpDayOk` …); `UPLOAD_SOURCES` eine Liste
    für Import + Upload-Plan. Bei Kennzahlen: Rankings/Aggregationen immer je Skill,
    nie über Skill-Grenzen.
-4. **Zeitzonen:** lokale Daten mit `isoLocal()` bilden, nie `toISOString()` auf ein
+5. **Zeitzonen:** lokale Daten mit `isoLocal()` bilden, nie `toISOString()` auf ein
    lokales `Date` (das kippt in MEZ auf den Vortag).
-5. **Deploy ≠ Commit.** `deploy.sh` = rsync auf den Server (kein Git). Committen/
+6. **Deploy ≠ Commit.** `deploy.sh` = rsync auf den Server (kein Git). Committen/
    Pushen nur auf ausdrückliche Aufforderung; nie „deployt und committed" melden,
    wenn nur deployt wurde. Build-ID-Stempel + Caddy-no-cache gegen Browser-Cache.
-6. **Migrationen** liegen als SQL-Dateien in `migrations/` und werden per
+7. **Migrationen** liegen als SQL-Dateien in `migrations/` und werden per
    `supabase db query --linked -f` eingespielt (additiv ohne Rückfrage, ändernd/
    löschend erst fragen). Secrets nie committen.
-7. **Sichtbare Texte** ohne lange Gedankenstriche; Komma/Doppelpunkt/Punkt.
+8. **Sichtbare Texte** ohne lange Gedankenstriche; Komma/Doppelpunkt/Punkt.
 
 ---
 

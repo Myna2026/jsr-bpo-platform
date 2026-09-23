@@ -410,7 +410,10 @@
     ])))]); }
     function wavg(list){ var sv=0,sn=0; (list||[]).forEach(function(c){ if(c&&c.v!=null){ var n=(c.n||0)||1; sv+=c.v*n; sn+=n; } }); return sn?sv/sn:null; }
     var teamWeek={}; weeks.forEach(function(w){ teamWeek[w.key]=wavg(rows.map(function(r){ return r.cells[w.key]; })); });
-    var teamAvg=wavg(rows.map(function(r){ return {v:r.avg,n:1}; }));
+    // Team-Ø über ALLE Bewertungen, nicht Mittelwert der Agenten-Durchschnitte: ein Agent mit 3 Bewertungen
+    // darf nicht so schwer wiegen wie einer mit 60. (Je Agent ist der Ø schon nach Anzahl gewichtet.)
+    var allCells=[]; rows.forEach(function(r){ weeks.forEach(function(w){ var c=r.cells[w.key]; if(c&&c.v!=null) allCells.push(c); }); });
+    var teamAvg=allCells.length?wavg(allCells):wavg(rows.map(function(r){ return {v:r.avg,n:1}; }));
     var pages=agentPages(rows, 11); var pr=pages[page]||[]; var isLast=(page===pages.length-1);
     var head=page===0?fondHead(P, lbl+' · CSAT', 'Kundenzufriedenheit', rangeTxt+(pages.length>1?(' · '+rows.length+' MA · '+pages.length+' Seiten'):'')):null;
     var colName='30cqw';
