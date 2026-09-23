@@ -46,9 +46,14 @@
   .opt .ch{margin-left:auto;color:var(--acc);font-weight:800}
   /* Bewusst KEINE zweite Spalte mehr: schmale Felder mit Lücke dazwischen führten dazu, dass der erste Tipp
      daneben ging und man zweimal tippen musste. Alle Auswahlfelder sind jetzt gleich breit und gleich groß. */
-  /* Damit „Tarif vorher" und „Tarif neu" nicht verwechselbar aussehen: der zweite Schritt trägt den ersten sichtbar mit. */
-  .prev{background:#ecfeff;border:1.5px solid var(--acc);border-radius:10px;padding:7px 11px;margin-bottom:9px;font-size:14px;color:var(--acc-d)}
-  .prev b{font-size:15px}
+  /* Abschluss-Bildschirm: drei Reihen untereinander, jede getroffene Wahl bleibt sichtbar stehen. */
+  .grp{margin-bottom:12px}
+  .grp-h{font-size:12px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px}
+  .grp-o{display:flex;flex-wrap:wrap;gap:7px}
+  .chip{flex:1 1 auto;min-width:96px;border:1.5px solid var(--line);background:#fff;border-radius:12px;padding:13px 12px;
+        font-family:inherit;font-size:15.5px;font-weight:700;color:var(--ink);cursor:pointer;touch-action:manipulation;
+        -webkit-tap-highlight-color:rgba(15,118,110,.15)}
+  .chip.on{border-color:var(--acc);background:var(--acc);color:#fff}
   .crumb{display:flex;gap:5px;flex-wrap:wrap;margin-bottom:9px}
   .cb{font-size:11px;font-weight:700;background:#f1f5f9;color:#475569;border-radius:999px;padding:3px 9px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .cb b{font-weight:800;color:var(--ink)}
@@ -236,7 +241,7 @@ $('fDate').addEventListener('change',function(){ if($('fDate').value){ setDate($
 function isClose(){ return F.action===OPT.close_action; }
 function buildSteps(){
   STEPS=['case','status','action'];
-  if(isClose()) STEPS=STEPS.concat(['tfrom','tto','level']);
+  if(isClose()) STEPS.push('abschluss');   // Tarif vorher, Tarif neu und Rabattstufe auf EINEM Bildschirm
   STEPS.push('check');
 }
 function crumbs(){
@@ -263,22 +268,19 @@ function showNext(cur){
   var nb=$('stepNext'); nb.hidden=false; CHOICE=(cur===undefined?null:cur);
   nb.disabled=(CHOICE===null||CHOICE===undefined);
 }
+// Auswahl: markieren und weiterspringen in EINEM Klick. Bewusst nur ein Ereignis (click), keine Verzögerung,
+// keine Sperre. Jede dieser Zutaten hat hier schon Schaden angerichtet: eine globale Sperre verschluckte den
+// nächsten Tipp, ein zusätzlicher touchstart-Zuhörer warf auf dem iPhone bei jeder Berührung einen Fehler.
+// click löst auf Touchgeräten genauso aus wie mit der Maus; touch-action:manipulation nimmt die Verzögerung.
 function bindPicks(fn){
-  var handler=function(b,ev){
-    var now=Date.now();
-    if(b._tapAt && now-b._tapAt<400) return;        // derselbe Tipp, zweites Ereignis
-    b._tapAt=now;
-    if(ev&&ev.type==='touchend'&&ev.cancelable) ev.preventDefault();
-    var it=PICKS[Number(b.getAttribute('data-pick'))]; var v=(typeof it==='object')?it.v:it;
-    Array.prototype.forEach.call($('stepBox').querySelectorAll('[data-pick]'),function(o){ o.className='opt'; });
-    b.className='opt on';                       // sofort sichtbar, auch wenn das Weiterspringen scheitert
-    CHOICE=v; $('stepNext').disabled=false;
-    setTimeout(function(){ try{ fn(v); }catch(e){ err('addErr','Es ist etwas schiefgegangen: '+(e&&e.message||e)); } },60);
-  };
   Array.prototype.forEach.call($('stepBox').querySelectorAll('[data-pick]'),function(b){
-    b.addEventListener('click',function(ev){ handler(b,ev); });
-    b.addEventListener('touchend',function(ev){ handler(b,ev); });
-    b.addEventListener('touchstart',function(){ diag('touchstart'); });   // kommt der Finger überhaupt an?
+    b.addEventListener('click',function(){
+      var it=PICKS[Number(b.getAttribute('data-pick'))]; var v=(typeof it==='object')?it.v:it;
+      Array.prototype.forEach.call($('stepBox').querySelectorAll('[data-pick]'),function(o){ o.className='opt'; });
+      b.className='opt on';
+      CHOICE=v; $('stepNext').disabled=false;
+      try{ fn(v); }catch(e){ err('addErr','Es ist etwas schiefgegangen: '+(e&&e.message||e)); }
+    });
   });
   PICKFN=fn;
 }
@@ -304,17 +306,34 @@ function render(){
   if(k==='status'){ PICKS=OPT.status; box.innerHTML='<div class="q">Status</div>'+optList(PICKS,F.status); bindPicks(function(v){ F.status=v; next(); }); showNext(F.status); return; }
   if(k==='action'){ PICKS=OPT.action; box.innerHTML='<div class="q">Was wurde gemacht?</div>'+optList(PICKS,F.action);
     bindPicks(function(v){ F.action=v; if(!isClose()){ F.tariff_from=null; F.tariff_to=null; F.discount_level=null; } next(); }); showNext(F.action); return; }
-  if(k==='tfrom'){ PICKS=TAR.map(function(t){ return t.name; });
-    box.innerHTML='<div class="q">Welchen Tarif hatte der Kunde?</div>'+optList(PICKS,F.tariff_from);
-    bindPicks(function(v){ F.tariff_from=v; next(); }); showNext(F.tariff_from); return; }
-  if(k==='tto'){ PICKS=TAR.map(function(t){ return t.name; });
-    box.innerHTML='<div class="prev">vorher <b>'+esc(F.tariff_from||'')+'</b></div>'
-      + '<div class="q">Auf welchen Tarif jetzt?</div>'+optList(PICKS,F.tariff_to);
-    bindPicks(function(v){ F.tariff_to=v; next(); }); showNext(F.tariff_to); return; }
-  if(k==='level'){ PICKS=[{v:1,l:'Stufe 1'},{v:2,l:'Stufe 2'}];
-    box.innerHTML='<div class="q">Rabattstufe</div>'+optList(PICKS,F.discount_level,true)
-      + (outcomeNow()?'<div class="ok" style="margin-top:10px">'+esc(F.tariff_from+' → '+F.tariff_to)+': '+OUT_TXT[outcomeNow()]+'</div>':'');
-    bindPicks(function(v){ F.discount_level=v; next(); }); showNext(F.discount_level); return; }
+  if(k==='abschluss'){
+    // EIN Bildschirm für Tarif vorher, Tarif neu und Rabattstufe. Jede Auswahl zeichnet nur diesen Bildschirm
+    // neu; es gibt keinen Schrittwechsel mehr, der scheitern könnte. Weiter geht es, wenn alle drei stehen.
+    var row=function(label, key, items, cur){
+      return '<div class="grp"><div class="grp-h">'+label+'</div><div class="grp-o">'
+        + items.map(function(it){ var v=(typeof it==='object')?it.v:it, l=(typeof it==='object')?it.l:it;
+            return '<button type="button" class="chip'+(String(cur)===String(v)?' on':'')+'" data-grp="'+key+'" data-val="'+esc(String(v))+'">'+esc(l)+'</button>'; }).join('')
+        + '</div></div>';
+    };
+    var names=TAR.map(function(t){ return t.name; });
+    var oc=outcomeNow();
+    box.innerHTML='<div class="q">Tarifwechsel und Rabatt</div>'
+      + row('Tarif vorher','tariff_from',names,F.tariff_from)
+      + row('Tarif neu','tariff_to',names,F.tariff_to)
+      + row('Rabattstufe','discount_level',[{v:1,l:'Stufe 1'},{v:2,l:'Stufe 2'}],F.discount_level)
+      + (oc?'<div class="ok">'+esc(F.tariff_from+' → '+F.tariff_to)+': '+OUT_TXT[oc]+'</div>':'');
+    Array.prototype.forEach.call(box.querySelectorAll('[data-grp]'),function(b){
+      b.addEventListener('click',function(){
+        var g=b.getAttribute('data-grp'), v=b.getAttribute('data-val');
+        F[g]=(g==='discount_level')?Number(v):v;
+        render();
+      });
+    });
+    var ready=!!(F.tariff_from&&F.tariff_to&&F.discount_level);
+    var nb2=$('stepNext'); nb2.hidden=false; nb2.disabled=!ready;
+    nb2.textContent=ready?'Weiter':'Bitte alle drei wählen';
+    CHOICE=ready?true:null; PICKFN=function(){ next(); };
+    return; }
   var o=outcomeNow();
   box.innerHTML='<div class="q">Passt das?</div>'
     + '<div class="sum">'+[de(F.work_date), F.case_no, F.status, F.action].map(esc).join(' · ')+'</div>'
