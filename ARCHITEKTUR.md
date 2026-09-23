@@ -186,7 +186,20 @@ Datenimport + Upload-Plan):
 | `Table_Weeks/Months_Booking_KPIs.csv` | Booking-Team | `kpi_project_entries` (KW/Monat) |
 | `FC_<Monat>_25Hrs__SALES/Support.xlsx` | Forecast | `report_forecast` (fc_hours) |
 | `Long_Term_Capacity_25H_Sales_Support.xlsx` | Langzeit | `report_longterm` (Kreuztabelle: Zeilen=Kennzahlen, Spalten=Monate) |
-| `HolidaycheckAG_CS_25hrs_<ts>.xlsx` | Mail-Excel | (in Arbeit) Mail-Anzahl → Mails/h |
+| `Mailerperformance_25hrs.xlsx` | Mailer-Excel | `kpi_entries` (Mails/h je Support-Agent) + `daily_mailer` (Mails/LogTime je Tag) |
+
+**Mails/h (Holidaycheck Support), bestätigte Quelle** (23.09.2026 an
+`Mailerperformance 25hrs Real.xlsx` gegen die Formeln der Kundendatei geprüft):
+- **Mails** = Blatt `Rohdaten Novo`, **Spalte N `Gesamt_bearbeitet`**, nur Zeilen mit
+  `Bearbeiter = ME`, je Agent (`Name Genesys`) und Tag. Das ist exakt die Kundenformel in
+  `vw_agent_qm.DP` „Mails (Mailerkategorie)":
+  `SUMPRODUCT((Name Genesys=mitarbeiterid)*(Datum=datum)*(Bearbeiter="ME")*Gesamt_bearbeitet)`.
+- **Stunden** = Blatt `vw_agent_qm`, **Spalte AQ `mailer`** (Sekunden ÷ 3600); Kundenformel
+  `LogTime ME (h) = mailer/3600`. **Mails/h** = Mails ÷ LogTime ME (h).
+- Mails an Tagen **ohne** LogTime-Zeile zählen nicht (wie beim Kunden); die Vorschau nennt die Menge.
+- Doppelte `(Agent, Tag)`-Zeilen im LogTime-Blatt verdoppeln Stunden und Mails in beiden Rechnungen;
+  der Import meldet sie (in der Prüfdatei: 08.06.2026, 15 Agenten). Jede Einspielung schreibt die
+  Quellenangabe in `data_imports.warnings.basis`.
 
 **Automatik:** Der Bewerber-Import (Meta `windsor_leads` + Google-Sheet-Sync) läuft
 serverseitig über die Edge Function **`applicant-import`** (täglich per Cron ~02:00

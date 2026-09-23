@@ -41565,8 +41565,23 @@ const MAILER_HOURS_SOURCE={
   nameCol:'mitarbeiterid',   // Agent (Genesys-Vollname), Join-Schlüssel
   dateCol:'datum',           // Datum -> ISO-Woche
   valueCol:'mailer',         // LogTime ME
+  colLetter:'AQ',            // Fundstelle in der Kundendatei (nur zur Doku/Fehlersuche)
   unit:'sec',                // 'sec' -> /3600 · 'min' -> /60 · 'hour' -> ×1
-  label:'Spalte „mailer" aus vw_agent_qm (Sekunden)'
+  label:'vw_agent_qm, Spalte AQ „mailer" (Sekunden ÷ 3600) — die Kundenformel „LogTime ME (h)" = mailer/3600; bestätigt 23.09.2026 an „Mailerperformance 25hrs Real.xlsx"'
+};
+// ▼ MAILS-QUELLE — bestätigt: Blatt „Rohdaten Novo", Spalte N „Gesamt_bearbeitet", nur Zeilen mit Bearbeiter=ME.
+//   Die Kundendatei rechnet in vw_agent_qm.DP „Mails (Mailerkategorie)":
+//   SUMPRODUCT((Name Genesys = mitarbeiterid)*(Datum = datum)*(Bearbeiter="ME")*Gesamt_bearbeitet)
+//   Also je Agent UND Tag, und nur für Tage, an denen der Agent eine LogTime-Zeile hat. Genau so rechnen wir.
+//   Gelesen wird über die Überschrift (robust gegen Spaltenverschiebung), Spalte N ist der Rückfall.
+const MAILER_MAILS_SOURCE={
+  sheetRx:/rohdaten/i,
+  nameCol:'Name Genesys',
+  dateCol:'Datum',
+  editorCol:'Bearbeiter',
+  valueCol:'Gesamt_bearbeitet',
+  colLetter:'N', colIndex:13,         // N = 14. Spalte (0-basiert 13)
+  label:'Rohdaten Novo, Spalte N „Gesamt_bearbeitet", nur Bearbeiter=ME, je Agent und Tag (Kundenformel „Mails (Mailerkategorie)"); bestätigt 23.09.2026 an „Mailerperformance 25hrs Real.xlsx"'
 };
 function mailerHoursToH(v){ const n=Number(String(v==null?'':v).replace(',','.'))||0; const u=MAILER_HOURS_SOURCE.unit; return u==='sec'?n/3600:(u==='min'?n/60:n); }
 function mailerNum(v){ return Number(String(v==null?'':v).replace(',','.'))||0; }
@@ -41603,24 +41618,33 @@ function MailerImport({employees, onSaved}){
       const roh=sheetAoa(wb,/rohdaten/i); const qm=sheetAoa(wb,MAILER_HOURS_SOURCE.sheetRx);
       if(!roh) throw new Error('Blatt „Rohdaten Novo" fehlt. Blätter: '+wb.SheetNames.join(', '));
       if(!qm)  throw new Error('Blatt „vw_agent_qm" (Stunden) fehlt. Blätter: '+wb.SheetNames.join(', '));
-      const iN=roh.idx('Name Genesys'), iD=roh.idx('Datum'), iB=roh.idx('Bearbeiter'), iM=roh.idx('Gesamt_bearbeitet');
-      if(iN<0||iD<0||iB<0||iM<0) throw new Error('Rohdaten-Spalten unvollständig (erwartet: Name Genesys, Datum, Bearbeiter, Gesamt_bearbeitet).');
+      const iN=roh.idx(MAILER_MAILS_SOURCE.nameCol), iD=roh.idx(MAILER_MAILS_SOURCE.dateCol), iB=roh.idx(MAILER_MAILS_SOURCE.editorCol);
+      // Werte-Spalte über die Überschrift; fehlt sie (umbenannt), nimm die vereinbarte Spalte N.
+      let iM=roh.idx(MAILER_MAILS_SOURCE.valueCol); let iMFallback=false;
+      if(iM<0 && roh.headers.length>MAILER_MAILS_SOURCE.colIndex){ iM=MAILER_MAILS_SOURCE.colIndex; iMFallback=true; }
+      if(iN<0||iD<0||iB<0||iM<0) throw new Error('Rohdaten-Spalten unvollständig (erwartet: Name Genesys, Datum, Bearbeiter, Gesamt_bearbeitet in Spalte N).');
       const qN=qm.idx(MAILER_HOURS_SOURCE.nameCol), qD=qm.idx(MAILER_HOURS_SOURCE.dateCol), qV=qm.idx(MAILER_HOURS_SOURCE.valueCol);
       if(qN<0||qD<0||qV<0) throw new Error('Stunden-Spalten fehlen ('+MAILER_HOURS_SOURCE.nameCol+' / '+MAILER_HOURS_SOURCE.dateCol+' / '+MAILER_HOURS_SOURCE.valueCol+').');
       setFile(f); setFileHash('sz'+bytes.length);
-      // Mails je (Name, ISO-Woche) UND je (Name, Tag), nur Bearbeiter=ME (case-insensitiv wie Excel „=ME").
-      // Der Tages-Bucket rechnet exakt wie die Kundenformel (SUMPRODUCT je Datum); die Woche = Summe ihrer Tage.
-      const mails={}, dmails={};
-      roh.rows.forEach(r=>{ if(!mailerIsME(r[iB])) return; const nm=String(r[iN]||'').trim(); if(!nm) return;
-        const val=mailerNum(r[iM]);
-        const yw=mailerYw(r[iD]); if(yw){ const key=nm+'|'+yw; mails[key]=(mails[key]||0)+val; }
-        const ds=mailerDay(r[iD]); if(ds){ const dk=nm+'|'+ds; dmails[dk]=(dmails[dk]||0)+val; } });
-      // Stunden je (Name, ISO-Woche) UND je (Name, Tag)
-      const hours={}, dhours={};
+      // ZUERST die Stunden: sie bestimmen, welche (Agent, Tag) überhaupt zählen — genau wie die Kundenformel,
+      // die je LogTime-Zeile rechnet. Mails an Tagen ohne LogTime-Zeile zählt der Kunde nicht, wir also auch nicht
+      // (sonst stünde im Zähler ein Tag, den der Nenner nicht kennt, und Mails/h wäre zu hoch).
+      // Doppelte (Agent, Tag) im LogTime-Blatt verdoppeln Stunden UND Mails (die Kundenformel rechnet je Zeile).
+      // Wir zählen sie wie der Kunde, melden sie aber, damit die Datei beim Auftraggeber korrigiert werden kann.
+      const hours={}, dhours={}; const logDay=new Set(); const dayRows={}; const dupDays={};
       qm.rows.forEach(r=>{ const nm=String(r[qN]||'').trim(); if(!nm) return; const h=mailerHoursToH(r[qV]);
         const yw=mailerYw(r[qD]); if(yw){ const key=nm+'|'+yw; hours[key]=(hours[key]||0)+h; }
-        const ds=mailerDay(r[qD]); if(ds){ const dk=nm+'|'+ds; dhours[dk]=(dhours[dk]||0)+h; } });
-      window.__mailerAgg={mails,hours,dmails,dhours}; // Rohaggregat (Woche + Tag) für Reprocess nach Alias-Zuordnung
+        const ds=mailerDay(r[qD]); if(ds){ const dk=nm+'|'+ds; dhours[dk]=(dhours[dk]||0)+h; logDay.add(dk);
+          dayRows[dk]=(dayRows[dk]||0)+1; if(dayRows[dk]===2) dupDays[ds]=(dupDays[ds]||0)+1; } });
+      // Mails je (Name, ISO-Woche) UND je (Name, Tag), nur Bearbeiter=ME (case-insensitiv wie Excel „=ME").
+      const mails={}, dmails={}; let mailsNoLog=0, rowsNoLog=0;
+      roh.rows.forEach(r=>{ if(!mailerIsME(r[iB])) return; const nm=String(r[iN]||'').trim(); if(!nm) return;
+        const val=mailerNum(r[iM]);
+        const ds=mailerDay(r[iD]);
+        if(!ds || !logDay.has(nm+'|'+ds)){ if(val>0){ mailsNoLog+=val; rowsNoLog++; } return; }   // kein LogTime-Tag -> wie beim Kunden nicht gezählt
+        const yw=mailerYw(r[iD]); if(yw){ const key=nm+'|'+yw; mails[key]=(mails[key]||0)+val; }
+        const dk=nm+'|'+ds; dmails[dk]=(dmails[dk]||0)+val; });
+      window.__mailerAgg={mails,hours,dmails,dhours,mailsNoLog,rowsNoLog,iMFallback,dupDays}; // Rohaggregat für Reprocess nach Alias-Zuordnung
       compute(mails,hours,dmails,dhours);
     }catch(e){ setErr('Datei nicht lesbar: '+(e.message||'')); } };
     rd.readAsArrayBuffer(f);
@@ -41664,7 +41688,10 @@ function MailerImport({employees, onSaved}){
       days.forEach(ds=>{ const key=nm+'|'+ds; const m=dmails[key]||0; const h=dhours[key]||0; if(m<=0 && h<=0) return;
         dailyFacts.push({ emp_id:emp.id, project_id:emp.project_id, work_date:ds, mails:Math.round(m*100)/100, log_hours:Math.round(h*100)/100 }); }); });
     dailyFacts.sort((a,b)=>a.work_date.localeCompare(b.work_date));
+    const _agg=window.__mailerAgg||{};
     setResult({ facts, dailyFacts,
+      mailsNoLog:Math.round(_agg.mailsNoLog||0), rowsNoLog:_agg.rowsNoLog||0, iMFallback:!!_agg.iMFallback,
+      dupDays:Object.keys(_agg.dupDays||{}).sort().map(d=>({day:d, agents:_agg.dupDays[d]})),
       skippedSales:[...skippedSales].sort(),
       unmatched:Object.values(unmatched).sort((a,b)=>b.mails-a.mails),
       weeks:[...new Set(facts.map(f=>f.year+'-'+String(f.kw).padStart(2,'0')))].sort(),
@@ -41691,7 +41718,11 @@ function MailerImport({employees, onSaved}){
         let storagePath=null; try{ const up=await sb.storage.from('weekly-imports').upload(path,file,{upsert:true,contentType:file.type||'application/octet-stream'}); if(!up.error) storagePath=path; }catch(e){}
         const perWeek={}; result.facts.forEach(f=>{ const k=f.year+'-'+f.kw; (perWeek[k]=perWeek[k]||[]).push(f); });
         for(const [y,w] of weeks){ const fs=perWeek[y+'-'+w]||[];
-          const basis={ hours_source:MAILER_HOURS_SOURCE.label, mails_source:'Σ Gesamt_bearbeitet (Bearbeiter=ME), Blatt Rohdaten Novo',
+          const basis={ hours_source:MAILER_HOURS_SOURCE.label, mails_source:MAILER_MAILS_SOURCE.label,
+            formel:'Mails/h = Mails (Mailerkategorie) ÷ LogTime ME (h); Kundendatei: DP = SUMPRODUCT((Name Genesys=mitarbeiterid)*(Datum=datum)*(Bearbeiter="ME")*Gesamt_bearbeitet), LogTime ME (h) = mailer/3600',
+            quelle_bestaetigt:'23.09.2026 an „Mailerperformance 25hrs Real.xlsx" gegen die Kundenformeln geprüft',
+            mails_ohne_logtime:result.mailsNoLog||0,
+            doppelte_logtime_tage:(result.dupDays||[]).map(d=>d.day+' ('+d.agents+')'),
             agents:fs.map(f=>({name:f.name, mails:f.mails, hours:Math.round(f.hours*10)/10, meh:f.meh==null?null:Math.round(f.meh*100)/100})) };
           const {data:imp,error:ie}=await sb.from('data_imports').insert({ project_id:pid, source_type:'mailer', kw:w, year:y, file_name:file.name, file_hash:fileHash, storage_path:storagePath,
             status:result.unmatched.length?'partial':'ok', warnings:{basis, skipped_sales:result.skippedSales, unmatched:result.unmatched.map(u=>u.name)},
@@ -41731,7 +41762,10 @@ function MailerImport({employees, onSaved}){
     {saved && <div style={{padding:'8px 12px',background:'#ecfdf5',border:'1px solid #a7f3d0',borderRadius:8,color:'#059669',fontSize:12,marginBottom:12,fontWeight:700}}>✓ Mailer-Import gespeichert — Mails/h je Support-Agent und Woche.</div>}
     <div style={{fontSize:11.5,color:'var(--muted)',marginBottom:10,lineHeight:1.5}}>
       Die Datei enthält alle Wochen; jede ISO-Woche füllt ihre eigene Kennzahl (die Wochenwahl oben wird hier ignoriert).
-      Gerechnet wird <b>Mails/h = Mails ÷ LogTime-Stunden</b>. Stunden-Quelle: <b>{MAILER_HOURS_SOURCE.label}</b>. Nur Support, Sales wird übersprungen.
+      Gerechnet wird <b>Mails/h = Mails ÷ LogTime-Stunden</b>, wie in der Kundendatei.<br/>
+      Mails: <b>{MAILER_MAILS_SOURCE.label}</b><br/>
+      Stunden: <b>{MAILER_HOURS_SOURCE.label}</b><br/>
+      Nur Support, Sales wird übersprungen.
     </div>
 
     {step==='upload' && <label style={{display:'inline-flex',alignItems:'center',gap:8,padding:'10px 16px',border:'1px dashed var(--border)',borderRadius:10,cursor:'pointer',fontWeight:700}}>
@@ -41749,7 +41783,10 @@ function MailerImport({employees, onSaved}){
       </div>
 
       <div style={{fontSize:11,color:'var(--muted)',background:'var(--surface-2)',border:'1px solid var(--border)',borderRadius:8,padding:'8px 10px',marginBottom:12,lineHeight:1.5}}>
-        <b>Rechenbasis:</b> Mails = Σ Gesamt_bearbeitet (Bearbeiter ME) aus „Rohdaten Novo" · Stunden = {MAILER_HOURS_SOURCE.label}. Ändert sich die Stunden-Quelle, ändern sich genau die unten gezeigten Werte.
+        <b>Rechenbasis:</b> Mails = {MAILER_MAILS_SOURCE.label} · Stunden = {MAILER_HOURS_SOURCE.label}. Ändert sich eine der beiden Quellen, ändern sich genau die unten gezeigten Werte.
+        {result.iMFallback?<div style={{color:'#b45309',fontWeight:700,marginTop:4}}>⚠ Überschrift „Gesamt_bearbeitet" nicht gefunden, gelesen wurde Spalte N.</div>:null}
+        {result.mailsNoLog>0?<div style={{marginTop:4}}>{result.mailsNoLog} Mails aus {result.rowsNoLog} Zeilen liegen auf Tagen ohne LogTime-Zeile und zählen nicht mit, genau wie in der Kundenauswertung.</div>:null}
+        {(result.dupDays||[]).length>0?<div style={{color:'#b45309',fontWeight:700,marginTop:4}}>⚠ Doppelte Zeilen im LogTime-Blatt: {result.dupDays.map(d=>fmtDate(d.day)+' ('+d.agents+' Agenten)').join(', ')}. Stunden und Mails dieser Tage zählen doppelt, in unserer Rechnung wie in der Kundenauswertung. Bitte beim Auftraggeber melden.</div>:null}
       </div>
 
       {result.unmatched.length>0 && <div style={{border:'1px solid #fecaca',background:'#fef2f2',borderRadius:10,padding:'10px 12px',marginBottom:12}}>
