@@ -92,34 +92,36 @@
     </div>
   </div>
 
-  <!-- Erfassung -->
-  <div id="sMain" hidden>
+  <!-- Start: Begrüßung, was heute schon erfasst ist, und der Weg zum nächsten Vorgang -->
+  <div id="sStart" hidden>
+    <h1 id="hello"></h1>
+    <p class="sub" id="helloSub">Trag jeden Vorgang einmal hier ein, danach überträgst du ihn in dein Blatt.</p>
     <div class="daterow">
       <span>Tag</span><b id="dLabel"></b>
       <button type="button" id="dChange">ändern</button>
       <input type="date" id="fDate" style="display:none;width:auto;flex:1 1 150px">
       <span style="margin-left:auto;font-size:12px">Blatt <span class="sheet" id="sheetName"></span></span>
     </div>
+    <button class="btn full" id="bNew" style="padding:16px;font-size:16px;margin-bottom:12px">+ Neuer Vorgang</button>
+    <div class="card">
+      <div class="hd"><h2 id="listCount">Heute erfasst</h2>
+        <span style="margin-left:auto"><button class="btn ghost sm" id="copyAll">Ganzen Tag kopieren</button></span></div>
+      <div id="dayBox" hidden><textarea class="tsv" id="dayTsv" readonly spellcheck="false" rows="2"></textarea></div>
+      <div id="list"></div>
+    </div>
+    <div class="foot">Deine Einträge, sonst nichts. Ein Vorgang lässt sich stornieren, er bleibt dann als storniert sichtbar.<br>
+      <a href="#" id="logout" style="color:var(--muted)">Abmelden</a></div>
+  </div>
 
+  <!-- Erfassung: eine Frage je Bildschirm -->
+  <div id="sForm" hidden>
     <div class="card" id="stepCard">
       <div class="shead"><span class="st" id="stNo"></span><button type="button" class="bk" id="stBack" hidden>← zurück</button></div>
       <div class="crumb" id="crumb"></div>
       <div id="stepBox"></div>
       <div class="err" id="addErr"></div>
     </div>
-
-    <details id="listWrap">
-      <summary><span id="listCount"></span></summary>
-      <div class="card" style="margin-top:6px">
-        <div class="hd"><h2>Heute erfasst</h2>
-          <span style="margin-left:auto"><button class="btn ghost sm" id="copyAll">Ganzen Tag kopieren</button></span></div>
-        <div id="dayBox" hidden><textarea class="tsv" id="dayTsv" readonly spellcheck="false" rows="2"></textarea></div>
-        <div id="list"></div>
-      </div>
-    </details>
-
-    <div class="foot">Deine Einträge, sonst nichts. Ein Vorgang lässt sich stornieren, er bleibt dann als storniert sichtbar.<br>
-      <a href="#" id="logout" style="color:var(--muted)">Abmelden</a></div>
+    <div class="foot"><a href="#" id="toStart" style="color:var(--muted)">Abbrechen und zurück zum Start</a></div>
   </div>
 </div>
 
@@ -129,9 +131,12 @@ var FN=SB_URL+'/functions/v1/cpo-track';
 var TOKEN=(function(){ try{ return new URLSearchParams(location.search).get('t')||''; }catch(e){ return ''; } })();
 var SES=null, ME='', OPT={status:[],action:[],close_action:'Angebot angenommen'}, TAR=[], ENTRIES=[];
 var F={}, STEP=0, SAVED=null, STEPS=[], CELLSTEP={}, PICKS=[];
+// Der Übertragen-Kasten steht nur beim zuletzt gespeicherten Vorgang offen; bei zwanzig Einträgen am Tag
+// wäre die Startseite sonst endlos. OPEN merkt, was der Agent von Hand aufgeklappt hat.
+var LASTSAVED=null, OPEN={};
 var OUT_TXT={upgrade:'Upgrade',downgrade:'Downgrade, aber gehalten',gleich:'Gleiche Tarifklasse'};
 function $(id){ return document.getElementById(id); }
-function show(id){ ['sPin','sMain'].forEach(function(s){ $(s).hidden = (s!==id); }); }
+function show(id){ ['sPin','sStart','sForm'].forEach(function(s){ $(s).hidden = (s!==id); }); try{ window.scrollTo(0,0); }catch(e){} }
 function err(id,msg){ $(id).textContent=msg||''; }
 function api(body){ return fetch(FN,{method:'POST',headers:{'Content-Type':'application/json','apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY},body:JSON.stringify(body)})
   .then(function(r){ return r.json().then(function(j){ if(!r.ok||j.error){ var e=new Error(j.error||('Fehler '+r.status)); e.expired=!!j.expired; throw e; } return j; }); }); }
@@ -159,9 +164,13 @@ function login(){
   }).catch(function(e){ err('pinErr',e.message); }).finally(function(){ $('pinGo').disabled=false; });
 }
 $('logout').addEventListener('click',function(e){ e.preventDefault(); try{ sessionStorage.removeItem('cpo_ses_'+TOKEN); }catch(x){} SES=null; show('sPin'); });
+function startForm(){ var d=F.work_date; F={work_date:d}; SAVED=null; STEP=0; err('addErr',''); show('sForm'); render(); }
+function backToStart(){ SAVED=null; STEP=0; var d=F.work_date; F={work_date:d}; show('sStart'); render2(); }
+$('bNew').addEventListener('click',startForm);
+$('toStart').addEventListener('click',function(e){ e.preventDefault(); backToStart(); });
 
 // Datum bleibt über alle Vorgänge stehen, Skill ist immer Retention und wird nie gefragt.
-function setDate(ds){ F.work_date=ds; $('dLabel').textContent=de(ds); $('fDate').value=ds; render(); render2(); }
+function setDate(ds){ F.work_date=ds; $('dLabel').textContent=de(ds); $('fDate').value=ds; render2(); }
 $('dChange').addEventListener('click',function(){ var i=$('fDate'); i.style.display=(i.style.display==='none'?'block':'none'); if(i.style.display!=='none') i.focus(); });
 $('fDate').addEventListener('change',function(){ if($('fDate').value){ setDate($('fDate').value); $('fDate').style.display='none'; } });
 
@@ -249,7 +258,7 @@ function save(){
   if(isClose()){ e.tariff_from=F.tariff_from; e.tariff_to=F.tariff_to; e.discount_level=F.discount_level; }
   $('bSave').disabled=true;
   api({action:'add',session:SES,entry:e}).then(function(r){
-    SAVED=r.entry; CELLSTEP[SAVED.id]=0; loadList(false);
+    SAVED=r.entry; CELLSTEP[SAVED.id]=0; LASTSAVED=SAVED.id; loadList(false);
   }).catch(function(x){ if(x.expired){ show('sPin'); err('pinErr',x.message); } else { err('addErr',x.message); $('bSave').disabled=false; } });
 }
 function renderSaved(){
@@ -257,14 +266,14 @@ function renderSaved(){
   $('stepBox').innerHTML='<div class="q">'+esc(SAVED.case_no)+' ist gespeichert</div>'
     + '<textarea class="tsv" readonly spellcheck="false" rows="1" id="savedTsv">'+esc(sheetRow(SAVED))+'</textarea>'
     + transferBlock(SAVED)
-    + '<button class="btn full" id="bNextCase" style="margin-top:12px">Nächster Vorgang</button>';
+    + '<button class="btn full" id="bDone" style="margin-top:12px">Fertig, zurück zum Start</button>';
   var t=$('savedTsv'); t.addEventListener('focus',function(){ t.select(); }); t.addEventListener('click',function(){ t.select(); });
   bindCells($('stepBox'));
-  $('bNextCase').addEventListener('click',function(){ var d=F.work_date; F={work_date:d}; SAVED=null; STEP=0; render(); });
+  $('bDone').addEventListener('click',backToStart);
 }
 
 // ── Übertragen Feld für Feld (der sichere Weg auf dem Telefon) ──────────────
-var SHEET_COL=['A Datum','B Case','C Skill','D Status','E abgeschl.','F was'];
+var SHEET_COL=['A Datum','B Case','C Skill','D Status','E abg.','F was'];
 function sheetCells(e){ return [ de(e.work_date), e.case_no, 'Retention', e.status, (e.closed?'ja':'nein'), e.action ]; }
 function sheetRow(e){ return sheetCells(e).join('\t'); }
 function sheetLineOf(f){ return [ de(f.work_date), f.case_no||'—', 'Retention', f.status||'—', (isClose()?'ja':'nein'), f.action||'—' ].join('\t'); }
@@ -281,7 +290,18 @@ function transferBlock(e){
     + (at>0?' · <button type="button" data-reset="'+e.id+'">von vorn</button>':'')+'</div></div>';
   return html;
 }
+// Eingeklappt: ein schmaler Knopf mit dem Fortschritt. Offen: der volle Kasten.
+function isOpen(e){ return (OPEN[e.id]!==undefined) ? OPEN[e.id] : (e.id===LASTSAVED); }
+function transferToggle(e){
+  if(isOpen(e)) return '<div style="width:100%">'+transferBlock(e)
+    + '<button type="button" class="btn ghost sm" data-fold="'+e.id+'" style="margin-top:6px">Zuklappen</button></div>';
+  var at=CELLSTEP[e.id]||0;
+  return '<button type="button" class="btn ghost sm" data-fold="'+e.id+'" style="width:100%;margin-top:6px">'
+    + 'Feld für Feld übertragen'+(at?(' · '+Math.min(at,6)+' von 6'):'')+'</button>';
+}
 function bindCells(root){
+  Array.prototype.forEach.call(root.querySelectorAll('[data-fold]'),function(b){ b.addEventListener('click',function(){
+    var id=b.getAttribute('data-fold'); var e=byId(id); OPEN[id]=!isOpen(e||{id:id}); render2(); }); });
   Array.prototype.forEach.call(root.querySelectorAll('[data-cell]'),function(c){ c.addEventListener('click',function(){
     var pr=c.getAttribute('data-cell').split('|'); var e=(SAVED&&SAVED.id===pr[0])?SAVED:byId(pr[0]); var i=Number(pr[1]); if(!e) return;
     copyPlain(sheetCells(e)[i], function(){});
@@ -322,7 +342,9 @@ function loadList(first){
     $('sheetName').textContent=ME||'—';
     if(!F.work_date) F.work_date=today();
     $('dLabel').textContent=de(F.work_date); $('fDate').value=F.work_date;
-    show('sMain'); render(); render2();
+    $('hello').textContent='Hallo '+(ME||'')+', ich wünsche dir viel Erfolg.';
+    render2();
+    if(!$('sForm').hidden){ render(); } else { show('sStart'); }
   }).catch(function(x){ if(x.expired||first){ show('sPin'); if(x.expired) err('pinErr',x.message); } });
 }
 function byId(id){ return ENTRIES.filter(function(e){ return e.id===id; })[0]; }
@@ -330,11 +352,11 @@ function render2(){
   var d=F.work_date||today();
   var day=ENTRIES.filter(function(e){ return e.work_date===d; });
   var open=day.filter(function(e){ return !e.cancelled_at; });
-  $('listCount').textContent = day.length ? ('Heute erfasst: '+day.length+' ▾') : 'Heute noch nichts erfasst';
+  $('listCount').textContent = day.length ? ('Heute erfasst: '+day.length) : 'Heute noch nichts erfasst';
   $('copyAll').disabled=!open.length;
   $('dayBox').hidden=!open.length;
   if(open.length){ var ta=$('dayTsv'); ta.value=open.map(sheetRow).join('\n'); ta.rows=Math.min(8,Math.max(2,open.length)); }
-  $('list').innerHTML = day.length ? day.map(function(e){
+  $('list').innerHTML = day.length ? day.map(function(e){   /* jshint ignore:line */
     var st=e.cancelled_at;
     return '<div class="e"'+(st?' style="opacity:.55"':'')+'>'
       + '<div class="grow"><div class="cs">'+esc(e.case_no)+' '
@@ -345,9 +367,9 @@ function render2(){
       + (st?'':'<button class="btn ghost sm" data-copy="'+e.id+'">Kopieren</button>')
       + (st?'':'<button class="btn ghost sm" data-cancel="'+e.id+'" style="color:var(--red)">Storno</button>')
       + '</div>'
-      + (st?'':transferBlock(e))
+      + (st?'':transferToggle(e))
       + '</div>';
-  }).join('') : '';
+  }).join('') : '<div style="font-size:13px;color:var(--muted);padding:6px 0">Für diesen Tag ist noch nichts erfasst. Tipp oben auf „Neuer Vorgang".</div>';
   bindCells($('list'));
   Array.prototype.forEach.call($('list').querySelectorAll('[data-copy]'),function(b){ b.addEventListener('click',function(){ copyRows([byId(b.getAttribute('data-copy'))],b); }); });
   Array.prototype.forEach.call($('list').querySelectorAll('[data-cancel]'),function(b){ b.addEventListener('click',function(){ cancel(b.getAttribute('data-cancel')); }); });
