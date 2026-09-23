@@ -11,13 +11,28 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 const cors = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type", "Access-Control-Allow-Methods": "POST, OPTIONS" };
 const json = (b: unknown, s = 200) => new Response(JSON.stringify(b), { status: s, headers: { ...cors, "Content-Type": "application/json" } });
-const CASE_RX = /^[A-Za-z0-9][A-Za-z0-9._/-]{1,39}$/;
+// Casenummer: CS oder IMS, gefolgt von Ziffern (User 2026-09-23). Fängt Zahlendreher und Tippfehler ab.
+const CASE_RX = /^(CS|IMS)[0-9]{4,12}$/;
 const OUTCOMES = [
   { key: "downgrade", label: "Downgrade, aber gehalten" },
   { key: "gleich", label: "Gleiche Tarifklasse" },
   { key: "upgrade", label: "Upgrade" },
 ];
 
+// Tarife mit Rangfolge je Mandat. Aus den beiden Rängen leitet sich das Ergebnis ab, der Agent wählt es nie
+// selbst: höherer Rang = Upgrade, niedrigerer = Downgrade, gleicher Rang = gleiche Tarifklasse.
+async function tariffs(projectId: string, skill: string) {
+  const { data } = await admin.from("app_config").select("value").eq("key", "jsr_cpo_tariffs_v1").maybeSingle();
+  const all: any = (data && data.value) || {};
+  const list = all[projectId + "/" + skill] || all[projectId] || [];
+  return (Array.isArray(list) ? list : []).filter((t: any) => t && t.name).map((t: any) => ({ name: String(t.name), rank: Number(t.rank) }))
+    .filter((t: any) => isFinite(t.rank)).sort((a: any, b: any) => a.rank - b.rank || a.name.localeCompare(b.name, "de"));
+}
+function outcomeOf(rankFrom: number, rankTo: number) {
+  if (rankTo > rankFrom) return "upgrade";
+  if (rankTo < rankFrom) return "downgrade";
+  return "gleich";
+}
 async function options() {
   const { data } = await admin.from("app_config").select("value").eq("key", "jsr_cpo_options_v1").maybeSingle();
   const v: any = (data && data.value) || {};
@@ -52,7 +67,8 @@ async function cpoFor(projectId: string, skill: string, outcome: string, level: 
 }
 // Was der Agent von einem Eintrag sehen darf: alles außer Geld.
 const pub = (r: any) => ({ id: r.id, work_date: r.work_date, case_no: r.case_no, status: r.status, closed: r.closed, action: r.action,
-  outcome: r.outcome, discount_level: r.discount_level, note: r.note, is_close: r.is_close, created_at: r.created_at,
+  outcome: r.outcome, discount_level: r.discount_level, tariff_from: r.tariff_from, tariff_to: r.tariff_to,
+  note: r.note, is_close: r.is_close, created_at: r.created_at,
   cancelled_at: r.cancelled_at, cancel_reason: r.cancel_reason });
 
 Deno.serve(async (req) => {
@@ -64,7 +80,8 @@ Deno.serve(async (req) => {
     const link = await linkOf(String(body.token || ""));
     if (!link) return json({ error: "Dieser Link ist nicht (mehr) gültig." }, 404);
     const { data: proj } = await admin.from("projects").select("name").eq("id", link.project_id).maybeSingle();
-    return json({ ok: true, project: (proj && proj.name) || link.project_id, skill: link.skill, label: link.label, options: await options(), outcomes: OUTCOMES });
+    return json({ ok: true, project: (proj && proj.name) || link.project_id, skill: link.skill, label: link.label,
+      options: await options(), outcomes: OUTCOMES, tariffs: await tariffs(link.project_id, link.skill) });
   }
 
   if (action === "login") {
@@ -79,7 +96,8 @@ Deno.serve(async (req) => {
     if (!c.ok || !c.employee_id) return json({ error: "Diese PIN kennen wir nicht." }, 401);
     const { data: ses, error: se } = await admin.from("cpo_sessions").insert({ token: link.token, employee_id: c.employee_id, emp_name: c.name || null }).select("id").single();
     if (se) return json({ error: "Anmeldung fehlgeschlagen." }, 500);
-    return json({ ok: true, session: ses.id, name: c.name || "", sheet: c.name || "", options: await options(), outcomes: OUTCOMES, project: link.project_id });
+    return json({ ok: true, session: ses.id, name: c.name || "", sheet: c.name || "", options: await options(), outcomes: OUTCOMES,
+      tariffs: await tariffs(link.project_id, link.skill), project: link.project_id });
   }
 
   const ses = await sessionOf(String(body.session || ""));
@@ -100,20 +118,28 @@ Deno.serve(async (req) => {
     const date = String(e.work_date || "").slice(0, 10);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return json({ error: "Bitte ein Datum wählen." }, 400);
     const caseNo = String(e.case_no || "").trim();
-    if (!CASE_RX.test(caseNo)) return json({ error: "Bitte eine gültige Casenummer eingeben (Buchstaben und Ziffern)." }, 400);
+    if (!CASE_RX.test(caseNo.toUpperCase())) return json({ error: "Die Casenummer muss mit CS oder IMS beginnen, gefolgt von Ziffern (z. B. CS5006433)." }, 400);
     if (opt.status.length && !opt.status.includes(String(e.status || ""))) return json({ error: "Bitte einen Status wählen." }, 400);
     if (opt.action.length && !opt.action.includes(String(e.action || ""))) return json({ error: "Bitte auswählen, was gemacht wurde." }, 400);
     const closed = e.closed === true || e.closed === "ja";
     const isClose = closed && String(e.action) === opt.close_action;
     const row: any = { project_id: ses.link.project_id, skill: ses.link.skill, employee_id: ses.employee_id, work_date: date,
-      case_no: caseNo, status: String(e.status), closed, action: String(e.action), note: (String(e.note || "").trim() || null), created_via: "agent" };
+      case_no: caseNo.toUpperCase(), status: String(e.status), closed, action: String(e.action), note: (String(e.note || "").trim() || null), created_via: "agent" };
     if (isClose) {
-      const outcome = String(e.outcome || ""); const level = Number(e.discount_level);
-      if (!OUTCOMES.some((o) => o.key === outcome)) return json({ error: "Bitte die Tarifart wählen." }, 400);
+      // Der Agent wählt zwei Tarife, das Ergebnis rechnet der Server. Nie die Angabe des Browsers übernehmen.
+      const tl = await tariffs(ses.link.project_id, ses.link.skill);
+      const tFrom = tl.find((t: any) => t.name === String(e.tariff_from || ""));
+      const tTo   = tl.find((t: any) => t.name === String(e.tariff_to || ""));
+      if (!tFrom) return json({ error: "Bitte den bisherigen Tarif wählen." }, 400);
+      if (!tTo)   return json({ error: "Bitte den neuen Tarif wählen." }, 400);
+      const outcome = outcomeOf(tFrom.rank, tTo.rank);
+      const level = Number(e.discount_level);
       if (level !== 1 && level !== 2) return json({ error: "Bitte die Rabattstufe wählen." }, 400);
+      row.tariff_from = tFrom.name; row.tariff_to = tTo.name;
       const cpo = await cpoFor(ses.link.project_id, ses.link.skill, outcome, level);
       if (!cpo) return json({ error: "Für diese Tarifart ist noch kein CPO hinterlegt. Bitte der Teamleitung sagen." }, 409);
-      row.outcome = outcome; row.discount_level = level; row.cpo_amount = cpo.amount; row.cpo_basis = cpo.basis;
+      row.outcome = outcome; row.discount_level = level; row.cpo_amount = cpo.amount;
+      row.cpo_basis = { ...cpo.basis, tariff_from: tFrom.name, rank_from: tFrom.rank, tariff_to: tTo.name, rank_to: tTo.rank };
       // Ein abgerechneter Abschluss je Casenummer — Wiedervorlagen auf denselben Case bleiben erlaubt.
       const { data: dup } = await admin.from("cpo_entries").select("id,work_date,employee_id").eq("project_id", ses.link.project_id)
         .ilike("case_no", caseNo).eq("is_close", true).is("cancelled_at", null).limit(1);

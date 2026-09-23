@@ -41054,6 +41054,61 @@ function CpoCalcView({team, showToast}){
 const CPO_OUT_LABEL={ downgrade:'Downgrade, aber gehalten', gleich:'Gleiche Tarifklasse', upgrade:'Upgrade' };
 const CPO_OUT_COLOR={ downgrade:'#0891b2', gleich:'#0f766e', upgrade:'#7c3aed' };
 function cpoEur(v){ return (v==null||isNaN(v))?'—':(Math.round(v*100)/100).toLocaleString('de-DE',{minimumFractionDigits:2,maximumFractionDigits:2})+' €'; }
+// Tarifliste je Mandat, pflegbar ohne Code. Aus der Rangfolge leitet das System Upgrade, Downgrade oder
+// gleiche Tarifklasse ab (MN 150 → MN 300 = Upgrade). Gleicher Rang bei zwei Tarifen heißt „gleiche Klasse".
+// Bestehende Einträge behalten ihr Ergebnis: es steht am Vorgang, eine spätere Änderung rechnet nichts um.
+function CpoTariffEditor({projectId, skill, showToast, onChanged}){
+  const KEY='jsr_cpo_tariffs_v1';
+  const mk=projectId+'/'+skill;
+  const [all,setAll]=React.useState(null);
+  const [open,setOpen]=React.useState(false);
+  const [busy,setBusy]=React.useState(false);
+  const [nm,setNm]=React.useState(''); const [rk,setRk]=React.useState('');
+  React.useEffect(()=>{ let alive=true; (async()=>{ try{ const v=await loadConfigFromDB(KEY); if(alive) setAll((v&&typeof v==='object')?v:{}); }catch(e){ if(alive) setAll({}); } })(); return ()=>{alive=false;}; },[]);
+  if(all===null) return null;
+  const list=(Array.isArray(all[mk])?all[mk]:[]).slice().sort((a,b)=>(Number(a.rank)||0)-(Number(b.rank)||0)||String(a.name).localeCompare(String(b.name),'de'));
+  const save=async(next)=>{ setBusy(true);
+    try{ const v={...all, [mk]:next}; await saveConfigToDB(KEY, v); setAll(v); onChanged&&onChanged(); }
+    catch(e){ showToast&&showToast('⚠ Speichern fehlgeschlagen','error'); }
+    setBusy(false); };
+  const add=async()=>{ const name=nm.trim(); const rank=Number(rk);
+    if(!name){ showToast&&showToast('Bitte einen Tarifnamen eingeben','error'); return; }
+    if(!isFinite(rank)){ showToast&&showToast('Bitte eine Rangnummer eingeben','error'); return; }
+    if(list.some(t=>String(t.name).toLowerCase()===name.toLowerCase())){ showToast&&showToast('Diesen Tarif gibt es schon','error'); return; }
+    await save([...list, {name, rank}]); setNm(''); setRk(''); };
+  const setRank=async(name,rank)=>{ const r=Number(rank); if(!isFinite(r)) return; await save(list.map(t=>t.name===name?{...t,rank:r}:t)); };
+  const del=async(name)=>{ if(!(await uiConfirm({title:'Tarif entfernen', text:'„'+name+'" aus der Liste nehmen? Bereits erfasste Vorgänge behalten ihr Ergebnis.', confirmLabel:'Entfernen'}))) return;
+    await save(list.filter(t=>t.name!==name)); };
+  return <div style={{border:'1px solid var(--border)',borderRadius:12,background:'var(--card)',marginBottom:14,overflow:'hidden'}}>
+    <div onClick={()=>setOpen(o=>!o)} style={{padding:'10px 14px',display:'flex',alignItems:'center',gap:10,cursor:'pointer'}}>
+      <span style={{fontSize:13,fontWeight:800}}>Tarife und Rangfolge</span>
+      <span style={{fontSize:12,color:'var(--muted)'}}>{list.length} Tarife · daraus erkennt das System Upgrade, Downgrade oder gleiche Klasse</span>
+      <span style={{marginLeft:'auto',fontSize:13,color:'var(--muted)'}}>{open?'▲':'▼'}</span>
+    </div>
+    {open&&<div style={{padding:'0 14px 14px'}}>
+      {!list.length?<div style={{fontSize:12.5,color:'var(--muted)',marginBottom:10}}>Noch keine Tarife hinterlegt. Ohne Liste können die Agenten keinen Abschluss erfassen.</div>:
+        <div style={{marginBottom:10}}>{list.map(t=>(
+          <div key={t.name} style={{display:'flex',alignItems:'center',gap:10,padding:'5px 0',borderTop:'1px solid var(--border)',fontSize:13}}>
+            <span style={{flex:1,fontWeight:600}}>{t.name}</span>
+            <label style={{fontSize:11.5,color:'var(--muted)'}}>Rang</label>
+            <input type="number" className="form-input" style={{width:74}} defaultValue={t.rank} disabled={busy}
+              onBlur={e=>{ if(Number(e.target.value)!==Number(t.rank)) setRank(t.name, e.target.value); }}/>
+            <button className="btn btn-sm" disabled={busy} style={{color:'var(--red)'}} onClick={()=>del(t.name)}>Entfernen</button>
+          </div>))}</div>}
+      <div style={{display:'flex',gap:8,alignItems:'flex-end',flexWrap:'wrap'}}>
+        <div style={{flex:'1 1 180px'}}><label className="form-label">Neuer Tarif</label>
+          <input className="form-input" placeholder="z. B. MN 2000" value={nm} onChange={e=>setNm(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter') add(); }}/></div>
+        <div style={{width:96}}><label className="form-label">Rang</label>
+          <input className="form-input" type="number" placeholder="5" value={rk} onChange={e=>setRk(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter') add(); }}/></div>
+        <button className="btn btn-sm btn-primary" disabled={busy} onClick={add}>Hinzufügen</button>
+      </div>
+      <div style={{fontSize:11.5,color:'var(--muted)',marginTop:8,lineHeight:1.5}}>
+        Höherer Rang heißt besserer Tarif: von Rang 1 auf Rang 2 ist ein Upgrade, umgekehrt ein Downgrade, gleicher Rang ist die gleiche Tarifklasse.
+        Zwei Tarife dürfen denselben Rang haben. Änderungen wirken ab dem nächsten Vorgang, schon erfasste behalten ihr Ergebnis.
+      </div>
+    </div>}
+  </div>;
+}
 function CpoTrackView({team, employees, showToast}){
   const roles=(team&&team.role_keys)||[];
   const isMgmt=roles.some(r=>r==='management'||r==='hr'||r==='finance');
@@ -41120,6 +41175,7 @@ function CpoTrackView({team, employees, showToast}){
       Abschlüsse der Retention, erfasst von den Agenten über ihren Link. Umsatz = Summe der beim Erfassen eingefrorenen CPOs.
       Stornierte Vorgänge zählen nicht mit, bleiben aber nachvollziehbar.
     </div>
+    <CpoTariffEditor projectId="proj_gn_e5f6a7b8" skill="retention" showToast={showToast}/>
     <div style={{display:'flex',gap:12,flexWrap:'wrap',alignItems:'center',marginBottom:14}}>
       <div style={{display:'flex',border:'1px solid var(--border)',borderRadius:10,overflow:'hidden'}}>{[segBtn('day','Tag'),segBtn('week','Woche'),segBtn('month','Monat')]}</div>
       <input type="date" className="form-input" style={{width:'auto'}} value={day} onChange={e=>setDay(e.target.value||isoLocal(new Date()))}/>
@@ -41162,8 +41218,8 @@ function CpoTrackView({team, employees, showToast}){
         {!listed.length?<div style={{padding:16,fontSize:13,color:'var(--muted)'}}>Für diesen Zeitraum ist nichts erfasst.</div>:
         <table style={{width:'100%',borderCollapse:'collapse',fontSize:12.5}}>
           <thead><tr style={{position:'sticky',top:0,background:'var(--surface-2)'}}>
-            {['Datum','Case','Mitarbeiter','Status','Abg.','Was','Tarifart','Stufe','CPO',''].map((h,i)=>
-              <th key={i} style={{textAlign:i>=7&&i<=8?'right':'left',padding:'6px 10px',fontSize:11,color:'var(--muted)',whiteSpace:'nowrap'}}>{h}</th>)}
+            {['Datum','Case','Mitarbeiter','Status','Abg.','Was','Tarif vorher → neu','Ergebnis','Stufe','CPO',''].map((h,i)=>
+              <th key={i} style={{textAlign:i>=8&&i<=9?'right':'left',padding:'6px 10px',fontSize:11,color:'var(--muted)',whiteSpace:'nowrap'}}>{h}</th>)}
           </tr></thead>
           <tbody>{listed.map(r=>(
             <tr key={r.id} style={{borderTop:'1px solid var(--border)',opacity:r.cancelled_at?0.5:1}}>
@@ -41173,6 +41229,7 @@ function CpoTrackView({team, employees, showToast}){
               <td style={{padding:'6px 10px'}}>{r.status}</td>
               <td style={{padding:'6px 10px'}}>{r.closed?'ja':'nein'}</td>
               <td style={{padding:'6px 10px'}}>{r.action}</td>
+              <td style={{padding:'6px 10px',whiteSpace:'nowrap'}}>{r.tariff_from?(r.tariff_from+' → '+r.tariff_to):'—'}</td>
               <td style={{padding:'6px 10px'}}>{r.outcome?CPO_OUT_LABEL[r.outcome]:'—'}</td>
               <td style={{padding:'6px 10px',textAlign:'right'}}>{r.discount_level||'—'}</td>
               <td style={{padding:'6px 10px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:700}}>{r.cpo_amount?cpoEur(Number(r.cpo_amount)):'—'}</td>
