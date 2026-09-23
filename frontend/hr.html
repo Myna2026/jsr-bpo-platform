@@ -1263,7 +1263,7 @@ const MENU_BADGE_MAIN_ITEMS = [
   {key:'urlaubantraege',label:'Urlaubsanträge'},{key:'feedback',label:'Feedbackgespräche'},{key:'kanban',label:'Recruiting'},{key:'funnel',label:'Bewerber-Trichter'},{key:'onboarding',label:'Onboarding'},{key:'langarchiv',label:'Aussortiert (Sprache)'},
   {key:'cvs',label:'CVs & Bewerber'},{key:'pool',label:'Bewerber-Pool'},{key:'potenzial',label:'Potenzial Zukunft'},{key:'phoneaction',label:'Telefonaktion'},{key:'postfach',label:'Postfach'},{key:'bewerberlinks',label:'Bewerber-Links'},{key:'dubletten',label:'Dubletten'},{key:'showcase',label:'Showcases'},{key:'training_plans',label:'Schulungsplanung'},
   {key:'timeline',label:'Timeline'},{key:'projects',label:'Projekte'},{key:'forecast',label:'Forecast'},{key:'fcist',label:'Forecast vs. Ist'},{key:'vorschau',label:'Personal-Vorschau'},
-  {key:'profitability',label:'Wirtschaftlichkeit'},{key:'praesentation',label:'Präsentationen'},{key:'termin',label:'Termin vorbereiten'},{key:'uploads',label:'Uploads'},{key:'dataimport',label:'Datenimport'},{key:'uploadplan',label:'Upload-Plan'},{key:'recmkt',label:'Recruiting Marketing'},{key:'nlquery',label:'Datenabfrage'},{key:'cpocalc',label:'CPO-Kalkulator'},
+  {key:'profitability',label:'Wirtschaftlichkeit'},{key:'cpotrack',label:'CPO Tracking'},{key:'praesentation',label:'Präsentationen'},{key:'termin',label:'Termin vorbereiten'},{key:'uploads',label:'Uploads'},{key:'dataimport',label:'Datenimport'},{key:'uploadplan',label:'Upload-Plan'},{key:'recmkt',label:'Recruiting Marketing'},{key:'nlquery',label:'Datenabfrage'},{key:'cpocalc',label:'CPO-Kalkulator'},
   {key:'useractivity',label:'Nutzung & Aktivität'},{key:'previewas',label:'Vorschau als'},{key:'errorlog',label:'Fehler-Log'},{key:'reminders',label:'Erinnerungen'},{key:'taskadmin',label:'Aufgaben-Verwaltung'},{key:'mgmtcalls',label:'Management-Calls'},
   {key:'contract_templates',label:'Vertragsvorlagen'},{key:'superadmin',label:'System / Konfiguration'},{key:'tabperms',label:'Portal-Tabs'},
   {key:'aisettings',label:'KI-Einstellungen'},{key:'aiendpoint',label:'KI-Anbindung'},{key:'cvsync',label:'CV-Sync'},
@@ -7654,7 +7654,8 @@ function buildNavSections(f){
     {sec:'Business', items:[   // Planung + Wirtschaftlichkeit (interne Steuerung)
       {key:'forecast',label:'Forecast',icon:'📈'},
       ...(_isMgmt ? [{key:'fcist',label:'Forecast vs. Ist',icon:'🔮'}] : []),   // Management-only
-      ...(_isMgmtLead ? [{key:'cpocalc',label:'CPO-Kalkulator',icon:'🧮'}] : []),   // Management + Projektleiter des Mandats (team.cpoLead): Rabattstufen-Rechner (Giganetz Retention)
+      ...(_isMgmtLead ? [{key:'cpocalc',label:'CPO-Kalkulator',icon:'🧮'}] : []),
+      ...(_isMgmtLead ? [{key:'cpotrack',label:'CPO Tracking',icon:'💶'}] : []),   // Abschlüsse der Agenten (Link + PIN) und der daraus gerechnete Umsatz   // Management + Projektleiter des Mandats (team.cpoLead): Rabattstufen-Rechner (Giganetz Retention)
       ...(_isMgmtLead ? [{key:'vorschau',label:'Personal-Vorschau',icon:'🧭'}] : []),   // Management + Projektleiter (Paul, was kommt)
       {key:'profitability',label:'Wirtschaftlichkeit',icon:'💹'},
       {key:'productivity',label:'Produktivität',icon:'📊'},
@@ -7724,7 +7725,7 @@ function menuRoleDefault(user, key){
   if(isLeadOnlyRoles(rk)){
     // Protokoll & Aktivitaet: nur Projektleiter (eigenes Team), nicht Teamleiter (User-Entscheidung 2026-08-30).
     if(key==='activity_log'||key==='useractivity') return rk.includes('projektleiter');
-    if(key==='cpocalc') return !!(user&&user.cpoLead);   // nur der Lead eines Projekts mit CPO-Mandat (RLS: cpo_calc_lead_project)
+    if(key==='cpocalc'||key==='cpotrack') return !!(user&&user.cpoLead);   // nur der Lead eines Projekts mit CPO-Mandat (RLS: cpo_calc_lead_project)
     return LEAD_ALLOWED_TABS.includes(key);
   }
   if(HR_ALWAYS_TABS.includes(key)) return true;
@@ -41045,6 +41046,146 @@ function CpoCalcView({team, showToast}){
     </div>}
   </div>;
 }
+// ── CPO Tracking (Giganetz Retention) ─────────────────────────────────────────────────────────────
+// Die Agenten erfassen ihre Vorgänge über den öffentlichen Link (cpo.html, Token + PIN). Hier die Auswertung:
+// Umsatz, Stückzahl, Tarifarten und Rabattstufen — in Summe und je Mitarbeiter, umschaltbar Tag/Woche/Monat.
+// Der Umsatz kommt aus dem BEIM ERFASSEN EINGEFRORENEN CPO (cpo_entries.cpo_amount), nicht aus dem aktuellen
+// Kalkulator: spätere Änderungen an den Stufen schreiben die Vergangenheit nicht um.
+const CPO_OUT_LABEL={ downgrade:'Downgrade, aber gehalten', gleich:'Gleiche Tarifklasse', upgrade:'Upgrade' };
+const CPO_OUT_COLOR={ downgrade:'#0891b2', gleich:'#0f766e', upgrade:'#7c3aed' };
+function cpoEur(v){ return (v==null||isNaN(v))?'—':(Math.round(v*100)/100).toLocaleString('de-DE',{minimumFractionDigits:2,maximumFractionDigits:2})+' €'; }
+function CpoTrackView({team, employees, showToast}){
+  const roles=(team&&team.role_keys)||[];
+  const isMgmt=roles.some(r=>r==='management'||r==='hr'||r==='finance');
+  const [rows,setRows]=useState(null);
+  const [links,setLinks]=useState([]);
+  const [mode,setMode]=useState('day');            // day | week | month
+  const [day,setDay]=useState(isoLocal(new Date()));
+  const [showCancelled,setShowCancelled]=useState(false);
+  const [busy,setBusy]=useState(null);
+  const load=React.useCallback(async()=>{
+    try{
+      const [r,l]=await Promise.all([
+        sbAllData((a,b)=>sb.from('cpo_entries').select('*').order('work_date',{ascending:false}).range(a,b)),
+        sb.from('cpo_links').select('token,project_id,label,active'),
+      ]);
+      setRows(r.data||[]); setLinks((l.data||[]).filter(x=>x.active));
+    }catch(e){ setRows([]); }
+  },[]);
+  useEffect(()=>{ load(); },[load]);
+  if(rows===null) return <div className="sp-empty">Lädt…</div>;
+  // Zeitraum: Tag, ISO-Woche des Tages oder Monat des Tages.
+  const d0=new Date(day+'T00:00:00');
+  let from=day, to=day, label='';
+  if(mode==='week'){ const mon=new Date(d0); mon.setDate(mon.getDate()-((mon.getDay()+6)%7)); const sun=new Date(mon); sun.setDate(mon.getDate()+6);
+    from=isoLocal(mon); to=isoLocal(sun); const w=getISOWeek(mon); label='KW '+w.kw+' · '+fmtDate(from)+' bis '+fmtDate(to); }
+  else if(mode==='month'){ const f=new Date(d0.getFullYear(),d0.getMonth(),1), t=new Date(d0.getFullYear(),d0.getMonth()+1,0);
+    from=isoLocal(f); to=isoLocal(t); label=d0.toLocaleDateString('de-DE',{month:'long',year:'numeric'}); }
+  else label=fmtDate(day);
+  const inRange=r=>{ const d=String(r.work_date).slice(0,10); return d>=from&&d<=to; };
+  const all=rows.filter(inRange);
+  const live=all.filter(r=>!r.cancelled_at);
+  const closes=live.filter(r=>r.is_close);
+  const revenue=closes.reduce((a,r)=>a+(Number(r.cpo_amount)||0),0);
+  const empName=id=>{ const e=(employees||[]).find(x=>x&&x.id===id); return e?((e.first_name||'')+' '+(e.last_name||'')).trim():'—'; };
+  // Aufschlüsselung
+  const byOut={}; closes.forEach(r=>{ const k=r.outcome||'?'; (byOut[k]=byOut[k]||{n:0,rev:0}); byOut[k].n++; byOut[k].rev+=Number(r.cpo_amount)||0; });
+  const lvl1=closes.filter(r=>r.discount_level===1).length, lvl2=closes.filter(r=>r.discount_level===2).length;
+  const byEmp={}; live.forEach(r=>{ const k=r.employee_id; (byEmp[k]=byEmp[k]||{n:0,cl:0,rev:0,l2:0});
+    byEmp[k].n++; if(r.is_close){ byEmp[k].cl++; byEmp[k].rev+=Number(r.cpo_amount)||0; if(r.discount_level===2) byEmp[k].l2++; } });
+  const empRows=Object.keys(byEmp).map(id=>({id, name:empName(id), ...byEmp[id]})).sort((a,b)=>b.rev-a.rev||b.n-a.n);
+  const listed=(showCancelled?all:live).slice().sort((a,b)=>String(b.work_date+b.created_at).localeCompare(String(a.work_date+a.created_at)));
+  async function cancelEntry(r){
+    const _r=await uiPrompt({title:'Vorgang stornieren', text:'Warum wird '+r.case_no+' storniert? Der Eintrag bleibt als storniert sichtbar.',
+      fields:[{key:'reason',label:'Grund (z. B. Vertrag gekündigt)'}], confirmLabel:'Stornieren'});
+    if(!_r) return;
+    const reason=(_r.reason||'').trim();
+    setBusy(r.id);
+    try{ const {data,error}=await sb.rpc('cpo_cancel',{p_id:r.id, p_reason:reason||''}); if(error) throw error;
+      if(data&&data.error) throw new Error(data.error);
+      showToast&&showToast('Storniert'); await load();
+    }catch(e){ showToast&&showToast('⚠ '+((e&&e.message)||'Storno fehlgeschlagen'),'error'); }
+    setBusy(null);
+  }
+  const tile=(v,l,sub,color)=><div style={{flex:'1 1 150px',minWidth:140,border:'1px solid var(--border)',borderRadius:12,padding:'12px 14px',background:'var(--card)'}}>
+    <div style={{fontSize:11,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em'}}>{l}</div>
+    <div style={{fontSize:24,fontWeight:800,fontFamily:'var(--mono)',color:color||'var(--text)',lineHeight:1.15,marginTop:3}}>{v}</div>
+    {sub?<div style={{fontSize:11.5,color:'var(--muted)',marginTop:2}}>{sub}</div>:null}
+  </div>;
+  const segBtn=(k,l)=><button key={k} className="btn btn-sm" onClick={()=>setMode(k)}
+    style={{border:'none',borderRadius:0,background:mode===k?'#0F5661':'transparent',color:mode===k?'#fff':'var(--text)',fontWeight:700}}>{l}</button>;
+  return <div style={{maxWidth:1100}}>
+    <div style={{fontSize:20,fontWeight:800,marginBottom:2}}>💶 CPO Tracking</div>
+    <div style={{fontSize:13,color:'var(--muted)',marginBottom:14,lineHeight:1.5}}>
+      Abschlüsse der Retention, erfasst von den Agenten über ihren Link. Umsatz = Summe der beim Erfassen eingefrorenen CPOs.
+      Stornierte Vorgänge zählen nicht mit, bleiben aber nachvollziehbar.
+    </div>
+    <div style={{display:'flex',gap:12,flexWrap:'wrap',alignItems:'center',marginBottom:14}}>
+      <div style={{display:'flex',border:'1px solid var(--border)',borderRadius:10,overflow:'hidden'}}>{[segBtn('day','Tag'),segBtn('week','Woche'),segBtn('month','Monat')]}</div>
+      <input type="date" className="form-input" style={{width:'auto'}} value={day} onChange={e=>setDay(e.target.value||isoLocal(new Date()))}/>
+      <span style={{fontSize:13,fontWeight:700}}>{label}</span>
+      <label style={{marginLeft:'auto',fontSize:12,color:'var(--muted)',display:'flex',alignItems:'center',gap:6}}>
+        <input type="checkbox" checked={showCancelled} onChange={e=>setShowCancelled(e.target.checked)}/> Stornierte zeigen</label>
+    </div>
+    <div style={{display:'flex',gap:12,flexWrap:'wrap',marginBottom:14}}>
+      {tile(cpoEur(revenue),'Umsatz',closes.length+(closes.length===1?' Abschluss':' Abschlüsse'),'#0f766e')}
+      {tile(String(closes.length),'Abschlüsse', live.length+' Vorgänge gesamt')}
+      {tile(closes.length?cpoEur(revenue/closes.length):'—','Ø CPO','je Abschluss')}
+      {tile(closes.length?(Math.round(lvl2/closes.length*100)+' %'):'—','Anteil Stufe 2','Stufe 1: '+lvl1+' · Stufe 2: '+lvl2)}
+    </div>
+    <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(280px,1fr))',gap:12,marginBottom:14}}>
+      <div style={{border:'1px solid var(--border)',borderRadius:12,padding:'12px 14px',background:'var(--card)'}}>
+        <div style={{fontSize:13,fontWeight:800,marginBottom:8}}>Nach Tarifart</div>
+        {Object.keys(CPO_OUT_LABEL).map(k=>{ const o=byOut[k]||{n:0,rev:0}; const pct=closes.length?Math.round(o.n/closes.length*100):0;
+          return <div key={k} style={{marginBottom:8}}>
+            <div style={{display:'flex',justifyContent:'space-between',fontSize:12.5,marginBottom:3}}>
+              <span style={{fontWeight:600}}>{CPO_OUT_LABEL[k]}</span><span style={{color:'var(--muted)'}}>{o.n}× · {cpoEur(o.rev)}</span></div>
+            <div style={{height:7,borderRadius:4,background:'var(--surface-2)',overflow:'hidden'}}>
+              <div style={{width:pct+'%',height:'100%',background:CPO_OUT_COLOR[k]}}/></div>
+          </div>; })}
+      </div>
+      <div style={{border:'1px solid var(--border)',borderRadius:12,padding:'12px 14px',background:'var(--card)'}}>
+        <div style={{fontSize:13,fontWeight:800,marginBottom:8}}>Je Mitarbeiter</div>
+        {!empRows.length?<div style={{fontSize:12.5,color:'var(--muted)'}}>Keine Vorgänge im Zeitraum.</div>:
+          <div style={{maxHeight:260,overflowY:'auto'}}>{empRows.map(e=>(
+            <div key={e.id} style={{display:'flex',alignItems:'center',gap:8,padding:'5px 0',borderTop:'1px solid var(--border)',fontSize:12.5}}>
+              <span style={{flex:1,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',fontWeight:600}}>{e.name}</span>
+              <span style={{width:60,textAlign:'right',color:'var(--muted)'}}>{e.n} Vorg.</span>
+              <span style={{width:52,textAlign:'right'}}>{e.cl}×</span>
+              <span style={{width:84,textAlign:'right',fontWeight:800,fontFamily:'var(--mono)'}}>{cpoEur(e.rev)}</span>
+            </div>))}</div>}
+      </div>
+    </div>
+    <div style={{border:'1px solid var(--border)',borderRadius:12,background:'var(--card)',overflow:'hidden'}}>
+      <div style={{padding:'10px 14px',borderBottom:'1px solid var(--border)',fontSize:13,fontWeight:800}}>Vorgänge <span style={{fontWeight:600,color:'var(--muted)'}}>({listed.length})</span></div>
+      <div style={{maxHeight:420,overflowY:'auto'}}>
+        {!listed.length?<div style={{padding:16,fontSize:13,color:'var(--muted)'}}>Für diesen Zeitraum ist nichts erfasst.</div>:
+        <table style={{width:'100%',borderCollapse:'collapse',fontSize:12.5}}>
+          <thead><tr style={{position:'sticky',top:0,background:'var(--surface-2)'}}>
+            {['Datum','Case','Mitarbeiter','Status','Abg.','Was','Tarifart','Stufe','CPO',''].map((h,i)=>
+              <th key={i} style={{textAlign:i>=7&&i<=8?'right':'left',padding:'6px 10px',fontSize:11,color:'var(--muted)',whiteSpace:'nowrap'}}>{h}</th>)}
+          </tr></thead>
+          <tbody>{listed.map(r=>(
+            <tr key={r.id} style={{borderTop:'1px solid var(--border)',opacity:r.cancelled_at?0.5:1}}>
+              <td style={{padding:'6px 10px',whiteSpace:'nowrap'}}>{fmtDate(r.work_date)}</td>
+              <td style={{padding:'6px 10px',fontFamily:'var(--mono)',fontWeight:700}}>{r.case_no}{r.cancelled_at?<span style={{marginLeft:6,fontSize:10,fontWeight:800,color:'var(--red)'}}>storniert</span>:null}</td>
+              <td style={{padding:'6px 10px',whiteSpace:'nowrap'}}>{empName(r.employee_id)}</td>
+              <td style={{padding:'6px 10px'}}>{r.status}</td>
+              <td style={{padding:'6px 10px'}}>{r.closed?'ja':'nein'}</td>
+              <td style={{padding:'6px 10px'}}>{r.action}</td>
+              <td style={{padding:'6px 10px'}}>{r.outcome?CPO_OUT_LABEL[r.outcome]:'—'}</td>
+              <td style={{padding:'6px 10px',textAlign:'right'}}>{r.discount_level||'—'}</td>
+              <td style={{padding:'6px 10px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:700}}>{r.cpo_amount?cpoEur(Number(r.cpo_amount)):'—'}</td>
+              <td style={{padding:'6px 10px',textAlign:'right'}}>{!r.cancelled_at&&<button className="btn btn-sm" disabled={busy===r.id} style={{color:'var(--red)'}} onClick={()=>cancelEntry(r)}>Storno</button>}</td>
+            </tr>))}</tbody>
+        </table>}
+      </div>
+    </div>
+    {isMgmt&&links.length>0&&<div style={{fontSize:11.5,color:'var(--muted)',marginTop:12,lineHeight:1.6}}>
+      Erfassungs-Link für die Agenten: {links.map(l=>(<span key={l.token} style={{fontFamily:'var(--mono)'}}>{'https://tive360.de/cpo.html?t='+l.token}</span>))} · Zugang mit der persönlichen PIN.
+    </div>}
+  </div>;
+}
 function NlQueryView({team}){
   const isMgmt=((team&&team.role_keys)||[]).some(r=>r==='management');
   const [msgs,setMsgs]=useState([]);            // API-Konversation
@@ -41603,6 +41744,9 @@ const MAILER_MAILS_SOURCE={
   label:'Rohdaten Novo, Spalte N „Gesamt_bearbeitet", nur Bearbeiter=ME, je Agent und Tag (Kundenformel „Mails (Mailerkategorie)"); bestätigt 23.09.2026 an „Mailerperformance 25hrs Real.xlsx"'
 };
 function mailerHoursToH(v){ const n=Number(String(v==null?'':v).replace(',','.'))||0; const u=MAILER_HOURS_SOURCE.unit; return u==='sec'?n/3600:(u==='min'?n/60:n); }
+// Obergrenze für einen plausiblen Wochenwert je Agent. Darüber stimmt die Datei nicht, nicht der Mitarbeiter:
+// meist fehlen die LogTime-Minuten (Mails auf fast null Stunden). Wird gemeldet, nie still verrechnet.
+const MAILER_MAX_PLAUSIBLE=30;
 function mailerNum(v){ return Number(String(v==null?'':v).replace(',','.'))||0; }
 function mailerYw(v){ if(v==null||v==='') return null; const d = v instanceof Date ? v : new Date(String(v).slice(0,10)); if(isNaN(d.getTime())) return null; const w=getISOWeek(d); return w.year+'-'+String(w.kw).padStart(2,'0'); }
 function mailerDay(v){ if(v==null||v==='') return null; const d = v instanceof Date ? v : new Date(String(v).slice(0,10)); if(isNaN(d.getTime())) return null; return isoLocal(d); }   // YYYY-MM-DD (Tagesebene, wie die Kundenformel je Datum)
@@ -41715,7 +41859,11 @@ function MailerImport({employees, onSaved}){
       unmatched:Object.values(unmatched).sort((a,b)=>b.mails-a.mails),
       weeks:[...new Set(facts.map(f=>f.year+'-'+String(f.kw).padStart(2,'0')))].sort(),
       agents:new Set(facts.map(f=>f.emp_id)).size,
-      noHours:facts.filter(f=>f.meh==null).map(f=>f.name+' (KW '+f.kw+')') });
+      noHours:facts.filter(f=>f.meh==null).map(f=>f.name+' (KW '+f.kw+')'),
+      // Unplausibel: so viele Mails je Stunde schafft niemand. Fast immer fehlt die LogTime, nicht die Mails.
+      odd:facts.filter(f=>f.meh!=null&&f.meh>MAILER_MAX_PLAUSIBLE)
+        .map(f=>({name:f.name, kw:f.kw, mails:Math.round(f.mails), hours:Math.round(f.hours*10)/10, meh:Math.round(f.meh*10)/10}))
+        .sort((a,b)=>b.meh-a.meh) });
     setStep('preview');
   }
   function reCompute(){ if(window.__mailerAgg) compute(window.__mailerAgg.mails, window.__mailerAgg.hours, window.__mailerAgg.dmails, window.__mailerAgg.dhours); }
@@ -41742,6 +41890,7 @@ function MailerImport({employees, onSaved}){
             quelle_bestaetigt:'23.09.2026 an „Mailerperformance 25hrs Real.xlsx" gegen die Kundenformeln geprüft',
             mails_ohne_logtime:result.mailsNoLog||0,
             doppelte_logtime_tage:(result.dupDays||[]).map(d=>d.day+' ('+d.agents+')'),
+            unplausibel:(result.odd||[]).filter(o=>o.kw===w).map(o=>o.name+': '+o.mails+' Mails / '+o.hours+' h = '+o.meh+' Mails/h'),
             agents:fs.map(f=>({name:f.name, mails:f.mails, hours:Math.round(f.hours*10)/10, meh:f.meh==null?null:Math.round(f.meh*100)/100})) };
           const {data:imp,error:ie}=await sb.from('data_imports').insert({ project_id:pid, source_type:'mailer', kw:w, year:y, file_name:file.name, file_hash:fileHash, storage_path:storagePath,
             status:result.unmatched.length?'partial':'ok', warnings:{basis, skipped_sales:result.skippedSales, unmatched:result.unmatched.map(u=>u.name)},
@@ -41822,6 +41971,13 @@ function MailerImport({employees, onSaved}){
 
       {result.skippedSales.length>0 && <div style={{fontSize:11,color:'var(--muted)',marginBottom:10}}>Übersprungen (Sales, keine Mail-Kennzahl): {result.skippedSales.join(', ')}.</div>}
       {result.noHours.length>0 && <div style={{fontSize:11,color:'#b45309',marginBottom:10}}>⚠ Ohne Stunden (kein Wert, nicht gespeichert): {result.noHours.slice(0,12).join(' · ')}{result.noHours.length>12?' …':''}</div>}
+      {(result.odd||[]).length>0 && <div style={{border:'1px solid #fde68a',background:'#fffbeb',borderRadius:10,padding:'10px 12px',marginBottom:12}}>
+        <div style={{fontSize:12,fontWeight:800,color:'#b45309',marginBottom:5}}>⚠ Unplausibel: mehr als {MAILER_MAX_PLAUSIBLE} Mails je Stunde</div>
+        {result.odd.slice(0,10).map((o,i)=><div key={i} style={{fontSize:12,color:'#92400e',padding:'2px 0'}}>
+          <b>{o.name}</b>, KW {o.kw}: {o.mails} Mails auf {o.hours} Stunden = <b>{o.meh}</b> Mails/h</div>)}
+        {result.odd.length>10?<div style={{fontSize:11,color:'#92400e'}}>… und {result.odd.length-10} weitere</div>:null}
+        <div style={{fontSize:11,color:'#92400e',marginTop:6,lineHeight:1.5}}>Fast immer fehlt die LogTime in der Datei, nicht die Mails. Der Wert wird trotzdem gespeichert, verzerrt aber den Teamwert. Beim Auftraggeber nachfragen.</div>
+      </div>}
 
       <div style={{maxHeight:340,overflow:'auto',border:'1px solid var(--border)',borderRadius:8,marginBottom:12}}>
         <table style={{width:'100%',borderCollapse:'collapse',fontSize:12,whiteSpace:'nowrap'}}>
@@ -48510,6 +48666,7 @@ function App(){
       'uploadplan':'<path fill-rule="evenodd" d="M19.5 21a3 3 0 0 0 3-3v-4.5a3 3 0 0 0-3-3h-15a3 3 0 0 0-3 3V18a3 3 0 0 0 3 3h15ZM1.5 10.146V6a3 3 0 0 1 3-3h5.379a2.25 2.25 0 0 1 1.59.659l2.122 2.121c.14.141.331.22.53.22H19.5a3 3 0 0 1 3 3v1.146A4.483 4.483 0 0 0 19.5 9h-15a4.483 4.483 0 0 0-3 1.146Z" clip-rule="evenodd"/>',
       'uploads':'<path d="M5.85 3.5a.75.75 0 0 0-1.117-1 9.719 9.719 0 0 0-2.348 4.876.75.75 0 0 0 1.479.248A8.219 8.219 0 0 1 5.85 3.5ZM19.267 2.5a.75.75 0 1 0-1.118 1 8.22 8.22 0 0 1 2.135 4.373.75.75 0 0 0 1.48-.248A9.72 9.72 0 0 0 19.266 2.5Z"/><path fill-rule="evenodd" d="M12 2.25A6.75 6.75 0 0 0 5.25 9v.75a8.217 8.217 0 0 1-2.119 5.52.75.75 0 0 0 .298 1.206c1.544.57 3.16.99 4.831 1.243a3.75 3.75 0 1 0 7.48 0 24.583 24.583 0 0 0 4.83-1.244.75.75 0 0 0 .298-1.205 8.217 8.217 0 0 1-2.118-5.52V9A6.75 6.75 0 0 0 12 2.25ZM9.75 18c0-.034 0-.067.002-.1a25.05 25.05 0 0 0 4.496 0l.002.1a2.25 2.25 0 1 1-4.5 0Z" clip-rule="evenodd"/>',
       'uploadmatrix':'<path fill-rule="evenodd" d="M2.25 6a3 3 0 0 1 3-3h13.5a3 3 0 0 1 3 3v12a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3V6Zm3.97.97a.75.75 0 0 1 1.06 0l2.25 2.25a.75.75 0 0 1 0 1.06l-2.25 2.25a.75.75 0 0 1-1.06-1.06l1.72-1.72-1.72-1.72a.75.75 0 0 1 0-1.06Zm4.28 4.28a.75.75 0 0 0 0 1.5h3a.75.75 0 0 0 0-1.5h-3Z" clip-rule="evenodd"/>',
+      'cpotrack':'<path d="M12 7.5a2.25 2.25 0 1 0 0 4.5 2.25 2.25 0 0 0 0-4.5Z"/><path fill-rule="evenodd" d="M1.5 4.875C1.5 3.839 2.34 3 3.375 3h17.25c1.035 0 1.875.84 1.875 1.875v9.75c0 1.036-.84 1.875-1.875 1.875H3.375A1.875 1.875 0 0 1 1.5 14.625v-9.75ZM8.25 9.75a3.75 3.75 0 1 1 7.5 0 3.75 3.75 0 0 1-7.5 0ZM18.75 9a.75.75 0 0 0-.75.75v.008c0 .414.336.75.75.75h.008a.75.75 0 0 0 .75-.75V9.75a.75.75 0 0 0-.75-.75h-.008ZM4.5 9.75A.75.75 0 0 1 5.25 9h.008a.75.75 0 0 1 .75.75v.008a.75.75 0 0 1-.75.75H5.25a.75.75 0 0 1-.75-.75V9.75Z" clip-rule="evenodd"/><path d="M2.25 18a.75.75 0 0 0 0 1.5c5.4 0 10.63.722 15.6 2.075 1.19.324 2.4-.558 2.4-1.82V18.75a.75.75 0 0 0-.75-.75H2.25Z"/>',
       'cpocalc':'<path fill-rule="evenodd" d="M6.32 1.827a49.255 49.255 0 0 1 11.36 0c1.497.174 2.57 1.46 2.57 2.93V19.5a3 3 0 0 1-3 3H6.75a3 3 0 0 1-3-3V4.757c0-1.47 1.073-2.756 2.57-2.93ZM7.5 11.25a.75.75 0 0 1 .75-.75h.008a.75.75 0 0 1 .75.75v.008a.75.75 0 0 1-.75.75H8.25a.75.75 0 0 1-.75-.75v-.008Zm.75 1.5a.75.75 0 0 0-.75.75v.008c0 .414.336.75.75.75h.008a.75.75 0 0 0 .75-.75v-.008a.75.75 0 0 0-.75-.75H8.25Zm-.75 3a.75.75 0 0 1 .75-.75h.008a.75.75 0 0 1 .75.75v.008a.75.75 0 0 1-.75.75H8.25a.75.75 0 0 1-.75-.75v-.008Zm3.75-4.5a.75.75 0 0 0-.75.75v.008c0 .414.336.75.75.75h.008a.75.75 0 0 0 .75-.75v-.008a.75.75 0 0 0-.75-.75h-.008Zm-.75 3a.75.75 0 0 1 .75-.75h.008a.75.75 0 0 1 .75.75v.008a.75.75 0 0 1-.75.75h-.008a.75.75 0 0 1-.75-.75v-.008Zm.75 1.5a.75.75 0 0 0-.75.75v.008c0 .414.336.75.75.75h.008a.75.75 0 0 0 .75-.75v-.008a.75.75 0 0 0-.75-.75h-.008Zm3.75-4.5a.75.75 0 0 0-.75.75v.008c0 .414.336.75.75.75h.008a.75.75 0 0 0 .75-.75v-.008a.75.75 0 0 0-.75-.75h-.008Zm-.75 3a.75.75 0 0 1 .75-.75h.008a.75.75 0 0 1 .75.75v.008a.75.75 0 0 1-.75.75h-.008a.75.75 0 0 1-.75-.75v-.008Zm.75 1.5a.75.75 0 0 0-.75.75v.008c0 .414.336.75.75.75h.008a.75.75 0 0 0 .75-.75v-.008a.75.75 0 0 0-.75-.75h-.008ZM6.75 6.75A1.5 1.5 0 0 1 8.25 5.25h7.5a1.5 1.5 0 0 1 1.5 1.5v.75a1.5 1.5 0 0 1-1.5 1.5h-7.5a1.5 1.5 0 0 1-1.5-1.5v-.75Z" clip-rule="evenodd"/>',
       'recmkt':'<path d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 0 1 3 19.875v-6.75ZM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V8.625ZM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V4.125Z"/>',
       'auswertung':'<path d="M18.375 2.25c-1.035 0-1.875.84-1.875 1.875v15.75c0 1.035.84 1.875 1.875 1.875h.75c1.035 0 1.875-.84 1.875-1.875V4.125c0-1.036-.84-1.875-1.875-1.875h-.75ZM9.75 8.625c0-1.036.84-1.875 1.875-1.875h.75c1.036 0 1.875.84 1.875 1.875v11.25c0 1.035-.84 1.875-1.875 1.875h-.75a1.875 1.875 0 0 1-1.875-1.875V8.625ZM3 13.125c0-1.036.84-1.875 1.875-1.875h.75c1.036 0 1.875.84 1.875 1.875v6.75c0 1.035-.84 1.875-1.875 1.875h-.75A1.875 1.875 0 0 1 3 19.875v-6.75Z"/>',
@@ -48807,6 +48964,7 @@ function App(){
           {view==='recmkt'&&<RecruitingMarketingView employees={employees}/>}
           {view==='nlquery'&&<NlQueryView team={team}/>}
           {view==='cpocalc'&&<CpoCalcView team={team} showToast={showToast}/>}
+          {view==='cpotrack'&&<CpoTrackView team={team} employees={employees} showToast={showToast}/>}
           {view==='rechte'&&<RechteView team={team}/>}
           {view==='aiaccess'&&<AiAccessView team={team} onOpenView={setView}/>}
           {view==='whosees'&&<AiWhoSeesView team={team} employees={employees} onOpenView={setView}/>}
