@@ -1263,7 +1263,7 @@ const MENU_BADGE_MAIN_ITEMS = [
   {key:'urlaubantraege',label:'Urlaubsanträge'},{key:'feedback',label:'Feedbackgespräche'},{key:'kanban',label:'Recruiting'},{key:'funnel',label:'Bewerber-Trichter'},{key:'onboarding',label:'Onboarding'},{key:'langarchiv',label:'Aussortiert (Sprache)'},
   {key:'cvs',label:'CVs & Bewerber'},{key:'pool',label:'Bewerber-Pool'},{key:'potenzial',label:'Potenzial Zukunft'},{key:'phoneaction',label:'Telefonaktion'},{key:'postfach',label:'Postfach'},{key:'bewerberlinks',label:'Bewerber-Links'},{key:'dubletten',label:'Dubletten'},{key:'showcase',label:'Showcases'},{key:'training_plans',label:'Schulungsplanung'},
   {key:'timeline',label:'Timeline'},{key:'projects',label:'Projekte'},{key:'forecast',label:'Forecast'},{key:'fcist',label:'Forecast vs. Ist'},{key:'vorschau',label:'Personal-Vorschau'},
-  {key:'profitability',label:'Wirtschaftlichkeit'},{key:'cpotrack',label:'CPO Tracking'},{key:'praesentation',label:'Präsentationen'},{key:'termin',label:'Termin vorbereiten'},{key:'uploads',label:'Uploads'},{key:'dataimport',label:'Datenimport'},{key:'uploadplan',label:'Upload-Plan'},{key:'recmkt',label:'Recruiting Marketing'},{key:'nlquery',label:'Datenabfrage'},{key:'cpocalc',label:'CPO-Kalkulator'},
+  {key:'profitability',label:'Wirtschaftlichkeit'},{key:'cpotrack',label:'Retention Overview'},{key:'praesentation',label:'Präsentationen'},{key:'termin',label:'Termin vorbereiten'},{key:'uploads',label:'Uploads'},{key:'dataimport',label:'Datenimport'},{key:'uploadplan',label:'Upload-Plan'},{key:'recmkt',label:'Recruiting Marketing'},{key:'nlquery',label:'Datenabfrage'},{key:'cpocalc',label:'CPO-Kalkulator'},
   {key:'useractivity',label:'Nutzung & Aktivität'},{key:'previewas',label:'Vorschau als'},{key:'errorlog',label:'Fehler-Log'},{key:'reminders',label:'Erinnerungen'},{key:'taskadmin',label:'Aufgaben-Verwaltung'},{key:'mgmtcalls',label:'Management-Calls'},
   {key:'contract_templates',label:'Vertragsvorlagen'},{key:'superadmin',label:'System / Konfiguration'},{key:'tabperms',label:'Portal-Tabs'},
   {key:'aisettings',label:'KI-Einstellungen'},{key:'aiendpoint',label:'KI-Anbindung'},{key:'cvsync',label:'CV-Sync'},
@@ -7655,7 +7655,7 @@ function buildNavSections(f){
       {key:'forecast',label:'Forecast',icon:'📈'},
       ...(_isMgmt ? [{key:'fcist',label:'Forecast vs. Ist',icon:'🔮'}] : []),   // Management-only
       ...(_isMgmtLead ? [{key:'cpocalc',label:'CPO-Kalkulator',icon:'🧮'}] : []),
-      ...(_isMgmtLead ? [{key:'cpotrack',label:'CPO Tracking',icon:'💶'}] : []),   // Abschlüsse der Agenten (Link + PIN) und der daraus gerechnete Umsatz   // Management + Projektleiter des Mandats (team.cpoLead): Rabattstufen-Rechner (Giganetz Retention)
+      ...(_isMgmtLead ? [{key:'cpotrack',label:'Retention Overview',icon:'💶'}] : []),   // Vorgänge der Agenten (Link + PIN), Abschlüsse und der daraus gerechnete Umsatz   // Management + Projektleiter des Mandats (team.cpoLead): Rabattstufen-Rechner (Giganetz Retention)
       ...(_isMgmtLead ? [{key:'vorschau',label:'Personal-Vorschau',icon:'🧭'}] : []),   // Management + Projektleiter (Paul, was kommt)
       {key:'profitability',label:'Wirtschaftlichkeit',icon:'💹'},
       {key:'productivity',label:'Produktivität',icon:'📊'},
@@ -41046,13 +41046,24 @@ function CpoCalcView({team, showToast}){
     </div>}
   </div>;
 }
-// ── CPO Tracking (Giganetz Retention) ─────────────────────────────────────────────────────────────
+// ── Retention Overview (Giganetz) ─────────────────────────────────────────────────────────────────
 // Die Agenten erfassen ihre Vorgänge über den öffentlichen Link (cpo.html, Token + PIN). Hier die Auswertung:
 // Umsatz, Stückzahl, Tarifarten und Rabattstufen — in Summe und je Mitarbeiter, umschaltbar Tag/Woche/Monat.
 // Der Umsatz kommt aus dem BEIM ERFASSEN EINGEFRORENEN CPO (cpo_entries.cpo_amount), nicht aus dem aktuellen
 // Kalkulator: spätere Änderungen an den Stufen schreiben die Vergangenheit nicht um.
 const CPO_OUT_LABEL={ downgrade:'Downgrade, aber gehalten', gleich:'Gleiche Tarifklasse', upgrade:'Upgrade' };
+// Werktage Mo bis Fr zwischen zwei Tagen (einschließlich). Ohne Feiertage: die Agenten arbeiten an Feiertagen,
+// und eine halbe Annahme wäre schlechter als eine klare. Basis der linearen Hochrechnung.
+function cpoWorkdays(fromStr, toStr){
+  var d=new Date(fromStr+'T00:00:00'), t=new Date(toStr+'T00:00:00'), n=0, g=0;
+  while(d<=t && g<400){ var w=d.getDay(); if(w>0&&w<6) n++; d.setDate(d.getDate()+1); g++; }
+  return n;
+}
 const CPO_OUT_COLOR={ downgrade:'#0891b2', gleich:'#0f766e', upgrade:'#7c3aed' };
+// Uhrzeit der Erfassung (Ortszeit). Grundlage für den Tagesverlauf.
+function cpoTime(ts){ if(!ts) return ''; const d=new Date(ts); if(isNaN(d.getTime())) return '';
+  return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); }
+function cpoHour(ts){ if(!ts) return null; const d=new Date(ts); return isNaN(d.getTime())?null:d.getHours(); }
 function cpoEur(v){ return (v==null||isNaN(v))?'—':(Math.round(v*100)/100).toLocaleString('de-DE',{minimumFractionDigits:2,maximumFractionDigits:2})+' €'; }
 // Tarifliste je Mandat, pflegbar ohne Code. Aus der Rangfolge leitet das System Upgrade, Downgrade oder
 // gleiche Tarifklasse ab (MN 150 → MN 300 = Upgrade). Gleicher Rang bei zwei Tarifen heißt „gleiche Klasse".
@@ -41109,6 +41120,44 @@ function CpoTariffEditor({projectId, skill, showToast, onChanged}){
     </div>}
   </div>;
 }
+// Die sechs abzurechnenden CPOs (drei Ergebnisse mal zwei Rabattstufen), direkt aus dem gepflegten Kalkulator.
+// Zum Gegenlesen an einer Stelle: genau diese Beträge friert ein Abschluss beim Erfassen ein.
+function CpoRateTable({projectId, skill}){
+  const [rows,setRows]=React.useState(null); const [open,setOpen]=React.useState(false); const [at,setAt]=React.useState(null);
+  React.useEffect(()=>{ let alive=true; (async()=>{
+    try{ const {data}=await sb.from('cpo_calc_configs').select('config,updated_at').eq('project_id',projectId).eq('skill',skill).maybeSingle();
+      if(!alive) return; setRows((data&&data.config&&Array.isArray(data.config.rows))?data.config.rows:[]); setAt(data&&data.updated_at||null);
+    }catch(e){ if(alive) setRows([]); } })(); return ()=>{alive=false;}; },[projectId,skill]);
+  if(rows===null) return null;
+  const val=(k,f)=>{ const r=rows.find(x=>x&&x.key===k); const v=r?Number(r[f]):NaN; return isFinite(v)?cpoEur(v):'—'; };
+  const missing=Object.keys(CPO_OUT_LABEL).some(k=>{ const r=rows.find(x=>x&&x.key===k); return !r||!isFinite(Number(r.cpo_stufe1))||!isFinite(Number(r.cpo_stufe2)); });
+  return <div style={{border:'1px solid '+(missing?'#fecaca':'var(--border)'),borderRadius:12,background:'var(--card)',marginBottom:14,overflow:'hidden'}}>
+    <div onClick={()=>setOpen(o=>!o)} style={{padding:'10px 14px',display:'flex',alignItems:'center',gap:10,cursor:'pointer'}}>
+      <span style={{fontSize:13,fontWeight:800}}>Hinterlegte CPOs</span>
+      <span style={{fontSize:12,color:missing?'var(--red)':'var(--muted)'}}>{missing?'unvollständig, Abschlüsse werden abgewiesen':'drei Ergebnisse mal zwei Rabattstufen'}</span>
+      <span style={{marginLeft:'auto',fontSize:13,color:'var(--muted)'}}>{open?'▲':'▼'}</span>
+    </div>
+    {open&&<div style={{padding:'0 14px 14px'}}>
+      <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
+        <thead><tr style={{color:'var(--muted)',fontSize:11,textTransform:'uppercase',letterSpacing:'.04em'}}>
+          <th style={{textAlign:'left',padding:'4px 0'}}>Ergebnis</th>
+          <th style={{textAlign:'right',padding:'4px 8px'}}>Stufe 1</th>
+          <th style={{textAlign:'right',padding:'4px 0'}}>Stufe 2</th></tr></thead>
+        <tbody>{Object.keys(CPO_OUT_LABEL).map(k=>(
+          <tr key={k} style={{borderTop:'1px solid var(--border)'}}>
+            <td style={{padding:'6px 0',fontWeight:600}}>{CPO_OUT_LABEL[k]}</td>
+            <td style={{padding:'6px 8px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:700}}>{val(k,'cpo_stufe1')}</td>
+            <td style={{padding:'6px 0',textAlign:'right',fontFamily:'var(--mono)',fontWeight:700}}>{val(k,'cpo_stufe2')}</td>
+          </tr>))}</tbody>
+      </table>
+      <div style={{fontSize:11.5,color:'var(--muted)',marginTop:8,lineHeight:1.5}}>
+        Stufe 2 ist der niedrigere Betrag, weil der Endkunde dort mehr Rabatt bekommt. Gepflegt im CPO-Kalkulator
+        {at?(', zuletzt geändert '+fmtDate(String(at).slice(0,10))):''}. Ein Abschluss friert den Betrag beim Erfassen ein,
+        spätere Änderungen rechnen die Vergangenheit nicht um.
+      </div>
+    </div>}
+  </div>;
+}
 function CpoTrackView({team, employees, showToast}){
   const roles=(team&&team.role_keys)||[];
   const isMgmt=roles.some(r=>r==='management'||r==='hr'||r==='finance');
@@ -41117,6 +41166,7 @@ function CpoTrackView({team, employees, showToast}){
   const [mode,setMode]=useState('day');            // day | week | month
   const [day,setDay]=useState(isoLocal(new Date()));
   const [showCancelled,setShowCancelled]=useState(false);
+  const [showEmps,setShowEmps]=useState(false);      // Team zuerst, Mitarbeiter auf Wunsch
   const [busy,setBusy]=useState(null);
   const load=React.useCallback(async()=>{
     try{
@@ -41181,12 +41231,13 @@ function CpoTrackView({team, employees, showToast}){
   const segBtn=(k,l)=><button key={k} className="btn btn-sm" onClick={()=>setMode(k)}
     style={{border:'none',borderRadius:0,background:mode===k?'#0F5661':'transparent',color:mode===k?'#fff':'var(--text)',fontWeight:700}}>{l}</button>;
   return <div style={{maxWidth:1100}}>
-    <div style={{fontSize:20,fontWeight:800,marginBottom:2}}>💶 CPO Tracking</div>
+    <div style={{fontSize:20,fontWeight:800,marginBottom:2}}>💶 Retention Overview</div>
     <div style={{fontSize:13,color:'var(--muted)',marginBottom:14,lineHeight:1.5}}>
       Abschlüsse der Retention, erfasst von den Agenten über ihren Link. Umsatz = Summe der beim Erfassen eingefrorenen CPOs.
       Stornierte Vorgänge zählen nicht mit, bleiben aber nachvollziehbar.
     </div>
     <CpoTariffEditor projectId="proj_gn_e5f6a7b8" skill="retention" showToast={showToast}/>
+    <CpoRateTable projectId="proj_gn_e5f6a7b8" skill="retention"/>
     <div style={{display:'flex',gap:12,flexWrap:'wrap',alignItems:'center',marginBottom:14}}>
       <div style={{display:'flex',border:'1px solid var(--border)',borderRadius:10,overflow:'hidden'}}>{[segBtn('day','Tag'),segBtn('week','Woche'),segBtn('month','Monat')]}</div>
       <input type="date" className="form-input" style={{width:'auto'}} value={day} onChange={e=>setDay(e.target.value||isoLocal(new Date()))}/>
@@ -41194,6 +41245,28 @@ function CpoTrackView({team, employees, showToast}){
       <label style={{marginLeft:'auto',fontSize:12,color:'var(--muted)',display:'flex',alignItems:'center',gap:6}}>
         <input type="checkbox" checked={showCancelled} onChange={e=>setShowCancelled(e.target.checked)}/> Stornierte zeigen</label>
     </div>
+    {(mode!=='day')&&(()=>{
+      // Lineare Hochrechnung: Ist ÷ bisherige Werktage × Werktage der ganzen Periode. Nur für die LAUFENDE
+      // Woche oder den laufenden Monat sinnvoll; abgeschlossene Perioden brauchen keine Schätzung.
+      const heute=isoLocal(new Date());
+      if(!(from<=heute&&heute<=to)) return null;
+      const wdTotal=cpoWorkdays(from,to), wdDone=cpoWorkdays(from, heute<to?heute:to);
+      if(!wdDone||!wdTotal) return null;
+      const projRev=revenue/wdDone*wdTotal, projCl=closes.length/wdDone*wdTotal;
+      const solid = wdDone>=Math.ceil(wdTotal/2);
+      return <div style={{border:'1px solid '+(solid?'#bbf7d0':'#fde68a'),background:solid?'#f0fdf4':'#fffbeb',borderRadius:12,padding:'12px 14px',marginBottom:14}}>
+        <div style={{display:'flex',gap:16,flexWrap:'wrap',alignItems:'baseline'}}>
+          <div><div style={{fontSize:11,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em'}}>Hochrechnung {mode==='week'?'Woche':'Monat'}</div>
+            <div style={{fontSize:24,fontWeight:800,fontFamily:'var(--mono)',color:solid?'#15803d':'#b45309'}}>{cpoEur(projRev)}</div></div>
+          <div><div style={{fontSize:11,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em'}}>Abschlüsse</div>
+            <div style={{fontSize:24,fontWeight:800,fontFamily:'var(--mono)'}}>{Math.round(projCl)}</div></div>
+          <div style={{fontSize:12,color:'var(--muted)',lineHeight:1.5,flex:'1 1 240px'}}>
+            {wdDone} von {wdTotal} Werktagen durch. Ist {cpoEur(revenue)} ÷ {wdDone} × {wdTotal}.
+            {solid?'':' Noch wenig Grundlage, die Zahl schwankt stark.'}
+          </div>
+        </div>
+      </div>;
+    })()}
     <div style={{display:'flex',gap:12,flexWrap:'wrap',marginBottom:14}}>
       {tile(cpoEur(revenue),'Umsatz',closes.length+(closes.length===1?' Abschluss':' Abschlüsse'),'#0f766e')}
       {tile(String(closes.length),'Abschlüsse', 'von '+live.length+' Vorgängen')}
@@ -41218,6 +41291,28 @@ function CpoTrackView({team, employees, showToast}){
         </div>
       </div>
       <div style={{border:'1px solid var(--border)',borderRadius:12,padding:'12px 14px',background:'var(--card)'}}>
+        <div style={{fontSize:13,fontWeight:800,marginBottom:8}}>Tagesverlauf</div>
+        {(()=>{ const h={}; live.forEach(r=>{ const x=cpoHour(r.created_at); if(x!=null) h[x]=(h[x]||0)+1; });
+          const hc={}; closes.forEach(r=>{ const x=cpoHour(r.created_at); if(x!=null) hc[x]=(hc[x]||0)+1; });
+          const hrs=Object.keys(h).map(Number).sort((a,b)=>a-b);
+          if(!hrs.length) return <div style={{fontSize:12.5,color:'var(--muted)'}}>Noch keine Erfassungen im Zeitraum.</div>;
+          const lo=Math.min(...hrs), hi=Math.max(...hrs); const max=Math.max(...hrs.map(x=>h[x]));
+          const cols=[]; for(let x=lo;x<=hi;x++) cols.push(x);
+          return <div>
+            <div style={{display:'flex',alignItems:'flex-end',gap:3,height:70}}>
+              {cols.map(x=>{ const n=h[x]||0, c=hc[x]||0; const ht=max?Math.round(n/max*60):0;
+                return <div key={x} title={x+' Uhr: '+n+' Vorgänge, davon '+c+' Abschlüsse'} style={{flex:1,minWidth:6,display:'flex',flexDirection:'column',justifyContent:'flex-end',height:'100%'}}>
+                  <div style={{height:ht+'px',background:'#cbd5e1',borderRadius:'3px 3px 0 0',position:'relative'}}>
+                    {c>0&&<div style={{position:'absolute',bottom:0,left:0,right:0,height:Math.round(c/Math.max(n,1)*ht)+'px',background:'#0f766e',borderRadius:'3px 3px 0 0'}}/>}
+                  </div></div>; })}
+            </div>
+            <div style={{display:'flex',gap:3,marginTop:3}}>
+              {cols.map(x=><div key={x} style={{flex:1,minWidth:6,textAlign:'center',fontSize:9,color:'var(--muted)'}}>{(hi-lo)<10||x%2===0?x:''}</div>)}
+            </div>
+            <div style={{fontSize:11,color:'var(--muted)',marginTop:6}}>Balken = erfasste Vorgänge je Stunde, dunkel = davon Abschlüsse. Zeitpunkt der Erfassung, nicht des Gesprächs.</div>
+          </div>; })()}
+      </div>
+      <div style={{border:'1px solid var(--border)',borderRadius:12,padding:'12px 14px',background:'var(--card)'}}>
         <div style={{fontSize:13,fontWeight:800,marginBottom:8}}>Kontakte ohne Abschluss</div>
         {!actRows.length?<div style={{fontSize:12.5,color:'var(--muted)'}}>Keine Vorgänge ohne Abschluss im Zeitraum.</div>:
           actRows.map(r=>{ const pct=docs.length?Math.round(r.n/docs.length*100):0;
@@ -41234,8 +41329,14 @@ function CpoTrackView({team, employees, showToast}){
         </div>
       </div>
       <div style={{border:'1px solid var(--border)',borderRadius:12,padding:'12px 14px',background:'var(--card)'}}>
-        <div style={{fontSize:13,fontWeight:800,marginBottom:8}}>Je Mitarbeiter</div>
+        <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8}}>
+          <span style={{fontSize:13,fontWeight:800}}>Team</span>
+          <span style={{fontSize:12,color:'var(--muted)'}}>{live.length} Vorgänge · {closes.length} Abschlüsse · {cpoEur(revenue)}</span>
+          {empRows.length>0&&<button className="btn btn-sm" style={{marginLeft:'auto'}} onClick={()=>setShowEmps(v=>!v)}>
+            {showEmps?'Mitarbeiter ausblenden':'Je Mitarbeiter ('+empRows.length+')'}</button>}
+        </div>
         {!empRows.length?<div style={{fontSize:12.5,color:'var(--muted)'}}>Keine Vorgänge im Zeitraum.</div>:
+         !showEmps?null:
           <div style={{maxHeight:280,overflowY:'auto'}}>
             <div style={{display:'flex',gap:8,fontSize:10.5,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.04em',paddingBottom:3}}>
               <span style={{flex:1}}>Mitarbeiter</span><span style={{width:52,textAlign:'right'}}>Vorg.</span>
@@ -41263,12 +41364,13 @@ function CpoTrackView({team, employees, showToast}){
         {!listed.length?<div style={{padding:16,fontSize:13,color:'var(--muted)'}}>Für diesen Zeitraum ist nichts erfasst.</div>:
         <table style={{width:'100%',borderCollapse:'collapse',fontSize:12.5}}>
           <thead><tr style={{position:'sticky',top:0,background:'var(--surface-2)'}}>
-            {['Datum','Case','Mitarbeiter','Status','Abg.','Was','Tarif vorher → neu','Ergebnis','Stufe','CPO',''].map((h,i)=>
-              <th key={i} style={{textAlign:i>=8&&i<=9?'right':'left',padding:'6px 10px',fontSize:11,color:'var(--muted)',whiteSpace:'nowrap'}}>{h}</th>)}
+            {['Datum','Zeit','Case','Mitarbeiter','Status','Abg.','Was','Tarif vorher → neu','Ergebnis','Stufe','CPO',''].map((h,i)=>
+              <th key={i} style={{textAlign:i>=9&&i<=10?'right':'left',padding:'6px 10px',fontSize:11,color:'var(--muted)',whiteSpace:'nowrap'}}>{h}</th>)}
           </tr></thead>
           <tbody>{listed.map(r=>(
             <tr key={r.id} style={{borderTop:'1px solid var(--border)',opacity:r.cancelled_at?0.5:1}}>
               <td style={{padding:'6px 10px',whiteSpace:'nowrap'}}>{fmtDate(r.work_date)}</td>
+              <td style={{padding:'6px 10px',whiteSpace:'nowrap',fontFamily:'var(--mono)',color:'var(--muted)'}}>{cpoTime(r.created_at)}</td>
               <td style={{padding:'6px 10px',fontFamily:'var(--mono)',fontWeight:700}}>{r.case_no}{r.cancelled_at?<span style={{marginLeft:6,fontSize:10,fontWeight:800,color:'var(--red)'}}>storniert</span>:null}</td>
               <td style={{padding:'6px 10px',whiteSpace:'nowrap'}}>{empName(r.employee_id)}</td>
               <td style={{padding:'6px 10px'}}>{r.status}</td>
@@ -41284,7 +41386,7 @@ function CpoTrackView({team, employees, showToast}){
       </div>
     </div>
     {isMgmt&&links.length>0&&<div style={{fontSize:11.5,color:'var(--muted)',marginTop:12,lineHeight:1.6}}>
-      Erfassungs-Link für die Agenten: {links.map(l=>(<span key={l.token} style={{fontFamily:'var(--mono)'}}>{'https://tive360.de/cpo.html?t='+l.token}</span>))} · Zugang mit der persönlichen PIN.
+      Erfassungs-Link für die Agenten (Retention Overview): {links.map(l=>(<span key={l.token} style={{fontFamily:'var(--mono)'}}>{'https://tive360.de/cpo.html?t='+l.token}</span>))} · Zugang mit der persönlichen PIN.
     </div>}
   </div>;
 }
