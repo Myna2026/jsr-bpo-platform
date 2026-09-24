@@ -9,7 +9,7 @@ export const PORTAL_URL = "https://hr.tive360.de/hr.html";
 
 export type AgentBrand = { key: string; name: string; accent: string; photo: string; disclosure: string };
 
-export async function agentBrand(sb: any, key: string, fallbackAccent = "#0F5661"): Promise<AgentBrand> {
+export async function agentBrand(sb: any, key: string, fallbackAccent = "#0A4A8F"): Promise<AgentBrand> {
   const { data } = await sb.from("ai_agents").select("key,name,accent,avatar_url,disclosure").eq("key", key).maybeSingle();
   const accent = (data && data.accent) || fallbackAccent;
   const photo = HR_BASE + ((data && data.avatar_url) || ("assets/agents/" + key + ".png"));
