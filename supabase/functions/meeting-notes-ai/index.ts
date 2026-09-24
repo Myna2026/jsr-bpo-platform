@@ -61,7 +61,7 @@ Deno.serve(async (req) => {
   if (!roles.length) return json({ error: "Kein Zugang." }, 403);
   const { data: rdefs } = await sb.from("roles_definitions").select("portals").in("role_key", roles);
   const hasHr = (rdefs || []).some((r: any) => (r.portals || []).includes("hr"));
-  if (!hasHr) return json({ error: "Nur fuers HR-Portal freigegeben." }, 403);
+  if (!hasHr) return json({ error: "Nur fuer den Leitstand freigegeben." }, 403);
 
   if (!ANTHROPIC_KEY) return json({ error: "Der KI-Schluessel ist noch nicht hinterlegt." }, 503);
   let body: any = {}; try { body = await req.json(); } catch { /* egal */ }

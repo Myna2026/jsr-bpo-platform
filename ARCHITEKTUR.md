@@ -24,9 +24,14 @@ Es gibt **drei Portale**, unterschieden über die Rolle (Feld `portals` in
 
 | Portal | Datei | Für wen | Domain |
 |---|---|---|---|
-| **HR** | `frontend/hr.html` | Overhead + Admin (Management, HR, Finance, Teamleiter, Projektleiter, QM, Trainer, ASP) | hr.tive360.de |
+| **Leitstand** (intern weiter `hr`) | `frontend/hr.html` | Overhead + Admin (Management, HR, Finance, Teamleiter, Projektleiter, QM, Trainer, ASP) | hr.tive360.de |
 | **Mitarbeiter** | `frontend/mitarbeiter.html` | Agenten/Mitarbeiter (eigenes Login) | mitarbeiter.tive360.de |
 | **Client** | `frontend/client.html` | Kunden (Rolle `kunde`) | client.tive360.de |
+
+Das HR-Portal heißt seit 2026-09-24 nach außen **Leitstand** (Login-Karte, Tab-Titel,
+Portal-Wechsler, Agentenmails). Geändert ist nur das Etikett: der interne Schlüssel
+bleibt `hr`, ebenso Rollenfelder, Tabellen und die Adresse; ein Umzug auf
+`leitstand.tive360.de` ist ein eigener, noch offener Schritt.
 
 Dazu **login-freie öffentliche Seiten** (Token-basiert): `praesentation.html`
 (Kundenbericht) und `showcase.html` (Bewerber-Showcase).
@@ -270,6 +275,17 @@ Diese Prinzipien ziehen sich durch das ganze System — beim Bauen einhalten:
    (Ø-Zeichen in HR-Ansichten, „Ø ungewichtet" im Kundenportal). Ehrlich ungenau
    statt falsch genau. Belegt 2026-09-23 am August 2026: Mails/h gewichtet 7,92 gegen
    Mittelwert 10,20, der Kundenwert liegt bei 7,8.
+2b. **Hochrechnungen laufen über Arbeitszeit, nicht über Kalendertage.** Nenner ist die
+   geplante Netto-Arbeitszeit aus `shift_assignments`, gekürzt um Abwesenheiten
+   (`employees.absences`: ganztags 0, halber Tag 0,5). Formel: `Ist + Σ (Reststunden je
+   Mitarbeiter × dessen Rate)`. Rate-Kaskade: eigene Rate ab 2 gelaufenen Stunden, sonst
+   eigener Schnitt der letzten 5 Plantage, sonst Teamschnitt, sonst keine Hochrechnung —
+   welche Stufe griff, steht an der Zahl. Anzeige erst ab 2 Teamstunden, „unsicher" bis
+   die Hälfte der Planstunden durch ist. Weil die Prognose damit am Schichtplan hängt,
+   meldet die Ansicht sein Ende („Plan endet am …") und Werktags-Lücken sichtbar, statt
+   die fehlenden Tage still wegzulassen. Erstmals im Retention-Cockpit (2026-09-24);
+   Ist-Stunden gibt es dort nicht (`daily_hours` nur HolidayCheck), der Plan ist die
+   einzige Quelle.
 3. **Kein stiller Rückfall.** Keine erfundenen/Dummy-Daten bei leerem Ergebnis.
    Loads sind an den Login gekoppelt (sonst läuft RLS anonym ins Leere); echte
    Fehler werden sichtbar gemacht, nicht durch Fake-Fallbacks kaschiert. Kein

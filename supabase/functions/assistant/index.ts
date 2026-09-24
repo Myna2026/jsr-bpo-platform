@@ -57,7 +57,7 @@ const NAV_KEYS = new Set(NAV.map((n) => n[0]));
 // auch die Struktur kennt (Portale, Rollen, Datenzusammenhänge, Konventionen). Bei Änderungen an ARCHITEKTUR.md
 // hier nachziehen.
 const ARCHITEKTUR = `AUFBAU DES SYSTEMS (Struktur, nicht Bedienung):
-PORTALE: HR-Portal (für Overhead/Admin), Mitarbeiter-Portal (Agenten mit eigenem Login), Client-Portal (Kunden).
+PORTALE: Leitstand, früher HR-Portal (für Overhead/Admin), Mitarbeiter-Portal (Agenten mit eigenem Login), Client-Portal (Kunden).
 Dazu öffentliche Token-Seiten (Präsentation, Showcase). Datenhaltung: Supabase (Postgres, Auth, Row-Level-Security,
 Storage, Edge Functions).
 ROLLEN (roles_definitions -> portals): kunde -> client; mitarbeiter -> mitarbeiter; teamlead/qm/trainer/asp/
@@ -133,7 +133,7 @@ Deno.serve(async (req) => {
   if (!roles.length) return json({ error: "Kein Zugang." }, 403);
   const { data: rdefs } = await sb.from("roles_definitions").select("portals").in("role_key", roles);
   const hasHr = (rdefs || []).some((r: any) => (r.portals || []).includes("hr"));
-  if (!hasHr) return json({ error: "Nur fürs HR-Portal freigegeben." }, 403);
+  if (!hasHr) return json({ error: "Nur für den Leitstand freigegeben." }, 403);
 
   if (!ANTHROPIC_KEY) return json({ error: "Der KI-Schlüssel ist noch nicht hinterlegt." }, 503);
   let body: any = {}; try { body = await req.json(); } catch { /* egal */ }
