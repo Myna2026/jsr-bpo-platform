@@ -64,7 +64,12 @@ try {
   // Offen-Check veraltetes DOM und ueberspringt Sektionen (stille blinde Flecken).
   const isSecOpen = (sec) => sec.evaluate((s) => {
     let el = s.nextElementSibling;
-    while (el && !el.classList.contains("nav-section")) { if (el.classList && el.classList.contains("ni")) return true; el = el.nextElementSibling; }
+    // Punkte liegen seit dem dunklen Menue in einer Huelle .nav-grp — beides zaehlt als "offen".
+    while (el && !el.classList.contains("nav-section")) {
+      if (el.classList && el.classList.contains("ni")) return true;
+      if (el.querySelector && el.querySelector(".ni")) return true;
+      el = el.nextElementSibling;
+    }
     return false;
   });
   const secLoc = page.locator(".sidebar .nav-section");
