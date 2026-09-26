@@ -41384,6 +41384,206 @@ function CpoRateTable({projectId, skill}){
     </div>}
   </div>;
 }
+// ── Stundenvergütung (zweite Erlösart neben dem CPO) ─────────────────────────────────────────────
+// Manche Mandate zahlen zusätzlich zum CPO einen Pauschalsatz je PRODUKTIVER Stunde. Produktiv heißt:
+// geplante Nettozeit aus dem Schichtplan (ohne Pause), abzüglich Urlaub und Krankheit — und nur an
+// Tagen, an denen der Agent auch wirklich Vorgänge erfasst hat. Wer nicht telefoniert (Projektleitung,
+// Backoffice), taucht damit gar nicht erst auf. Satz, Schalter und Rückfallwert stehen in app_config
+// (jsr_retention_hourly_v1) und sind ohne Code änderbar.
+const HOURLY_KEY='jsr_retention_hourly_v1';
+const HOURLY_DEFAULT={on:false, rate:12.5, fallback:7.5};
+function hourlyCfgOf(all, projectId, skill){
+  const v=(all&&all[projectId+'/'+skill])||{};
+  return {on:!!v.on, rate:Number(v.rate)||HOURLY_DEFAULT.rate, fallback:Number(v.fallback)||HOURLY_DEFAULT.fallback};
+}
+function CpoHourlyEditor({projectId, skill, cfg, allCfg, onSaved, showToast}){
+  const [open,setOpen]=useState(false);
+  const [busy,setBusy]=useState(false);
+  const [rate,setRate]=useState(String(cfg.rate).replace('.',','));
+  const [fb,setFb]=useState(String(cfg.fallback).replace('.',','));
+  const num=v=>Number(String(v).replace(',','.'));
+  const save=async(next)=>{
+    setBusy(true);
+    try{ const all={...(allCfg||{})}; all[projectId+'/'+skill]={...cfg, ...next}; await saveConfigToDB(HOURLY_KEY, all); onSaved&&onSaved(all); }
+    catch(e){ showToast&&showToast('⚠ Speichern fehlgeschlagen','error'); }
+    setBusy(false);
+  };
+  return <div style={{border:'1px solid '+(cfg.on?'#bfdbfe':'var(--border)'),borderRadius:12,background:'var(--card)',marginBottom:14,overflow:'hidden'}}>
+    <div style={{padding:'10px 14px',display:'flex',alignItems:'center',gap:10}}>
+      <span style={{fontSize:13,fontWeight:800}}>Stundenvergütung</span>
+      <span style={{fontSize:12,color:'var(--muted)'}}>
+        {cfg.on?(cpoEur(cfg.rate)+' je produktiver Stunde, zusätzlich zum CPO'):'aus, dieses Mandat rechnet nur nach CPO'}
+      </span>
+      <label style={{marginLeft:'auto',display:'flex',alignItems:'center',gap:7,fontSize:12,fontWeight:700,cursor:'pointer'}}>
+        <input type="checkbox" checked={cfg.on} disabled={busy} onChange={e=>save({on:e.target.checked})}/>
+        {cfg.on?'an':'aus'}
+      </label>
+      <button className="btn btn-sm" onClick={()=>setOpen(o=>!o)}>{open?'Schließen':'Einstellen'}</button>
+    </div>
+    {open&&<div style={{padding:'0 14px 14px'}}>
+      <div style={{display:'flex',gap:10,alignItems:'flex-end',flexWrap:'wrap'}}>
+        <div style={{width:150}}><label className="form-label">Satz je Stunde (€)</label>
+          <input className="form-input" value={rate} disabled={busy} onChange={e=>setRate(e.target.value)}
+            onBlur={()=>{ const v=num(rate); if(isFinite(v)&&v>0&&v!==cfg.rate) save({rate:v}); else setRate(String(cfg.rate).replace('.',',')); }}/></div>
+        <div style={{width:190}}><label className="form-label">Rückfall ohne Schichtplan (h/Tag)</label>
+          <input className="form-input" value={fb} disabled={busy} onChange={e=>setFb(e.target.value)}
+            onBlur={()=>{ const v=num(fb); if(isFinite(v)&&v>0&&v!==cfg.fallback) save({fallback:v}); else setFb(String(cfg.fallback).replace('.',',')); }}/></div>
+      </div>
+      <div style={{fontSize:11.5,color:'var(--muted)',marginTop:10,lineHeight:1.6}}>
+        Bezahlt werden Nettostunden aus dem Schichtplan, abzüglich Urlaub und Krankheit, und nur an Tagen,
+        an denen der Agent Vorgänge erfasst hat. Fehlt für so einen Tag noch eine Schicht im Plan, rechnet
+        das System mit dem Rückfallwert; sobald der Plan gepflegt ist, greift er automatisch und der
+        Rückfall verschwindet von selbst. Änderungen wirken sofort auf die ganze Auswertung, auch rückwirkend.
+      </div>
+    </div>}
+  </div>;
+}
+// ── Rechner: wie empfindlich reagiert der Umsatz auf die Fallzahl? ───────────────────────────────
+// Grundlage ist ein ECHTER Zeitraum (gestern, laufende Woche, laufender Monat oder frei gewählt).
+// Daraus kommen Fälle, Abschlussquote und Ø CPO. Die Frage dahinter: der Auftraggeber dreht die
+// Fallzahl um X Prozent — was macht das mit dem Umsatz? Die Stundenvergütung bleibt dabei
+// unberührt, sie hängt an der Besetzung und nicht an der Menge. Genau das ist der Punkt: sie
+// dämpft den Ausschlag.
+function CpoSimulator({compute, today, hrl, planOf, planDays}){
+  const gestern=(()=>{ const d=new Date(today+'T00:00:00'); d.setDate(d.getDate()-1); return isoLocal(d); })();
+  const monatAb=today.slice(0,8)+'01';
+  const wocheAb=(()=>{ const d=new Date(today+'T00:00:00'); d.setDate(d.getDate()-((d.getDay()+6)%7)); return isoLocal(d); })();
+  const [basis,setBasis]=useState('monat');            // gestern | woche | monat | frei
+  const [bFrom,setBFrom]=useState(monatAb);
+  const [bTo,setBTo]=useState(today);
+  const [pct,setPct]=useState(-20);
+  const [ziel,setZiel]=useState('gleich');             // gleich | folgewoche | monat
+
+  const br=(()=>{
+    if(basis==='gestern') return {f:gestern,t:gestern,label:'Gestern, '+fmtDate(gestern)};
+    if(basis==='woche')   return {f:wocheAb,t:today,label:'Laufende Woche, '+fmtDate(wocheAb)+' bis '+fmtDate(today)};
+    if(basis==='monat')   return {f:monatAb,t:today,label:'Laufender Monat, '+fmtDate(monatAb)+' bis '+fmtDate(today)};
+    const f=bFrom<=bTo?bFrom:bTo, t=bFrom<=bTo?bTo:bFrom;
+    return {f,t,label:fmtDate(f)+' bis '+fmtDate(t)};
+  })();
+  const B=compute(br.f, br.t);
+  const tage=B.dates.filter(ds=>ds<=today).length || 1;
+  const faelleProTag=B.team.n/tage;
+  const quote=B.team.n?B.team.cl/B.team.n:0;
+  const oCpo=B.team.cl?B.team.rev/B.team.cl:0;
+  const stdProTag=B.team.paidH/tage;
+
+  // Zielzeitraum: wie viele Tage rechnen wir hoch?
+  const zielTage=(()=>{
+    if(ziel==='gleich') return tage;
+    if(ziel==='folgewoche'){
+      const mo=new Date(today+'T00:00:00'); mo.setDate(mo.getDate()-((mo.getDay()+6)%7)+7);
+      let n=0; for(let i=0;i<7;i++){ const d=new Date(mo); d.setDate(mo.getDate()+i); const ds=isoLocal(d);
+        if((planDays||[]).indexOf(ds)>=0 || cpoIsWorkday(ds)) n++; }
+      return n;
+    }
+    const d0=new Date(today+'T00:00:00'); const letzter=new Date(d0.getFullYear(), d0.getMonth()+1, 0);
+    let n=0; for(let d=new Date(d0.getFullYear(),d0.getMonth(),1); d<=letzter; d.setDate(d.getDate()+1)){ if(cpoIsWorkday(isoLocal(d))) n++; }
+    return n;
+  })();
+  const zielLabel = ziel==='gleich'?('gleicher Zeitraum, '+tage+' Tage')
+                  : ziel==='folgewoche'?('Folgewoche, '+zielTage+' Werktage')
+                  : ('ganzer Monat, '+zielTage+' Werktage');
+
+  const szenario=(p)=>{
+    const faelle=faelleProTag*zielTage*(1+p/100);
+    const abschl=faelle*quote;
+    const cpoRev=abschl*oCpo;
+    const stdRev=hrl.on?(stdProTag*zielTage*hrl.rate):0;   // menge-unabhaengig
+    return {p, faelle, abschl, cpoRev, stdRev, total:cpoRev+stdRev};
+  };
+  const basisSz=szenario(0), sz=szenario(pct);
+  const delta=sz.total-basisSz.total;
+  const deltaPct=basisSz.total?delta/basisSz.total*100:0;
+  const jeProzent=basisSz.total?(szenario(1).total-basisSz.total):0;
+  const reihe=[-30,-20,-10,0,10,20,30].map(szenario);
+
+  const kachel=(v,l,sub,farbe)=><div style={{flex:'1 1 170px',minWidth:160,border:'1px solid var(--border)',borderRadius:12,padding:'12px 14px',background:'var(--card)'}}>
+    <div style={{fontSize:11,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em'}}>{l}</div>
+    <div style={{fontSize:24,fontWeight:800,fontFamily:'var(--mono)',color:farbe||'var(--text)',lineHeight:1.15,marginTop:3}}>{v}</div>
+    {sub?<div style={{fontSize:11.5,color:'var(--muted)',marginTop:2}}>{sub}</div>:null}
+  </div>;
+  const seg=(val,set,opts)=><div style={{display:'flex',border:'1px solid var(--border)',borderRadius:10,overflow:'hidden'}}>
+    {opts.map(([k,l])=><button key={k} className="btn btn-sm" onClick={()=>set(k)}
+      style={{border:'none',borderRadius:0,background:val===k?'var(--brand)':'transparent',color:val===k?'#fff':'var(--text)',fontWeight:700}}>{l}</button>)}
+  </div>;
+
+  return <div>
+    <div style={{border:'1px solid var(--border)',borderRadius:12,background:'var(--card)',padding:'14px 16px',marginBottom:14}}>
+      <div style={{fontSize:13,fontWeight:800,marginBottom:10}}>Grundlage</div>
+      <div style={{display:'flex',gap:12,alignItems:'center',flexWrap:'wrap'}}>
+        {seg(basis,setBasis,[['gestern','Gestern'],['woche','Laufende Woche'],['monat','Laufender Monat'],['frei','Freier Zeitraum']])}
+        {basis==='frei'&&<>
+          <input type="date" className="form-input" style={{width:'auto'}} value={bFrom} onChange={e=>setBFrom(e.target.value||today)}/>
+          <span style={{fontSize:13,color:'var(--muted)'}}>bis</span>
+          <input type="date" className="form-input" style={{width:'auto'}} value={bTo} onChange={e=>setBTo(e.target.value||today)}/>
+        </>}
+        <span style={{fontSize:12.5,color:'var(--muted)'}}>{br.label}</span>
+      </div>
+      <div style={{display:'flex',gap:12,flexWrap:'wrap',marginTop:14}}>
+        {kachel(String(B.team.n),'Vorgänge',cpoNum(faelleProTag,1)+' je Tag · '+tage+' Tage')}
+        {kachel(String(B.team.cl),'Abschlüsse',Math.round(quote*100)+' % Quote')}
+        {kachel(cpoEur(B.team.rev),'CPO-Umsatz','Ø '+cpoEur(oCpo)+' je Abschluss','#0f766e')}
+        {hrl.on&&kachel(cpoEur(B.team.hourRev),'Stundenumsatz',cpoHours(B.team.paidH)+' produktiv','var(--brand-soft)')}
+      </div>
+      {B.team.n===0&&<div style={{fontSize:12.5,color:'#b45309',marginTop:10}}>In diesem Zeitraum ist nichts erfasst — such einen anderen, sonst rechnet der Rechner mit Nullen.</div>}
+    </div>
+
+    <div style={{border:'1px solid var(--border)',borderRadius:12,background:'var(--card)',padding:'14px 16px',marginBottom:14}}>
+      <div style={{fontSize:13,fontWeight:800,marginBottom:10}}>Was, wenn der Auftraggeber die Fallzahl ändert?</div>
+      <div style={{display:'flex',gap:14,alignItems:'center',flexWrap:'wrap'}}>
+        <div style={{display:'flex',alignItems:'center',gap:8}}>
+          <input type="range" min="-60" max="60" step="5" value={pct} onChange={e=>setPct(Number(e.target.value))} style={{width:240}}/>
+          <input className="form-input" style={{width:90,textAlign:'right',fontFamily:'var(--mono)',fontWeight:700}}
+            value={pct} onChange={e=>{ const v=Number(String(e.target.value).replace(',','.')); if(isFinite(v)) setPct(Math.max(-100,Math.min(300,v))); }}/>
+          <span style={{fontSize:13,fontWeight:700}}>%</span>
+        </div>
+        {seg(ziel,setZiel,[['gleich','Gleicher Zeitraum'],['folgewoche','Folgewoche'],['monat','Ganzer Monat']])}
+        <span style={{fontSize:12,color:'var(--muted)'}}>{zielLabel}</span>
+      </div>
+
+      <div style={{display:'flex',gap:12,flexWrap:'wrap',marginTop:14}}>
+        {kachel(cpoNum(sz.faelle,0),'Vorgänge erwartet',(pct>0?'+':'')+pct+' % gegenüber heute')}
+        {kachel(cpoNum(sz.abschl,0),'Abschlüsse','Quote bleibt bei '+Math.round(quote*100)+' %')}
+        {kachel(cpoEur(sz.cpoRev),'CPO-Umsatz','bewegt sich mit der Menge','#0f766e')}
+        {hrl.on&&kachel(cpoEur(sz.stdRev),'Stundenumsatz','unverändert, hängt an der Besetzung','var(--brand-soft)')}
+        {kachel(cpoEur(sz.total),'Gesamt',(delta>=0?'+':'')+cpoEur(delta)+' · '+(deltaPct>=0?'+':'')+cpoNum(deltaPct,1)+' %','var(--brand)')}
+      </div>
+      <div style={{fontSize:12.5,color:'var(--muted)',marginTop:12,lineHeight:1.6}}>
+        Ein Prozentpunkt mehr oder weniger Fälle bewegt den Umsatz um <b style={{color:'var(--text)'}}>{cpoEur(Math.abs(jeProzent))}</b>
+        {hrl.on?<> im Zielzeitraum. Weil die Stundenvergütung nicht an der Menge hängt, schlägt eine Mengenänderung nur auf
+        {' '}<b style={{color:'var(--text)'}}>{basisSz.total?cpoNum(basisSz.cpoRev/basisSz.total*100,0):0} %</b> des Umsatzes durch.</>:<> im Zielzeitraum.</>}
+      </div>
+    </div>
+
+    <div style={{border:'1px solid var(--border)',borderRadius:12,background:'var(--card)',overflow:'hidden'}}>
+      <div style={{padding:'10px 14px',borderBottom:'1px solid var(--border)',fontSize:13,fontWeight:800}}>Empfindlichkeit im Überblick</div>
+      <div style={{overflowX:'auto'}}>
+        <table style={{width:'100%',borderCollapse:'collapse',fontSize:12.5,minWidth:640}}>
+          <thead><tr style={{background:'var(--surface-2)'}}>
+            {['Fallzahl','Vorgänge','Abschlüsse','CPO-Umsatz', ...(hrl.on?['Stundenumsatz']:[]), 'Gesamt','Delta'].map((h,i)=>
+              <th key={i} style={{textAlign:i?'right':'left',padding:'7px 10px',fontSize:10.5,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',whiteSpace:'nowrap'}}>{h}</th>)}
+          </tr></thead>
+          <tbody>{reihe.map(r=>{ const d=r.total-basisSz.total; const jetzt=r.p===0;
+            return <tr key={r.p} style={{borderTop:'1px solid var(--border)',background:jetzt?'var(--surface-2)':'transparent',fontWeight:jetzt?800:400}}>
+              <td style={{padding:'7px 10px',whiteSpace:'nowrap'}}>{r.p>0?'+':''}{r.p} %{jetzt?' · heutiges Niveau':''}</td>
+              <td style={{padding:'7px 10px',textAlign:'right'}}>{cpoNum(r.faelle,0)}</td>
+              <td style={{padding:'7px 10px',textAlign:'right'}}>{cpoNum(r.abschl,0)}</td>
+              <td style={{padding:'7px 10px',textAlign:'right',fontFamily:'var(--mono)'}}>{cpoEur(r.cpoRev)}</td>
+              {hrl.on?<td style={{padding:'7px 10px',textAlign:'right',fontFamily:'var(--mono)',color:'var(--muted)'}}>{cpoEur(r.stdRev)}</td>:null}
+              <td style={{padding:'7px 10px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:800}}>{cpoEur(r.total)}</td>
+              <td style={{padding:'7px 10px',textAlign:'right',fontFamily:'var(--mono)',color:d<0?'var(--red)':(d>0?'#15803d':'var(--muted)')}}>{d>0?'+':''}{cpoEur(d)}</td>
+            </tr>; })}</tbody>
+        </table>
+      </div>
+      <div style={{padding:'9px 14px',borderTop:'1px solid var(--border)',fontSize:11.5,color:'var(--muted)',lineHeight:1.6}}>
+        Gerechnet wird mit der Abschlussquote und dem Ø CPO der Grundlage, beide bleiben konstant — der Rechner beantwortet
+        ausschließlich die Mengenfrage. Ändert sich zugleich die Qualität der Fälle, stimmt der Ø CPO nicht mehr.
+        {hrl.on?' Die Stundenvergütung ist mit der geplanten Besetzung des Zielzeitraums gerechnet, nicht mit der Fallzahl.':''}
+      </div>
+    </div>
+  </div>;
+}
 function CpoTrackView({team, employees, showToast}){
   const roles=(team&&team.role_keys)||[];
   const isMgmt=roles.some(r=>r==='management'||r==='hr'||r==='finance');
@@ -41400,6 +41600,10 @@ function CpoTrackView({team, employees, showToast}){
   const [sortKey,setSortKey]=useState('rev');
   const [busy,setBusy]=useState(null);
   const [nowTs,setNowTs]=useState(Date.now());
+  const [hourlyAll,setHourlyAll]=useState(null);     // Stundenvergütung je Mandat (app_config)
+  const [tab,setTab]=useState('auswertung');         // auswertung | rechner
+  useEffect(()=>{ let alive=true; (async()=>{ try{ const v=await loadConfigFromDB(HOURLY_KEY); if(alive) setHourlyAll((v&&typeof v==='object')?v:{}); }
+    catch(e){ if(alive) setHourlyAll({}); } })(); return ()=>{alive=false;}; },[]);
   const load=React.useCallback(async()=>{
     try{
       const [r,s,l]=await Promise.all([
@@ -41414,6 +41618,7 @@ function CpoTrackView({team, employees, showToast}){
   useEffect(()=>{ const t=setInterval(()=>setNowTs(Date.now()), 60000); return ()=>clearInterval(t); },[]);
   if(rows===null) return <div className="sp-empty">Lädt…</div>;
 
+  const HRL=hourlyCfgOf(hourlyAll, PROJ, SKILL);     // an/aus, Satz, Rückfall
   const now=new Date(nowTs);
   const today=isoLocal(now);
   const nowMin=now.getHours()*60+now.getMinutes();
@@ -41487,9 +41692,19 @@ function CpoTrackView({team, employees, showToast}){
     const live=ents.filter(r=>!r.cancelled_at);
     live.forEach(r=>{ ids[r.employee_id]=1; });
     const mineOf={}; live.forEach(r=>{ (mineOf[r.employee_id]=mineOf[r.employee_id]||[]).push(r); });
+    // Tage, an denen ein Agent Vorgaenge erfasst hat: nur die zaehlen fuer die Stundenverguetung.
+    const activeDays={};
+    live.forEach(r=>{ const ds=String(r.work_date).slice(0,10);
+      (activeDays[r.employee_id]=activeDays[r.employee_id]||{})[ds]=1; });
+    // Rueckfall fuer heute: anteilig am Standardtag 09:00-17:30, damit ein angefangener Tag nicht voll zaehlt.
+    const fbToday=Math.max(0, Math.min(1, (nowMin-540)/510));
     const list=Object.keys(ids).map(id=>{
-      let planH=0, doneH=0, restH=0;
-      dates.forEach(ds=>{ const p=planOf(ds,id); planH+=p.plan; doneH+=p.done; restH+=Math.max(0, p.plan-p.done); });
+      let planH=0, doneH=0, restH=0, paidH=0, paidPlanH=0, fbDays=0;
+      dates.forEach(ds=>{ const p=planOf(ds,id); planH+=p.plan; doneH+=p.done; restH+=Math.max(0, p.plan-p.done);
+        if(!(activeDays[id]&&activeDays[id][ds])) return;          // an diesem Tag nicht telefoniert
+        if(p.plan>0){ paidH+=p.done; paidPlanH+=p.plan; }           // Schichtplan ist die Wahrheit
+        else { const f=HRL.fallback; fbDays++; paidPlanH+=f; paidH+=(ds<today?f:(ds===today?f*fbToday:0)); }
+      });
       const mine=mineOf[id]||[];
       const cls=mine.filter(r=>r.is_close);
       const rev=cls.reduce((a,r)=>a+(Number(r.cpo_amount)||0),0);
@@ -41499,21 +41714,31 @@ function CpoTrackView({team, employees, showToast}){
       const lost=mine.filter(r=>r.action==='Kündigung in K7 erfasst'||r.action==='Angebot abgelehnt').length;
       const l2=cls.filter(r=>r.discount_level===2).length;
       const rate=rateFor(id, doneH, cls.length, rev);
-      return {id, name:empName(id), planH, doneH, restH, n:mine.length, cl:cls.length, rev,
+      const hourRev=HRL.on?paidH*HRL.rate:0;
+      const fcHourRev=HRL.on?paidPlanH*HRL.rate:0;   // alle geplanten produktiven Stunden des Zeitraums
+      const fcRev=rate.eph==null?null:(rev+restH*rate.eph);
+      return {id, name:empName(id), planH, doneH, restH, paidH, paidPlanH, fbDays,
+        n:mine.length, cl:cls.length, rev, hourRev, total:rev+hourRev,
         up:out.up, gleich:out.gleich, down:out.downgrade, reached, lost, l2, rate,
         cph:doneH>0?cls.length/doneH:null, eph:doneH>0?rev/doneH:null,
         fcCl:rate.cph==null?null:(cls.length+restH*rate.cph),
-        fcRev:rate.eph==null?null:(rev+restH*rate.eph)};
+        fcRev, fcHourRev, fcTotal:(fcRev==null?null:fcRev+fcHourRev)};
     });
     const sum=k=>list.reduce((a,r)=>a+(Number(r[k])||0),0);
     const cls=live.filter(r=>r.is_close);
     const team={
       planH:sum('planH'), doneH:sum('doneH'), restH:sum('restH'),
+      paidH:sum('paidH'), paidPlanH:sum('paidPlanH'), fbDays:sum('fbDays'),
+      hourRev:sum('hourRev'),
       n:live.length, cl:cls.length, rev:cls.reduce((a,r)=>a+(Number(r.cpo_amount)||0),0),
       fcCl:list.some(r=>r.fcCl!=null)?list.reduce((a,r)=>a+(r.fcCl!=null?r.fcCl:r.cl),0):null,
       fcRev:list.some(r=>r.fcRev!=null)?list.reduce((a,r)=>a+(r.fcRev!=null?r.fcRev:r.rev),0):null,
       noBase:list.filter(r=>r.rate.src==='none'&&r.restH>0).length,
+      fcHourRev:sum('fcHourRev'),
+      bezahlte:list.filter(r=>r.paidH>0).length,
     };
+    team.total=team.rev+team.hourRev;
+    team.fcTotal=(team.fcRev==null)?null:(team.fcRev+team.fcHourRev);
     // Plan-Gesundheit: reicht der Plan bis zum Ende, und fehlen Werktage darin?
     const gaps=dates.filter(ds=>ds<=today && cpoIsWorkday(ds) && !(plan[ds]&&Object.keys(plan[ds]).length));
     const planShort=(planEnd&&t>planEnd)?planEnd:null;
@@ -41555,9 +41780,18 @@ function CpoTrackView({team, employees, showToast}){
     const e=live.filter(r=>String(r.work_date).slice(0,10)===ds);
     const c=e.filter(r=>r.is_close);
     let ph=0, dh=0; Object.keys(plan[ds]||{}).forEach(id=>{ ph+=plan[ds][id].plan; dh+=plan[ds][id].done; });
-    return {ds, n:e.length, cl:c.length, rev:c.reduce((a,r)=>a+(Number(r.cpo_amount)||0),0), planH:ph, doneH:dh};
+    // Bezahlte Stunden des Tages: nur Agenten, die an diesem Tag Vorgaenge erfasst haben.
+    let paid=0;
+    if(HRL.on){
+      const aktiv={}; e.forEach(r=>{ aktiv[r.employee_id]=1; });
+      Object.keys(aktiv).forEach(id=>{ const pd=(plan[ds]&&plan[ds][id])||null;
+        paid += pd? pd.done : (ds<today?HRL.fallback:(ds===today?HRL.fallback*Math.max(0,Math.min(1,(nowMin-540)/510)):0)); });
+    }
+    const rev=c.reduce((a,r)=>a+(Number(r.cpo_amount)||0),0);
+    const hourRev=HRL.on?paid*HRL.rate:0;
+    return {ds, n:e.length, cl:c.length, rev, paidH:paid, hourRev, total:rev+hourRev, planH:ph, doneH:dh};
   }).filter(d=>d.n>0||d.planH>0):[];
-  const maxDayRev=dayRows.reduce((a,d)=>Math.max(a,d.rev),0);
+  const maxDayRev=dayRows.reduce((a,d)=>Math.max(a,HRL.on?d.total:d.rev),0);
 
   const SORTS={name:'Name', doneH:'Stunden', n:'Vorgänge', cl:'Abschlüsse', cph:'Abschl./Std', quote:'Quote', up:'Upgrades', down:'Downgrades', lost:'Verloren', rev:'Umsatz', eph:'€/Std'};
   const empRows=R.list.slice().sort((a,b)=>{
@@ -41620,9 +41854,15 @@ function CpoTrackView({team, employees, showToast}){
 
   return <div style={{maxWidth:1240}}>
     <div style={{fontSize:20,fontWeight:800,marginBottom:2}}>💶 Retention Overview</div>
-    <div style={{fontSize:13,color:'var(--muted)',marginBottom:14,lineHeight:1.5}}>
-      Abschlüsse der Retention, erfasst von den Agenten über ihren Link. Umsatz = Summe der beim Erfassen eingefrorenen CPOs.
-      Hochgerechnet wird über die geplante Arbeitszeit aus dem Schichtplan, nicht über Kalendertage. Stornierte Vorgänge zählen nicht mit.
+    <div style={{fontSize:13,color:'var(--muted)',marginBottom:12,lineHeight:1.5}}>
+      Abschlüsse der Retention, erfasst von den Agenten über ihren Link. CPO-Umsatz = Summe der beim Erfassen eingefrorenen CPOs
+      {HRL.on?', Stundenumsatz = produktive Stunden aus dem Schichtplan mal '+cpoEur(HRL.rate)+'':''}.
+      Hochgerechnet wird über die geplante Arbeitszeit, nicht über Kalendertage. Stornierte Vorgänge zählen nicht mit.
+    </div>
+    <div style={{display:'flex',border:'1px solid var(--border)',borderRadius:10,overflow:'hidden',marginBottom:14,width:'fit-content'}}>
+      {[['auswertung','Auswertung'],['rechner','Rechner']].map(([k,l])=>(
+        <button key={k} className="btn btn-sm" onClick={()=>setTab(k)}
+          style={{border:'none',borderRadius:0,background:tab===k?'var(--brand)':'transparent',color:tab===k?'#fff':'var(--text)',fontWeight:700}}>{l}</button>))}
     </div>
 
     {/* Heute — immer sichtbar, unabhängig vom gewählten Zeitraum */}
@@ -41630,13 +41870,15 @@ function CpoTrackView({team, employees, showToast}){
       <div style={{display:'flex',flexWrap:'wrap',gap:20,alignItems:'flex-end'}}>
         <div style={{minWidth:150}}>
           <div style={{fontSize:11,fontWeight:800,opacity:.75,textTransform:'uppercase',letterSpacing:'.06em'}}>Heute · {fmtDate(today)}</div>
-          <div style={{fontSize:30,fontWeight:800,fontFamily:'var(--mono)',lineHeight:1.1}}>{cpoEur(T.team.rev)}</div>
-          <div style={{fontSize:12,opacity:.85}}>{T.team.cl} {T.team.cl===1?'Abschluss':'Abschlüsse'} aus {T.team.n} Vorgängen</div>
+          <div style={{fontSize:30,fontWeight:800,fontFamily:'var(--mono)',lineHeight:1.1}}>{cpoEur(HRL.on?T.team.total:T.team.rev)}</div>
+          <div style={{fontSize:12,opacity:.85}}>
+            {HRL.on?(cpoEur(T.team.rev)+' CPO · '+cpoEur(T.team.hourRev)+' Stunden'):(T.team.cl+' '+(T.team.cl===1?'Abschluss':'Abschlüsse')+' aus '+T.team.n+' Vorgängen')}
+          </div>
         </div>
         <div style={{minWidth:150}}>
           <div style={{fontSize:11,fontWeight:800,opacity:.75,textTransform:'uppercase',letterSpacing:'.06em'}}>Hochrechnung Tagesende</div>
           {T.enough&&T.team.fcRev!=null?<>
-            <div style={{fontSize:30,fontWeight:800,fontFamily:'var(--mono)',lineHeight:1.1}}>{cpoEur(T.team.fcRev)}</div>
+            <div style={{fontSize:30,fontWeight:800,fontFamily:'var(--mono)',lineHeight:1.1}}>{cpoEur(HRL.on?T.team.fcTotal:T.team.fcRev)}</div>
             <div style={{fontSize:12,opacity:.85}}>{cpoNum(T.team.fcCl,0)} Abschlüsse {T.solid?'':'· noch unsicher'}</div>
           </>:<>
             <div style={{fontSize:20,fontWeight:800,lineHeight:1.3,marginTop:4}}>noch zu früh</div>
@@ -41659,7 +41901,12 @@ function CpoTrackView({team, employees, showToast}){
 
     <CpoTariffEditor projectId={PROJ} skill={SKILL} showToast={showToast}/>
     <CpoRateTable projectId={PROJ} skill={SKILL}/>
+    {hourlyAll!==null&&<CpoHourlyEditor projectId={PROJ} skill={SKILL} cfg={HRL} allCfg={hourlyAll}
+      onSaved={a=>setHourlyAll(a)} showToast={showToast}/>}
 
+    {tab==='rechner'&&<CpoSimulator compute={computeRange} today={today} hrl={HRL} planOf={planOf} planDays={planDays}/>}
+
+    {tab==='auswertung'&&<>
     <div style={{display:'flex',gap:12,flexWrap:'wrap',alignItems:'center',marginBottom:14}}>
       <div style={{display:'flex',border:'1px solid var(--border)',borderRadius:10,overflow:'hidden'}}>{[segBtn('day','Tag'),segBtn('week','Woche'),segBtn('month','Monat'),segBtn('range','Zeitraum')]}</div>
       {mode==='range'?<>
@@ -41686,7 +41933,8 @@ function CpoTrackView({team, employees, showToast}){
     {mode!=='day'&&R.hasToday&&<div style={{border:'1px solid '+(R.solid?'#bbf7d0':'#fde68a'),background:R.solid?'#f0fdf4':'#fffbeb',borderRadius:12,padding:'12px 14px',marginBottom:14}}>
       <div style={{display:'flex',gap:18,flexWrap:'wrap',alignItems:'baseline'}}>
         <div><div style={{fontSize:11,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em'}}>Hochrechnung {mode==='week'?'Woche':(mode==='month'?'Monat':'Zeitraum')}</div>
-          <div style={{fontSize:26,fontWeight:800,fontFamily:'var(--mono)',color:R.solid?'#15803d':'#b45309'}}>{R.enough&&R.team.fcRev!=null?cpoEur(R.team.fcRev):'—'}</div></div>
+          <div style={{fontSize:26,fontWeight:800,fontFamily:'var(--mono)',color:R.solid?'#15803d':'#b45309'}}>{R.enough&&R.team.fcRev!=null?cpoEur(HRL.on?R.team.fcTotal:R.team.fcRev):'—'}</div>
+          {HRL.on&&R.enough&&R.team.fcRev!=null?<div style={{fontSize:11.5,color:'var(--muted)',marginTop:2}}>{cpoEur(R.team.fcRev)} CPO · {cpoEur(R.team.fcHourRev)} Stunden</div>:null}</div>
         <div><div style={{fontSize:11,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em'}}>Abschlüsse</div>
           <div style={{fontSize:26,fontWeight:800,fontFamily:'var(--mono)'}}>{R.enough&&R.team.fcCl!=null?cpoNum(R.team.fcCl,0):'—'}</div></div>
         <div style={{fontSize:12,color:'var(--muted)',lineHeight:1.6,flex:'1 1 260px'}}>
@@ -41698,7 +41946,9 @@ function CpoTrackView({team, employees, showToast}){
     </div>}
 
     <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(158px,1fr))',gap:12,marginBottom:14}}>
-      {tile(cpoEur(revenue),'Umsatz',closes.length+(closes.length===1?' Abschluss':' Abschlüsse'),'#0f766e')}
+      {tile(cpoEur(revenue),'CPO-Umsatz',closes.length+(closes.length===1?' Abschluss':' Abschlüsse'),'#0f766e')}
+      {HRL.on&&tile(cpoEur(R.team.hourRev),'Stundenumsatz',cpoHours(R.team.paidH)+' × '+cpoEur(HRL.rate),'var(--brand-soft)')}
+      {HRL.on&&tile(cpoEur(R.team.total),'Gesamtumsatz','CPO und Stunden','var(--brand)')}
       {tile(String(closes.length),'Abschlüsse','von '+live.length+' Vorgängen')}
       {tile(String(docs.length),'Ohne Abschluss','Dokumentation, kein Umsatz')}
       {tile(closes.length?cpoEur(revenue/closes.length):'—','Ø CPO','je Abschluss')}
@@ -41780,7 +42030,7 @@ function CpoTrackView({team, employees, showToast}){
             <th style={{textAlign:'right',padding:'6px 8px',fontSize:10.5,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',whiteSpace:'nowrap',position:'sticky',top:0,background:'var(--surface-2)'}}>Gleich</th>
             {th('down','Down')}{th('lost','Verloren')}
             <th style={{textAlign:'right',padding:'6px 8px',fontSize:10.5,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',whiteSpace:'nowrap',position:'sticky',top:0,background:'var(--surface-2)'}}>Stufe 2</th>
-            {th('rev','Umsatz')}{th('eph','€/Std')}
+            {th('rev','CPO €')}{HRL.on?th('hourRev','Stunden €'):null}{HRL.on?th('total','Gesamt €'):null}{th('eph','€/Std')}
             {R.hasToday?<th style={{textAlign:'right',padding:'6px 8px',fontSize:10.5,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',whiteSpace:'nowrap',position:'sticky',top:0,background:'var(--surface-2)'}}>Prognose</th>:null}
           </tr></thead>
           <tbody>{empRows.map(e=>{
@@ -41800,6 +42050,10 @@ function CpoTrackView({team, employees, showToast}){
               <td style={{padding:'6px 8px',textAlign:'right',color:e.lost?'var(--red)':'var(--muted)',fontWeight:e.lost?700:400}} title="Kündigung in K7 erfasst oder Angebot abgelehnt">{e.lost}</td>
               <td style={{padding:'6px 8px',textAlign:'right',color:'var(--muted)'}}>{e.cl?Math.round(e.l2/e.cl*100)+' %':'—'}</td>
               <td style={{padding:'6px 8px',textAlign:'right',fontWeight:800,fontFamily:'var(--mono)'}}>{cpoEur(e.rev)}</td>
+              {HRL.on?<td style={{padding:'6px 8px',textAlign:'right',fontFamily:'var(--mono)',color:e.paidH>0?'var(--text)':'var(--muted)'}}
+                title={e.paidH>0?(cpoHours(e.paidH)+' bezahlt'+(e.fbDays?(' · '+e.fbDays+' Tage ohne Schichtplan, mit '+cpoHours(HRL.fallback)+' gerechnet'):'')):'keine Vorgänge erfasst, keine Stundenvergütung'}>
+                {e.paidH>0?cpoEur(e.hourRev):'—'}</td>:null}
+              {HRL.on?<td style={{padding:'6px 8px',textAlign:'right',fontWeight:800,fontFamily:'var(--mono)'}}>{cpoEur(e.total)}</td>:null}
               <td style={{padding:'6px 8px',textAlign:'right',fontFamily:'var(--mono)',color:'var(--muted)'}}>{e.eph!=null?cpoEur(e.eph):'—'}</td>
               {R.hasToday?<td style={{padding:'6px 8px',textAlign:'right',fontFamily:'var(--mono)'}} title={'Grundlage: '+(RATE_LABEL[e.rate.src]||'')+' · Reststunden '+cpoHours(e.restH)}>
                 {e.fcRev!=null?cpoEur(e.fcRev):'—'}
@@ -41820,6 +42074,8 @@ function CpoTrackView({team, employees, showToast}){
               <td style={{padding:'7px 8px',textAlign:'right'}}>{empRows.reduce((a,e)=>a+e.lost,0)}</td>
               <td style={{padding:'7px 8px',textAlign:'right'}}>{R.team.cl?Math.round(lvl2/R.team.cl*100)+' %':'—'}</td>
               <td style={{padding:'7px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{cpoEur(R.team.rev)}</td>
+              {HRL.on?<td style={{padding:'7px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{cpoEur(R.team.hourRev)}</td>:null}
+              {HRL.on?<td style={{padding:'7px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{cpoEur(R.team.total)}</td>:null}
               <td style={{padding:'7px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{R.team.doneH>0?cpoEur(R.team.rev/R.team.doneH):'—'}</td>
               {R.hasToday?<td style={{padding:'7px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{R.enough&&R.team.fcRev!=null?cpoEur(R.team.fcRev):'—'}</td>:null}
             </tr>
@@ -41834,12 +42090,15 @@ function CpoTrackView({team, employees, showToast}){
 
     {/* Umsatz je Tag */}
     {dayRows.length>0&&<div style={{border:'1px solid var(--border)',borderRadius:12,background:'var(--card)',marginBottom:14,overflow:'hidden'}}>
-      <div style={{padding:'10px 14px',borderBottom:'1px solid var(--border)',fontSize:13,fontWeight:800}}>Umsatz je Tag</div>
+      <div style={{padding:'10px 14px',borderBottom:'1px solid var(--border)',fontSize:13,fontWeight:800}}>{HRL.on?'Umsatz je Tag, CPO und Stunden':'Umsatz je Tag'}</div>
       <div style={{padding:'8px 14px 12px'}}>
         <div style={{display:'flex',alignItems:'center',gap:10,paddingBottom:4,fontSize:10.5,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.04em'}}>
           <span style={{width:108}}>Tag</span><span style={{width:88,textAlign:'right'}}>Stunden</span>
           <span style={{width:56,textAlign:'right'}}>Vorg.</span><span style={{width:52,textAlign:'right'}}>Abschl.</span>
-          <span style={{flex:1,minWidth:60}}/><span style={{width:92,textAlign:'right'}}>Umsatz</span><span style={{width:82,textAlign:'right'}}>je Stunde</span>
+          <span style={{flex:1,minWidth:60}}/>
+          <span style={{width:92,textAlign:'right'}}>CPO</span>
+          {HRL.on?<span style={{width:92,textAlign:'right'}}>Stunden</span>:null}
+          {HRL.on?<span style={{width:98,textAlign:'right'}}>Gesamt</span>:<span style={{width:82,textAlign:'right'}}>je Stunde</span>}
         </div>
         {dayRows.map(d=>(
           <div key={d.ds} style={{display:'flex',alignItems:'center',gap:10,padding:'4px 0',fontSize:12.5,borderTop:'1px solid var(--border)'}}>
@@ -41849,9 +42108,12 @@ function CpoTrackView({team, employees, showToast}){
             <span style={{width:56,textAlign:'right',color:'var(--muted)'}}>{d.n} Vg.</span>
             <span style={{width:52,textAlign:'right',fontWeight:700}}>{d.cl}</span>
             <div style={{flex:1,height:8,background:'var(--surface-2)',borderRadius:5,overflow:'hidden',minWidth:60}}>
-              <div style={{width:(maxDayRev?Math.round(d.rev/maxDayRev*100):0)+'%',height:'100%',background:'#0f766e'}}/></div>
+              <div style={{width:(maxDayRev?Math.round((HRL.on?d.total:d.rev)/maxDayRev*100):0)+'%',height:'100%',background:'#0f766e'}}/></div>
             <span style={{width:92,textAlign:'right',fontFamily:'var(--mono)',fontWeight:700}}>{cpoEur(d.rev)}</span>
-            <span style={{width:82,textAlign:'right',fontFamily:'var(--mono)',color:'var(--muted)'}}>{d.doneH>0?cpoEur(d.rev/d.doneH)+'/h':'—'}</span>
+            {HRL.on?<span style={{width:92,textAlign:'right',fontFamily:'var(--mono)',color:'var(--muted)'}} title={cpoHours(d.paidH)+' bezahlt'}>{cpoEur(d.hourRev)}</span>:null}
+            {HRL.on
+              ?<span style={{width:98,textAlign:'right',fontFamily:'var(--mono)',fontWeight:800}}>{cpoEur(d.total)}</span>
+              :<span style={{width:82,textAlign:'right',fontFamily:'var(--mono)',color:'var(--muted)'}}>{d.doneH>0?cpoEur(d.rev/d.doneH)+'/h':'—'}</span>}
           </div>))}
       </div>
     </div>}
@@ -41891,6 +42153,8 @@ function CpoTrackView({team, employees, showToast}){
         </table>}
       </div>
     </div>
+    </>}
+
     {isMgmt&&links.length>0&&<div style={{fontSize:11.5,color:'var(--muted)',marginTop:12,lineHeight:1.6}}>
       Erfassungs-Link für die Agenten (Retention Overview): {links.map(l=>(<span key={l.token} style={{fontFamily:'var(--mono)'}}>{'https://tive360.de/retention'}</span>))} · Zugang mit der persönlichen PIN.
     </div>}
