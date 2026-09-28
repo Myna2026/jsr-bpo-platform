@@ -28,6 +28,8 @@ const json = (b: unknown, s = 200) => new Response(JSON.stringify(b), { status: 
 
 const OWNER_MAIL = "info@mynaai.de";
 const FALLBACK_TO = ["consulting@25hrs.net", "r.gore@tiramu.de"];   // Thorsten, Rajner
+// Bewusst getrennt vom Giganetz-Report (Entscheidung 2026-09-28): dort sind Ylli und Shkurte
+// dazugekommen, hier nicht. HolidayCheck ist Edis Mandat — kommt hier jemand dazu, dann Edi.
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });

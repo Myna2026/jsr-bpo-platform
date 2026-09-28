@@ -1,4 +1,4 @@
-// Annas Wächter über das Retention Overview. Einmal täglich um 19:20 Berliner Zeit, direkt nach dem
+// Pauls Wächter über das Retention Overview. Einmal täglich um 19:20 Berliner Zeit, direkt nach dem
 // Tagesabschluss — und NUR, wenn es etwas zu melden gibt. Lieber wenige Meldungen, die jemand liest.
 // Empfänger ist allein info@mynaai.de; die beiden Tagesreports (cpo-report) gehen weiter an alle drei.
 //
@@ -180,7 +180,7 @@ Deno.serve(async (req) => {
   if (!funde.length) return json({ ok: true, today, funde: 0, note: "nichts zu melden" });
 
   // ── Mail ──────────────────────────────────────────────────────────────────
-  const brandKey = ((await agentMailSender(sb, "anna")) ? "anna" : "max");
+  const brandKey = ((await agentMailSender(sb, "paul")) ? "paul" : "max");
   const brand = await agentBrand(sb, brandKey);
   let inner = lead(funde.length === 1 ? "Eine Auffälligkeit im Retention Overview." : funde.length + " Auffälligkeiten im Retention Overview.");
   funde.forEach((f) => { inner += callout(f.titel, f.text, f.ton === "bad" ? "#dc2626" : "#d97706"); });
@@ -196,7 +196,7 @@ Deno.serve(async (req) => {
   // Nur an den Eigentümer (User, 2026-09-28): die zwei Tagesreports gehen an alle drei, die
   // Auffälligkeiten nur an ihn — sonst landen Einzelfälle über Agenten im Verteiler.
   const to: string[] = [isTest ? String(body.to || OWNER_MAIL) : OWNER_MAIL];
-  const sender = (await agentMailSender(sb, "anna")) || (await agentMailSender(sb, "max"));
+  const sender = (await agentMailSender(sb, "paul")) || (await agentMailSender(sb, "max"));
   if (!sender) return json({ ok: false, error: "Kein Absender mit Postfach" }, 500);
   const results: any[] = [];
   for (const adr of to) { const r = await smtpSend(sender, adr, subject, html); results.push({ to: adr, ok: r.ok, error: r.error }); }

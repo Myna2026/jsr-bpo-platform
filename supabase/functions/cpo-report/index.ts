@@ -1,4 +1,4 @@
-// Annas CPO-Report, zweimal am Tag: 13:00 der Zwischenstand, 19:15 der Tagesabschluss
+// Pauls CPO-Report, zweimal am Tag: 13:00 der Zwischenstand, 19:15 der Tagesabschluss
 // (nach dem Ende der Spätschicht um 19:00, damit die letzten Vorgänge drin sind).
 // Inhalt: CPO-Umsatz bis zu diesem Zeitpunkt, Stundenumsatz, Summe — dazu die drei besten und die
 // zwei schwächsten Agenten des Tages. Empfänger: info@mynaai.de, Thorsten, Rajner.
@@ -26,7 +26,30 @@ const json = (b: unknown, s = 200) => new Response(JSON.stringify(b), { status: 
 
 const PROJ = "proj_gn_e5f6a7b8", SKILL = "retention";
 const OWNER_MAIL = "info@mynaai.de";
-const FALLBACK_TO = ["consulting@25hrs.net", "r.gore@tiramu.de"];   // Thorsten, Rajner
+// Empfaenger der beiden Tagesreports. Gesucht wird ueber den Namen im Zugang, damit eine geaenderte
+// Adresse automatisch mitgeht; die Ersatzadresse greift nur, wenn der Zugang nicht gefunden wird.
+// Ylli und Shkurte kommen ab dem 29.09.2026 dazu (Vorgabe vom 28.09.: "ab morgen") — deshalb ein
+// Datum und kein sofortiger Wechsel, damit der heutige Abschluss noch an die bisherige Runde geht.
+const EXTRA_AB = "2026-09-29";
+async function empfaengerFuer(sb: any, today: string): Promise<string[]> {
+  const faellig = EMPFAENGER.filter((e) => !e.ab || today >= e.ab);
+  const { data: us } = await sb.from("app_users").select("user_id,full_name")
+    .or(faellig.map((e) => "full_name.ilike.%" + e.name + "%").join(","));
+  const mails: string[] = [];
+  for (const e of faellig) {
+    const u = (us || []).find((x: any) => String(x.full_name || "").toLowerCase().includes(e.name.toLowerCase()));
+    let adr = "";
+    if (u) { const { data: au } = await sb.auth.admin.getUserById((u as any).user_id); adr = au?.user?.email || ""; }
+    mails.push(adr || e.ersatz);
+  }
+  return [...new Set([OWNER_MAIL, ...mails])];
+}
+const EMPFAENGER: { name: string; ersatz: string; ab?: string }[] = [
+  { name: "Thorsten", ersatz: "consulting@25hrs.net" },
+  { name: "Rajner",   ersatz: "r.gore@tiramu.de" },
+  { name: "Ylli",     ersatz: "y.bogiqi@25hrs.net",  ab: EXTRA_AB },
+  { name: "Shkurte",  ersatz: "sh.cikaqi@25hrs.net", ab: EXTRA_AB },
+];
 const HOURLY_KEY = "jsr_retention_hourly_v1";
 
 const AGENT_POS = ["Agent", "Senior Agent", "ASP", "Supervisor"];   // Kategorie "agent" laut docs/fachmodell
@@ -154,16 +177,19 @@ Deno.serve(async (req) => {
   const fbCount = rows.filter((r) => r.fb && r.agent).length;
   const planLos = shiftIds.length === 0;
 
-  const best = rows.slice(0, 3);
-  const schwach = rows.length > 3 ? rows.slice(-2).filter((r) => !best.some((b) => b.id === r.id)) : [];
+  // Eine Liste statt Bestenliste und Schlusslicht (Vorgabe 2026-09-28): alle, die telefonieren,
+  // nach Umsatz sortiert. Overhead bleibt draussen — wer keine Cases bearbeitet, gehoert nicht in
+  // die Leistungsreihe, auch wenn einmal ein Vorgang von ihm kommt.
+  const liste = rows.filter((r) => r.agent);
+  const schnitt = liste.length ? liste.reduce((a: number, r: any) => a + r.rev, 0) / liste.length : 0;
 
-  if (dry) return json({ ok: true, slot, today, total, gesamt, quote,
+  if (dry) return json({ ok: true, slot, today, empfaenger: await empfaengerFuer(sb, today), total, gesamt, quote,
                          jeStd: total.paid > 0 ? Math.round((HRL.on ? gesamt : total.rev) / total.paid * 100) / 100 : null,
                          jeStdCpo: total.paid > 0 ? Math.round(total.rev / total.paid * 100) / 100 : null,
                          rows, hourly: HRL, fbCount });
 
   // ── Mail bauen ────────────────────────────────────────────────────────────
-  const brandKey = ((await agentMailSender(sb, "anna")) ? "anna" : "max");
+  const brandKey = ((await agentMailSender(sb, "paul")) ? "paul" : "max");
   const brand = await agentBrand(sb, brandKey);
   const titel = slot === "13" ? "Retention, Zwischenstand 13:00" : "Retention, Tagesabschluss";
   const unter = dmy(today) + " · Deutsche GigaNetz, Retention" + (slot === "13" ? " · Stand 13:00 Uhr" : " · nach Ende der Spätschicht");
@@ -201,13 +227,14 @@ Deno.serve(async (req) => {
               : (total.cl + (total.cl === 1 ? " Abschluss" : " Abschlüsse") + " aus " + total.n + " Vorgängen.")));
   inner += kacheln;
 
-  if (best.length) {
-    inner += '<tr><td style="padding:16px 16px 4px;font-size:13px;font-weight:bold;color:#0f2830;">Die drei Besten</td></tr>';
-    best.forEach((r, i) => { inner += zeile(r, "good", ["🥇", "🥈", "🥉"][i]); });
-  }
-  if (schwach.length) {
-    inner += '<tr><td style="padding:16px 16px 4px;font-size:13px;font-weight:bold;color:#0f2830;">Die zwei schwächsten</td></tr>';
-    schwach.forEach((r) => { inner += zeile(r, "warn"); });
+  if (liste.length) {
+    inner += '<tr><td style="padding:16px 16px 4px;font-size:13px;font-weight:bold;color:#0f2830;">'
+      + liste.length + ' Agenten am Telefon, nach Umsatz</td></tr>';
+    liste.forEach((r, i) => {
+      // Farbe sagt, wo jemand gegenueber dem Tagesschnitt steht — ohne die Ueberschrift „die Schwaechsten".
+      const tone = r.rev === 0 ? "warn" : (r.rev >= schnitt ? "good" : "neutral");
+      inner += zeile(r, tone, ["🥇", "🥈", "🥉"][i]);
+    });
   }
   if (!rows.length) {
     inner += callout("Noch nichts erfasst", "Bis " + (slot === "13" ? "13:00" : "19:15") + " Uhr ist für heute kein Vorgang eingetragen.", "#d97706");
@@ -225,6 +252,7 @@ Deno.serve(async (req) => {
   inner += refLine((slot === "13"
     ? "Zwischenstand: Vorgänge bis 13:00 Uhr, Stunden anteilig bis 13:00 Uhr."
     : "Tagesabschluss um 19:15 Uhr, nach dem Ende der Spätschicht: alle Vorgänge des Tages, Stunden für den geplanten Tag.")
+    + " In der Liste stehen alle Agenten am Telefon, sortiert nach Umsatz; grün heißt über dem Tagesschnitt."
     + (HRL.on ? " Je vergüteter Stunde = CPO plus Stundenvergütung geteilt durch die Stunden, die vergütet werden — Overhead und Tage ohne Vorgang zählen nicht mit." : ""));
 
   const html = shell(brand, titel, unter, inner);
@@ -236,20 +264,13 @@ Deno.serve(async (req) => {
   if (isTest) {
     to = [String(body.to || OWNER_MAIL)];
   } else {
-    const { data: us } = await sb.from("app_users").select("user_id,full_name").or("full_name.ilike.%Thorsten%,full_name.ilike.%Rajner%");
-    const uids = (us || []).map((u: any) => u.user_id);
-    const mails: string[] = [];
-    for (const uid of uids) {
-      const { data: au } = await sb.auth.admin.getUserById(uid);
-      const m = au?.user?.email; if (m) mails.push(m);
-    }
-    to = [...new Set([OWNER_MAIL, ...(mails.length ? mails : FALLBACK_TO)])];
+    to = await empfaengerFuer(sb, today);
   }
 
-  // Absender: Anna, sobald sie ein Postfach hat. Solange nicht, übernimmt Max — sein Feld ist genau
-  // das Melden, wenn etwas auffällt, und er hat eine Adresse. Kein Code-Wechsel nötig, wenn Anna
-  // ihr Postfach bekommt: dann greift sie automatisch.
-  const sender = (await agentMailSender(sb, "anna")) || (await agentMailSender(sb, "max"));
+  // Absender ist Paul, bei beiden Mandaten derselbe (Entscheidung 2026-09-28). Im Agenten-Register
+  // gehoert ihm die Analyse: "Forecast gegen Ist, gelieferte Stunden je Projekt und Skill, Unter- und
+  // Ueberdeckung". Anna beantwortet Fragen, sie verschickt keine Berichte. Max bleibt nur als Rueckfall.
+  const sender = (await agentMailSender(sb, "paul")) || (await agentMailSender(sb, "max"));
   if (!sender) return json({ ok: false, error: "Kein Absender mit Postfach gefunden" }, 500);
   const results: any[] = [];
   for (const adr of to) {
