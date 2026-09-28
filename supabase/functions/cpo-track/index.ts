@@ -21,11 +21,15 @@ const OUTCOMES = [
 
 // Tarife mit Rangfolge je Mandat. Aus den beiden Rängen leitet sich das Ergebnis ab, der Agent wählt es nie
 // selbst: höherer Rang = Upgrade, niedrigerer = Downgrade, gleicher Rang = gleiche Tarifklasse.
+// legacy = auslaufender Tarif: gibt es nicht mehr im Verkauf, Bestandskunden haben ihn noch. Er ist als
+// "Tarif vorher" waehlbar und als "Tarif neu" nur dann, wenn der Kunde ihn schon hat (halten = seitwaerts).
+// Gepflegt wird das ohne Code im Leitstand unter "Tarife und Rangfolge".
 async function tariffs(projectId: string, skill: string) {
   const { data } = await admin.from("app_config").select("value").eq("key", "jsr_cpo_tariffs_v1").maybeSingle();
   const all: any = (data && data.value) || {};
   const list = all[projectId + "/" + skill] || all[projectId] || [];
-  return (Array.isArray(list) ? list : []).filter((t: any) => t && t.name).map((t: any) => ({ name: String(t.name), rank: Number(t.rank) }))
+  return (Array.isArray(list) ? list : []).filter((t: any) => t && t.name)
+    .map((t: any) => ({ name: String(t.name), rank: Number(t.rank), legacy: t.legacy === true }))
     .filter((t: any) => isFinite(t.rank)).sort((a: any, b: any) => a.rank - b.rank || a.name.localeCompare(b.name, "de"));
 }
 function outcomeOf(rankFrom: number, rankTo: number) {
@@ -143,6 +147,11 @@ Deno.serve(async (req) => {
       const tTo   = tl.find((t: any) => t.name === String(e.tariff_to || ""));
       if (!tFrom) return json({ error: "Bitte den bisherigen Tarif wählen." }, 400);
       if (!tTo)   return json({ error: "Bitte den neuen Tarif wählen." }, 400);
+      // Auslaufender Tarif: nur halten ist erlaubt, neu vergeben nicht. Die Sperre gehoert hierher und
+      // nicht nur in die Oberflaeche — der Browser koennte etwas anderes schicken.
+      if (tTo.legacy && tTo.name !== tFrom.name) {
+        return json({ error: "„" + tTo.name + "\u201c wird nicht mehr vergeben. Der Tarif kann nur gehalten werden." }, 400);
+      }
       const outcome = outcomeOf(tFrom.rank, tTo.rank);
       const level = Number(e.discount_level);
       if (level !== 1 && level !== 2) return json({ error: "Bitte die Rabattstufe wählen." }, 400);

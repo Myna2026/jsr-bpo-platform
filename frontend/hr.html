@@ -41789,13 +41789,16 @@ function cpoEur(v){ return (v==null||isNaN(v))?'—':(Math.round(v*100)/100).toL
 // Tarifliste je Mandat, pflegbar ohne Code. Aus der Rangfolge leitet das System Upgrade, Downgrade oder
 // gleiche Tarifklasse ab (MN 150 → MN 300 = Upgrade). Gleicher Rang bei zwei Tarifen heißt „gleiche Klasse".
 // Bestehende Einträge behalten ihr Ergebnis: es steht am Vorgang, eine spätere Änderung rechnet nichts um.
+// „Auslaufend" (legacy) heißt: nicht mehr im Verkauf, Bestandskunden haben ihn noch. Der Tarif steht dem
+// Agenten nur als „Tarif vorher" zur Wahl — und als „Tarif neu" ausschließlich dann, wenn der Kunde ihn
+// schon hat, also beim Halten. Durchgesetzt wird das auch serverseitig in der Function cpo-track.
 function CpoTariffEditor({projectId, skill, showToast, onChanged}){
   const KEY='jsr_cpo_tariffs_v1';
   const mk=projectId+'/'+skill;
   const [all,setAll]=React.useState(null);
   const [open,setOpen]=React.useState(false);
   const [busy,setBusy]=React.useState(false);
-  const [nm,setNm]=React.useState(''); const [rk,setRk]=React.useState('');
+  const [nm,setNm]=React.useState(''); const [rk,setRk]=React.useState(''); const [lg,setLg]=React.useState(false);
   React.useEffect(()=>{ let alive=true; (async()=>{ try{ const v=await loadConfigFromDB(KEY); if(alive) setAll((v&&typeof v==='object')?v:{}); }catch(e){ if(alive) setAll({}); } })(); return ()=>{alive=false;}; },[]);
   if(all===null) return null;
   const list=(Array.isArray(all[mk])?all[mk]:[]).slice().sort((a,b)=>(Number(a.rank)||0)-(Number(b.rank)||0)||String(a.name).localeCompare(String(b.name),'de'));
@@ -41807,21 +41810,26 @@ function CpoTariffEditor({projectId, skill, showToast, onChanged}){
     if(!name){ showToast&&showToast('Bitte einen Tarifnamen eingeben','error'); return; }
     if(!isFinite(rank)){ showToast&&showToast('Bitte eine Rangnummer eingeben','error'); return; }
     if(list.some(t=>String(t.name).toLowerCase()===name.toLowerCase())){ showToast&&showToast('Diesen Tarif gibt es schon','error'); return; }
-    await save([...list, {name, rank}]); setNm(''); setRk(''); };
+    await save([...list, {name, rank, legacy:!!lg}]); setNm(''); setRk(''); setLg(false); };
+  const setLegacy=async(name,v)=>{ await save(list.map(t=>t.name===name?{...t, legacy:!!v}:t)); };
   const setRank=async(name,rank)=>{ const r=Number(rank); if(!isFinite(r)) return; await save(list.map(t=>t.name===name?{...t,rank:r}:t)); };
   const del=async(name)=>{ if(!(await uiConfirm({title:'Tarif entfernen', text:'„'+name+'" aus der Liste nehmen? Bereits erfasste Vorgänge behalten ihr Ergebnis.', confirmLabel:'Entfernen'}))) return;
     await save(list.filter(t=>t.name!==name)); };
   return <div style={{border:'1px solid var(--border)',borderRadius:12,background:'var(--card)',marginBottom:14,overflow:'hidden'}}>
     <div onClick={()=>setOpen(o=>!o)} style={{padding:'10px 14px',display:'flex',alignItems:'center',gap:10,cursor:'pointer'}}>
       <span style={{fontSize:13,fontWeight:800}}>Tarife und Rangfolge</span>
-      <span style={{fontSize:12,color:'var(--muted)'}}>{list.length} Tarife · daraus erkennt das System Upgrade, Downgrade oder gleiche Klasse</span>
+      <span style={{fontSize:12,color:'var(--muted)'}}>{list.length} Tarife{list.filter(t=>t.legacy).length?(' · '+list.filter(t=>t.legacy).length+' auslaufend'):''} · daraus erkennt das System Upgrade, Downgrade oder gleiche Klasse</span>
       <span style={{marginLeft:'auto',fontSize:13,color:'var(--muted)'}}>{open?'▲':'▼'}</span>
     </div>
     {open&&<div style={{padding:'0 14px 14px'}}>
       {!list.length?<div style={{fontSize:12.5,color:'var(--muted)',marginBottom:10}}>Noch keine Tarife hinterlegt. Ohne Liste können die Agenten keinen Abschluss erfassen.</div>:
         <div style={{marginBottom:10}}>{list.map(t=>(
           <div key={t.name} style={{display:'flex',alignItems:'center',gap:10,padding:'5px 0',borderTop:'1px solid var(--border)',fontSize:13}}>
-            <span style={{flex:1,fontWeight:600}}>{t.name}</span>
+            <span style={{flex:1,fontWeight:600}}>{t.name}
+              {t.legacy?<span style={{marginLeft:7,fontSize:10.5,fontWeight:800,letterSpacing:'.03em',textTransform:'uppercase',color:'#92400e',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:5,padding:'1px 5px'}}>auslaufend</span>:null}</span>
+            <label style={{fontSize:11.5,color:'var(--muted)',display:'flex',alignItems:'center',gap:5,cursor:'pointer'}}
+              title="Nicht mehr im Verkauf: nur noch als Tarif vorher wählbar, als neuer Tarif nur zum Halten.">
+              <input type="checkbox" checked={!!t.legacy} disabled={busy} onChange={e=>setLegacy(t.name, e.target.checked)}/>auslaufend</label>
             <label style={{fontSize:11.5,color:'var(--muted)'}}>Rang</label>
             <input type="number" className="form-input" style={{width:74}} defaultValue={t.rank} disabled={busy}
               onBlur={e=>{ if(Number(e.target.value)!==Number(t.rank)) setRank(t.name, e.target.value); }}/>
@@ -41832,11 +41840,15 @@ function CpoTariffEditor({projectId, skill, showToast, onChanged}){
           <input className="form-input" placeholder="z. B. MN 2000" value={nm} onChange={e=>setNm(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter') add(); }}/></div>
         <div style={{width:96}}><label className="form-label">Rang</label>
           <input className="form-input" type="number" placeholder="5" value={rk} onChange={e=>setRk(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter') add(); }}/></div>
+        <label style={{fontSize:12,display:'flex',alignItems:'center',gap:6,cursor:'pointer',paddingBottom:7}}>
+          <input type="checkbox" checked={lg} onChange={e=>setLg(e.target.checked)}/>auslaufend</label>
         <button className="btn btn-sm btn-primary" disabled={busy} onClick={add}>Hinzufügen</button>
       </div>
       <div style={{fontSize:11.5,color:'var(--muted)',marginTop:8,lineHeight:1.5}}>
         Höherer Rang heißt besserer Tarif: von Rang 1 auf Rang 2 ist ein Upgrade, umgekehrt ein Downgrade, gleicher Rang ist die gleiche Tarifklasse.
         Zwei Tarife dürfen denselben Rang haben. Änderungen wirken ab dem nächsten Vorgang, schon erfasste behalten ihr Ergebnis.
+        „Auslaufend" heißt: nicht mehr im Verkauf. Der Agent sieht den Tarif nur noch unter „Tarif vorher"; als neuen Tarif kann er ihn
+        ausschließlich wählen, wenn der Kunde ihn schon hat — dann ist es ein Halten und zählt als gleiche Klasse.
       </div>
     </div>}
   </div>;
