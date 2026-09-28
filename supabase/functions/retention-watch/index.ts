@@ -1,5 +1,6 @@
 // Annas Wächter über das Retention Overview. Einmal täglich um 19:20 Berliner Zeit, direkt nach dem
 // Tagesabschluss — und NUR, wenn es etwas zu melden gibt. Lieber wenige Meldungen, die jemand liest.
+// Empfänger ist allein info@mynaai.de; die beiden Tagesreports (cpo-report) gehen weiter an alle drei.
 //
 // Geprüft wird (vom User am 2026-09-28 so festgelegt):
 //  1 Einbruch bei den Abschlüssen   Tag unter 50 % des Schnitts der letzten fünf Arbeitstage
@@ -27,7 +28,6 @@ const json = (b: unknown, s = 200) => new Response(JSON.stringify(b), { status: 
 
 const PROJ = "proj_gn_e5f6a7b8", SKILL = "retention";
 const OWNER_MAIL = "info@mynaai.de";
-const FALLBACK_TO = ["consulting@25hrs.net", "r.gore@tiramu.de"];
 
 const AGENT_POS = ["Agent", "Senior Agent", "ASP", "Supervisor"];   // Kategorie "agent" laut docs/fachmodell
 function istAgent(emp: any) { return !!emp && AGENT_POS.indexOf(String(emp.position || "").trim()) >= 0; }
@@ -191,14 +191,9 @@ Deno.serve(async (req) => {
   const html = shell(brand, "Retention: " + (funde.length === 1 ? "eine Auffälligkeit" : funde.length + " Auffälligkeiten"), dmy(today) + " · Deutsche GigaNetz, Retention", inner);
   const subject = (isTest ? "[Test] " : "") + "Retention: " + (funde.length === 1 ? "eine Auffälligkeit" : funde.length + " Auffälligkeiten") + " am " + dmy(today);
 
-  let to: string[] = [];
-  if (isTest) to = [String(body.to || OWNER_MAIL)];
-  else {
-    const { data: us } = await sb.from("app_users").select("user_id,full_name").or("full_name.ilike.%Thorsten%,full_name.ilike.%Rajner%");
-    const mails: string[] = [];
-    for (const u of (us || [])) { const { data: au } = await sb.auth.admin.getUserById((u as any).user_id); const m = au?.user?.email; if (m) mails.push(m); }
-    to = [...new Set([OWNER_MAIL, ...(mails.length ? mails : FALLBACK_TO)])];
-  }
+  // Nur an den Eigentümer (User, 2026-09-28): die zwei Tagesreports gehen an alle drei, die
+  // Auffälligkeiten nur an ihn — sonst landen Einzelfälle über Agenten im Verteiler.
+  const to: string[] = [isTest ? String(body.to || OWNER_MAIL) : OWNER_MAIL];
   const sender = (await agentMailSender(sb, "anna")) || (await agentMailSender(sb, "max"));
   if (!sender) return json({ ok: false, error: "Kein Absender mit Postfach" }, 500);
   const results: any[] = [];
