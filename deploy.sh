@@ -158,6 +158,9 @@ stamp_rsync "$LOCAL_DIR/cpo.html" "$REMOTE_BASE/root/cpo.html"
 # Kurze Adresse tive360.de/retention: Caddy loest /retention ueber try_files {path}.html auf.
 stamp_rsync "$LOCAL_DIR/cpo.html" "$REMOTE_BASE/root/retention.html"
 
+echo "→ Fragen zur HolidayCheck-Forecast-Datei (tive360.de/fc-fragen, ohne Login)..."
+rsync -az --progress "$LOCAL_DIR/fc-fragen.html" "$SERVER:$REMOTE_BASE/root/fc-fragen.html"
+
 echo "→ Öffentliche Präsentationsseite (Login-frei, nutzt shared/presentation-slides.js)..."
 rsync -az --progress "$LOCAL_DIR/praesentation.html" "$SERVER:$REMOTE_BASE/hr/praesentation.html"
 rsync -az --progress "$LOCAL_DIR/praesentation.html" "$SERVER:$REMOTE_BASE/client/praesentation.html"

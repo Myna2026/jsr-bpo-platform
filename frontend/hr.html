@@ -1319,7 +1319,7 @@ const MENU_BADGE_MAIN_ITEMS = [
   {key:'urlaubantraege',label:'Urlaubsanträge'},{key:'feedback',label:'Feedbackgespräche'},{key:'kanban',label:'Recruiting'},{key:'funnel',label:'Bewerber-Trichter'},{key:'onboarding',label:'Onboarding'},{key:'langarchiv',label:'Aussortiert (Sprache)'},
   {key:'cvs',label:'CVs & Bewerber'},{key:'pool',label:'Bewerber-Pool'},{key:'potenzial',label:'Potenzial Zukunft'},{key:'phoneaction',label:'Telefonaktion'},{key:'postfach',label:'Postfach'},{key:'bewerberlinks',label:'Bewerber-Links'},{key:'dubletten',label:'Dubletten'},{key:'showcase',label:'Showcases'},{key:'training_plans',label:'Schulungsplanung'},
   {key:'timeline',label:'Timeline'},{key:'projects',label:'Projekte'},{key:'forecast',label:'Forecast'},{key:'fcist',label:'Forecast vs. Ist'},{key:'vorschau',label:'Personal-Vorschau'},
-  {key:'profitability',label:'Wirtschaftlichkeit'},{key:'cpotrack',label:'Retention Overview'},{key:'praesentation',label:'Präsentationen'},{key:'termin',label:'Termin vorbereiten'},{key:'uploads',label:'Uploads'},{key:'dataimport',label:'Datenimport'},{key:'uploadplan',label:'Upload-Plan'},{key:'recmkt',label:'Recruiting Marketing'},{key:'nlquery',label:'Datenabfrage'},{key:'cpocalc',label:'CPO-Kalkulator'},
+  {key:'profitability',label:'Wirtschaftlichkeit'},{key:'hcstunden',label:'HC Stundenabgleich'},{key:'cpotrack',label:'Retention Overview'},{key:'praesentation',label:'Präsentationen'},{key:'termin',label:'Termin vorbereiten'},{key:'uploads',label:'Uploads'},{key:'dataimport',label:'Datenimport'},{key:'uploadplan',label:'Upload-Plan'},{key:'recmkt',label:'Recruiting Marketing'},{key:'nlquery',label:'Datenabfrage'},{key:'cpocalc',label:'CPO-Kalkulator'},
   {key:'useractivity',label:'Nutzung & Aktivität'},{key:'previewas',label:'Vorschau als'},{key:'errorlog',label:'Fehler-Log'},{key:'reminders',label:'Erinnerungen'},{key:'taskadmin',label:'Aufgaben-Verwaltung'},{key:'mgmtcalls',label:'Management-Calls'},
   {key:'contract_templates',label:'Vertragsvorlagen'},{key:'superadmin',label:'System / Konfiguration'},{key:'tabperms',label:'Portal-Tabs'},
   {key:'aisettings',label:'KI-Einstellungen'},{key:'aiendpoint',label:'KI-Anbindung'},{key:'cvsync',label:'CV-Sync'},
@@ -7722,6 +7722,7 @@ function buildNavSections(f){
     {sec:'Business', items:[   // Planung + Wirtschaftlichkeit (interne Steuerung)
       {key:'forecast',label:'Forecast',icon:'📈'},
       ...(_isMgmt ? [{key:'fcist',label:'Forecast vs. Ist',icon:'🔮'}] : []),   // Management-only
+      ...(_isMgmtLead ? [{key:'hcstunden',label:'HC Stundenabgleich',icon:'⏱'}] : []),   // Management + Projektleiter: Ziel gegen netto gelieferte Stunden
       ...(_isMgmtLead ? [{key:'cpocalc',label:'CPO-Kalkulator',icon:'🧮'}] : []),
       ...(_isMgmtLead ? [{key:'cpotrack',label:'Retention Overview',icon:'💶'}] : []),   // Vorgänge der Agenten (Link + PIN), Abschlüsse und der daraus gerechnete Umsatz   // Management + Projektleiter des Mandats (team.cpoLead): Rabattstufen-Rechner (Giganetz Retention)
       ...(_isMgmtLead ? [{key:'vorschau',label:'Personal-Vorschau',icon:'🧭'}] : []),   // Management + Projektleiter (Paul, was kommt)
@@ -36856,6 +36857,45 @@ function CallQaSuggestions({projects, employees, showToast}){
     {sampleFor && <CallSampleModal emp={sampleFor} onClose={()=>setSampleFor(null)} onSaved={()=>{ setSampleFor(null); setReload(r=>r+1); showToast&&showToast('Stichprobe gespeichert','success'); }}/>}
   </div>;
 }
+// ── Archiv der Rohdateien ───────────────────────────────────────────────────
+// Jede Importdatei gehoert in den Bucket weekly-imports. Scheitert das, darf der Import
+// NICHT still durchlaufen: der Grund wird im Datenimport-Bereich angezeigt, landet als
+// Warnung im Protokoll und die Zeile in der Import-Liste traegt "ohne Datei".
+// Fundsache 2026-09-28: Die Storage-Policy liess nur Management schreiben, waehrend
+// data_imports schon fuer Projektleiter geoeffnet war — 139 Importe ohne Rohdatei.
+const IMPORT_ARCHIVE_FAILS=[];
+function archiveFailNote(arch, list){
+  const out=Array.isArray(list)?list.slice():[];
+  if(arch&&arch.error) out.unshift({type:'error', message:'Rohdatei nicht archiviert: '+arch.error});
+  return out;
+}
+async function archiveImportFile(path, file, label){
+  try{
+    const up=await sb.storage.from('weekly-imports').upload(path,file,{upsert:true,contentType:(file&&file.type)||'application/octet-stream'});
+    if(up&&up.error) throw up.error;
+    return {path, error:null};
+  }catch(e){
+    const msg=(e&&e.message)||String(e);
+    IMPORT_ARCHIVE_FAILS.push({label:label||'Import', name:(file&&file.name)||'', msg, at:new Date()});
+    try{ window.dispatchEvent(new CustomEvent('jsr-archive-fail')); }catch(_e){}
+    try{ console.error('[import] Rohdatei nicht archiviert:', label, msg); }catch(_e){}
+    return {path:null, error:msg};
+  }
+}
+// Rote Leiste im Datenimport. Bleibt stehen, bis die Seite neu geladen wird.
+function ImportArchiveWarning(){
+  const [,tick]=useState(0);
+  useEffect(()=>{ const h=()=>tick(x=>x+1); window.addEventListener('jsr-archive-fail',h); return ()=>window.removeEventListener('jsr-archive-fail',h); },[]);
+  if(!IMPORT_ARCHIVE_FAILS.length) return null;
+  return <div style={{border:'1px solid #fecaca',background:'#fef2f2',borderRadius:10,padding:'12px 14px',marginBottom:12,color:'#991b1b',fontSize:12.5,lineHeight:1.6}}>
+    <div style={{fontWeight:800,marginBottom:4}}>Die Zahlen sind importiert, die Datei aber nicht archiviert.</div>
+    {IMPORT_ARCHIVE_FAILS.slice(-5).map((f,i)=><div key={i}>
+      <b>{f.label}</b>{f.name?' · '+f.name:''} — {f.msg}
+    </div>)}
+    <div style={{marginTop:5}}>Ohne Archiv laesst sich spaeter nicht mehr nachsehen, was in der Datei stand. Bitte der Technik melden und die Datei aufbewahren.</div>
+  </div>;
+}
+
 // ══ Datenimport (Schnitt 2: Rohdaten-Excel → weekly_hours) ══
 // Import getrennt vom Bericht. Erkennung am INHALT (Header-Mapping je Projekt gespeichert), nie am Dateinamen.
 // Nicht zuordenbare Namen werden GEMELDET (Warnungen), nie still verworfen. Nichts wird Fakt vor der Vorschau.
@@ -37088,12 +37128,12 @@ function RohdatenImport({projId, projName, employees, onSaved}){
   async function save(){ if(!result||busy) return; setBusy(true); setErr('');
     const ts=isoLocal(new Date())+'_'+fileHash;
     const path=projId+'/rohdaten/'+ts+'_'+(file.name||'rohdaten.xlsx');
-    let storagePath=null; try{ const up=await sb.storage.from('weekly-imports').upload(path,file,{upsert:true,contentType:file.type||'application/octet-stream'}); if(!up.error) storagePath=path; }catch(e){}
+    const arch=await archiveImportFile(path,file,'Rohdaten'); const storagePath=arch.path;
     let uid=null,uname=null; try{ const u=await sb.auth.getUser(); uid=u&&u.data&&u.data.user&&u.data.user.id||null; if(uid){ const nr=await sb.from('app_users').select('full_name').eq('user_id',uid).single(); uname=nr&&nr.data&&nr.data.full_name||null; } }catch(e){}
     const wkCount={}; result.facts.forEach(f=>{ const k=f.year+'|'+f.kw; wkCount[k]=(wkCount[k]||0)+1; });
     const primary=Object.keys(wkCount).sort((a,b)=>wkCount[b]-wkCount[a])[0]; const pkw=primary?Number(primary.split('|')[1]):null, pyy=primary?Number(primary.split('|')[0]):null;
     const status=result.unmatched.length?'partial':'ok';
-    const {data:imp,error:ie}=await sb.from('data_imports').insert({ project_id:projId, source_type:'rohdaten', kw:pkw, year:pyy, file_name:file.name, file_hash:fileHash, storage_path:storagePath, status, warnings:result.warnings, row_count:(sheet.rows||[]).length, matched_count:result.facts.length, unmatched_count:result.unmatched.length, uploaded_by:uid, uploaded_by_name:uname }).select('id').single();
+    const {data:imp,error:ie}=await sb.from('data_imports').insert({ project_id:projId, source_type:'rohdaten', kw:pkw, year:pyy, file_name:file.name, file_hash:fileHash, storage_path:storagePath, status, warnings:archiveFailNote(arch,result.warnings), row_count:(sheet.rows||[]).length, matched_count:result.facts.length, unmatched_count:result.unmatched.length, uploaded_by:uid, uploaded_by_name:uname }).select('id').single();
     if(ie){ setBusy(false); setErr('Import nicht gespeichert: '+(ie.message||'')); return; }
     // Punkt 1 / Schnitt 4: weekly_hours ist jetzt eine View über daily_hours (Aggregat beim Lesen). Wir schreiben
     // NUR noch die Tagesebene. Je importierter Woche den ganzen Mo–So-Bereich des Projekts leeren und neu schreiben
@@ -37314,10 +37354,10 @@ function PivotImport({projId, employees, source, fields, table, accept, hint, on
   }
   async function save(){ if(!result||busy) return; setBusy(true); setErr('');
     const ts=isoLocal(new Date())+'_'+fileHash; const path=projId+'/'+source+'/'+ts+'_'+(file.name||source);
-    let storagePath=null; try{ const up=await sb.storage.from('weekly-imports').upload(path,file,{upsert:true,contentType:file.type||'application/octet-stream'}); if(!up.error) storagePath=path; }catch(e){}
+    const arch=await archiveImportFile(path,file,source); const storagePath=arch.path;
     let uid=null,uname=null; try{ const u=await sb.auth.getUser(); uid=u&&u.data&&u.data.user&&u.data.user.id||null; if(uid){ const nr=await sb.from('app_users').select('full_name').eq('user_id',uid).single(); uname=nr&&nr.data&&nr.data.full_name||null; } }catch(e){}
     const status=result.unmatched.length?'partial':'ok';
-    const {data:imp,error:ie}=await sb.from('data_imports').insert({ project_id:projId, source_type:source, kw:Number(kw), year:Number(year), file_name:file.name, file_hash:fileHash, storage_path:storagePath, status, warnings:result.warnings, row_count:(sheet.rows||[]).length, matched_count:result.facts.length, unmatched_count:result.unmatched.length, uploaded_by:uid, uploaded_by_name:uname }).select('id').single();
+    const {data:imp,error:ie}=await sb.from('data_imports').insert({ project_id:projId, source_type:source, kw:Number(kw), year:Number(year), file_name:file.name, file_hash:fileHash, storage_path:storagePath, status, warnings:archiveFailNote(arch,result.warnings), row_count:(sheet.rows||[]).length, matched_count:result.facts.length, unmatched_count:result.unmatched.length, uploaded_by:uid, uploaded_by_name:uname }).select('id').single();
     if(ie){ setBusy(false); setErr('Import nicht gespeichert: '+(ie.message||'')); return; }
     const rows=result.facts.map(f=>({ import_id:imp.id, project_id:projId, employee_id:f.employee_id, kw:Number(kw), year:Number(year), ...f.vals, raw:f.raw }));
     // mergeUpsert: zwei Quellen (Gesamt+Inbound) mergen in EINE Zeile — nur die eigenen Spalten setzen, nicht löschen.
@@ -37516,9 +37556,9 @@ function BookingImportAgent({projId, employees, onSaved, initKw, initYear}){
       // 1) Rohdatei + Protokoll ZUERST (Spur zur Quelle): die KPI-Werte sollen den Lauf/die Datei tragen (import_id).
       //    Fehler MUSS auffallen (kein verschlucktes try/catch mehr).
       const ts=isoLocal(new Date())+'_'+fileHash; const path=projId+'/booking_a/'+ts+'_'+(file.name||'booking.xlsx');
-      let storagePath=null; try{ const up=await sb.storage.from('weekly-imports').upload(path,file,{upsert:true,contentType:file.type||'application/octet-stream'}); if(!up.error) storagePath=path; }catch(e){}
+      const arch=await archiveImportFile(path,file,'Buchungen'); const storagePath=arch.path;
       const status=result.unmatched.length?'partial':'ok';
-      const {data:imp,error:ie}=await sb.from('data_imports').insert({ project_id:projId, source_type:'booking_a', kw:Number(kw), year:Number(year), file_name:file.name, file_hash:fileHash, storage_path:storagePath, status, warnings:result.warnings, row_count:(sheet.rows||[]).length, matched_count:result.facts.length, unmatched_count:result.unmatched.length, uploaded_by:uid, uploaded_by_name:uname }).select('id').single();
+      const {data:imp,error:ie}=await sb.from('data_imports').insert({ project_id:projId, source_type:'booking_a', kw:Number(kw), year:Number(year), file_name:file.name, file_hash:fileHash, storage_path:storagePath, status, warnings:archiveFailNote(arch,result.warnings), row_count:(sheet.rows||[]).length, matched_count:result.facts.length, unmatched_count:result.unmatched.length, uploaded_by:uid, uploaded_by_name:uname }).select('id').single();
       if(ie) throw new Error('Import-Protokoll nicht gespeichert: '+(ie.message||ie));
       const rows=[]; result.facts.forEach(f=>{ const snap={cr:f.cr,open:f.open,osl:f.osl,sales_calls:f.sales_calls};
         const put=(kpi_id,value)=>{ if(value!=null&&!isNaN(value)) rows.push({emp_id:f.employee_id, kpi_id, value:kpiRound(value), kw:Number(kw), year:Number(year), source:'import', entered_by:uname, import_id:imp.id, raw:snap}); };
@@ -37701,9 +37741,9 @@ function BookingImportTeam({projId, expectMode, onSaved}){
       const skill=kpiIds.skill; const teamKpis=[kpiIds.cr,kpiIds.buchungen,kpiIds.calls];
       // Rohdatei + Protokoll ZUERST (Spur zur Quelle): die Werte tragen den Lauf/die Datei (import_id). Fehler MUSS auffallen.
       const ts=isoLocal(new Date())+'_'+fileHash; const path=projId+'/booking_team/'+ts+'_'+(file.name||'booking_team.csv');
-      let storagePath=null; try{ const up=await sb.storage.from('weekly-imports').upload(path,file,{upsert:true,contentType:file.type||'text/csv'}); if(!up.error) storagePath=path; }catch(e){}
+      const arch=await archiveImportFile(path,file,'Buchungen Team'); const storagePath=arch.path;
       const f0=result.facts[0]||{}; const status=result.warnings.some(w=>w.type==='invalid')?'partial':'ok';
-      const {data:imp,error:ie}=await sb.from('data_imports').insert({project_id:projId, source_type:sourceType, kw:(f0.n||null), year:(f0.year||null), file_name:file.name, file_hash:fileHash, storage_path:storagePath, status, warnings:result.warnings, row_count:(sheet.rows||[]).length, matched_count:result.facts.length, unmatched_count:0, uploaded_by:uid, uploaded_by_name:uname}).select('id').single();
+      const {data:imp,error:ie}=await sb.from('data_imports').insert({project_id:projId, source_type:sourceType, kw:(f0.n||null), year:(f0.year||null), file_name:file.name, file_hash:fileHash, storage_path:storagePath, status, warnings:archiveFailNote(arch,result.warnings), row_count:(sheet.rows||[]).length, matched_count:result.facts.length, unmatched_count:0, uploaded_by:uid, uploaded_by_name:uname}).select('id').single();
       if(ie) throw new Error('Import-Protokoll nicht gespeichert: '+(ie.message||ie));
       const rows=[]; const byYearKw={}, byYearMonth={};
       result.facts.forEach(f=>{ const periodCol=f.mode==='kw'?{kw:f.n}:{month:f.n}; const snap={cr:f.cr,buchungen:f.buchungen,calls:f.calls};
@@ -38126,6 +38166,456 @@ function PausenGegencheck({projId}){
   </div>;
 }
 
+// ══ HolidayCheck · Stundenabgleich ═══════════════════════════════════════════
+// Abgerechnet wird, was wir netto liefern: Schichtplan minus Urlaub, Krankheit und
+// Pausen, je Person nur mit ihrem abrechenbaren Anteil. Der Forecast ist das ZIEL,
+// nicht die Obergrenze — Ueberlieferung ist erlaubt, Unterlieferung soll hier sichtbar
+// werden, samt Grund: Abwesenheit, zu duenn geplant oder Team zu klein.
+//
+// Die Anteile stehen in app_config.jsr_hc_billing_v1 und sind im Reiter "Anteile" ohne
+// Code aenderbar: je Person, in Prozent, dauerhaft oder fuer Tag/Woche/Monat/Zeitraum.
+// Sonderfall Trainer: waehrend einer laufenden HC-Schulung zaehlt die Person 0 Prozent
+// (Vorgabe vom 2026-09-28: Albanitë Hetemi 100 %, aber 0 % bei laufender Schulungsklasse).
+//
+// Der Forecast liegt heute nur je Kalenderwoche vor. Fuer Teilwochen wird er gleichmaessig
+// auf die Tage verteilt; das steht so auch in der Ansicht. Tagesgenau wird es erst, wenn
+// das Blatt "Tagesplanung" der Auftraggeber-Datei mit eingelesen wird.
+const HC_BILLING_KEY='jsr_hc_billing_v1';
+
+function hcCfgNorm(v){
+  const c=(v&&typeof v==='object')?v:{};
+  return {
+    default_pct:(c.default_pct==null?100:Number(c.default_pct)),
+    entries:Array.isArray(c.entries)?c.entries:[],
+    training_zero:Array.isArray(c.training_zero)?c.training_zero:[],
+  };
+}
+// Welche Regel gilt an diesem Tag? Befristete schlaegt dauerhaft, sonst die zuletzt beginnende.
+function hcEntryFor(cfg, empId, ds){
+  let best=null;
+  (cfg.entries||[]).forEach(e=>{
+    if(!e||e.emp!==empId) return;
+    if(e.from&&ds<e.from) return;
+    if(e.to&&ds>e.to) return;
+    if(!best){ best=e; return; }
+    const a=(e.from||e.to)?1:0, b=(best.from||best.to)?1:0;
+    if(a>b){ best=e; return; }
+    if(a===b&&String(e.from||'')>=String(best.from||'')) best=e;
+  });
+  return best;
+}
+function hcPctFor(cfg, empId, ds, trainDays){
+  if((cfg.training_zero||[]).indexOf(empId)>=0&&trainDays&&trainDays[ds]) return {pct:0, src:'schulung'};
+  const e=hcEntryFor(cfg, empId, ds);
+  if(e) return {pct:Math.max(0,Math.min(100,Number(e.pct)||0)), src:((e.from||e.to)?'zeitraum':'dauerhaft'), note:(e.note||'')};
+  return {pct:(cfg.default_pct==null?100:Number(cfg.default_pct)), src:'standard'};
+}
+const HC_SRC_LABEL={schulung:'Schulung laeuft', zeitraum:'befristete Regel', dauerhaft:'feste Regel', standard:'Standard'};
+
+function HcHoursView({projects, team}){
+  const proj=(projects||[]).find(p=>p&&/holiday/i.test(p.name||''));
+  const today=isoLocal(new Date());
+  const [mode,setMode]=useState('week');          // day | week | month | range
+  const [anchor,setAnchor]=useState(today);
+  const [rFrom,setRFrom]=useState(today);
+  const [rTo,setRTo]=useState(today);
+  const [tab,setTab]=useState('abgleich');        // abgleich | anteile
+  const [cfg,setCfg]=useState(null);
+  const [raw,setRaw]=useState(null);
+  const [busy,setBusy]=useState(true);
+  const [reload,setReload]=useState(0);
+
+  // Zeitraum bestimmen
+  const per=(()=>{
+    const d=new Date(anchor+'T00:00:00');
+    if(mode==='day') return {from:anchor, to:anchor, label:fmtDate(anchor)};
+    if(mode==='week'){
+      const dow=(d.getDay()||7); const mon=new Date(d); mon.setDate(d.getDate()-(dow-1));
+      const sun=new Date(mon); sun.setDate(mon.getDate()+6);
+      return {from:isoLocal(mon), to:isoLocal(sun), label:'KW '+getISOWeek(mon).kw+' · '+fmtDate(isoLocal(mon))+' bis '+fmtDate(isoLocal(sun))};
+    }
+    if(mode==='month'){
+      const a=new Date(d.getFullYear(),d.getMonth(),1), b=new Date(d.getFullYear(),d.getMonth()+1,0);
+      return {from:isoLocal(a), to:isoLocal(b), label:a.toLocaleDateString('de-DE',{month:'long',year:'numeric'})};
+    }
+    const f=rFrom<=rTo?rFrom:rTo, t=rFrom<=rTo?rTo:rFrom;
+    return {from:f, to:t, label:fmtDate(f)+' bis '+fmtDate(t)};
+  })();
+
+  useEffect(()=>{ if(!proj){ setBusy(false); return; } let alive=true;
+    (async()=>{
+      setBusy(true);
+      const y0=Number(per.from.slice(0,4)), y1=Number(per.to.slice(0,4));
+      const years=y0===y1?[y0]:[y0,y1];
+      const [shR, dhR, fcR, tpR, cfgRaw]=await Promise.all([
+        sbAllData((a,b)=>sb.from('shift_assignments').select('employee_id,skill,work_date,net_hours,gross_hours,shift_value')
+          .eq('project_id',proj.id).gte('work_date',per.from).lte('work_date',per.to).order('work_date',{ascending:true}).range(a,b)),
+        sbAllData((a,b)=>sb.from('daily_hours').select('employee_id,skill,work_date,hours')
+          .eq('project_id',proj.id).gte('work_date',per.from).lte('work_date',per.to).order('work_date',{ascending:true}).range(a,b)),
+        sb.from('report_forecast').select('skill,year,kw,fc_hours').eq('project_id',proj.id).in('year',years),
+        sb.from('training_plans').select('id,name,start_date,end_date,status').eq('project_id',proj.id),
+        loadConfigFromDB(HC_BILLING_KEY),
+      ]);
+      if(!alive) return;
+      const sh=shR.data||[];
+      const ids=[];
+      sh.forEach(r=>{ if(r.employee_id&&ids.indexOf(r.employee_id)<0) ids.push(r.employee_id); });
+      const c=hcCfgNorm(cfgRaw);
+      (c.entries||[]).forEach(e=>{ if(e&&e.emp&&ids.indexOf(e.emp)<0) ids.push(e.emp); });
+      const empR=ids.length?await sb.from('employees').select('id,first_name,last_name,position,absences').in('id',ids):{data:[]};
+      if(!alive) return;
+      setCfg(c);
+      setRaw({sh, dh:(dhR.data||[]), fc:(fcR.data||[]), tp:(tpR.data||[]), emps:(empR.data||[])});
+      setBusy(false);
+    })();
+    return ()=>{ alive=false; };
+  },[proj&&proj.id, per.from, per.to, reload]);
+
+  // ── Rechnen ───────────────────────────────────────────────────────────────
+  const R=useMemo(()=>{
+    if(!raw||!cfg||!proj) return null;
+    const empBy={}; raw.emps.forEach(e=>{ empBy[e.id]=e; });
+    const nameOf=id=>{ const e=empBy[id]||{}; return ((e.first_name||'')+' '+(e.last_name||'')).trim()||'Unbekannt'; };
+
+    // Tage des Zeitraums
+    const days=[]; { let d=new Date(per.from+'T00:00:00'); const end=new Date(per.to+'T00:00:00');
+      while(d<=end){ days.push(isoLocal(d)); d=new Date(d.getFullYear(),d.getMonth(),d.getDate()+1); } }
+
+    // Tage mit laufender HC-Schulung (verdrehte Zeitraeume werden uebersprungen)
+    const trainDays={}, trainNames={};
+    (raw.tp||[]).forEach(t=>{
+      const a=String(t.start_date||'').slice(0,10), b=String(t.end_date||'').slice(0,10);
+      if(!a||!b||b<a) return;
+      if(String(t.status||'')==='done'||String(t.status||'')==='cancelled') return;
+      days.forEach(ds=>{ if(ds>=a&&ds<=b){ trainDays[ds]=true; trainNames[t.name||'Schulung']=true; } });
+    });
+
+    // Ziel je Skill: Wochen-Forecast, fuer Teilwochen anteilig auf die Tage verteilt
+    const fcBy={}; (raw.fc||[]).forEach(r=>{ fcBy[String(r.skill||'').toLowerCase()+'|'+r.year+'-'+r.kw]=Number(r.fc_hours)||0; });
+    // Schluessel = ISO-Jahr + KW, nicht das Kalenderjahr: sonst faellt der Jahreswechsel auseinander.
+    const weekDays={};
+    days.forEach(ds=>{ const w=getISOWeek(new Date(ds+'T00:00:00'));
+      const k=w.year+'-'+w.kw; weekDays[k]=(weekDays[k]||0)+1; });
+    const zielOf=(skill)=>{ let sum=0, teil=false;
+      Object.keys(weekDays).forEach(k=>{ const v=fcBy[skill+'|'+k]; if(v==null) return;
+        const n=weekDays[k]; if(n<7) teil=true; sum+=v*n/7; });
+      return {h:sum, teil};
+    };
+
+    // Ist aus dem Kundensystem (Kontrollspalte)
+    const istBy={}; (raw.dh||[]).forEach(r=>{ const k=r.employee_id+'|'+r.skill; istBy[k]=(istBy[k]||0)+(Number(r.hours)||0); });
+
+    // Plan je Person und Skill
+    const per_={}; const daySeries={};
+    raw.sh.forEach(r=>{
+      const ds=String(r.work_date).slice(0,10); const sk=String(r.skill||'').toLowerCase();
+      const net=Number(r.net_hours)||0; if(net<=0) return;
+      const emp=empBy[r.employee_id];
+      const f=cpoAbsFactor(emp, ds);
+      const nach=net*f;                                    // nach Urlaub/Krankheit
+      const p=hcPctFor(cfg, r.employee_id, ds, trainDays);
+      const abr=nach*(p.pct/100);                          // abrechenbar
+      const k=r.employee_id+'|'+sk;
+      const q=per_[k]||(per_[k]={id:r.employee_id, skill:sk, name:nameOf(r.employee_id),
+        position:((empBy[r.employee_id]||{}).position||''), plan:0, abw:0, netto:0, abr:0, pctDays:[], srcs:{}});
+      q.plan+=net; q.abw+=net-nach; q.netto+=nach; q.abr+=abr;
+      q.pctDays.push(p.pct); q.srcs[p.src]=true;
+      const dk=ds+'|'+sk; const dd=daySeries[dk]||(daySeries[dk]={ds, skill:sk, plan:0, netto:0, abr:0});
+      dd.plan+=net; dd.netto+=nach; dd.abr+=abr;
+    });
+    const list=Object.keys(per_).map(k=>{ const q=per_[k];
+      q.pct=q.pctDays.length?Math.round(q.pctDays.reduce((a,b)=>a+b,0)/q.pctDays.length):100;
+      q.ist=istBy[q.id+'|'+q.skill]||0;
+      return q; }).sort((a,b)=>b.abr-a.abr);
+
+    const skills=['sales','support'].map(sk=>{
+      const rows=list.filter(r=>r.skill===sk);
+      const rate=(()=>{ const s=((proj.skills||[]).find(x=>x.key===sk)||{}); const v=Number(s.rate); return isFinite(v)&&v>0?v:null; })();
+      const z=zielOf(sk);
+      const sum=f=>rows.reduce((a,r)=>a+(Number(r[f])||0),0);
+      const abr=sum('abr'), netto=sum('netto'), plan=sum('plan'), abw=sum('abw'), ist=sum('ist');
+      return {skill:sk, label:sk==='sales'?'Sales':'Support', rate, ziel:z.h, zielTeil:z.teil,
+              plan, abw, netto, abr, ist, rows,
+              luecke:(z.h>0?abr-z.h:null),
+              eur:(rate!=null?abr*rate:null), zielEur:(rate!=null&&z.h>0?z.h*rate:null),
+              luckEur:(rate!=null&&z.h>0?(abr-z.h)*rate:null),
+              nichtAbr:netto-abr};
+    }).filter(s=>s.rows.length>0||s.ziel>0);
+
+    const dayRows=Object.keys(daySeries).map(k=>daySeries[k]).sort((a,b)=>a.ds<b.ds?-1:(a.ds>b.ds?1:(a.skill<b.skill?-1:1)));
+    // Overhead ohne eigene Regel faellt sonst still mit 100 Prozent durch.
+    const OVERHEAD=['Teamleiter','Trainer','QM','Projektleiter'];
+    const offen={};
+    list.forEach(r=>{
+      if(OVERHEAD.indexOf(String(r.position||'').trim())<0) return;
+      if(hcEntryFor(cfg, r.id, per.to)) return;
+      if((cfg.training_zero||[]).indexOf(r.id)>=0) return;
+      offen[r.id]={name:r.name, position:r.position};
+    });
+    return {days, skills, list, dayRows, trainDays, trainNames:Object.keys(trainNames),
+            offenOverhead:Object.keys(offen).map(k=>offen[k]),
+            hatSchulung:Object.keys(trainDays).length>0};
+  },[raw,cfg,proj,per.from,per.to]);
+
+  if(!proj) return <div style={{maxWidth:900}}>
+    <div style={{fontSize:20,fontWeight:700,marginBottom:8}}>⏱ HC Stundenabgleich</div>
+    <div className="sp-empty">Kein HolidayCheck-Projekt gefunden.</div></div>;
+
+  const seg=(k,l)=><button key={k} className="btn btn-sm" onClick={()=>setMode(k)}
+    style={{background:mode===k?BRAND.main:'var(--card)',color:mode===k?'#fff':'var(--text)',fontWeight:mode===k?800:600}}>{l}</button>;
+
+  return <div style={{maxWidth:1180}}>
+    <div style={{fontSize:20,fontWeight:700,marginBottom:4}}>⏱ HC Stundenabgleich</div>
+    <div style={{fontSize:13,color:'var(--muted)',marginBottom:12,maxWidth:860,lineHeight:1.6}}>
+      Abgerechnet wird, was wir netto liefern: Schichtplan abzüglich Urlaub, Krankheit und Pausen,
+      je Person nur mit ihrem abrechenbaren Anteil. Der Forecast ist das Ziel, nicht die Obergrenze.
+    </div>
+
+    <div style={{display:'flex',gap:8,marginBottom:12,flexWrap:'wrap'}}>
+      <button className="btn btn-sm" onClick={()=>setTab('abgleich')}
+        style={{background:tab==='abgleich'?BRAND.main:'var(--card)',color:tab==='abgleich'?'#fff':'var(--text)',fontWeight:800}}>Abgleich</button>
+      <button className="btn btn-sm" onClick={()=>setTab('anteile')}
+        style={{background:tab==='anteile'?BRAND.main:'var(--card)',color:tab==='anteile'?'#fff':'var(--text)',fontWeight:800}}>Abrechenbare Anteile</button>
+    </div>
+
+    {tab==='anteile'
+      ? <HcShareEditor cfg={cfg} list={(R&&R.list)||[]} raw={raw} today={today}
+          onSaved={c=>{ setCfg(hcCfgNorm(c)); setReload(x=>x+1); }}/>
+      : <React.Fragment>
+
+      <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap',marginBottom:12}}>
+        {seg('day','Tag')}{seg('week','Woche')}{seg('month','Monat')}{seg('range','Zeitraum')}
+        {mode==='range'
+          ? <React.Fragment>
+              <input type="date" className="form-input" style={{width:'auto'}} value={rFrom} onChange={e=>setRFrom(e.target.value)}/>
+              <span style={{fontSize:12,color:'var(--muted)'}}>bis</span>
+              <input type="date" className="form-input" style={{width:'auto'}} value={rTo} onChange={e=>setRTo(e.target.value)}/>
+            </React.Fragment>
+          : <input type="date" className="form-input" style={{width:'auto'}} value={anchor} onChange={e=>setAnchor(e.target.value)}/>}
+        <span style={{fontSize:13,fontWeight:700}}>{per.label}</span>
+        {busy?<span style={{fontSize:12,color:'var(--muted)'}}>lädt …</span>:null}
+      </div>
+
+      {R&&R.offenOverhead.length>0&&<div style={{border:'1px solid #fde68a',background:'#fffbeb',borderRadius:10,padding:'9px 13px',marginBottom:12,fontSize:12.5,color:'#92400e',lineHeight:1.6}}>
+        <b>Für diese Rollen ist kein Anteil hinterlegt</b>, sie zählen deshalb voll mit: {R.offenOverhead.map(r=>r.name+' ('+r.position+')').join(', ')}.
+        Lieber sichtbar unvollständig als still falsch — im Reiter „Abrechenbare Anteile" einstellen.
+      </div>}
+
+      {R&&R.hatSchulung&&<div style={{border:'1px solid #bfdbfe',background:'#eff6ff',borderRadius:10,padding:'9px 13px',marginBottom:12,fontSize:12.5,color:'#1e40af'}}>
+        In diesem Zeitraum läuft eine Schulung ({R.trainNames.join(', ')}). Wer dafür auf 0 Prozent gesetzt ist, wird an diesen Tagen nicht abgerechnet.
+      </div>}
+
+      {R&&R.skills.map(s=><div key={s.skill} style={{border:'1px solid var(--border)',borderRadius:12,background:'var(--card)',marginBottom:14,overflow:'hidden'}}>
+        <div style={{padding:'11px 14px',borderBottom:'1px solid var(--border)',display:'flex',alignItems:'baseline',gap:10,flexWrap:'wrap'}}>
+          <span style={{fontSize:14,fontWeight:800}}>{s.label}</span>
+          <span style={{fontSize:12,color:'var(--muted)'}}>{s.rate!=null?(cpoEur(s.rate)+' je Stunde'):'kein Stundensatz hinterlegt'}</span>
+        </div>
+        <div style={{padding:'12px 14px',display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:12}}>
+          <div><div style={{fontSize:11,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em'}}>Ziel (Forecast)</div>
+            <div style={{fontSize:21,fontWeight:800,fontFamily:'var(--mono)'}}>{s.ziel>0?cpoHours(s.ziel):'—'}</div>
+            <div style={{fontSize:11.5,color:'var(--muted)'}}>{s.ziel>0?(s.zielEur!=null?cpoEur(s.zielEur):'')+(s.zielTeil?' · Teilwoche anteilig':''):'kein Forecast hinterlegt'}</div></div>
+          <div><div style={{fontSize:11,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em'}}>Geplant netto</div>
+            <div style={{fontSize:21,fontWeight:800,fontFamily:'var(--mono)'}}>{cpoHours(s.netto)}</div>
+            <div style={{fontSize:11.5,color:'var(--muted)'}}>{cpoHours(s.plan)} geplant, {cpoHours(s.abw)} Abwesenheit</div></div>
+          <div><div style={{fontSize:11,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em'}}>Abrechenbar</div>
+            <div style={{fontSize:21,fontWeight:800,fontFamily:'var(--mono)',color:BRAND.main}}>{cpoHours(s.abr)}</div>
+            <div style={{fontSize:11.5,color:'var(--muted)'}}>{s.eur!=null?cpoEur(s.eur):'—'}{s.nichtAbr>0?(' · '+cpoHours(s.nichtAbr)+' nicht abrechenbar'):''}</div></div>
+          <div><div style={{fontSize:11,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em'}}>Lücke zum Ziel</div>
+            <div style={{fontSize:21,fontWeight:800,fontFamily:'var(--mono)',color:(s.luecke==null?'var(--text)':(s.luecke<0?'#b91c1c':'#15803d'))}}>
+              {s.luecke==null?'—':((s.luecke>0?'+':'')+cpoNum(s.luecke,1)+' h')}</div>
+            <div style={{fontSize:11.5,color:'var(--muted)'}}>{s.luckEur==null?'':((s.luckEur>0?'+':'')+cpoEur(s.luckEur))}</div></div>
+        </div>
+
+        <div style={{padding:'0 14px 14px',overflowX:'auto'}}>
+          <table style={{width:'100%',borderCollapse:'collapse',fontSize:12.5,minWidth:720}}>
+            <thead><tr style={{color:'var(--muted)',fontSize:10.5,textTransform:'uppercase',letterSpacing:'.04em'}}>
+              <th style={{padding:'6px 8px',textAlign:'left'}}>Mitarbeiter</th>
+              <th style={{padding:'6px 8px',textAlign:'left'}}>Rolle</th>
+              <th style={{padding:'6px 8px',textAlign:'right'}}>Plan</th>
+              <th style={{padding:'6px 8px',textAlign:'right'}}>./. Abw.</th>
+              <th style={{padding:'6px 8px',textAlign:'right'}}>netto</th>
+              <th style={{padding:'6px 8px',textAlign:'right'}}>Anteil</th>
+              <th style={{padding:'6px 8px',textAlign:'right'}}>abrechenbar</th>
+              <th style={{padding:'6px 8px',textAlign:'right'}}>Euro</th>
+              <th style={{padding:'6px 8px',textAlign:'right'}} title="Protokollierte Stunden im Auftraggeber-System, nur zur Kontrolle">protokolliert</th>
+            </tr></thead>
+            <tbody>
+              {s.rows.map(r=><tr key={r.id} style={{borderTop:'1px solid var(--border)'}}>
+                <td style={{padding:'6px 8px',fontWeight:600}}>{r.name}</td>
+                <td style={{padding:'6px 8px',color:'var(--muted)'}}>{r.position||'—'}</td>
+                <td style={{padding:'6px 8px',textAlign:'right',fontFamily:'var(--mono)',color:'var(--muted)'}}>{cpoNum(r.plan,1)}</td>
+                <td style={{padding:'6px 8px',textAlign:'right',fontFamily:'var(--mono)',color:r.abw>0?'#b45309':'var(--muted)'}}>{r.abw>0?('−'+cpoNum(r.abw,1)):'—'}</td>
+                <td style={{padding:'6px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{cpoNum(r.netto,1)}</td>
+                <td style={{padding:'6px 8px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:700,color:r.pct===100?'var(--muted)':BRAND.main}}
+                  title={Object.keys(r.srcs).map(k=>HC_SRC_LABEL[k]||k).join(', ')}>{r.pct} %</td>
+                <td style={{padding:'6px 8px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:800}}>{cpoNum(r.abr,1)}</td>
+                <td style={{padding:'6px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{s.rate!=null?cpoEur(r.abr*s.rate):'—'}</td>
+                <td style={{padding:'6px 8px',textAlign:'right',fontFamily:'var(--mono)',color:'var(--muted)'}}
+                  title="Stunden aus dem Zeitexport des Auftraggebers. Weicht diese Zahl stark vom Plan ab, stimmt der Plan nicht.">{r.ist>0?cpoNum(r.ist,1):'—'}</td>
+              </tr>)}
+              <tr style={{borderTop:'2px solid var(--border)',fontWeight:800,background:'var(--surface-2)'}}>
+                <td style={{padding:'7px 8px'}} colSpan={2}>Summe {s.label}</td>
+                <td style={{padding:'7px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{cpoNum(s.plan,1)}</td>
+                <td style={{padding:'7px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{s.abw>0?('−'+cpoNum(s.abw,1)):'—'}</td>
+                <td style={{padding:'7px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{cpoNum(s.netto,1)}</td>
+                <td style={{padding:'7px 8px'}}></td>
+                <td style={{padding:'7px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{cpoNum(s.abr,1)}</td>
+                <td style={{padding:'7px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{s.eur!=null?cpoEur(s.eur):'—'}</td>
+                <td style={{padding:'7px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{cpoNum(s.ist,1)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>)}
+
+      {R&&R.dayRows.length>0&&<div style={{border:'1px solid var(--border)',borderRadius:12,background:'var(--card)',overflow:'hidden'}}>
+        <div style={{padding:'10px 14px',borderBottom:'1px solid var(--border)',fontSize:13,fontWeight:800}}>Je Tag</div>
+        <div style={{padding:'8px 14px 12px',overflowX:'auto'}}>
+          <table style={{width:'100%',borderCollapse:'collapse',fontSize:12.5,minWidth:560}}>
+            <thead><tr style={{color:'var(--muted)',fontSize:10.5,textTransform:'uppercase',letterSpacing:'.04em'}}>
+              <th style={{padding:'5px 8px',textAlign:'left'}}>Tag</th>
+              <th style={{padding:'5px 8px',textAlign:'left'}}>Skill</th>
+              <th style={{padding:'5px 8px',textAlign:'right'}}>Plan</th>
+              <th style={{padding:'5px 8px',textAlign:'right'}}>netto</th>
+              <th style={{padding:'5px 8px',textAlign:'right'}}>abrechenbar</th>
+              <th style={{padding:'5px 8px',textAlign:'left'}}></th>
+            </tr></thead>
+            <tbody>{R.dayRows.map(d=><tr key={d.ds+d.skill} style={{borderTop:'1px solid var(--border)'}}>
+              <td style={{padding:'5px 8px',whiteSpace:'nowrap',fontWeight:d.ds===today?800:600}}>{fmtDate(d.ds)}</td>
+              <td style={{padding:'5px 8px',color:'var(--muted)'}}>{d.skill==='sales'?'Sales':'Support'}</td>
+              <td style={{padding:'5px 8px',textAlign:'right',fontFamily:'var(--mono)',color:'var(--muted)'}}>{cpoNum(d.plan,1)}</td>
+              <td style={{padding:'5px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{cpoNum(d.netto,1)}</td>
+              <td style={{padding:'5px 8px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:700}}>{cpoNum(d.abr,1)}</td>
+              <td style={{padding:'5px 8px',fontSize:11,color:'#1e40af'}}>{R.trainDays[d.ds]?'Schulung':''}</td>
+            </tr>)}</tbody>
+          </table>
+        </div>
+      </div>}
+
+      <div style={{fontSize:11.5,color:'var(--muted)',marginTop:10,lineHeight:1.65,maxWidth:880}}>
+        Plan = Nettostunden aus dem Schichtplan (Pausen schon abgezogen). Abwesenheit kürzt den Tag ganz oder halb.
+        Der Anteil kommt aus den abrechenbaren Anteilen und kann je Person und Zeitraum eingestellt werden.
+        Der Forecast liegt nur je Kalenderwoche vor; für angebrochene Wochen wird er gleichmäßig auf die Tage verteilt.
+        Die Spalte „protokolliert" stammt aus dem Zeitexport des Auftraggebers und dient nur der Kontrolle, nicht der Abrechnung.
+      </div>
+    </React.Fragment>}
+  </div>;
+}
+
+// Anteile einstellen: je Person, in Prozent, dauerhaft oder befristet. Ohne Code aenderbar.
+function HcShareEditor({cfg, list, raw, today, onSaved}){
+  const [busy,setBusy]=useState(false);
+  const [emp,setEmp]=useState('');
+  const [pct,setPct]=useState('100');
+  const [geltung,setGeltung]=useState('dauerhaft');   // dauerhaft|tag|woche|monat|zeitraum
+  const [gFrom,setGFrom]=useState(today);
+  const [gTo,setGTo]=useState(today);
+  const [note,setNote]=useState('');
+  const c=cfg||hcCfgNorm(null);
+  const people=(()=>{
+    const by={};
+    (raw&&raw.emps||[]).forEach(e=>{ by[e.id]={id:e.id, name:((e.first_name||'')+' '+(e.last_name||'')).trim(), position:e.position||''}; });
+    (list||[]).forEach(r=>{ if(!by[r.id]) by[r.id]={id:r.id, name:r.name, position:r.position}; });
+    return Object.keys(by).map(k=>by[k]).sort((a,b)=>a.name<b.name?-1:1);
+  })();
+  const nameOf=id=>{ const p=people.find(x=>x.id===id); return p?p.name:id; };
+
+  const write=async(next)=>{
+    setBusy(true);
+    try{ await saveConfigToDB(HC_BILLING_KEY, next); cfgToast(true); onSaved&&onSaved(next); }
+    catch(e){ cfgToast(false); }
+    setBusy(false);
+  };
+  const spanOf=()=>{
+    if(geltung==='dauerhaft') return {from:null, to:null};
+    if(geltung==='tag') return {from:gFrom, to:gFrom};
+    if(geltung==='woche'){ const d=new Date(gFrom+'T00:00:00'); const dow=(d.getDay()||7);
+      const mon=new Date(d); mon.setDate(d.getDate()-(dow-1)); const sun=new Date(mon); sun.setDate(mon.getDate()+6);
+      return {from:isoLocal(mon), to:isoLocal(sun)}; }
+    if(geltung==='monat'){ const d=new Date(gFrom+'T00:00:00');
+      return {from:isoLocal(new Date(d.getFullYear(),d.getMonth(),1)), to:isoLocal(new Date(d.getFullYear(),d.getMonth()+1,0))}; }
+    return {from:(gFrom<=gTo?gFrom:gTo), to:(gFrom<=gTo?gTo:gFrom)};
+  };
+  const add=()=>{
+    if(!emp) return;
+    const p=Math.max(0,Math.min(100,Number(String(pct).replace(',','.'))||0));
+    const sp=spanOf();
+    const e={id:'hcb_'+Date.now(), emp, pct:p, from:sp.from, to:sp.to, note:note||null};
+    write({...c, entries:[...(c.entries||[]), e]});
+    setNote('');
+  };
+  const del=(id)=>write({...c, entries:(c.entries||[]).filter(e=>e.id!==id)});
+  const toggleTraining=(id)=>{
+    const has=(c.training_zero||[]).indexOf(id)>=0;
+    write({...c, training_zero:has?(c.training_zero||[]).filter(x=>x!==id):[...(c.training_zero||[]), id]});
+  };
+
+  return <div>
+    <div style={{fontSize:13,color:'var(--muted)',marginBottom:12,maxWidth:820,lineHeight:1.6}}>
+      Wie viel Prozent der geplanten Nettozeit einer Person abgerechnet werden. Ohne Eintrag gelten {c.default_pct} Prozent.
+      Eine befristete Regel schlägt eine dauerhafte, bei gleicher Art gilt die zuletzt beginnende.
+    </div>
+
+    <div style={{border:'1px solid var(--border)',borderRadius:12,background:'var(--card)',padding:'12px 14px',marginBottom:14}}>
+      <div style={{fontSize:13,fontWeight:800,marginBottom:9}}>Neue Regel</div>
+      <div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'flex-end'}}>
+        <div style={{minWidth:210}}><label className="form-label">Mitarbeiter</label>
+          <select className="form-select" value={emp} disabled={busy} onChange={e=>setEmp(e.target.value)}>
+            <option value="">bitte wählen</option>
+            {people.map(p=><option key={p.id} value={p.id}>{p.name}{p.position?(' · '+p.position):''}</option>)}
+          </select></div>
+        <div style={{width:110}}><label className="form-label">Anteil (%)</label>
+          <input className="form-input" value={pct} disabled={busy} onChange={e=>setPct(e.target.value)}/></div>
+        <div style={{minWidth:150}}><label className="form-label">Gilt für</label>
+          <select className="form-select" value={geltung} disabled={busy} onChange={e=>setGeltung(e.target.value)}>
+            <option value="dauerhaft">dauerhaft</option>
+            <option value="tag">einen Tag</option>
+            <option value="woche">eine Woche</option>
+            <option value="monat">einen Monat</option>
+            <option value="zeitraum">freien Zeitraum</option>
+          </select></div>
+        {geltung!=='dauerhaft'&&<div style={{width:160}}><label className="form-label">{geltung==='zeitraum'?'von':'Datum'}</label>
+          <input type="date" className="form-input" value={gFrom} disabled={busy} onChange={e=>setGFrom(e.target.value)}/></div>}
+        {geltung==='zeitraum'&&<div style={{width:160}}><label className="form-label">bis</label>
+          <input type="date" className="form-input" value={gTo} disabled={busy} onChange={e=>setGTo(e.target.value)}/></div>}
+        <div style={{minWidth:190,flex:'1 1 190px'}}><label className="form-label">Notiz (freiwillig)</label>
+          <input className="form-input" value={note} disabled={busy} onChange={e=>setNote(e.target.value)} placeholder="z. B. halbe Stelle im Projekt"/></div>
+        <button className="btn btn-sm btn-primary" disabled={busy||!emp} onClick={add}>Hinzufügen</button>
+      </div>
+    </div>
+
+    <div style={{border:'1px solid var(--border)',borderRadius:12,background:'var(--card)',overflow:'hidden',marginBottom:14}}>
+      <div style={{padding:'10px 14px',borderBottom:'1px solid var(--border)',fontSize:13,fontWeight:800}}>Eingestellte Anteile</div>
+      {(c.entries||[]).length===0
+        ? <div style={{padding:'14px',fontSize:12.5,color:'var(--muted)'}}>Noch keine Regel. Alle zählen mit {c.default_pct} Prozent.</div>
+        : <div style={{padding:'6px 14px 12px'}}>
+            {(c.entries||[]).map(e=><div key={e.id} style={{display:'flex',gap:10,alignItems:'center',padding:'7px 0',borderTop:'1px solid var(--border)',fontSize:12.5,flexWrap:'wrap'}}>
+              <span style={{fontWeight:700,minWidth:170}}>{nameOf(e.emp)}</span>
+              <span style={{fontFamily:'var(--mono)',fontWeight:800,color:BRAND.main,width:56,textAlign:'right'}}>{e.pct} %</span>
+              <span style={{color:'var(--muted)'}}>{(e.from||e.to)?(fmtDate(e.from)+' bis '+fmtDate(e.to)):'dauerhaft'}</span>
+              {e.note?<span style={{color:'var(--muted)',fontStyle:'italic'}}>{e.note}</span>:null}
+              <button className="btn btn-sm" style={{marginLeft:'auto'}} disabled={busy} onClick={()=>del(e.id)}>Entfernen</button>
+            </div>)}
+          </div>}
+    </div>
+
+    <div style={{border:'1px solid var(--border)',borderRadius:12,background:'var(--card)',overflow:'hidden'}}>
+      <div style={{padding:'10px 14px',borderBottom:'1px solid var(--border)',fontSize:13,fontWeight:800}}>Null Prozent, solange eine HC-Schulung läuft</div>
+      <div style={{padding:'10px 14px',fontSize:12.5,color:'var(--muted)',lineHeight:1.6}}>
+        Für Trainer: an Tagen, an denen eine Schulung dieses Projekts läuft, wird die Person nicht abgerechnet.
+        Geprüft wird gegen die Schulungsplanung, nicht von Hand.
+      </div>
+      <div style={{padding:'0 14px 12px'}}>
+        {people.map(p=><label key={p.id} style={{display:'flex',gap:9,alignItems:'center',padding:'5px 0',fontSize:12.5,cursor:'pointer'}}>
+          <input type="checkbox" disabled={busy} checked={(c.training_zero||[]).indexOf(p.id)>=0} onChange={()=>toggleTraining(p.id)}/>
+          <span style={{fontWeight:600}}>{p.name}</span>
+          <span style={{color:'var(--muted)'}}>{p.position}</span>
+        </label>)}
+      </div>
+    </div>
+  </div>;
+}
+
 // ── Forecast vs. Ist — ausführliche Ansicht (Menüpunkt, Management-only) ──
 // FC-Linie (solid = Vergangenheit, gestrichelt = erwartet) + Ist-Balken, Hover mit KW/FC/Ist/Lücke.
 function FcIstChart({rows, color}){
@@ -38353,7 +38843,7 @@ function LongtermImport({projId, initYear, onSaved}){
     const recs=Object.keys(sheetsData).map(sk=>({project_id:projId, skill:sk, start_year:Number(year), start_month:Number(startMonth), rows:sheetsData[sk], file_name:file&&file.name||null, updated_by:uid, updated_at:new Date().toISOString()}));
     const up=await sb.from('report_longterm').upsert(recs,{onConflict:'project_id,skill'});
     if(up.error){ setBusy(false); setErr('Nicht gespeichert: '+(up.error.message||up.error)); return; }
-    try{ const ts=isoLocal(new Date())+'_'+fileHash; await sb.storage.from('weekly-imports').upload(projId+'/longterm/'+ts+'_'+(file.name||'longterm.xlsx'),file,{upsert:true,contentType:file.type||'application/octet-stream'}); }catch(e){}
+    { const ts=isoLocal(new Date())+'_'+fileHash; await archiveImportFile(projId+'/longterm/'+ts+'_'+(file.name||'longterm.xlsx'),file,'Langzeitforecast'); }
     setBusy(false); setSaved(true); setSheetsData(null); setFile(null); onSaved&&onSaved();
   }
   return <div style={{fontSize:13}}>
@@ -38449,8 +38939,8 @@ function ForecastImport({projId, skill, initYear, onSaved}){
     if((ins.data||[]).length!==insRows.length){ setBusy(false); setErr('Nur '+((ins.data||[]).length)+' von '+insRows.length+' Werten geschrieben (Rechte/Policy prüfen).'); return; }
     // Rohdatei + Protokoll erst nach verifiziertem Schreiben.
     const ts=isoLocal(new Date())+'_'+fileHash; const path=projId+'/forecast_'+skill+'/'+ts+'_'+(file.name||'forecast.xlsx');
-    let storagePath=null; try{ const up=await sb.storage.from('weekly-imports').upload(path,file,{upsert:true,contentType:file.type||'application/octet-stream'}); if(!up.error) storagePath=path; }catch(e){}
-    try{ await sb.from('data_imports').insert({ project_id:projId, source_type:'forecast_'+skill, kw:kws[0], year:Y, file_name:file.name, file_hash:fileHash, storage_path:storagePath, status:'ok', warnings:warn.map(w=>({type:'info',message:w})), row_count:rows.length, matched_count:clean.length, unmatched_count:0, uploaded_by:uid, uploaded_by_name:uname }); }catch(e){}
+    const arch=await archiveImportFile(path,file,'Forecast '+skill); const storagePath=arch.path;
+    try{ await sb.from('data_imports').insert({ project_id:projId, source_type:'forecast_'+skill, kw:kws[0], year:Y, file_name:file.name, file_hash:fileHash, storage_path:storagePath, status:'ok', warnings:archiveFailNote(arch,warn.map(w=>({type:'info',message:w}))), row_count:rows.length, matched_count:clean.length, unmatched_count:0, uploaded_by:uid, uploaded_by_name:uname }); }catch(e){}
     setBusy(false); setSaved(true); setRows(null); setMeta(null); setFile(null); setWarn([]); onSaved&&onSaved();
   }
 
@@ -42884,7 +43374,7 @@ function MailerImport({employees, onSaved}){
       const impByWeek={};
       if(pid){
         const ts=isoLocal(new Date())+'_'+fileHash; const path=pid+'/mailer/'+ts+'_'+(file.name||'mailer.xlsx');
-        let storagePath=null; try{ const up=await sb.storage.from('weekly-imports').upload(path,file,{upsert:true,contentType:file.type||'application/octet-stream'}); if(!up.error) storagePath=path; }catch(e){}
+        const arch=await archiveImportFile(path,file,'Mailer'); const storagePath=arch.path;
         const perWeek={}; result.facts.forEach(f=>{ const k=f.year+'-'+f.kw; (perWeek[k]=perWeek[k]||[]).push(f); });
         for(const [y,w] of weeks){ const fs=perWeek[y+'-'+w]||[];
           const basis={ hours_source:MAILER_HOURS_SOURCE.label, mails_source:MAILER_MAILS_SOURCE.label,
@@ -42895,7 +43385,8 @@ function MailerImport({employees, onSaved}){
             unplausibel:(result.odd||[]).filter(o=>o.kw===w).map(o=>o.name+': '+o.mails+' Mails / '+o.hours+' h = '+o.meh+' Mails/h'),
             agents:fs.map(f=>({name:f.name, mails:f.mails, hours:Math.round(f.hours*10)/10, meh:f.meh==null?null:Math.round(f.meh*100)/100})) };
           const {data:imp,error:ie}=await sb.from('data_imports').insert({ project_id:pid, source_type:'mailer', kw:w, year:y, file_name:file.name, file_hash:fileHash, storage_path:storagePath,
-            status:result.unmatched.length?'partial':'ok', warnings:{basis, skipped_sales:result.skippedSales, unmatched:result.unmatched.map(u=>u.name)},
+            status:result.unmatched.length?'partial':'ok', warnings:{basis, skipped_sales:result.skippedSales, unmatched:result.unmatched.map(u=>u.name),
+              nicht_archiviert:(arch&&arch.error)||null},
             row_count:fs.length, matched_count:fs.length, unmatched_count:result.unmatched.length, uploaded_by:uid, uploaded_by_name:uname }).select('id').single();
           if(ie) throw new Error('Import-Protokoll (KW '+w+') nicht gespeichert: '+(ie.message||ie));
           impByWeek[y+'-'+w]=imp.id; }
@@ -44289,6 +44780,7 @@ function DataImportView({projects, employees}){
   return <div style={{maxWidth:1000}}>
     <div style={{fontSize:20,fontWeight:700,marginBottom:4}}>📥 Datenimport</div>
     <div style={{fontSize:13,color:'var(--muted)',marginBottom:14}}>Was für die gewählte Woche schon importiert ist und was fehlt. Erkennung am Inhalt; nicht zuordenbare Namen oder falsche Dateien werden gemeldet, nie still verworfen.</div>
+    <ImportArchiveWarning/>
     <div style={{display:'flex',gap:10,alignItems:'center',marginBottom:14,flexWrap:'wrap'}}>
       <select className="form-select" style={{width:'auto',fontWeight:700}} value={projId} onChange={e=>{setProjId(e.target.value); setOpen(null);}}>{projList.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select>
       <span style={{fontSize:12,fontWeight:700,marginLeft:6}}>Woche:</span>
@@ -44332,6 +44824,7 @@ function DataImportView({projects, employees}){
     {imports===null ? <div className="sp-empty">Lädt…</div> : imports.length===0 ? <div className="sp-empty">Noch keine Importe für dieses Projekt.</div> :
       <div style={{display:'flex',flexDirection:'column',gap:6}}>{imports.map(im=>{ const isMonth=im.source_type==='booking_month'; return <div key={im.id} style={{display:'flex',alignItems:'center',gap:12,padding:'8px 12px',border:'1px solid var(--border)',borderRadius:8,flexWrap:'wrap'}}>
         <span style={{fontSize:11,fontWeight:800,padding:'2px 8px',borderRadius:20,background:im.status==='ok'?'#ecfdf5':im.status==='partial'?'#fffbeb':'#fef2f2',color:im.status==='ok'?'#059669':im.status==='partial'?'#d97706':'#dc2626'}}>{im.status==='ok'?'vollständig':im.status==='partial'?'teilweise':'Fehler'}</span>
+        {!im.storage_path&&<span title="Die Zahlen sind importiert, die Rohdatei fehlt im Archiv." style={{fontSize:11,fontWeight:800,padding:'2px 8px',borderRadius:20,background:'#fef2f2',color:'#dc2626'}}>ohne Datei</span>}
         <span style={{fontSize:11,fontWeight:700,color:'var(--muted)',minWidth:130}}>{srcLabel[im.source_type]||im.source_type}</span>
         <span style={{fontSize:12,fontWeight:600}}>{isMonth?('Monat '+im.kw+'/'+im.year):('KW '+im.kw+'/'+im.year)}</span>
         <span style={{fontSize:11,color:'var(--muted)',flex:1,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{im.file_name}</span>
@@ -49613,6 +50106,7 @@ function App(){
       'tabperms':'<path fill-rule="evenodd" d="M12 1.5a5.25 5.25 0 0 0-5.25 5.25v3a3 3 0 0 0-3 3v6.75a3 3 0 0 0 3 3h10.5a3 3 0 0 0 3-3v-6.75a3 3 0 0 0-3-3v-3c0-2.9-2.35-5.25-5.25-5.25Zm3.75 8.25v-3a3.75 3.75 0 1 0-7.5 0v3h7.5Z" clip-rule="evenodd"/>',
       'hraccess':'<path fill-rule="evenodd" d="M12.516 2.17a.75.75 0 0 0-1.032 0 11.209 11.209 0 0 1-7.877 3.08.75.75 0 0 0-.722.515A12.74 12.74 0 0 0 2.25 9.75c0 5.942 4.064 10.933 9.563 12.348a.749.749 0 0 0 .374 0c5.499-1.415 9.563-6.406 9.563-12.348 0-1.39-.223-2.73-.635-3.985a.75.75 0 0 0-.722-.516l-.143.001c-2.996 0-5.717-1.17-7.734-3.08Zm3.094 8.016a.75.75 0 1 0-1.22-.872l-3.236 4.53L9.53 12.22a.75.75 0 0 0-1.06 1.06l2.25 2.25a.75.75 0 0 0 1.14-.094l3.75-5.25Z" clip-rule="evenodd"/>',
       'appusers':'<path d="M4.5 6.375a4.125 4.125 0 1 1 8.25 0 4.125 4.125 0 0 1-8.25 0ZM14.25 8.625a3.375 3.375 0 1 1 6.75 0 3.375 3.375 0 0 1-6.75 0ZM1.5 19.125a7.125 7.125 0 0 1 14.25 0v.003l-.001.119a.75.75 0 0 1-.363.63 13.067 13.067 0 0 1-6.761 1.873c-2.472 0-4.786-.684-6.76-1.873a.75.75 0 0 1-.364-.63l-.001-.122ZM17.25 19.128l-.001.144a2.25 2.25 0 0 1-.233.96 10.088 10.088 0 0 0 5.06-1.01.75.75 0 0 0 .42-.643 4.875 4.875 0 0 0-6.957-4.611 8.586 8.586 0 0 1 1.71 5.157v.003Z"/>',
+      'hcstunden':'<path fill-rule="evenodd" d="M12 2.25c-5.385 0-9.75 4.365-9.75 9.75s4.365 9.75 9.75 9.75 9.75-4.365 9.75-9.75S17.385 2.25 12 2.25ZM12.75 6a.75.75 0 0 0-1.5 0v6c0 .414.336.75.75.75h4.5a.75.75 0 0 0 0-1.5h-3.75V6Z" clip-rule="evenodd"/>',
       'cockpit':'<path fill-rule="evenodd" d="M3 6a3 3 0 0 1 3-3h2.25a3 3 0 0 1 3 3v2.25a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V6Zm9.75 0a3 3 0 0 1 3-3H18a3 3 0 0 1 3 3v2.25a3 3 0 0 1-3 3h-2.25a3 3 0 0 1-3-3V6ZM3 15.75a3 3 0 0 1 3-3h2.25a3 3 0 0 1 3 3V18a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3v-2.25Zm9.75 0a3 3 0 0 1 3-3H18a3 3 0 0 1 3 3V18a3 3 0 0 1-3 3h-2.25a3 3 0 0 1-3-3v-2.25Z" clip-rule="evenodd"/>',
       'start':'<path d="M11.47 3.841a.75.75 0 0 1 1.06 0l8.69 8.69a.75.75 0 1 0 1.06-1.061l-8.689-8.69a2.25 2.25 0 0 0-3.182 0l-8.69 8.69a.75.75 0 1 0 1.061 1.06l8.69-8.689Z"/><path d="m12 5.432 8.159 8.159c.03.03.06.058.091.086v6.198c0 1.035-.84 1.875-1.875 1.875H15a.75.75 0 0 1-.75-.75v-4.5a.75.75 0 0 0-.75-.75h-3a.75.75 0 0 0-.75.75V21a.75.75 0 0 1-.75.75H5.625a1.875 1.875 0 0 1-1.875-1.875v-6.198a2.29 2.29 0 0 0 .091-.086L12 5.432Z"/>',
       'daily_tasks':'<path fill-rule="evenodd" d="M7.502 6h7.128A3.375 3.375 0 0 1 18 9.375v9.375a3 3 0 0 0 3-3V6.108c0-1.505-1.125-2.811-2.664-2.94a48.972 48.972 0 0 0-.673-.05A3 3 0 0 0 15 1.5h-1.5a3 3 0 0 0-2.663 1.618c-.225.015-.45.032-.673.05C8.662 3.295 7.554 4.542 7.502 6ZM13.5 3A1.5 1.5 0 0 0 12 4.5h4.5A1.5 1.5 0 0 0 15 3h-1.5Z" clip-rule="evenodd"/><path fill-rule="evenodd" d="M3 9.375C3 8.339 3.84 7.5 4.875 7.5h9.75c1.036 0 1.875.84 1.875 1.875v11.25c0 1.035-.84 1.875-1.875 1.875h-9.75A1.875 1.875 0 0 1 3 20.625V9.375Zm7.06 3.316a.75.75 0 1 0-1.12-.997l-2.095 2.35-.71-.71a.75.75 0 0 0-1.06 1.061l1.25 1.25a.75.75 0 0 0 1.09-.033l2.646-2.921Z" clip-rule="evenodd"/>',
@@ -49993,6 +50487,7 @@ function App(){
           {view==='reminders'&&<RemindersView team={team}/>}
           {view==='taskadmin'&&<TaskAdminView team={team} projects={projects} catalog={taskCatalog}/>}
           {view==='fcist'&&<ForecastVsIstView projects={projects}/>}
+          {view==='hcstunden'&&<HcHoursView projects={projects} team={team}/>}
           {view==='callqa'&&<CallQaView projects={projects} employees={employees} showToast={showToast}/>}
           {view==='skillmatrix'&&<SkillMatrix employees={employees} projects={projects}/>}
           {view==='kanban'&&<RecruitingKanban employees={employees} setEmployees={setEmployees} cvList={cvList} setCvList={setCvList} projects={projects} onPromoteToEmployee={promoteToEmployee} showToast={showToast} onNavigate={dqNavigate}/>}
