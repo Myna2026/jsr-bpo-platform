@@ -112,8 +112,10 @@ Deno.serve(async (req) => {
   // 4 Tag reißt aus (Umsatz)
   if (bTage >= 3 && schnittRev >= 100) {
     const ab = (hRev - schnittRev) / schnittRev;
-    if (Math.abs(ab) > 0.4) funde.push({ titel: ab < 0 ? "Umsatz weit unter dem Schnitt" : "Umsatz weit über dem Schnitt", ton: ab < 0 ? "bad" : "warn",
-      text: "Heute " + eur(hRev) + " gegen " + eur(schnittRev) + " im Schnitt, das sind " + (ab > 0 ? "+" : "") + Math.round(ab * 100) + " %." });
+    // Verglichen wird CPO gegen CPO. Die Stundenvergütung haengt am Schichtplan, nicht an der
+    // Leistung des Tages, und wuerde den Ausschlag verwaessern — deshalb steht sie hier bewusst nicht drin.
+    if (Math.abs(ab) > 0.4) funde.push({ titel: ab < 0 ? "CPO-Umsatz weit unter dem Schnitt" : "CPO-Umsatz weit über dem Schnitt", ton: ab < 0 ? "bad" : "warn",
+      text: "Heute " + eur(hRev) + " CPO gegen " + eur(schnittRev) + " im Schnitt, das sind " + (ab > 0 ? "+" : "") + Math.round(ab * 100) + " %. Die Stundenvergütung bleibt hier aussen vor." });
   }
   // 3 Quote fällt
   if (hN >= 20 && schnittQuote > 0 && hQuote < schnittQuote * 0.6) {

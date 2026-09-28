@@ -157,7 +157,10 @@ Deno.serve(async (req) => {
   const best = rows.slice(0, 3);
   const schwach = rows.length > 3 ? rows.slice(-2).filter((r) => !best.some((b) => b.id === r.id)) : [];
 
-  if (dry) return json({ ok: true, slot, today, total, gesamt, quote, rows, hourly: HRL, fbCount });
+  if (dry) return json({ ok: true, slot, today, total, gesamt, quote,
+                         jeStd: total.paid > 0 ? Math.round((HRL.on ? gesamt : total.rev) / total.paid * 100) / 100 : null,
+                         jeStdCpo: total.paid > 0 ? Math.round(total.rev / total.paid * 100) / 100 : null,
+                         rows, hourly: HRL, fbCount });
 
   // ── Mail bauen ────────────────────────────────────────────────────────────
   const brandKey = ((await agentMailSender(sb, "anna")) ? "anna" : "max");
@@ -182,14 +185,20 @@ Deno.serve(async (req) => {
   const maxRev = Math.max(1, ...rows.map((r) => r.rev));
   const zeile = (r: any, tone: string, badge?: string) => perfRow({
     name: r.name, value: eur(r.rev), tone, badge,
-    note: r.cl + " Abschlüsse aus " + r.n + " Vorgängen · " + Math.round(r.quote * 100) + " % Quote"
+    note: r.cl + (r.cl === 1 ? " Abschluss" : " Abschlüsse") + " aus " + r.n + " Vorgängen · " + Math.round(r.quote * 100) + " % Quote"
           + (HRL.on ? " · " + eur(r.hourRev) + " Stunden" : ""),
     valuePct: Math.round(r.rev / maxRev * 100),
   });
 
+  // Ertrag je Stunde: voller Umsatz durch die Stunden, die auch vergütet werden. Beide Teile getrennt
+  // genannt, damit niemand den CPO-Anteil für die ganze Zahl hält (so steht es auch im Cockpit).
+  const jeStd = HRL.on ? (total.paid > 0 ? gesamt / total.paid : null) : (total.paid > 0 ? total.rev / total.paid : null);
+  const jeStdCpo = total.paid > 0 ? total.rev / total.paid : null;
+
   let inner = lead("<b>" + eur(gesamt) + "</b> " + (slot === "13" ? "stehen bis 13:00 Uhr auf der Uhr" : "sind heute zusammengekommen") + ". "
-    + (HRL.on ? ("Davon " + eur(total.rev) + " aus Abschlüssen und " + eur(total.hourRev) + " aus " + hrs(total.paid) + " produktiver Zeit.")
-              : (total.cl + " Abschlüsse aus " + total.n + " Vorgängen.")));
+    + (HRL.on ? ("Davon " + eur(total.rev) + " aus Abschlüssen und " + eur(total.hourRev) + " aus " + hrs(total.paid) + " produktiver Zeit."
+                 + (jeStd != null ? " Das sind <b>" + eur(jeStd) + "</b> je vergüteter Stunde, davon " + eur(jeStdCpo!) + " aus Abschlüssen." : ""))
+              : (total.cl + (total.cl === 1 ? " Abschluss" : " Abschlüsse") + " aus " + total.n + " Vorgängen.")));
   inner += kacheln;
 
   if (best.length) {
@@ -213,9 +222,10 @@ Deno.serve(async (req) => {
       + (fbCount === 1 ? "ihn" : "sie") + " rechnet der Report mit " + hrs(HRL.fallback) + ". Sobald der Plan gepflegt ist, greift er automatisch.", "#d97706");
   }
   inner += button(PORTAL_URL + "?goto=cpotrack", "Retention Overview öffnen", brand.accent);
-  inner += refLine(slot === "13"
+  inner += refLine((slot === "13"
     ? "Zwischenstand: Vorgänge bis 13:00 Uhr, Stunden anteilig bis 13:00 Uhr."
-    : "Tagesabschluss um 19:15 Uhr, nach dem Ende der Spätschicht: alle Vorgänge des Tages, Stunden für den geplanten Tag.");
+    : "Tagesabschluss um 19:15 Uhr, nach dem Ende der Spätschicht: alle Vorgänge des Tages, Stunden für den geplanten Tag.")
+    + (HRL.on ? " Je vergüteter Stunde = CPO plus Stundenvergütung geteilt durch die Stunden, die vergütet werden — Overhead und Tage ohne Vorgang zählen nicht mit." : ""));
 
   const html = shell(brand, titel, unter, inner);
   const subject = (isTest ? "[Test] " : "") + titel + " · " + eur(gesamt);
