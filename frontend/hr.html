@@ -41275,6 +41275,11 @@ function cpoAbsFactor(emp, ds){
   if(single&&isFinite(d)&&d>0&&d<1) return Math.max(0, 1-d);
   return 0;
 }
+// Nur Fall-Bearbeiter zaehlen: Kategorie "agent" laut Positionsliste (docs/fachmodell). Teamleitung,
+// Trainer, QM und Projektleitung erfassen keine Cases und werden nicht nach Stunden verguetet, auch
+// wenn sie einmal einen Vorgang eintragen.
+const CPO_AGENT_POS=['Agent','Senior Agent','ASP','Supervisor'];
+function cpoIsAgent(emp){ return !!emp && CPO_AGENT_POS.indexOf(String(emp.position||'').trim())>=0; }
 function cpoIsWorkday(ds){ const d=new Date(ds+'T00:00:00'); const w=d.getDay(); return w>0&&w<6; }
 // Tage von..bis einschließlich, als Liste von 'YYYY-MM-DD'.
 function cpoDateList(fromStr, toStr){
@@ -41699,8 +41704,10 @@ function CpoTrackView({team, employees, showToast}){
     // Rueckfall fuer heute: anteilig am Standardtag 09:00-17:30, damit ein angefangener Tag nicht voll zaehlt.
     const fbToday=Math.max(0, Math.min(1, (nowMin-540)/510));
     const list=Object.keys(ids).map(id=>{
+      const istAgent=cpoIsAgent(empById[id]);
       let planH=0, doneH=0, restH=0, paidH=0, paidPlanH=0, fbDays=0;
       dates.forEach(ds=>{ const p=planOf(ds,id); planH+=p.plan; doneH+=p.done; restH+=Math.max(0, p.plan-p.done);
+        if(!istAgent) return;                                       // Overhead wird nicht nach Stunden verguetet
         if(!(activeDays[id]&&activeDays[id][ds])) return;          // an diesem Tag nicht telefoniert
         if(p.plan>0){ paidH+=p.done; paidPlanH+=p.plan; }           // Schichtplan ist die Wahrheit
         else { const f=HRL.fallback; fbDays++; paidPlanH+=f; paidH+=(ds<today?f:(ds===today?f*fbToday:0)); }
@@ -41717,7 +41724,7 @@ function CpoTrackView({team, employees, showToast}){
       const hourRev=HRL.on?paidH*HRL.rate:0;
       const fcHourRev=HRL.on?paidPlanH*HRL.rate:0;   // alle geplanten produktiven Stunden des Zeitraums
       const fcRev=rate.eph==null?null:(rev+restH*rate.eph);
-      return {id, name:empName(id), planH, doneH, restH, paidH, paidPlanH, fbDays,
+      return {id, name:empName(id), istAgent, planH, doneH, restH, paidH, paidPlanH, fbDays,
         n:mine.length, cl:cls.length, rev, hourRev, total:rev+hourRev,
         up:out.up, gleich:out.gleich, down:out.downgrade, reached, lost, l2, rate,
         cph:doneH>0?cls.length/doneH:null, eph:doneH>0?rev/doneH:null,
@@ -41783,7 +41790,7 @@ function CpoTrackView({team, employees, showToast}){
     // Bezahlte Stunden des Tages: nur Agenten, die an diesem Tag Vorgaenge erfasst haben.
     let paid=0;
     if(HRL.on){
-      const aktiv={}; e.forEach(r=>{ aktiv[r.employee_id]=1; });
+      const aktiv={}; e.forEach(r=>{ if(cpoIsAgent(empById[r.employee_id])) aktiv[r.employee_id]=1; });
       Object.keys(aktiv).forEach(id=>{ const pd=(plan[ds]&&plan[ds][id])||null;
         paid += pd? pd.done : (ds<today?HRL.fallback:(ds===today?HRL.fallback*Math.max(0,Math.min(1,(nowMin-540)/510)):0)); });
     }
@@ -42051,7 +42058,9 @@ function CpoTrackView({team, employees, showToast}){
               <td style={{padding:'6px 8px',textAlign:'right',color:'var(--muted)'}}>{e.cl?Math.round(e.l2/e.cl*100)+' %':'—'}</td>
               <td style={{padding:'6px 8px',textAlign:'right',fontWeight:800,fontFamily:'var(--mono)'}}>{cpoEur(e.rev)}</td>
               {HRL.on?<td style={{padding:'6px 8px',textAlign:'right',fontFamily:'var(--mono)',color:e.paidH>0?'var(--text)':'var(--muted)'}}
-                title={e.paidH>0?(cpoHours(e.paidH)+' bezahlt'+(e.fbDays?(' · '+e.fbDays+' Tage ohne Schichtplan, mit '+cpoHours(HRL.fallback)+' gerechnet'):'')):'keine Vorgänge erfasst, keine Stundenvergütung'}>
+                title={e.paidH>0?(cpoHours(e.paidH)+' bezahlt'+(e.fbDays?(' · '+e.fbDays+' Tage ohne Schichtplan, mit '+cpoHours(HRL.fallback)+' gerechnet'):''))
+                  :(!e.istAgent?('Position '+((empById[e.id]&&empById[e.id].position)||'ohne Angabe')+': bearbeitet keine Cases, keine Stundenvergütung')
+                               :'keine Vorgänge erfasst, keine Stundenvergütung')}>
                 {e.paidH>0?cpoEur(e.hourRev):'—'}</td>:null}
               {HRL.on?<td style={{padding:'6px 8px',textAlign:'right',fontWeight:800,fontFamily:'var(--mono)'}}>{cpoEur(e.total)}</td>:null}
               <td style={{padding:'6px 8px',textAlign:'right',fontFamily:'var(--mono)',color:'var(--muted)'}}>{e.eph!=null?cpoEur(e.eph):'—'}</td>
@@ -42084,6 +42093,7 @@ function CpoTrackView({team, employees, showToast}){
       </div>}
       <div style={{padding:'8px 14px',borderTop:'1px solid var(--border)',fontSize:11.5,color:'var(--muted)',lineHeight:1.6}}>
         Std = gelaufene Nettostunden laut Schichtplan (abzüglich Abwesenheit), im Tooltip die geplanten. V : A = Vorgänge je Abschluss.
+        Stundenvergütung bekommen nur Fall-Bearbeiter (Agent, Senior Agent, ASP, Supervisor) an Tagen mit Vorgängen.
         Verloren = „Kündigung in K7 erfasst" oder „Angebot abgelehnt". Die Prognose rechnet die Reststunden mit der Rate hoch, die unter dem Betrag steht.
       </div>
     </div>

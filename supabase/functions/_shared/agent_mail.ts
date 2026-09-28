@@ -27,11 +27,20 @@ export function delta(cur: number, prev: number): string {
 }
 
 // Bis zu 4 Kennzahl-Kacheln, responsive (stapeln auf dem Telefon). sub = Vergleich/Zusatz.
+// Wie gross darf die Zahl sein, damit sie in ihre Kachel passt? Betraege wie "1.492,00 EUR" sprengen
+// eine Viertelspalte bei 26px. Die Kachel bricht nicht mehr um (nowrap), dafuer schrumpft die Schrift.
+function tileSize(v: string, count: number): number {
+  const proSpalte = count >= 4 ? 8 : count === 3 ? 11 : count === 2 ? 16 : 24;   // Zeichen, die bei 26px passen
+  if (v.length <= proSpalte) return 26;
+  if (v.length <= proSpalte + 3) return 21;
+  if (v.length <= proSpalte + 6) return 18;
+  return 16;
+}
 export function tiles(items: { big: string | number; label: string; sub?: string }[]): string {
   const w = items.length >= 4 ? "25%" : items.length === 3 ? "33%" : items.length === 2 ? "50%" : "100%";
   const cells = items.map((it) =>
     '<td width="' + w + '" valign="top" class="atile" style="padding:0 5px 8px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f5f7f8;border:1px solid #e6ecee;border-radius:12px;"><tr><td style="padding:14px 6px;text-align:center;">'
-    + '<div style="font-size:26px;font-weight:bold;color:#0f2830;line-height:1;">' + esc(it.big) + '</div>'
+    + '<div style="font-size:' + tileSize(String(it.big), items.length) + 'px;font-weight:bold;color:#0f2830;line-height:1.05;white-space:nowrap;">' + esc(it.big) + '</div>'
     + '<div style="font-size:11.5px;color:#5b6b70;margin-top:5px;line-height:1.3;">' + esc(it.label) + '</div>'
     + (it.sub ? '<div style="font-size:10.5px;color:#8a979c;margin-top:3px;">' + esc(it.sub) + '</div>' : '')
     + '</td></tr></table></td>').join("");
