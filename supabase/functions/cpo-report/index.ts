@@ -96,6 +96,9 @@ Deno.serve(async (req) => {
   const isTest = body.mode === "test" || !!body.to;
   const dry = body.dry === true;
   const forced = typeof body.slot === "string";
+  // Nachversand von Hand: schickt eine schon einmal versendete Mail erneut an die REGULAERE Runde.
+  // Schreibt bewusst keinen Anspruch, damit er wiederholbar bleibt; der Cron setzt das Kennzeichen nie.
+  const resend = body.resend === true;
   const forcedRun = forced || isTest || dry;
   // Zeitfenster in Berliner Zeit: 13:00 und 19:15, je fünf Minuten breit (Cron alle 5 Minuten).
   const fenster = (mins >= 780 && mins < 785) ? "13" : (mins >= 1155 && mins < 1160) ? "19" : null;
@@ -105,7 +108,7 @@ Deno.serve(async (req) => {
   const today = String(body.day || iso(now));
 
   // Anspruch VOR dem Senden schreiben; ein zweiter Lauf im selben Fenster laeuft am Schluessel auf.
-  if (!isTest && !dry) {
+  if (!isTest && !dry && !resend) {
     const { error: claimErr } = await sb.from("cpo_report_log").insert({ day: today, slot });
     if (claimErr) return json({ ok: true, skipped: "schon versendet", day: today, slot });
   }
@@ -183,7 +186,8 @@ Deno.serve(async (req) => {
   const liste = rows.filter((r) => r.agent);
   const schnitt = liste.length ? liste.reduce((a: number, r: any) => a + r.rev, 0) / liste.length : 0;
 
-  if (dry) return json({ ok: true, slot, today, empfaenger: await empfaengerFuer(sb, today), total, gesamt, quote,
+  const sendeTag = iso(now);
+  if (dry) return json({ ok: true, slot, today, sendeTag, empfaenger: await empfaengerFuer(sb, sendeTag), total, gesamt, quote,
                          jeStd: total.paid > 0 ? Math.round((HRL.on ? gesamt : total.rev) / total.paid * 100) / 100 : null,
                          jeStdCpo: total.paid > 0 ? Math.round(total.rev / total.paid * 100) / 100 : null,
                          rows, hourly: HRL, fbCount });
@@ -226,6 +230,10 @@ Deno.serve(async (req) => {
                  + (jeStd != null ? " Das sind <b>" + eur(jeStd) + "</b> je vergüteter Stunde, davon " + eur(jeStdCpo!) + " aus Abschlüssen." : ""))
               : (total.cl + (total.cl === 1 ? " Abschluss" : " Abschlüsse") + " aus " + total.n + " Vorgängen.")));
   inner += kacheln;
+  if (resend) {
+    inner += callout("Nachversand", "Dieser Tagesabschluss vom " + dmy(today) + " ging gestern Abend noch an die kleinere Runde. "
+      + "Hier kommt er einmalig an alle. Ab heute läuft der Takt um 13:00 und 19:15 wieder normal.", "#2563eb");
+  }
 
   if (liste.length) {
     inner += '<tr><td style="padding:16px 16px 4px;font-size:13px;font-weight:bold;color:#0f2830;">'
@@ -264,7 +272,8 @@ Deno.serve(async (req) => {
   if (isTest) {
     to = [String(body.to || OWNER_MAIL)];
   } else {
-    to = await empfaengerFuer(sb, today);
+    // Wer die Mail bekommt, richtet sich nach dem Tag des Versands, nicht nach dem Berichtstag.
+    to = await empfaengerFuer(sb, sendeTag);
   }
 
   // Absender ist Paul, bei beiden Mandaten derselbe (Entscheidung 2026-09-28). Im Agenten-Register
