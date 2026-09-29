@@ -36922,7 +36922,12 @@ function cqAutoMap(headers, fields){ const m={}; const H=headers.map(cqNormHead)
   for(const c of f.cand){ const nc=cqNormHead(c); let i=H.indexOf(nc); if(i<0) i=H.findIndex(h=>h.indexOf(nc)>=0); if(i>=0){ idx=i; break; } }
   m[f.key]=idx; }); return m; }
 // Wert-Parser je Feldtyp (Import B/C): Zahlen, Zählwerte, Prozent, Dauer (Sekunden ODER h:mm:ss)
-function cqInt(v){ const n=parseInt(String(v==null?'':v).replace(/[^\d\-]/g,''),10); return isNaN(n)?null:n; }
+// Zeitangaben sind KEINE Stueckzahlen. Frueher hat cqInt hier die Trennzeichen entfernt und aus
+// "00:04:39.745" die Zahl 439745 gemacht — aus vier Minuten wurden 439.745 Anrufe (Befund 2026-09-29:
+// der Auftraggeber-Export hatte ab KW 36 Dauern in "Outbound" und "Alert - No Answer"). Lieber nichts
+// als Unsinn: solche Werte werden verworfen und der Import meldet die Spalte.
+function cqLooksDuration(v){ return /\d{1,3}:\d{2}/.test(String(v==null?'':v)); }
+function cqInt(v){ if(cqLooksDuration(v)) return null; const n=parseInt(String(v==null?'':v).replace(/[^\d\-]/g,''),10); return isNaN(n)?null:n; }
 function cqNumV(v){ const s=String(v==null?'':v).replace(/[^\d,.\-]/g,'').replace(',','.'); if(s===''||s==='-') return null; const n=Number(s); return isNaN(n)?null:n; }
 function cqDur(v){ if(v==null||v==='') return null; const s=String(v).trim();
   if(s.indexOf(':')>=0){ const p=s.split(':').map(x=>Number(x)||0); let sec=0; for(const x of p) sec=sec*60+x; return sec; }
@@ -36956,6 +36961,7 @@ function fmtDur(sec){ if(sec==null) return '—'; sec=Math.round(sec); const h=M
 const CALLS_TOTAL_FIELDS=[
   {key:'name',        label:'Agent-Name',      req:true,  kind:'name', cand:['agent name','agentname','agent','name','mitarbeiter']},
   {key:'answered',    label:'Answered',        req:true,  kind:'int',  cand:['answered','angenommen','answered calls','calls answered']},
+  {key:'handled',     label:'Handle',          req:false, kind:'int',  cand:['handle','handled','bearbeitet']},   // bearbeitete Gespraeche inkl. Outbound; im Bericht nur zur Einordnung neben Answered
   {key:'outbound',    label:'Outbound',        req:false, kind:'int',  cand:['outbound','outbound calls','ausgehend']},
   {key:'transferred', label:'Transferred',     req:false, kind:'int',  cand:['transferred','weitergeleitet','transfers']},
   {key:'no_answer',   label:'Alert-No Answer', req:false, kind:'int',  cand:['alert-no answer','alert no answer','no answer','not answered','verpasst','missed']},
@@ -37326,13 +37332,14 @@ function PivotImport({projId, employees, source, fields, table, accept, hint, on
     const empById={}, byName={}, byKey={}; emps.forEach(e=>{ const full=(e.first_name||'')+' '+(e.last_name||''); empById[e.id]=e; byName[cqNormName(full)]=e; const k=cqNameKey(full); if(k) byKey[k]=e; });
     // exakt (diakritika-gefaltet) → sonst reihenfolge-unabhängig (Vorname/Nachname getauscht). Alias hat Vorrang.
     const resolve=nm=>{ const n=cqNormName(nm); if(aliasMap[n]) return empById[aliasMap[n]]||null; return byName[n]||byKey[cqNameKey(nm)]||null; };
-    const seen={}, facts=[], unmatched={}, dups=[]; let ignoredCount=0;
+    const seen={}, facts=[], unmatched={}, dups=[]; let ignoredCount=0; const durCols={};
     (sheet.rows||[]).forEach(r=>{ const nm=String(r[map.name]==null?'':r[map.name]).trim(); if(!nm) return;
       if(ignoredSet[cqNormName(nm)]){ ignoredCount++; return; }
       const emp=resolve(nm);
       if(!emp){ (unmatched[nm]=unmatched[nm]||{name:nm,rows:0}).rows++; return; }
       if(seen[emp.id]){ dups.push(nm); return; } seen[emp.id]=true;
-      const vals={}, raw={}; valFields.forEach(f=>{ const idx=map[f.key]; const rv = idx>=0? r[idx] : ''; vals[f.key]=cqParse(f.kind,rv); if(idx>=0) raw[f.key]=rv; });
+      const vals={}, raw={}; valFields.forEach(f=>{ const idx=map[f.key]; const rv = idx>=0? r[idx] : ''; vals[f.key]=cqParse(f.kind,rv); if(idx>=0) raw[f.key]=rv;
+        if(f.kind==='int'&&idx>=0&&cqLooksDuration(rv)) (durCols[f.key]=durCols[f.key]||{label:f.label,beispiel:String(rv).trim(),n:0}).n++; });
       facts.push({ employee_id:emp.id, name:((emp.first_name||'')+' '+(emp.last_name||'')).trim(), vals, raw });
     });
     facts.sort((a,b)=>a.name.localeCompare(b.name,'de'));
@@ -37340,6 +37347,9 @@ function PivotImport({projId, employees, source, fields, table, accept, hint, on
     const warnings=[];
     if(unmatchedList.length) warnings.push({type:'unmatched',message:unmatchedList.length+' nicht zuordenbare Namen (nicht importiert)',details:unmatchedList.map(u=>u.name+' ('+u.rows+')')});
     if(dups.length) warnings.push({type:'duplicate',message:dups.length+' doppelte Namen (nur erste Zeile übernommen)',details:dups});
+    Object.keys(durCols).forEach(k=>{ const c2=durCols[k];
+      warnings.push({type:'invalid', message:'Spalte „'+c2.label+'" enthält Zeitangaben statt Stückzahlen — nicht übernommen',
+        details:[c2.n+' Zeile(n), z. B. „'+c2.beispiel+'". Bitte im Export die richtige Spalte wählen oder die Zuordnung ändern.']}); });
     setResult({facts,unmatched:unmatchedList,warnings,ignoredCount}); setBusy(false); setStep('preview');
   }
   async function assignAlias(nm, empId){ if(!empId) return; setBusy(true); setErr('');
@@ -47312,9 +47322,13 @@ function CheckinView({employees, projects, team, showToast, isMobileW}){
 // ISO-Wochen-Montag + Monat der Woche (Donnerstag-Regel) — für Werktage (Rückmeldung 5e) und MTD (5d).
 function isoWeekMonday(y,w){ const jan4=new Date(y,0,4); const dow=(jan4.getDay()||7); const wk1=new Date(jan4); wk1.setDate(jan4.getDate()-(dow-1)); const mon=new Date(wk1); mon.setDate(wk1.getDate()+(w-1)*7); return mon; }
 function isoWeekMonth(y,w){ const th=isoWeekMonday(y,w); th.setDate(th.getDate()+3); return {y:th.getFullYear(), m:th.getMonth()}; }
+// Ein Schluesselsatz fuer beide Skills. Support trug frueher eigene Schluessel (aht/att/hold/acw),
+// waehrend der Import avg_handle/avg_talk/avg_hold/avg_acw schreibt — deshalb blieben dort ALLE
+// Zeitspalten leer, egal was in der Datenbank stand (Befund 2026-09-29). Die Beschriftung bleibt
+// unterschiedlich, der Schluessel nicht; `alt` liest von Hand getippte Altwerte weiter.
 const HC_CALL_COLS = {
-  sales:   [{k:'no_answer',l:'No Answer',t:'count'},{k:'answered',l:'Answered',t:'count'},{k:'outbound',l:'Outbound',t:'count'},{k:'avg_talk',l:'Avg Talk',t:'time'},{k:'avg_acw',l:'Avg ACW',t:'time'},{k:'avg_handle',l:'Avg Handle',t:'time'},{k:'avg_hold',l:'Avg Hold',t:'time'}],
-  support: [{k:'answered',l:'Answered',t:'count'},{k:'outbound',l:'Outbound',t:'count'},{k:'tel_hours',l:'Std. Telefonie',t:'num'},{k:'aht',l:'AHT',t:'time'},{k:'att',l:'ATT',t:'time'},{k:'hold',l:'HOLD',t:'time'},{k:'acw',l:'ACW',t:'time'}]
+  sales:   [{k:'no_answer',l:'No Answer',t:'count'},{k:'answered',l:'Answered',t:'count'},{k:'handled',l:'Handle',t:'count'},{k:'outbound',l:'Outbound',t:'count'},{k:'avg_talk',l:'Avg Talk',t:'time'},{k:'avg_acw',l:'Avg ACW',t:'time'},{k:'avg_handle',l:'Avg Handle',t:'time'},{k:'avg_hold',l:'Avg Hold',t:'time'}],
+  support: [{k:'answered',l:'Answered',t:'count'},{k:'handled',l:'Handle',t:'count'},{k:'outbound',l:'Outbound',t:'count'},{k:'tel_hours',l:'Std. Telefonie',t:'num'},{k:'avg_handle',l:'AHT',t:'time',alt:'aht'},{k:'avg_talk',l:'ATT',t:'time',alt:'att'},{k:'avg_hold',l:'HOLD',t:'time',alt:'hold'},{k:'avg_acw',l:'ACW',t:'time',alt:'acw'}]
 };
 function hcEmptyRow(){ return {kw:'',plan:'',rueck:'',geliefert:'',erkl:''}; }
 function hcEmptyTeam(){ return {fte:'',members:[],stunden:[hcEmptyRow(),hcEmptyRow(),hcEmptyRow(),hcEmptyRow(),hcEmptyRow()],calls:{vorwoche:{},monat:{}},massnahmen:''}; }
@@ -47532,18 +47546,29 @@ function PresentationsView({projects, employees, team, showToast}){
       const {data:wh}=await sb.from('weekly_hours').select('skill,kw,year,hours,employee_id,sales_calls').eq('project_id',selProj.id).in('year',years).in('kw',kws);
       const hours={}, scByEmp={}; (wh||[]).forEach(r=>{ if(!inWin(r)) return; const sk=String(r.skill||'').toLowerCase(); const key=sk+'|'+r.year+'|'+r.kw; hours[key]=(hours[key]||0)+Number(r.hours||0);
         if(r.sales_calls!=null){ const ek=r.year+'-'+r.kw; (scByEmp[r.employee_id]=scByEmp[r.employee_id]||{})[ek]=(scByEmp[r.employee_id][ek]||0)+Number(r.sales_calls); } });
-      const {data:wc}=await sb.from('weekly_calls').select('employee_id,kw,year,answered,outbound,no_answer,avg_handle_sec,avg_talk_sec,avg_hold_sec,avg_acw_sec').eq('project_id',selProj.id).in('year',years).in('kw',kws);
+      const {data:wc}=await sb.from('weekly_calls').select('employee_id,kw,year,answered,handled,outbound,no_answer,avg_handle_sec,avg_talk_sec,avg_hold_sec,avg_acw_sec').eq('project_id',selProj.id).in('year',years).in('kw',kws);
       const rv=ws[ws.length-1]; const wcWin=(wc||[]).filter(inWin); const callsByEmp={}; wcWin.filter(r=>r.kw===rv.kw&&r.year===rv.yr).forEach(r=>{ callsByEmp[r.employee_id]=r; });   // Vorwoche = ausgewertete Woche (Review)
       const {data:wg}=await sb.from('weekly_gauges').select('employee_id,kw,year,gesamt_pct,anzahl,dauer_sec,nps,csat').eq('project_id',selProj.id).in('year',years).in('kw',kws);
       const gaugesWin=(wg||[]).filter(inWin);   // 5-Wochen-Fenster, für CSAT (Schnitt 5b)
       const {data:ke}=await sb.from('kpi_entries').select('emp_id,kpi_id,value,kw,year').in('kpi_id',['kpi_hc_open_bookings','kpi_hc_osl']).in('year',years).in('kw',kws);
       const kpiWin=(ke||[]).filter(inWin);      // Buchungen (offen/OSL) je MA/KW — manuell im KPI-Tab; Sales Calls kommen aus scByEmp (Import)
+      // Rueckmeldung = geplante Nettostunden aus dem Schichtplan, abzueglich Urlaub und Krankheit.
+      // Dieselbe Rechnung wie im HC Stundenabgleich (Entscheidung 2026-09-29: Bericht und Cockpit
+      // muessen dieselbe Zahl zeigen, sonst gibt es Diskussionen mit dem Auftraggeber).
+      const wMon=isoWeekMonday(ws[0].yr,ws[0].kw); const wSun=new Date(isoWeekMonday(ws[ws.length-1].yr,ws[ws.length-1].kw)); wSun.setDate(wSun.getDate()+6);
+      const {data:sa}=await sbAllData((a2,b2)=>sb.from('shift_assignments').select('employee_id,skill,work_date,net_hours')
+        .eq('project_id',selProj.id).gte('work_date',isoLocal(wMon)).lte('work_date',isoLocal(wSun)).order('work_date',{ascending:true}).range(a2,b2));
+      const empById={}; (employees||[]).forEach(e=>{ if(e) empById[e.id]=e; });
+      const planH={};
+      (sa||[]).forEach(r=>{ const ds=String(r.work_date).slice(0,10); const net=Number(r.net_hours)||0; if(net<=0) return;
+        const f=cpoAbsFactor(empById[r.employee_id], ds); const w=getISOWeek(new Date(ds+'T00:00:00'));
+        const kk=String(r.skill||'').toLowerCase()+'|'+w.year+'|'+w.kw; planH[kk]=(planH[kk]||0)+net*f; });
       const {data:fte}=await sb.from('report_fte').select('employee_id,fte').eq('project_id',selProj.id);
       const fm={}; (fte||[]).forEach(x=>{ fm[x.employee_id]=Number(x.fte); });
       const {data:rf}=await sb.from('report_forecast').select('skill,year,kw,fc_hours,planned_hours').eq('project_id',selProj.id).in('year',years).in('kw',kws);
       const forecast={}, forecastPlanned={}; (rf||[]).forEach(r=>{ if(!inWin(r)) return; const kk=String(r.skill||'').toLowerCase()+'|'+r.year+'|'+r.kw; forecast[kk]=(r.fc_hours==null?null:Number(r.fc_hours)); forecastPlanned[kk]=(r.planned_hours==null?null:Number(r.planned_hours)); });
-      if(alive){ setStores({hours,scByEmp,callsByEmp,callsWin:wcWin,callsCount:wcWin.length,gaugesCount:gaugesWin.length,gaugesWin,kpiWin,forecast,forecastPlanned,loaded:true}); setFteStd(fm); }
-    }catch(e){ if(alive){ setStores({hours:{},scByEmp:{},callsByEmp:{},callsWin:[],callsCount:0,gaugesCount:0,gaugesWin:[],kpiWin:[],forecast:{},forecastPlanned:{},loaded:true}); } }
+      if(alive){ setStores({hours,scByEmp,callsByEmp,callsWin:wcWin,callsCount:wcWin.length,gaugesCount:gaugesWin.length,gaugesWin,kpiWin,forecast,forecastPlanned,planH,loaded:true}); setFteStd(fm); }
+    }catch(e){ if(alive){ setStores({hours:{},scByEmp:{},callsByEmp:{},callsWin:[],callsCount:0,gaugesCount:0,gaugesWin:[],kpiWin:[],forecast:{},forecastPlanned:{},planH:{},loaded:true}); } }
   })(); return ()=>{alive=false;}; },[selProjId,pNo,pYear]);
   // Langzeit-Modell (report_longterm) in den Bericht ziehen, wenn für den Skill noch nichts gepflegt ist.
   // setDeck (kein upd) → kein Dirty-Flag; unverändert lassen, wenn schon vorhanden.
@@ -47560,7 +47585,11 @@ function PresentationsView({projects, employees, team, showToast}){
     try{ if(num==null||isNaN(num)){ await sb.from('report_fte').delete().eq('project_id',selProj.id).eq('employee_id',empId); }
       else { await sb.from('report_fte').upsert({project_id:selProj.id,employee_id:empId,fte:num,updated_at:new Date().toISOString()},{onConflict:'project_id,employee_id'}); } }
     catch(e){ showToast&&showToast('FTE speichern fehlgeschlagen: '+(e.message||''),'error'); } }
-  const teamFteSum=t=>membersFor(t).reduce((s,e)=>s+(fteStd[e.id]!=null?fteStd[e.id]:0),0);
+  // EINE Regel fuer beide Stellen: hinterlegter Standard, sonst 1,0. Vorher zaehlte der Knopf
+  // "= Summe Standard" fehlende Werte als 0 und die FTE-Folie als 1 — dieselbe Mannschaft ergab
+  // 13,00 und 14,00 auf einem Bildschirm (Befund 2026-09-29).
+  const teamFteSum=t=>membersFor(t).reduce((s,e)=>s+(fteStd[e.id]!=null?fteStd[e.id]:1),0);
+  const fteOhneStandard=t=>membersFor(t).filter(e=>fteStd[e.id]==null).map(e=>empName(e));
   // „Gelieferte Stunden" je Skill aus weekly_hours übernehmen → geliefert + KW, Provenance 'imported'.
   function applyImportHours(t){ const ws=windowWeeks(); const members=membersFor(t);
     // Rückmeldung automatisch mit-rechnen: Team-FTE = gesetztes td.fte ODER Summe der report_fte-Standards.
@@ -47581,7 +47610,7 @@ function PresentationsView({projects, employees, team, showToast}){
   const secToMmss=s=>{ if(s==null||s==='') return ''; const x=Math.round(Number(s)||0); return Math.floor(x/60)+':'+String(x%60).padStart(2,'0'); };
   function applyImportCalls(t){ const members=membersFor(t); upd(n=>{ const cur=n.teams[t].calls.vorwoche={...(n.teams[t].calls.vorwoche||{})};
     members.forEach(e=>{ const r=(stores.callsByEmp||{})[e.id]; if(!r) return;
-      cur[e.id]={ no_answer:r.no_answer!=null?String(r.no_answer):'', answered:r.answered!=null?String(r.answered):'', outbound:r.outbound!=null?String(r.outbound):'',
+      cur[e.id]={ no_answer:r.no_answer!=null?String(r.no_answer):'', answered:r.answered!=null?String(r.answered):'', handled:r.handled!=null?String(r.handled):'', outbound:r.outbound!=null?String(r.outbound):'',
         avg_talk:secToMmss(r.avg_talk_sec), avg_acw:secToMmss(r.avg_acw_sec), avg_handle:secToMmss(r.avg_handle_sec), avg_hold:secToMmss(r.avg_hold_sec) }; });
     (n.teams[t].calls=n.teams[t].calls||{})._vwsrc='imported'; }); applyImportCallAht(t); }
   // CSAT je MA über das 5-Wochen-Fenster aus weekly_gauges. Ø gewichtet nach Anzahl (n). Namen eingefroren.
@@ -47601,7 +47630,7 @@ function PresentationsView({projects, employees, team, showToast}){
   function applyImportCallAht(t){ const ws=windowWeeks(); const members=membersFor(t); const win=stores.callsWin||[];
     const memberSet={}; members.forEach(e=>{ memberSet[e.id]=e; });
     const byEmp={}; win.forEach(r=>{ if(!memberSet[r.employee_id]) return; if(!ws.some(w=>w.yr===r.year&&w.kw===r.kw)) return; const wk=r.year+'-'+r.kw;
-      (byEmp[r.employee_id]=byEmp[r.employee_id]||{})[wk]={aht:(r.avg_handle_sec==null?null:Number(r.avg_handle_sec)), answered:(r.answered==null?0:Number(r.answered))}; });
+      (byEmp[r.employee_id]=byEmp[r.employee_id]||{})[wk]={aht:(r.avg_handle_sec==null?null:Number(r.avg_handle_sec)), answered:(Number(r.answered)||Number(r.handled)||0)}; });
     const weeks=ws.map(w=>({kw:w.kw,key:w.yr+'-'+w.kw}));
     const revMon=reviewMonday(); const cutoff=new Date(revMon); cutoff.setDate(revMon.getDate()-newbieWeeks*7);
     const isNewbie=e=>{ const s=(e.contract&&e.contract.start)||e.contract_start||e.hire_date; if(!s) return false; const d=new Date(String(s).slice(0,10)+'T12:00:00'); return !isNaN(d.getTime())&&d>=cutoff; };
@@ -47616,6 +47645,7 @@ function PresentationsView({projects, employees, team, showToast}){
   // übernommen wurde (klare Trennung „nicht übernommen" vs. „kein Organigramm"). Der Org-Zweig wird danach
   // asynchron aus org_nodes nachgeladen und nur gemergt, wenn er tatsächlich Mitglieder enthält.
   function applyFteList(t){ const members=membersFor(t);
+    if(!stores.loaded) return;   // ohne geladene Standardwerte zaehlt jeder als 1,0 — das waere still falsch
     const rows=members.map(e=>({id:e.id,name:empName(e),fte:(fteStd[e.id]!=null?fteStd[e.id]:1)}));
     const total=Math.round(rows.reduce((s,r)=>s+(Number(r.fte)||0),0)*100)/100;
     // Drei Funktions-Bänder (Projektleitung / Overhead / Agenten) statt Baum. Personen = Skill-Leute des Projekts
@@ -47649,8 +47679,20 @@ function PresentationsView({projects, employees, team, showToast}){
         const {data:sce}=await sb.from('kpi_entries').select('emp_id,value,kw,year').eq('kpi_id',scCfg.id).in('year',years).in('kw',kws);
         (sce||[]).forEach(r=>{ if(!ws.some(w=>w.yr===r.year&&w.kw===r.kw)) return; (scKpi[r.emp_id]=scKpi[r.emp_id]||{})[r.year+'-'+r.kw]=Number(r.value); }); }
     }catch(e){}
+    // EINE Quelle: der KPI-Wert aus dem Booking-Import. Bis 2026-09-29 wurde je Person gemischt —
+    // fehlte der KPI-Wert, sprang still die Rohzahl aus weekly_hours ein. In KW 37 ergab das 239,
+    // eine Zahl, die in keinem der beiden Systeme steht. Jetzt gilt der KPI, und wo die Rohdaten
+    // abweichen, steht es sichtbar unter der Folie statt unsichtbar in der Summe.
     const sc=stores.scByEmp||{};
-    const callsOf=(id,key)=>{ const v=(scKpi[id]||{})[key]; if(v!=null) return v; const v2=(sc[id]||{})[key]; return v2!=null?v2:null; };
+    const callsOf=(id,key)=>{ const v=(scKpi[id]||{})[key]; return v!=null?v:null; };
+    const abweichung=[];
+    ws.forEach(w=>{ const key=w.yr+'-'+w.kw; let kpiS=0,rohS=0,kpiAny=false,rohAny=false;
+      members.forEach(e=>{ const a2=(scKpi[e.id]||{})[key]; const b2=(sc[e.id]||{})[key];
+        if(a2!=null){ kpiS+=a2; kpiAny=true; } if(b2!=null){ rohS+=b2; rohAny=true; } });
+      // Nur melden, wenn es ueberhaupt Anrufe gibt — sonst meldet Support jede Woche "0 gegen 0".
+      if(kpiS<=0&&rohS<=0) return;
+      if(kpiAny&&rohAny&&Math.abs(kpiS-rohS)>0.5) abweichung.push({kw:w.kw, kpi:kpiS, roh:rohS});
+      else if(!kpiAny&&rohAny) abweichung.push({kw:w.kw, kpi:null, roh:rohS}); });
     const weeks=ws.map(w=>({kw:w.kw,key:w.yr+'-'+w.kw}));
     const crOf=(o,os,c)=> c>0 ? Math.round((o+os)/c*10000)/100 : null;
     const agents=members.map(e=>{ const byWeek={}; let to=0,tos=0,tc=0;
@@ -47673,17 +47715,20 @@ function PresentationsView({projects, employees, team, showToast}){
     const mtdAgents=agents.map(a=>{ let o=0,os=0,c=0; mtdWeeks.forEach(wk=>{ const v=a.byWeek[wk.key]; if(v){o+=v.open;os+=v.osl;c+=v.calls;} }); return {id:a.id,name:a.name,open:o,osl:os,calls:c,cr:crOf(o,os,c)}; }).filter(a=>a.calls||a.open||a.osl);
     let mo=0,mos=0,mc=0; mtdAgents.forEach(a=>{mo+=a.open;mos+=a.osl;mc+=a.calls;});
     const mtd={ label:MONTHS_DE[rm.m]+' '+rm.y, weekKws:mtdWeeks.map(w=>w.kw), agents:mtdAgents, team:{open:mo,osl:mos,calls:mc,cr:(crMonth!=null?crMonth:crOf(mo,mos,mc))} };
-    upd(n=>{ n.teams[t].cr={weeks,reportKey:rv.yr+'-'+rv.kw,team,agents,mtd,_src:'imported'}; }); }
-  // Rückmeldung je KW = Team-FTE × 7,5 h × Werktage der KW (Mo–Fr minus Feiertage der dominanten Location). Überschreibbar.
-  function applyRueckmeldung(t){ const ws=windowWeeks(); const members=membersFor(t); const fte=numOr(deck.teams[t].fte, null);
-    if(fte==null) return;
-    const locCount={}; members.forEach(e=>{ const l=(e.location||e.city||''); locCount[l]=(locCount[l]||0)+1; });
-    const domLoc=Object.keys(locCount).sort((a,b)=>locCount[b]-locCount[a])[0]||'';
-    const holSet=holidayDatesForLocation(domLoc);
-    const workdays=(kw,yr)=>{ const mon=isoWeekMonday(yr,kw); let n=0; for(let i=0;i<5;i++){ const d=new Date(mon); d.setDate(mon.getDate()+i); if(!holSet.has(isoLocal(d))) n++; } return n; };
+    // Gilt die Folie fuer diesen Skill ueberhaupt? Support hat weder Buchungen noch Sales Calls —
+    // dort standen bisher fuenf Spalten mit Nullen, die wie ein Fehler aussehen.
+    const hatDaten=agents.some(a=>Object.keys(a.byWeek).some(k=>{ const v=a.byWeek[k]; return (v.open||v.osl||v.calls); }));
+    upd(n=>{ n.teams[t].cr={weeks,reportKey:rv.yr+'-'+rv.kw,team,agents,mtd,abweichung,hatDaten,_src:'imported'}; }); }
+  // Rückmeldung je KW = geplante Nettostunden aus dem SCHICHTPLAN, abzüglich Urlaub und Krankheit.
+  // Bis 2026-09-29 war es Team-FTE × 7,5 h × Werktage — eine Schätzung aus der Zeit ohne Schichtplan.
+  // Jetzt dieselbe Zahl wie im HC Stundenabgleich; nur so sind Bericht und Cockpit deckungsgleich.
+  // Wochen ohne Plan bleiben LEER statt 0: eine 0 wäre eine Aussage, die wir nicht treffen können.
+  function applyRueckmeldung(t){ const ws=windowWeeks(); const ph=stores.planH||{};
     upd(n=>{ const rows=n.teams[t].stunden;
       ws.forEach((w,i)=>{ if(!rows[i]) rows[i]=hcEmptyRow(); rows[i].kw=''+w.kw;
-        const wd=workdays(w.kw,w.yr); const val=Math.round(fte*7.5*wd*10)/10; rows[i].rueck=String(val).replace('.',','); rows[i].rsrc='system'; }); }); }
+        const v=ph[t+'|'+w.yr+'|'+w.kw];
+        rows[i].rueck=(v==null?'':String(Math.round(v*10)/10).replace('.',','));
+        rows[i].rsrc='system'; }); }); }
   // Calls MTD (5f): weekly_calls über die Berichtsmonats-Wochen summiert (Anzahlen summiert, Zeiten nach Answered gewichtet).
   function applyImportCallsMtd(t){ const ws=windowWeeks(); const members=membersFor(t); const win=stores.callsWin||[];
     const rv=ws[ws.length-1]; const rm=isoWeekMonth(rv.yr,rv.kw);
@@ -47692,8 +47737,13 @@ function PresentationsView({projects, employees, team, showToast}){
     upd(n=>{ const cur=n.teams[t].calls.monat={...(n.teams[t].calls.monat||{})};
       members.forEach(e=>{ const list=byEmp[e.id]; if(!list||!list.length) return;
         const sum=k=>list.reduce((s,r)=>s+(Number(r[k])||0),0);
-        const wavgSec=k=>{ let ts=0,wsum=0; list.forEach(r=>{ const v=Number(r[k]); const w=Number(r.answered)||0; if(!isNaN(v)&&w>0){ts+=v*w;wsum+=w;} }); return wsum?ts/wsum:null; };
-        cur[e.id]={ no_answer:String(sum('no_answer')), answered:String(sum('answered')), outbound:String(sum('outbound')),
+        // Gewicht: Answered, ersatzweise Handle, sonst die Woche einfach zaehlen. Vorher fielen alle
+        // Zeilen ohne Answered heraus — deshalb waren die Zeiten bei Outbound-Agenten leer.
+        const wavgSec=k=>{ let ts=0,wsum=0; list.forEach(r=>{ const v=Number(r[k]); if(isNaN(v)||r[k]==null) return;
+          const w=(Number(r.answered)||Number(r.handled)||1); ts+=v*w; wsum+=w; }); return wsum?ts/wsum:null; };
+        // Summen nur zeigen, wo es auch Werte gibt — sonst steht ueberall eine 0, die nichts bedeutet.
+        const s0=k=>{ const any=list.some(r=>r[k]!=null); return any?String(sum(k)):''; };
+        cur[e.id]={ no_answer:s0('no_answer'), answered:s0('answered'), handled:s0('handled'), outbound:s0('outbound'),
           avg_talk:secToMmss(wavgSec('avg_talk_sec')), avg_acw:secToMmss(wavgSec('avg_acw_sec')), avg_handle:secToMmss(wavgSec('avg_handle_sec')), avg_hold:secToMmss(wavgSec('avg_hold_sec')) }; });
       (n.teams[t].calls=n.teams[t].calls||{})._mtdsrc='imported'; n.teams[t].calls._mtdKws=mtdKeys.map(k=>Number(k.split('-')[1])); }); }
   // Fehlzeiten: Krankheitstage je KW aus Abwesenheiten (type 'sick', Mo–Fr gezählt). Kommentar je Woche bleibt erhalten.
@@ -47906,7 +47956,7 @@ function PresentationsView({projects, employees, team, showToast}){
         {members.length===0&&<tr><td colSpan={cols.length+1} style={{padding:10,color:'var(--muted)'}}>Keine {t==='sales'?'Sales':'Support'}-Mitarbeiter im System.</td></tr>}
         {members.map(e=>{ const c=cur[e.id]||{}; return (<tr key={e.id} style={{borderTop:'1px solid var(--border)'}}>
           <td style={{padding:'3px 6px',whiteSpace:'nowrap'}}>{empName(e)}</td>
-          {cols.map(col=><td key={col.k} style={{padding:'3px 6px',width:col.t==='time'?78:70}}>{inp(c[col.k],v=>upd(n=>{ (n.teams[t].calls[period][e.id]=n.teams[t].calls[period][e.id]||{})[col.k]=v; if(period==='vorwoche')(n.teams[t].calls=n.teams[t].calls||{})._vwsrc='manual'; }),col.t==='time'?'mm:ss':'')}</td>)}
+          {cols.map(col=><td key={col.k} style={{padding:'3px 6px',width:col.t==='time'?78:70}}>{inp((c[col.k]==null||c[col.k]==='')&&col.alt?c[col.alt]:c[col.k],v=>upd(n=>{ (n.teams[t].calls[period][e.id]=n.teams[t].calls[period][e.id]||{})[col.k]=v; if(period==='vorwoche')(n.teams[t].calls=n.teams[t].calls||{})._vwsrc='manual'; }),col.t==='time'?'mm:ss':'')}</td>)}
         </tr>); })}
         {members.length>0&&<tr style={{borderTop:'2px solid '+accent,fontWeight:800}}>
           <td style={{padding:'5px 6px'}}>Gesamt</td>
@@ -47944,7 +47994,8 @@ function PresentationsView({projects, employees, team, showToast}){
         <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',marginBottom:8}}>
           <label style={{fontSize:12,color:'var(--muted)'}}>Team-FTE</label>
           <div style={{width:90}}>{inp(td.fte,v=>upd(n=>{n.teams[t].fte=v;}),'z.B. 8,5')}</div>
-          <button className="btn btn-sm" title="Team-FTE aus den Standard-FTE der Mitarbeiter summieren" onClick={()=>upd(n=>{n.teams[t].fte=String(Math.round(teamFteSum(t)*100)/100).replace('.',',');})}>= Summe Standard ({fmtNum(Math.round(teamFteSum(t)*100)/100,2)})</button>
+          <button className="btn btn-sm" disabled={!stores.loaded} title={stores.loaded?'Team-FTE aus den Standard-FTE der Mitarbeiter summieren':'Standard-FTE werden noch geladen'} onClick={()=>upd(n=>{n.teams[t].fte=String(Math.round(teamFteSum(t)*100)/100).replace('.',',');})}>= Summe Standard ({stores.loaded?fmtNum(Math.round(teamFteSum(t)*100)/100,2):'…'})</button>
+          {stores.loaded&&fteOhneStandard(t).length>0&&<span style={{fontSize:11,color:'#b45309'}} title={fteOhneStandard(t).join(', ')}>{fteOhneStandard(t).length} ohne hinterlegten Standard, mit 1,0 gerechnet</span>}
           <span style={{fontSize:12,color:'var(--muted)'}}>{membersFor(t).length} MA im System · {(td.members||[]).length} gewählt</span>
         </div>
         <div style={{display:'flex',flexWrap:'wrap',gap:6}}>
@@ -47955,7 +48006,7 @@ function PresentationsView({projects, employees, team, showToast}){
         <div style={{marginTop:10,borderTop:'1px dashed var(--border)',paddingTop:8}}>
           <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',marginBottom:6}}>
             <div style={{fontSize:11,color:'var(--muted)'}}>Standard-FTE je Mitarbeiter (fester Wert, Fallback für jeden Bericht — telefonie-only, ohne Overhead):</div>
-            <button className="btn btn-sm btn-primary" onClick={()=>applyFteList(t)}>FTE-Folie übernehmen</button>
+            <button className="btn btn-sm btn-primary" disabled={!stores.loaded} title={stores.loaded?'':'Standard-FTE werden noch geladen'} onClick={()=>applyFteList(t)}>FTE-Folie übernehmen</button>
             {td.fteList&&td.fteList._src==='imported'&&<span style={{fontSize:11,color:'#2563eb',fontWeight:700}}>● Folie 2 aktiv ({(td.fteList.rows||[]).length} MA, Ø-Summe {fmtNum(td.fteList.total,2)})</span>}
           </div>
           <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(190px,1fr))',gap:6}}>
@@ -47968,8 +48019,10 @@ function PresentationsView({projects, employees, team, showToast}){
       </Section>
       <Section title="Gelieferte Stunden (5 Wochen)">
         <div style={{marginBottom:6,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
-          <button className="btn btn-sm" disabled={!numOr(deck.teams[t].fte,null)} title={numOr(deck.teams[t].fte,null)?'':'Erst Team-FTE setzen (Besetzung)'} onClick={()=>applyRueckmeldung(t)}>Rückmeldung berechnen</button>
-          <span style={{fontSize:11,color:'var(--muted)'}}>Rückmeldung = Team-FTE ({fmtNum(numOr(deck.teams[t].fte,0),2)}) × 7,5 h × Werktage der KW (Feiertage abgezogen). Überschreibbar.</span>
+          <button className="btn btn-sm" disabled={!stores.loaded} title={stores.loaded?'':'Daten werden noch geladen'} onClick={()=>applyRueckmeldung(t)}>Rückmeldung aus dem Schichtplan</button>
+          <span style={{fontSize:11,color:'var(--muted)'}}>Rückmeldung = geplante Nettostunden aus dem Schichtplan, abzüglich Urlaub und Krankheit — dieselbe Zahl wie im HC Stundenabgleich. Wochen ohne Plan bleiben leer. Überschreibbar.</span>
+          {stores.loaded&&!windowWeeks().some(w=>(stores.planH||{})[t+'|'+w.yr+'|'+w.kw]!=null)&&
+            <span style={{fontSize:11,fontWeight:700,color:'#b45309'}}>Für keine der fünf Wochen steht ein Schichtplan.</span>}
         </div>
         <StundenEdit t={t}/>
       </Section>
@@ -47994,7 +48047,7 @@ function PresentationsView({projects, employees, team, showToast}){
           <button className="btn btn-sm btn-primary" disabled={!Object.keys(stores.callsByEmp||{}).length} onClick={()=>applyImportCalls(t)}>Aus Import übernehmen</button>
           {(td.calls||{})._vwsrc==='imported'&&<span style={{fontSize:11,color:'#2563eb',fontWeight:700}}>● Import</span>}
           {(td.calls||{})._vwsrc==='manual'&&<span style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>● manuell geändert</span>}
-          <span style={{fontSize:11,color:'var(--muted)'}}>Answered/Outbound/No Answer + Zeiten (mm:ss) aus weekly_calls, KW {reviewWeek().kw}. {Object.keys(stores.callsByEmp||{}).length} MA im Import.</span>
+          <span style={{fontSize:11,color:'var(--muted)'}}>Answered/Handle/Outbound/No Answer + Zeiten (mm:ss) aus weekly_calls, KW {reviewWeek().kw}. {Object.keys(stores.callsByEmp||{}).length} MA im Import. Berichtet wird Answered; Handle steht daneben und zeigt, was die Outbound-Leute leisten.</span>
         </div>
         <CallsEdit t={t} period="vorwoche"/>
       </Section>
@@ -48012,7 +48065,16 @@ function PresentationsView({projects, employees, team, showToast}){
           {td.cr&&td.cr._src==='imported'&&<span style={{fontSize:11,color:'#2563eb',fontWeight:700}}>● {(td.cr.agents||[]).length} Agenten</span>}
           <span style={{fontSize:11,color:'var(--muted)'}}>Team-CR aus kpi_project_entries (gepflegte Kennzahl „CR", Wochen + Monat). Agenten-CR = (Offene + OSL) ÷ Sales Calls je MA — Buchungen und Sales Calls kommen aus dem Booking-Import (📥 Datenimport), keine Handerfassung mehr.</span>
         </div>
-        {td.cr&&td.cr.weeks? (
+        {td.cr&&td.cr.hatDaten===false&&<div style={{border:'1px solid var(--border)',background:'var(--surface-2)',borderRadius:8,padding:'9px 12px',fontSize:12.5,color:'var(--muted)',marginBottom:6}}>
+          Für {t==='sales'?'Sales':'Support'} gibt es in diesen fünf Wochen weder Buchungen noch Sales Calls.
+          Die Folie gehört zum Sales-Teil des Berichts — die Nullen hier wären keine Aussage.
+        </div>}
+        {td.cr&&(td.cr.abweichung||[]).length>0&&<div style={{border:'1px solid #fde68a',background:'#fffbeb',borderRadius:8,padding:'9px 12px',fontSize:12,color:'#92400e',marginBottom:6,lineHeight:1.6}}>
+          <b>Sales Calls: die Quellen weichen ab.</b> Gezeigt wird der Wert aus dem Booking-Import.
+          {td.cr.abweichung.map(a2=>' KW '+a2.kw+': Import '+(a2.kpi==null?'—':fmtNum(a2.kpi))+' gegen Rohstunden '+fmtNum(a2.roh)+'.').join('')}
+          {' '}Solange das offen ist, stimmt der CR-Nenner nur in den Wochen ohne Abweichung.
+        </div>}
+        {td.cr&&td.cr.weeks&&td.cr.hatDaten!==false? (
           <div style={{overflowX:'auto'}}><table style={{borderCollapse:'collapse',fontSize:12}}>
             <thead><tr style={{color:'var(--muted)'}}><th style={{textAlign:'left',padding:'3px 8px',fontWeight:700}}>Team je KW</th>{td.cr.weeks.map(w=><th key={w.key} style={{padding:'3px 10px',fontWeight:700}}>KW {w.kw}</th>)}</tr></thead>
             <tbody>
