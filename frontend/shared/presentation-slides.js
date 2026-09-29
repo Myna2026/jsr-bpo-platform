@@ -451,7 +451,7 @@
       .concat(weeks.map(function(w){ var v=teamWeek[w.key]; return h('div',{key:w.key,style:{flex:1,textAlign:'center',fontFamily:MONO,fontSize:'1.5cqw',fontWeight:800,color:P.ink}}, v==null?'—':fmtNum(v,1)); }))
       .concat([h('div',{key:'avg',style:{flex:1,textAlign:'center',fontFamily:MONO,fontSize:'1.7cqw',fontWeight:800,color:P.onLightTxt}}, teamAvg==null?'—':fmtNum(teamAvg,1))]));
     return Slide(ctx, [ head, panel(P, [
-      h(FitBox,{key:'tbl', fkey:fkey, style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',overflow:'hidden'}}, [headerRow].concat(body).concat(isLast?[teamRow]:[])),
+      h(FitBox,{key:'tbl', fkey:fkey, off:(1+(isLast?1:0)), style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',overflow:'hidden'}}, [headerRow].concat(body).concat(isLast?[teamRow]:[])),
       h('div',{key:'ft',style:{fontSize:'1.1cqw',color:P.muted,marginTop:'1cqw'}},'CSAT je Mitarbeiter und Woche · n = Anzahl Bewertungen · Team Ø gewichtet nach n'+(pages.length>1?(' · Seite '+(page+1)+'/'+pages.length):''))
     ]) ]);
   }
@@ -530,7 +530,7 @@
       .concat(vals.slice(1).map(function(v,i){ return h('div',{key:i,style:{flex:1,textAlign:'right',fontFamily:MONO,fontWeight:(i===2||i===4)?800:(bold?800:400),color:(i===4)?P.onLightTxt:P.ink,paddingRight:'.6cqw'}}, v); }))); }
     var body=agents.map(function(a){ return line([a.name,fmtNum(a.open),fmtNum(a.osl),fmtNum(a.open+a.osl),fmtNum(a.calls),a.cr==null?'—':fmtNum(a.cr,1)+'%'],false,null); });
     var totalRow=line(['Team gesamt',fmtNum(tm.open),fmtNum(tm.osl),fmtNum((tm.open||0)+(tm.osl||0)),fmtNum(tm.calls),tm.cr==null?'—':fmtNum(tm.cr,1)+'%'],true,'2px solid '+P.onLight);
-    return Slide(ctx,[head, panel(P,[ h(FitBox,{key:'tbl', fkey:fkeyM, style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',overflow:'hidden'}}, [hdr].concat(body).concat(mLast?[totalRow]:[])), h('div',{key:'ft',style:{fontSize:'1.05cqw',color:P.muted,marginTop:'.8cqw'}}, 'MTD = Summe der Berichtsmonats-Wochen (KW '+((mtd.weekKws||[]).join(', '))+') · CR = (Offene+OSL)÷Calls') ])]);
+    return Slide(ctx,[head, panel(P,[ h(FitBox,{key:'tbl', fkey:fkeyM, off:(1+(mLast?1:0)), style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',overflow:'hidden'}}, [hdr].concat(body).concat(mLast?[totalRow]:[])), h('div',{key:'ft',style:{fontSize:'1.05cqw',color:P.muted,marginTop:'.8cqw'}}, 'MTD = Summe der Berichtsmonats-Wochen (KW '+((mtd.weekKws||[]).join(', '))+') · CR = (Offene+OSL)÷Calls') ])]);
   }
 
   // Fehlzeiten — Krankheitstage je Woche (System, aus Abwesenheiten) + Kommentar je Woche (manuell).
@@ -595,30 +595,71 @@
     ]) : (onM? h('div',{key:'cap',style:{marginTop:'.8cqw',fontSize:'1.1cqw',color:P.muted,flexShrink:0}},'Maximal 5 neue Maßnahmen je Woche erreicht.'):null);
     return Slide(ctx,[head, panel(P,[list, addRow])]);
   }
-  // Folie 5 — Langzeit-Entwicklung, 12 Monate. deck.teams[tk].langzeit={startMonth,startYear,rows:[{label,m:[12],calc}]}.
-  // 17 Kennzahlen × 12 Monate; gerechnete Ergebnis-Zeilen (calc) sind farblich von den Vorgaben abgesetzt.
-  function Langzeit(ctx, tk){ var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk);
-    var lz=td.langzeit||{}; var rows=lz.rows||[];
-    var MN=['Jan','Feb','Mär','Apr','Mai','Jun','Jul','Aug','Sep','Okt','Nov','Dez'];
-    var sm=((lz.startMonth||1)-1); var yr=lz.startYear||lz.year;
-    var head=fondHead(P, lbl, 'Langzeit-Entwicklung', '12 Monate'+(yr?(' ab '+MN[sm]+' '+yr):''));
-    if(!rows.length) return emptyPanel(ctx,head,P,'Keine Langzeit-Daten hinterlegt.');
-    var M=[]; for(var mi=0;mi<12;mi++) M.push(MN[(sm+mi)%12]); var colName='25cqw';
-    var many=rows.length>18; var padY=many?'.14cqw':'.22cqw', labFs=many?'.9cqw':'1cqw', valFs=many?'.88cqw':'.98cqw';
-    var isCalc=function(r){ if(r.calc!=null) return !!r.calc; var s=String(r.label||'').toLowerCase();
-      return /working ?net|in ?office|eom|needed|productive hour|coverage|over.?under|net ?difference|netto|produktiv/.test(s); };
-    var hdr=h('div',{key:'h',style:{display:'flex',alignItems:'flex-end',paddingBottom:'.4cqw',borderBottom:'1px solid #e6edef',fontSize:(many?'.9cqw':'1cqw'),fontWeight:700,color:P.muted}},
-      [h('div',{key:'n',style:{width:colName}},'')].concat(M.map(function(m,i){ return h('div',{key:i,style:{flex:1,textAlign:'center'}},m); })));
-    function row(r,ri){ var calc=isCalc(r);
-      return h('div',{key:ri,style:{display:'flex',alignItems:'center',padding:padY+' .5cqw',borderBottom:'1px solid #f4f7f8',
+  // Folie — Langzeit-Entwicklung, 12 Monate. Aufbau wie die Datei des Auftraggebers: drei Blöcke
+  // (Bedarf und Arbeitszeit · Personalbewegung · Ergebnis), eingerückte Unterzeilen, gerechnete
+  // Ergebniszeilen abgesetzt. Umbruch an den BLOCKGRENZEN, die Kapazität kommt aus der Messung
+  // (fkey 'lz:<skill>') — keine feste Zeilenzahl.
+  // deck.teams[tk].langzeit = {startMonth,startYear,months:[{m,y,cur}],
+  //   blocks:[{key,title,rows:[{key,label,ind,kind:'file'|'edit'|'calc',t:[12 fertige Texte]}]}]}
+  // Ältere Berichte tragen noch die flache Form {rows:[{label,m,calc}]}; die wird als ein Block gerendert.
+  var LZ_MN=['Jan','Feb','Mär','Apr','Mai','Jun','Jul','Aug','Sep','Okt','Nov','Dez'];
+  function lzModel(ctx, tk){ var td=(ctx.deck.teams||{})[tk]||{}; var lz=td.langzeit||{};
+    if(lz.blocks&&lz.blocks.length) return lz;
+    var rows=lz.rows||[]; if(!rows.length) return null;
+    return { startMonth:lz.startMonth||1, startYear:lz.startYear||lz.year, months:null,
+      blocks:[{ key:'alle', title:'', rows:rows.map(function(r){ return {label:r.label, ind:0, kind:(r.calc?'calc':'file'), m:r.m}; }) }] };
+  }
+  // Umbruch bevorzugt an der Blockgrenze. Passt ein Block allein nicht auf eine Seite, wird er
+  // geteilt und die Blockueberschrift oben wiederholt — lieber eine Fortsetzung als eine still
+  // abgeschnittene Zeile. Die Kapazitaet kommt aus der Messung, nie aus einer geschaetzten Zahl.
+  function lzPages(ctx, tk){ var m=lzModel(ctx,tk); if(!m) return [[]];
+    var cap=Math.max(3, fitCap('lz:'+tk, 15));
+    var out=[], cur=[];
+    function push(){ if(cur.length){ out.push(cur); cur=[]; } }
+    (m.blocks||[]).forEach(function(b){
+      var rows=b.rows||[]; if(!rows.length) return;
+      var cost=rows.length+(b.title?1:0);
+      if(cur.length && cur.length+cost>cap && cost<=cap) push();
+      var i=0, erste=true;
+      while(i<rows.length){
+        if(cur.length>=cap) push();
+        if(b.title && (erste || !cur.length)){ cur.push({t:'title', k:b.key+(erste?'':'-f'+i), label:b.title+(erste?'':' (Forts.)')}); erste=false; continue; }
+        erste=false;
+        cur.push({t:'row', k:b.key+'-'+i, r:rows[i]}); i++;
+      }
+    });
+    push();
+    return out.length?out:[[]];
+  }
+  function Langzeit(ctx, tk, page){ page=page||0; var P=pal(ctx.accent); var lbl=skillLabel(ctx,tk);
+    var m=lzModel(ctx,tk);
+    var sm=((m&&m.startMonth||1)-1), yr=m&&m.startYear;
+    var head=fondHead(P, lbl, 'Langzeit-Entwicklung', '12 Monate'+(yr?(' ab '+LZ_MN[sm]+' '+yr):''));
+    if(!m) return emptyPanel(ctx,head,P,'Keine Langzeit-Daten hinterlegt.');
+    var months=(m.months&&m.months.length===12)?m.months:(function(){ var a=[]; for(var i=0;i<12;i++) a.push({m:(sm+i)%12, y:(yr||0)+Math.floor((sm+i)/12)}); return a; })();
+    var items=lzPages(ctx,tk)[page]||[];
+    var colName='27cqw';
+    var hdr=h('div',{key:'h',style:{display:'flex',alignItems:'flex-end',paddingBottom:'.35cqw',borderBottom:'1px solid #e6edef',fontSize:'.86cqw',fontWeight:700,color:P.muted,flexShrink:0}},
+      [h('div',{key:'n',style:{width:colName}},'')].concat(months.map(function(mo,i){ return h('div',{key:i,style:{flex:1,textAlign:'center',color:mo.cur?P.onLightTxt:P.muted}}, LZ_MN[mo.m]); })));
+    var kids=items.map(function(it){
+      if(it.t==='title') return h('div',{key:it.k,style:{padding:'.7cqw .5cqw .25cqw',fontSize:'.78cqw',fontWeight:800,letterSpacing:'.09em',textTransform:'uppercase',color:P.muted,lineHeight:1.2}}, it.label);
+      var r=it.r, calc=(r.kind==='calc');
+      return h('div',{key:it.k,style:{display:'flex',alignItems:'center',padding:'.12cqw .5cqw',borderBottom:'1px solid #f4f7f8',lineHeight:1.2,
         background:calc?rgba(P.onLight,.06):'transparent',borderLeft:'.35cqw solid '+(calc?P.onLight:'transparent')}},
-        [h('div',{key:'n',style:{width:colName,fontWeight:calc?800:600,fontSize:labFs,color:calc?P.onLightTxt:P.ink,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},r.label||'')]
-        .concat(M.map(function(m,i){ var v=(r.m||[])[i]; return h('div',{key:i,style:{flex:1,textAlign:'center',fontFamily:MONO,fontSize:valFs,fontWeight:calc?700:400,color:(v===''||v==null)?'#cbd5e1':(calc?P.onLightTxt:P.ink)}}, (v===''||v==null)?'·':v); }))); }
-    var legend=h('div',{key:'lg',style:{display:'flex',gap:'2.2cqw',alignItems:'center',fontSize:'.92cqw',color:P.muted,marginTop:'.55cqw',flexShrink:0}},[
+        [h('div',{key:'n',style:{width:colName,paddingLeft:(r.ind?'1.5cqw':'0'),boxSizing:'border-box',fontWeight:calc?800:600,fontSize:'.86cqw',
+          color:calc?P.onLightTxt:P.ink,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}, r.label||'')]
+        .concat(months.map(function(mo,i){ var v=r.t?r.t[i]:((r.m||[])[i]); var leer=(v===''||v==null||v==='·');
+          return h('div',{key:i,style:{flex:1,textAlign:'center',fontFamily:MONO,fontSize:'.85cqw',fontWeight:calc?700:400,
+            background:mo.cur?rgba(P.onLight,.07):'transparent',color:leer?'#cbd5e1':(calc?P.onLightTxt:P.ink)}}, leer?'·':v); })));
+    });
+    var legend=h('div',{key:'lg',style:{display:'flex',gap:'2.2cqw',alignItems:'center',fontSize:'.85cqw',color:P.muted,marginTop:'.5cqw',flexShrink:0}},[
       h('span',{key:'a',style:{display:'inline-flex',alignItems:'center',gap:'.5cqw'}},[h('span',{style:{width:'1.5cqw',height:'.9cqw',background:'#fff',border:'1px solid #dfe7ea',display:'inline-block',borderRadius:'.2cqw'}}),'Vorgabe']),
       h('span',{key:'b',style:{display:'inline-flex',alignItems:'center',gap:'.5cqw'}},[h('span',{style:{width:'1.5cqw',height:'.9cqw',background:rgba(P.onLight,.14),borderLeft:'.3cqw solid '+P.onLight,display:'inline-block',borderRadius:'.2cqw'}}),'Ergebnis (gerechnet)'])
     ]);
-    return Slide(ctx,[head, panel(P,[ h('div',{key:'t',style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',overflow:'hidden'}}, [hdr].concat(rows.map(row))), legend ])]);
+    return Slide(ctx,[head, panel(P,[
+      h('div',{key:'t',style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',overflow:'hidden'}},
+        [hdr, h(FitBox,{key:'fb', fkey:'lz:'+tk, total:kids.length, style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',overflow:'hidden'}}, kids)]),
+      legend ], {padding:'2.2cqw 2.6cqw'})]);
   }
 
   // Call-Reviews-Folie je Bericht schaltbar (ctx.callReviews). WICHTIG: deckSlides UND deckSlideKeys über
@@ -630,7 +671,7 @@
   function hasFte(ctx,k){ var td=(ctx.deck.teams||{})[k]||{}; return !!(td.fteList&&td.fteList.rows&&td.fteList.rows.length); }
   function hasStd(ctx,k){ var td=(ctx.deck.teams||{})[k]||{}; return (td.stunden||[]).some(function(r){ return r.kw!==''||r.plan!==''||r.geliefert!==''||r.rueck!==''; }); }
   function hasCr(ctx,k){ var td=(ctx.deck.teams||{})[k]||{}; return !!(td.cr&&td.cr.agents&&td.cr.agents.length); }
-  function hasLangzeit(ctx,k){ var td=(ctx.deck.teams||{})[k]||{}; return !!(td.langzeit&&td.langzeit.rows&&td.langzeit.rows.length); }
+  function hasLangzeit(ctx,k){ var lz=((ctx.deck.teams||{})[k]||{}).langzeit; return !!(lz&&((lz.blocks&&lz.blocks.length)||(lz.rows&&lz.rows.length))); }
   function hasCallsMtd(ctx,k){ var td=(ctx.deck.teams||{})[k]||{}; return !!(td.calls&&td.calls.monat&&Object.keys(td.calls.monat).length); }
   function hasMassnahmen(ctx,k){ var td=(ctx.deck.teams||{})[k]||{}; return !!((td.massnahmen||'').trim()) || !!(ctx.measures&&ctx.measures.length); }
   function hasFehlzeiten(ctx,k){ var td=(ctx.deck.teams||{})[k]||{}; return !!(td.fehlzeiten&&td.fehlzeiten.weeks&&td.fehlzeiten.weeks.length); }
@@ -672,8 +713,11 @@
       for(var i=0;i<kids.length;i++){ var r=kids[i].getBoundingClientRect();
         if(r.height<2){ n++; continue; }
         if(r.bottom<=box.bottom+0.5) n++; else break; }
-      var f=props.mult||1;
-      fitReport(props.fkey, n*f, (props.total!=null?props.total:kids.length*f));
+      // off = Kinder, die KEINE Listeneintraege sind (Kopfzeile, Summenzeile). Ohne das meldet der
+      // Kasten in Kindern und die Seitenaufteilung rechnet in Eintraegen — die Kappe konvergiert nie
+      // und die letzten Zeilen werden still abgeschnitten (CSAT und MTD, gefunden am 29.09.).
+      var off=props.off||0; var f=props.mult||1;
+      fitReport(props.fkey, Math.max(0,n-off)*f, (props.total!=null?props.total:Math.max(0,kids.length-off)*f));
     });
     return h('div',{ref:ref, style:props.style}, props.children);
   }
@@ -790,7 +834,7 @@
     add('stundentab','Stunden (Tabelle)',function(){return StundenTable(ctx,k);});
     add('stunden','Stunden',function(){return Stunden(ctx,k);});
     if(hasFehlzeiten(ctx,k)) add('fehlzeiten','Fehlzeiten',function(){return Fehlzeiten(ctx,k);});
-    add('langzeit','Langzeit',function(){return Langzeit(ctx,k);});
+    addPaged('langzeit','Langzeit', lzPages(ctx,k).length, function(pi){ return Langzeit(ctx,k,pi); });
     if(kind==='sales'){
       add('crtab','CR (Tabelle)',function(){return CrTable(ctx,k);});
       add('crchart','CR (Verlauf)',function(){return CrChart(ctx,k);});

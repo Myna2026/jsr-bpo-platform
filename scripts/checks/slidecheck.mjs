@@ -40,6 +40,38 @@ const team = () => ({
        agents:namen.map((n,i)=>({id:'id'+i,name:n,byWeek:Object.fromEntries(weeks.map(w=>[w.key,{open:8,osl:20,calls:60,cr:46.6}])),tot:{open:40,osl:100,calls:300,cr:46.6}})),
        mtd:{label:'September 2026', weekKws:[36,37,38,39], agents:namen.map((n,i)=>({id:'id'+i,name:n,open:8,osl:20,calls:60,cr:46.6})), team:{open:40,osl:100,calls:300,cr:46.6}} },
   massnahmen:'Eine Maßnahme je Zeile\n'.repeat(12),
+  langzeit:{ startMonth:1, startYear:2026,
+    months:Array.from({length:12},(_,i)=>({m:i,y:2026,cur:i===8})),
+    blocks:[
+      {key:'bedarf',title:'Bedarf und Arbeitszeit',rows:[
+        {key:'forecast',label:'Forecast (Hours)',ind:0,kind:'edit',t:Array(12).fill('2.539,0')},
+        {key:'workdays',label:'Work Days',ind:0,kind:'file',t:Array(12).fill('22')},
+        {key:'gross',label:'Working Gross Time (Min.)',ind:1,kind:'file',t:Array(12).fill('510')},
+        {key:'breaks',label:'Short Breaks (Min.)',ind:1,kind:'file',t:Array(12).fill('30')},
+        {key:'meal',label:'Meal (Min.)',ind:1,kind:'file',t:Array(12).fill('30')},
+        {key:'net',label:'Working Net Time (Hours)',ind:0,kind:'file',t:Array(12).fill('7,5')},
+        {key:'productivity',label:'Productivity %',ind:0,kind:'calc',t:Array(12).fill('85,2 %')},
+        {key:'breakmeal',label:'Break and Meal %',ind:1,kind:'file',t:Array(12).fill('11,8 %')},
+        {key:'inoffice',label:'In Office Shrinkage % (Unpaid Aux)',ind:1,kind:'file',t:Array(12).fill('3,0 %')},
+        {key:'shrinkage',label:'Shrinkage',ind:0,kind:'calc',t:Array(12).fill('10,0 %')},
+        {key:'plannedout',label:'Planned Out Office Shrinkage % (Vacations etc.)',ind:1,kind:'file',t:Array(12).fill('5,0 %')},
+        {key:'unplannedout',label:'Unplanned Out Office Shrinkage % (Technical Issue, Health Issues etc.)',ind:1,kind:'file',t:Array(12).fill('5,0 %')},
+        {key:'vacdays',label:'Vacations Days',ind:0,kind:'file',t:Array(12).fill('12,5')},
+        {key:'vacsanity',label:'Vacations sanity check',ind:0,kind:'file',t:Array(12).fill('0')}]},
+      {key:'personal',title:'Personalbewegung',rows:[
+        {key:'attrition',label:'Attrition (by the end of the month)',ind:0,kind:'edit',t:Array(12).fill('4,5')},
+        {key:'newhire',label:'New Hire FTE',ind:1,kind:'edit',t:Array(12).fill('6,5')},
+        {key:'trainattr',label:'Training Attrition FTE',ind:1,kind:'edit',t:Array(12).fill('3')},
+        {key:'newhireafter',label:'New Hire after attrition',ind:0,kind:'calc',t:Array(12).fill('3,5')}]},
+      {key:'ergebnis',title:'Ergebnis',rows:[
+        {key:'eomfte',label:'EOM Forecasted FTE (Productive)',ind:0,kind:'file',t:Array(12).fill('13')},
+        {key:'neededfte',label:'Needed FTE',ind:0,kind:'calc',t:Array(12).fill('16,9')},
+        {key:'overtime',label:'Overtime',ind:0,kind:'file',t:Array(12).fill('0')},
+        {key:'productiveh',label:'Productive (Hours)',ind:0,kind:'calc',t:Array(12).fill('1.864,8')},
+        {key:'coverage',label:'Coverage %',ind:0,kind:'calc',t:Array(12).fill('176,1 %')},
+        {key:'overunder',label:'Over/Under FTE',ind:0,kind:'calc',t:Array(12).fill('-3,9')},
+        {key:'netdiff',label:'Net Difference in hours',ind:0,kind:'calc',t:Array(12).fill('-739,3')}]}
+    ] },
 });
 
 const ctx = {
@@ -63,7 +95,7 @@ const page_html = `<!doctype html><meta charset="utf-8"><div id="root"></div>
   function draw(){ root.render(React.createElement('div',{style:{width:1200}},
     window.PRES.deckSlides(window.__CTX__).map(function(el,i){ return React.createElement(React.Fragment,{key:'k'+window.__N__+'_'+i},el); }))); }
   window.__N__=0;
-  if(window.PRES.onFit) window.PRES.onFit(function(){ if(window.__N__++>6) return; draw(); });
+  if(window.PRES.onFit) window.PRES.onFit(function(){ if(window.__N__++>16) return; draw(); });
   draw();
 </script>`;
 
@@ -82,13 +114,28 @@ const res = await p.evaluate(()=>{
       const cr=c.getBoundingClientRect(); if(cr.height<3) return;
       const d=cr.bottom-r.bottom; if(d>over){ over=d; who=(c.textContent||'').trim().slice(0,44); }
     });
-    return { i, over:Math.round(over), who, titel:(sl.innerText||'').split('\n').slice(0,3).join(' · ').slice(0,56) };
+    // Zweite Bauart des stillen Abschneidens: der Inhalt bleibt INNERHALB der Folie, laeuft aber
+    // aus einem Kasten mit overflow:hidden heraus (so verschwanden vier Zeilen der Langzeit-Folie,
+    // ohne dass die Randpruefung oben etwas gemeldet haette).
+    let clip=0, clipWho='';
+    sl.querySelectorAll('*').forEach(c=>{
+      if(c===sl) return;
+      const cs=getComputedStyle(c);
+      if(cs.overflowY!=='hidden' && cs.overflowY!=='clip') return;
+      if(cs.whiteSpace==='nowrap') return;                       // einzeiliges Kuerzen mit Ellipse
+      const d=c.scrollHeight-c.clientHeight;
+      if(c.clientHeight>20 && d>clip){ clip=d; clipWho=(c.textContent||'').trim().slice(0,44); }
+    });
+    return { i, over:Math.round(over), who, clip:Math.round(clip), clipWho, titel:(sl.innerText||'').split('\n').slice(0,3).join(' · ').slice(0,56) };
   });
 });
 await b.close();
 if(errs.length){ console.log('slidecheck: Fehler beim Rendern: '+errs[0].slice(0,140)); process.exit(1); }
-const bad = res.filter(r=>r.over>2);
+const bad = res.filter(r=>r.over>2 || r.clip>2);
 console.log('slidecheck: '+res.length+' Folien mit vollem Datensatz gerendert, '+bad.length+' mit Ueberlauf.');
-bad.forEach(r=>console.log('   Folie '+r.i+': '+r.over+' px ueber den Rand — "'+r.who+'"  ['+r.titel+']'));
+bad.forEach(r=>{
+  if(r.over>2)  console.log('   Folie '+r.i+': '+r.over+' px ueber den Rand — "'+r.who+'"  ['+r.titel+']');
+  if(r.clip>2)  console.log('   Folie '+r.i+': '+r.clip+' px im Kasten abgeschnitten — "'+r.clipWho+'"  ['+r.titel+']');
+});
 console.log(bad.length? 'RESULT: FAIL' : 'RESULT: PASS');
 process.exit(bad.length?1:0);
