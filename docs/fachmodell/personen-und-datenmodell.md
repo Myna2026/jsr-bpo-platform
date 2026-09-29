@@ -55,17 +55,48 @@ Bei einem Wechsel wird die alte Zuweisung geschlossen (`end_date` gesetzt)
 und eine neue mit dem neuen Start angelegt. Alte Zuweisungen werden nie
 überschrieben oder gelöscht — die Historie bleibt vollständig erhalten.
 
+### Wo die Zuordnung steht: flache Felder vs. `project_assignments`
+
+> Korrektur 2026-09-29. Bis dahin beschrieb dieses Dokument `project_assignments`
+> als die Zuordnung **aller** Kategorien. Gebaut ist es anders, und der gebaute
+> Stand bleibt: ein Umbau lohnt nicht, es funktioniert, nur die Beschreibung
+> stimmte nicht.
+
+Es gibt **zwei** Ablagen, und welche gilt, hängt an der Kategorie:
+
+- **Agent:** die flachen Felder `project_id` und `project_skill` am
+  Mitarbeiter sind die Wahrheit. `project_assignments` bleibt bei Agenten
+  **absichtlich leer** und wird beim Speichern geleert (`hr.html`, Kommentar
+  „Agent/Firma: flaches Feld ist die Wahrheit"). Leser behandeln das als
+  virtuelle Zuweisung mit 100 Prozent.
+- **Overhead:** `project_assignments` mit `share_pct` je Zeile. Nur hier
+  braucht es echte Zeilen, weil eine Person auf mehreren Projekten und Skills
+  anteilig arbeitet.
+- **Admin:** keines von beidem.
+
+Wer Zuordnungen liest, nimmt **nicht** direkt eines der Felder, sondern die
+gemeinsame Funktion in `hr.html` (offene `project_assignments` bevorzugt, sonst
+die virtuelle 100-Prozent-Zeile aus den flachen Feldern). Eine Auswertung, die
+nur `project_assignments` abfragt, sieht keinen einzigen Agenten.
+
 ### Validierungsregeln pro Kategorie
-- **Agent** (`Agent`, `Senior Agent`, `ASP`): Genau eine offene Zuweisung
-  (`end_date: null`). Pflichtfeld — ein Agent ohne aktive Zuweisung ist ein
-  Fehler.
-- **Overhead** (`Teamleiter`, `Trainer`, `QM`, `Projektleiter`): Mindestens
-  eine offene Zuweisung. Mehrere offene Zuweisungen erlaubt — sowohl mehrere
-  Skills auf demselben Projekt als auch über mehrere Projekte hinweg.
-  Hintergrund: Auslastung bei kleinen Projekten.
-- **Admin** (`HR`, `Management`, `Finance`, `IT`): Keine Projektzuweisung.
+- **Agent** (`Agent`, `Senior Agent`, `ASP`): genau **ein** Projekt und **ein**
+  Skill in den flachen Feldern. Beide sind Pflicht, sobald die Person planbar
+  ist. Ein leerer `project_skill` fällt aus jeder Auswertung heraus, die je
+  Projekt und Skill rechnet, ohne dass es auffällt. Vor dem ersten Einsatz
+  (`contract`, `training_planned`) darf der Skill noch offen sein, solange die
+  Schulungsklasse ihn nicht festlegt.
+- **Overhead** (`Teamleiter`, `Trainer`, `QM`, `Projektleiter`): mindestens
+  eine offene Zeile in `project_assignments`. Mehrere offene Zeilen erlaubt,
+  sowohl mehrere Skills auf demselben Projekt als auch über mehrere Projekte
+  hinweg. Hintergrund: Auslastung bei kleinen Projekten.
+- **Admin** (`HR`, `Management`, `Finance`, `IT`): keine Projektzuweisung.
   Diese Mitarbeiter sind übergeordnet und nicht projektbezogen tätig.
   Auswertungen wie „Mitarbeiter auf Projekt X" zählen sie nicht mit.
+
+Der Abschnitt oben über das Schließen alter Zuweisungen und die lückenlose
+Historie gilt unverändert für Overhead. Bei Agenten gibt es diese Historie
+nicht: ein Projektwechsel überschreibt die flachen Felder.
 
 ### CV-Skills vs. Projekt-Skill (NICHT verwechseln)
 Es gibt zwei verschiedene Skill-Felder mit unterschiedlicher Bedeutung:
@@ -73,7 +104,8 @@ Es gibt zwei verschiedene Skill-Felder mit unterschiedlicher Bedeutung:
 - **`cv_skills`** (Array, am Mitarbeiter/Bewerber): Selbstauskunft auf dem
   CV, mehrere möglich („was kann diese Person grundsätzlich"). Dient
   Profil-Auswertungen. Ändert sich selten.
-- **Projekt-Skill** (Teil der `project_assignments`-Zeile): Der Skill, mit
+- **Projekt-Skill** (`project_skill` beim Agenten, `skill` der
+  `project_assignments`-Zeile beim Overhead): Der Skill, mit
   dem die Person aktuell auf einem konkreten Projekt arbeitet. Operative
   Wahrheit für KPIs und Schichten.
 

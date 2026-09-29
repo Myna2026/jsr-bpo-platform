@@ -43,11 +43,17 @@ Vorgabe. Vollständige Modelle: `docs/fachmodell/`.
 - `position` ist Master; die Kategorie (`agent` / `overhead` / `admin`) wird
   daraus abgeleitet, nie doppelt gespeichert. Neue Positionen müssen in die
   Tabelle im Doc, sonst lehnt das System sie ab.
-- Projektzuweisungen `project_assignments[{employee_id, project_id, skill,
-  start_date, end_date}]` sind die operative Kernstruktur. Wechsel = alte
-  Zeile schließen, neue anlegen; nie überschreiben oder löschen. Agent: genau
-  eine offene Zuweisung. Overhead: mindestens eine. Admin: keine.
-- `cv_skills` (Selbstauskunft) und Projekt-Skill (aus der Zuweisung) sind nie
+- Projektzuordnung liegt an ZWEI Stellen, je nach Kategorie. **Agent:** die
+  flachen Felder `project_id` + `project_skill`; `project_assignments` bleibt
+  bei Agenten absichtlich leer (virtuelle 100-%-Zuweisung), beide Felder sind
+  Pflicht, sobald die Person planbar ist. **Overhead:** Zeilen in
+  `project_assignments[{project_id, skill, share_pct, start_date, end_date}]`,
+  mindestens eine offene, mehrere erlaubt; Wechsel = alte Zeile schließen,
+  neue anlegen, nie überschreiben oder löschen. **Admin:** keine Zuordnung.
+  Zuordnungen nie direkt aus einem der Felder lesen, sondern über die geteilte
+  Funktion in `hr.html`: eine Abfrage nur auf `project_assignments` sieht
+  keinen einzigen Agenten.
+- `cv_skills` (Selbstauskunft) und Projekt-Skill (aus der Zuordnung) sind nie
   austauschbar, kein Fallback. Operative Auswertungen nutzen nur den
   Projekt-Skill.
 - Master-Feldnamen: `bank:{name,iban,bic}`, `id_number`, `position`,
