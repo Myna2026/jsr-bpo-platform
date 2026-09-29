@@ -206,7 +206,7 @@
   }
   function ftePages(ctx, tk){ var fl=((ctx.deck.teams||{})[tk]||{}).fteList||{};
     if(fl.bands&&fl.bands.length){ return ftePlan(fl).length; }
-    return agentPages(fl.rows||[],24).length; }
+    return agentPages(fl.rows||[],24,'fte:'+tk).length; }
   function Fte(ctx, tk, page){ page=page||0; var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk);
     var fl=td.fteList||{}; var rows=fl.rows||[]; var bands=fl.bands; var total=(fl.total!=null)?fl.total:numOr(td.fte,null);
     var hasBands=!!(bands&&bands.length&&bands.some(function(b){ return b.people&&b.people.length; }));
@@ -226,12 +226,13 @@
       return Slide(ctx, [ head, panel(P, (page===0?[totalBadge]:[]).concat([FteBandsBody(pageBands, P)])) ].filter(Boolean));
     }
     // Fallback: mehrspaltige Namensliste (Legacy ohne bands), paginiert
-    var lpages=agentPages(rows,24); var lr=lpages[page]||[];
+    var fkeyF='fte:'+tk;
+    var lpages=agentPages(rows,24,fkeyF); var lr=lpages[page]||[];
     var head2=page===0?fondHead(P, lbl, 'Besetzung & FTE', (pcount?(pcount+' Mitarbeiter'):'')+(lpages.length>1?(' · '+lpages.length+' Seiten'):'')):null;
     var cols3=lr.length>8?3:(lr.length>4?2:1); var per=Math.ceil(lr.length/cols3); var groups=[]; for(var g=0;g<cols3;g++) groups.push(lr.slice(g*per,(g+1)*per));
     return Slide(ctx, [ head2, panel(P, (page===0?[totalBadge]:[]).concat([
       h('div',{key:'grid',style:{flex:1,minHeight:0,display:'flex',gap:'3.5cqw',overflow:'hidden'}},
-        groups.map(function(grp,gi){ return h('div',{key:gi,style:{flex:1,minWidth:0,display:'flex',flexDirection:'column',gap:'.5cqw'}},
+        groups.map(function(grp,gi){ return h(gi===0?FitBox:'div',{key:gi, fkey:(gi===0?fkeyF:undefined), mult:(gi===0?cols3:undefined), total:(gi===0?lr.length:undefined), style:{flex:1,minWidth:0,display:'flex',flexDirection:'column',gap:'.5cqw'}},
           grp.map(function(r,ri){ return h('div',{key:r.id||ri,style:{display:'flex',alignItems:'center',justifyContent:'space-between',gap:'1cqw',padding:'.45cqw 0',borderBottom:'1px solid #f1f5f9'}},[
             h('span',{key:'n',style:{fontSize:'1.4cqw',fontWeight:600,color:P.ink,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},r.name),
             h('span',{key:'f',style:{fontFamily:MONO,fontSize:'1.4cqw',fontWeight:700,color:P.onLightTxt,flexShrink:0}},fmtNum(r.fte,2))
@@ -427,7 +428,8 @@
     // darf nicht so schwer wiegen wie einer mit 60. (Je Agent ist der Ø schon nach Anzahl gewichtet.)
     var allCells=[]; rows.forEach(function(r){ weeks.forEach(function(w){ var c=r.cells[w.key]; if(c&&c.v!=null) allCells.push(c); }); });
     var teamAvg=allCells.length?wavg(allCells):wavg(rows.map(function(r){ return {v:r.avg,n:1}; }));
-    var pages=agentPages(rows, 7); var pr=pages[page]||[]; var isLast=(page===pages.length-1);
+    var fkey='csat:'+tk;
+    var pages=agentPages(rows, 7, fkey); var pr=pages[page]||[]; var isLast=(page===pages.length-1);
     var head=page===0?fondHead(P, lbl+' · CSAT', 'Kundenzufriedenheit', rangeTxt+(pages.length>1?(' · '+rows.length+' MA · '+pages.length+' Seiten'):'')):null;
     var colName='30cqw';
     function valCell(c){ if(!c||c.v==null) return h('div',{style:{flex:1,textAlign:'center',fontFamily:MONO,fontSize:'1.4cqw',color:'#cbd5e1'}},'—');
@@ -449,7 +451,7 @@
       .concat(weeks.map(function(w){ var v=teamWeek[w.key]; return h('div',{key:w.key,style:{flex:1,textAlign:'center',fontFamily:MONO,fontSize:'1.5cqw',fontWeight:800,color:P.ink}}, v==null?'—':fmtNum(v,1)); }))
       .concat([h('div',{key:'avg',style:{flex:1,textAlign:'center',fontFamily:MONO,fontSize:'1.7cqw',fontWeight:800,color:P.onLightTxt}}, teamAvg==null?'—':fmtNum(teamAvg,1))]));
     return Slide(ctx, [ head, panel(P, [
-      h('div',{key:'tbl',style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',overflow:'hidden'}}, [headerRow].concat(body).concat(isLast?[teamRow]:[])),
+      h(FitBox,{key:'tbl', fkey:fkey, style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',overflow:'hidden'}}, [headerRow].concat(body).concat(isLast?[teamRow]:[])),
       h('div',{key:'ft',style:{fontSize:'1.1cqw',color:P.muted,marginTop:'1cqw'}},'CSAT je Mitarbeiter und Woche · n = Anzahl Bewertungen · Team Ø gewichtet nach n'+(pages.length>1?(' · Seite '+(page+1)+'/'+pages.length):''))
     ]) ]);
   }
@@ -511,15 +513,16 @@
     ])]);
   }
   function AgentCrTrend(ctx, tk, page){ var td=(ctx.deck.teams||{})[tk]||{}; var cr=td.cr||{};
-    return AgentMultiples(ctx, tk, page, { agents:cr.agents, weeks:cr.weeks, title:'CR-Verlauf je Agent',
+    return AgentMultiples(ctx, tk, page, { fkey:'cr', agents:cr.agents, weeks:cr.weeks, title:'CR-Verlauf je Agent',
       value:function(a,w){ var c=a.byWeek&&a.byWeek[w.key]; return (c&&c.cr!=null)?c.cr:null; },
       fmtAvg:function(a){ return (a.tot&&a.tot.cr!=null)?(fmtNum(a.tot.cr,1)+'%'):'—'; }, foot:'Balken = CR je Woche',
       emptyTitle:'Keine KPI-Daten je Agent.', emptySub:'' });
   }
-  function Mtd(ctx, tk){ var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk);
-    var mtd=(td.cr&&td.cr.mtd)||{}; var agents=mtd.agents||[]; var tm=mtd.team||{};
-    var head=fondHead(P, lbl, 'Monat bis dato (MTD)', mtd.label||'');
-    if(!agents.length) return emptyPanel(ctx,head,P,'Keine KPI-Daten im laufenden Monat.');
+  function Mtd(ctx, tk, page){ page=page||0; var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk);
+    var mtd=(td.cr&&td.cr.mtd)||{}; var agentsAll=mtd.agents||[]; var tm=mtd.team||{};
+    var fkeyM='mtd:'+tk; var mpages=agentPages(agentsAll,12,fkeyM); var agents=mpages[page]||[]; var mLast=(page===mpages.length-1);
+    var head=(page===0)?fondHead(P, lbl, 'Monat bis dato (MTD)', (mtd.label||'')+(mpages.length>1?(' · '+mpages.length+' Seiten'):'')):null;
+    if(!agentsAll.length) return emptyPanel(ctx,head,P,'Keine KPI-Daten im laufenden Monat.');
     var colName='26cqw'; var heads=['Mitarbeiter','Offene','OSL','Buchungen','Calls','CR'];
     var hdr=h('div',{key:'h',style:{display:'flex',alignItems:'flex-end',paddingBottom:'.7cqw',borderBottom:'1px solid #e6edef'}}, heads.map(function(t2,i){ return h('div',{key:i,style:{width:i===0?colName:'auto',flex:i===0?'none':1,textAlign:i===0?'left':'right',fontSize:'1.15cqw',fontWeight:700,color:P.muted,textTransform:'uppercase',paddingRight:'.6cqw'}},t2); }));
     function line(vals,bold,border){ return h('div',{style:{display:'flex',alignItems:'center',padding:'.45cqw 0',borderBottom:border?null:'1px solid #f1f5f9',borderTop:border||null,marginTop:border?'.2cqw':0,paddingTop:border?'.6cqw':'.45cqw',fontSize:'1.35cqw',fontWeight:bold?800:400,color:P.ink}},
@@ -527,7 +530,7 @@
       .concat(vals.slice(1).map(function(v,i){ return h('div',{key:i,style:{flex:1,textAlign:'right',fontFamily:MONO,fontWeight:(i===2||i===4)?800:(bold?800:400),color:(i===4)?P.onLightTxt:P.ink,paddingRight:'.6cqw'}}, v); }))); }
     var body=agents.map(function(a){ return line([a.name,fmtNum(a.open),fmtNum(a.osl),fmtNum(a.open+a.osl),fmtNum(a.calls),a.cr==null?'—':fmtNum(a.cr,1)+'%'],false,null); });
     var totalRow=line(['Team gesamt',fmtNum(tm.open),fmtNum(tm.osl),fmtNum((tm.open||0)+(tm.osl||0)),fmtNum(tm.calls),tm.cr==null?'—':fmtNum(tm.cr,1)+'%'],true,'2px solid '+P.onLight);
-    return Slide(ctx,[head, panel(P,[ h('div',{key:'tbl',style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',overflow:'hidden'}}, [hdr].concat(body).concat([totalRow])), h('div',{key:'ft',style:{fontSize:'1.05cqw',color:P.muted,marginTop:'.8cqw'}}, 'MTD = Summe der Berichtsmonats-Wochen (KW '+((mtd.weekKws||[]).join(', '))+') · CR = (Offene+OSL)÷Calls') ])]);
+    return Slide(ctx,[head, panel(P,[ h(FitBox,{key:'tbl', fkey:fkeyM, style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',overflow:'hidden'}}, [hdr].concat(body).concat(mLast?[totalRow]:[])), h('div',{key:'ft',style:{fontSize:'1.05cqw',color:P.muted,marginTop:'.8cqw'}}, 'MTD = Summe der Berichtsmonats-Wochen (KW '+((mtd.weekKws||[]).join(', '))+') · CR = (Offene+OSL)÷Calls') ])]);
   }
 
   // Fehlzeiten — Krankheitstage je Woche (System, aus Abwesenheiten) + Kommentar je Woche (manuell).
@@ -641,7 +644,40 @@
   // Agenten-Grafiken brechen bei zu vielen Personen automatisch auf Folgeseiten um (Folienzahl ergibt sich selbst,
   // nicht fest verdrahtet). Gleichmäßige Aufteilung: 17 Agenten → 2 Seiten à 9/8, nicht 15/2.
   var AGENT_PER_PAGE=10;
-  function agentPages(list, cap){ list=list||[]; cap=cap||AGENT_PER_PAGE; var n=list.length; if(n<=cap) return [list]; var pages=Math.ceil(n/cap); var per=Math.ceil(n/pages); var out=[]; for(var i=0;i<n;i+=per) out.push(list.slice(i,i+per)); return out; }
+  // ── Seitenumbruch: gemessen, nicht geschaetzt ────────────────────────────
+  // Frueher stand in jeder Folie eine feste Zeilenzahl ("CSAT passt bis 7"). Das stimmt genau so
+  // lange, bis eine Zeile hoeher wird — ein langer Name, ein Kennzeichen, eine Spalte mehr. Zweimal
+  // hat uns das Folien abgeschnitten. Jetzt misst die Folie nach dem Layout selbst nach, wie viele
+  // Zeilen in den weissen Bereich passen, merkt sich das je Folienart und rendert einmal neu.
+  // Die Zahl an der Aufrufstelle ist nur noch der erste Versuch, nicht die Wahrheit.
+  var FIT={cap:{}, tries:{}, bump:null};
+  function fitReset(){ FIT.cap={}; FIT.tries={}; }
+  function fitCap(fkey, fallback){ var v=fkey?FIT.cap[fkey]:null; return (v&&v>0)?v:fallback; }
+  function fitReport(fkey, passen, gesamt){
+    if(!fkey||!gesamt) return;
+    if(passen>=gesamt) return;                 // alles drin: nichts zu lernen
+    var neu=Math.max(1,passen);
+    if(FIT.cap[fkey]===neu) return;
+    FIT.tries[fkey]=(FIT.tries[fkey]||0)+1;
+    if(FIT.tries[fkey]>4) return;              // Schutz gegen Hin-und-Her
+    FIT.cap[fkey]=neu;
+    if(typeof FIT.bump==='function') FIT.bump();
+  }
+  // Container, der nach dem Layout zaehlt, wie viele seiner Kinder noch ganz sichtbar sind.
+  function FitBox(props){
+    var ref=R.useRef(null);
+    R.useLayoutEffect(function(){
+      var el=ref.current; if(!el) return;
+      var box=el.getBoundingClientRect(); var kids=el.children; var n=0;
+      for(var i=0;i<kids.length;i++){ var r=kids[i].getBoundingClientRect();
+        if(r.height<2){ n++; continue; }
+        if(r.bottom<=box.bottom+0.5) n++; else break; }
+      var f=props.mult||1;
+      fitReport(props.fkey, n*f, (props.total!=null?props.total:kids.length*f));
+    });
+    return h('div',{ref:ref, style:props.style}, props.children);
+  }
+  function agentPages(list, cap, fkey){ list=list||[]; cap=fitCap(fkey, cap||AGENT_PER_PAGE); var n=list.length; if(n<=cap) return [list]; var pages=Math.ceil(n/cap); var per=Math.ceil(n/pages); var out=[]; for(var i=0;i<n;i+=per) out.push(list.slice(i,i+per)); return out; }
   // Eligible-Call-Agenten (echte Answered-Zeile) — für Pagination-Count in skillPlan UND in CallsView identisch.
   function callsAgents(ctx, tk, period){ var td=(ctx.deck.teams||{})[tk]||{}; var cur=(td.calls&&td.calls[period])||{};
     var members=(ctx.membersOf(tk)||[]).filter(function(m){ return ((td.members||[]).length===0)||(td.members||[]).indexOf(m.id)>=0; });
@@ -651,7 +687,8 @@
   function AgentMultiples(ctx, tk, page, cfg){ page=page||0; var P=pal(ctx.accent); var lbl=skillLabel(ctx,tk);
     var agents=cfg.agents||[]; var weeks=cfg.weeks||[];
     if(!agents.length) return Slide(ctx,[ fondHead(P, lbl, cfg.title, cfg.eyebrow||''), pendingBody(ctx,P,cfg.emptyTitle||'Keine Daten',cfg.emptySub||'') ]);
-    var pages=agentPages(agents); var pa=pages[page]||[];
+    var fkey='multi:'+tk+':'+(cfg.fkey||cfg.title||'');
+    var pages=agentPages(agents, null, fkey); var pa=pages[page]||[];
     var all=[]; agents.forEach(function(a){ weeks.forEach(function(w){ var v=cfg.value(a,w); if(v!=null) all.push(v); }); });
     var dom=zoomDomain(all,0.4); var perRow=pa.length<=8?4:5;
     function mini(a){ return h('div',{key:a.id,style:{border:'1px solid #eef2f4',borderRadius:'1cqw',padding:'.9cqw 1cqw',display:'flex',flexDirection:'column',minWidth:0}},[
@@ -667,13 +704,13 @@
       h('div',{key:'avg',style:{marginTop:'.35cqw',fontFamily:MONO,fontSize:'1.05cqw',fontWeight:700,color:P.onLightTxt}}, 'Ø '+cfg.fmtAvg(a))
     ]); }
     var head=page===0?fondHead(P, lbl, cfg.title, (agents.length+' Agenten'+(pages.length>1?(' · '+pages.length+' Seiten'):''))):null;
-    var body=[ h('div',{key:'g',style:{flex:1,minHeight:0,display:'grid',gridTemplateColumns:'repeat('+perRow+',1fr)',gap:'1.2cqw',overflow:'hidden',alignContent:'start'}}, pa.map(mini)),
+    var body=[ h(FitBox,{key:'g', fkey:fkey, style:{flex:1,minHeight:0,display:'grid',gridTemplateColumns:'repeat('+perRow+',1fr)',gap:'1.2cqw',overflow:'hidden',alignContent:'start'}}, pa.map(mini)),
       h('div',{key:'ft',style:{fontSize:'1cqw',color:P.muted,marginTop:'.8cqw'}}, cfg.foot+(pages.length>1?(' · Seite '+(page+1)+'/'+pages.length):'')+' · gepunktet = keine Daten') ];
     return Slide(ctx, [head, panel(P, body)].filter(Boolean));
   }
   function ahtMmss(s){ if(s==null) return '—'; s=Math.round(s); return Math.floor(s/60)+':'+(String(s%60).length<2?'0':'')+(s%60); }
   function CallAgentAht(ctx, tk, page){ var td=(ctx.deck.teams||{})[tk]||{}; var d=td.callaht||{};
-    return AgentMultiples(ctx, tk, page, { agents:d.agents, weeks:d.weeks, title:'AHT je Agent · 5 Wochen',
+    return AgentMultiples(ctx, tk, page, { fkey:'aht', agents:d.agents, weeks:d.weeks, title:'AHT je Agent · 5 Wochen',
       value:function(a,w){ var c=a.byWeek&&a.byWeek[w.key]; return (c&&c.aht!=null)?c.aht:null; },
       fmtAvg:function(a){ return ahtMmss(a.tot&&a.tot.aht); }, foot:'Balken = AHT je Woche (mm:ss)',
       emptyTitle:'AHT-Verlauf je Agent folgt', emptySub:'Wird mit „Aus Import übernehmen" (Calls) angebunden; bricht bei vielen Agenten automatisch um.' });
@@ -708,7 +745,8 @@
     if(!rows.length) return emptyPanel(ctx, fondHead(P, lbl+' · '+eyebrow, 'Mail-Kennzahlen'), P, 'Keine Mail-Kennzahlen in diesem Zeitraum.');
     var tot=(blk&&blk.total)||{};
     var dom=zoomDomain(rows.map(function(r){ return r.meh||0; }));
-    var pages=agentPages(rows,10); var pa=pages[page]||[]; var base=pages.slice(0,page).reduce(function(s,p){ return s+p.length; },0);
+    var fkey='mail:'+tk+':'+mode;
+    var pages=agentPages(rows,10,fkey); var pa=pages[page]||[]; var base=pages.slice(0,page).reduce(function(s,p){ return s+p.length; },0);
     var head=page===0?fondHead(P, lbl+' · '+eyebrow, 'Mail-Kennzahlen', rows.length+' Agenten'+(pages.length>1?(' · '+pages.length+' Seiten'):'')):null;
     function row(r,rank){ var w=Math.max(6,frac(r.meh||0,dom)*100);
       return h('div',{key:r.id,style:{display:'flex',alignItems:'center',gap:'1.2cqw'}},[
@@ -729,7 +767,7 @@
         h('div',{key:'c',style:{display:'flex',alignItems:'baseline',gap:'.9cqw'}},[
           h('span',{style:{fontSize:'3.4cqw',fontWeight:800,color:P.ink,lineHeight:1,fontVariantNumeric:'tabular-nums'}}, fmtNum(tot.mails)),
           h('span',{style:{fontSize:'1.15cqw',color:P.muted,fontWeight:700}},'Mails') ]) ]):null,
-      h('div',{key:'list',style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',gap:'.75cqw',overflow:'hidden'}},
+      h(FitBox,{key:'list', fkey:fkey, style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',gap:'.75cqw',overflow:'hidden'}},
         pa.map(function(r,i){ return row(r, base+i+1); })),
       h('div',{key:'foot',style:{fontSize:'1cqw',color:P.muted,flexShrink:0}},
         'Mails/h = Mails geteilt durch die Task-Stunden. Die Teamzahl rechnet aus den Summen, nicht als Mittel der Einzelwerte.'
@@ -737,7 +775,7 @@
     return Slide(ctx, head?[head,body]:[body]);
   }
   function MailAgentTrend(ctx, tk, page){ var td=(ctx.deck.teams||{})[tk]||{}; var d=td.mailtrend||{};
-    return AgentMultiples(ctx, tk, page, { agents:d.agents, weeks:d.weeks, title:'Mail je Agent · 5 Wochen',
+    return AgentMultiples(ctx, tk, page, { fkey:'mail', agents:d.agents, weeks:d.weeks, title:'Mail je Agent · 5 Wochen',
       value:function(a,w){ var c=a.byWeek&&a.byWeek[w.key]; return (c&&c.meh!=null)?c.meh:null; },
       fmtAvg:function(a){ return (a.tot&&a.tot.meh!=null)?fmtNum(a.tot.meh,1)+' Mails/h':'—'; },
       foot:'Balken = Mails/h je Woche',
@@ -757,33 +795,40 @@
       add('crtab','CR (Tabelle)',function(){return CrTable(ctx,k);});
       add('crchart','CR (Verlauf)',function(){return CrChart(ctx,k);});
       add('agentcr','CR je Agent',function(){return AgentCr(ctx,k);});
-      addPaged('agentcrtrend','CR-Verlauf je Agent', agentPages((td.cr||{}).agents||[]).length, function(pi){ return AgentCrTrend(ctx,k,pi); });
-      add('mtd','MTD',function(){return Mtd(ctx,k);});
+      addPaged('agentcrtrend','CR-Verlauf je Agent', agentPages((td.cr||{}).agents||[],null,'multi:'+k+':cr').length, function(pi){ return AgentCrTrend(ctx,k,pi); });
+      addPaged('mtd','MTD', agentPages((((td.cr||{}).mtd)||{}).agents||[],12,'mtd:'+k).length, function(pi){ return Mtd(ctx,k,pi); });
       addPaged('calls','Calls (Vorwoche)', agentPages(callsAgents(ctx,k,'vorwoche'),14).length, function(pi){ return Calls(ctx,k,pi); });
       addPaged('callsmtd','Calls (Monat)', agentPages(callsAgents(ctx,k,'monat'),14).length, function(pi){ return CallsMtd(ctx,k,pi); });
     } else {
       addPaged('calls','Calls (Vorwoche)', agentPages(callsAgents(ctx,k,'vorwoche'),14).length, function(pi){ return Calls(ctx,k,pi); });
       addPaged('callsmtd','Calls (Monat)', agentPages(callsAgents(ctx,k,'monat'),14).length, function(pi){ return CallsMtd(ctx,k,pi); });
-      addPaged('callaht','AHT je Agent', agentPages((td.callaht||{}).agents||[]).length, function(pi){ return CallAgentAht(ctx,k,pi); });
-      addPaged('mailvorwoche','Mail (Vorwoche)', agentPages(mailRows(ctx,k,'vorwoche'),10).length, function(pi){ return MailKpis(ctx,k,'vorwoche',pi); });
-      addPaged('mailmonat','Mail (Monat)', agentPages(mailRows(ctx,k,'monat'),10).length, function(pi){ return MailKpis(ctx,k,'monat',pi); });
-        addPaged('mailagent','Mail je Agent', agentPages(((( (ctx.deck.teams||{})[k]||{}).mailtrend)||{}).agents||[]).length, function(pi){ return MailAgentTrend(ctx,k,pi); });
+      addPaged('callaht','AHT je Agent', agentPages((td.callaht||{}).agents||[],null,'multi:'+k+':aht').length, function(pi){ return CallAgentAht(ctx,k,pi); });
+      addPaged('mailvorwoche','Mail (Vorwoche)', agentPages(mailRows(ctx,k,'vorwoche'),10,'mail:'+k+':vorwoche').length, function(pi){ return MailKpis(ctx,k,'vorwoche',pi); });
+      addPaged('mailmonat','Mail (Monat)', agentPages(mailRows(ctx,k,'monat'),10,'mail:'+k+':monat').length, function(pi){ return MailKpis(ctx,k,'monat',pi); });
+        addPaged('mailagent','Mail je Agent', agentPages(((((ctx.deck.teams||{})[k]||{}).mailtrend)||{}).agents||[],null,'multi:'+k+':mail').length, function(pi){ return MailAgentTrend(ctx,k,pi); });
     }
     if(deckShowCalls(ctx)) add('callscores','Call-Qualität',function(){return CallScores(ctx,k);});
-    addPaged('csat','CSAT', agentPages((td.csat||{}).rows||[],7).length, function(pi){ return Csat(ctx,k,pi); });
+    addPaged('csat','CSAT', agentPages((td.csat||{}).rows||[],7,'csat:'+k).length, function(pi){ return Csat(ctx,k,pi); });
     add('massnahmen','Maßnahmen',function(){return Massnahmen(ctx,k);});
     return p;
   }
-  function deckSlides(ctx){ var out=[Title(ctx)]; activeSkills(ctx).forEach(function(s,i){ var k=s.key;
-    if(i>0) out.push(SectionDivider(ctx, skillLabel(ctx,k)));
-    skillPlan(ctx,k).forEach(function(it){ out.push(it.fn()); });
-  }); out.push(ThankYou(ctx)); return out; }
+  function hiddenSet(ctx){ var l=(ctx&&ctx.hidden)||[]; var m={}; (l||[]).forEach(function(k){ m[k]=true; }); return m; }
+  function deckSlides(ctx){ var hid=hiddenSet(ctx); var out=[]; if(!hid['title']) out.push(Title(ctx));
+    activeSkills(ctx).forEach(function(s,i){ var k=s.key;
+      if(i>0&&!hid['divider:'+k]) out.push(SectionDivider(ctx, skillLabel(ctx,k)));
+      skillPlan(ctx,k).forEach(function(it){ if(!hid[it.key]) out.push(it.fn()); });
+    }); if(!hid['thankyou']) out.push(ThankYou(ctx)); return out; }
   // Folien-Identität (für Kommentar-Anker) — dieselbe Reihenfolge/Quelle wie deckSlides.
-  function deckSlideKeys(ctx){ var out=[{key:'title',label:'Titel'}]; activeSkills(ctx).forEach(function(s,i){ var k=s.key, L=skillLabel(ctx,k);
-    if(i>0) out.push({key:'divider:'+k, label:L+' · Trenner'});
-    skillPlan(ctx,k).forEach(function(it){ out.push({key:it.key, label:it.label}); });
-  }); out.push({key:'thankyou', label:'Abschluss'}); return out; }
+  // Muss GENAU dieselbe Filterung fahren wie deckSlides: die oeffentliche Seite paart Folien und
+  // Schluessel ueber den Index. Laufen die beiden auseinander, haengen Kommentare an der falschen Folie.
+  function deckSlideKeys(ctx, alle){ var hid=alle?{}:hiddenSet(ctx);
+    var out=[]; if(!hid['title']) out.push({key:'title',label:'Titel'});
+    activeSkills(ctx).forEach(function(s,i){ var k=s.key, L=skillLabel(ctx,k);
+      if(i>0&&!hid['divider:'+k]) out.push({key:'divider:'+k, label:L+' · Trenner'});
+      skillPlan(ctx,k).forEach(function(it){ if(!hid[it.key]) out.push({key:it.key, label:it.label}); });
+    }); if(!hid['thankyou']) out.push({key:'thankyou', label:'Abschluss'}); return out; }
 
-  window.PRES = { deckSlides:deckSlides, deckSlideKeys:deckSlideKeys, Title:Title, Fte:Fte, StundenTable:StundenTable, Stunden:Stunden, Fehlzeiten:Fehlzeiten, Langzeit:Langzeit, CrTable:CrTable, CrChart:CrChart, AgentCr:AgentCr, AgentCrTrend:AgentCrTrend, Mtd:Mtd, Calls:Calls, CallsMtd:CallsMtd, Massnahmen:Massnahmen, CallScores:CallScores, Csat:Csat, SectionDivider:SectionDivider, ThankYou:ThankYou, MailKpis:MailKpis, CallAgentAht:CallAgentAht, MailAgentTrend:MailAgentTrend, callCols:callCols, pal:pal,
+  window.PRES = { onFit:function(fn){ FIT.bump=fn; }, fitReset:fitReset, fitState:function(){ return FIT.cap; },
+    deckSlides:deckSlides, deckSlideKeys:deckSlideKeys, Title:Title, Fte:Fte, StundenTable:StundenTable, Stunden:Stunden, Fehlzeiten:Fehlzeiten, Langzeit:Langzeit, CrTable:CrTable, CrChart:CrChart, AgentCr:AgentCr, AgentCrTrend:AgentCrTrend, Mtd:Mtd, Calls:Calls, CallsMtd:CallsMtd, Massnahmen:Massnahmen, CallScores:CallScores, Csat:Csat, SectionDivider:SectionDivider, ThankYou:ThankYou, MailKpis:MailKpis, CallAgentAht:CallAgentAht, MailAgentTrend:MailAgentTrend, callCols:callCols, pal:pal,
     fmtNum:fmtNum, numOr:numOr, pctDiff:pctDiff, wavgTime:wavgTime, sumCol:sumCol, decToMmss:decToMmss, mmssToDec:mmssToDec };
 })();

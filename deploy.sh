@@ -64,6 +64,18 @@ else
   run_check "statuscheck.js (STATUS_FLOW ↔ cvs_status_valid)" node "$CHECKS/statuscheck.js"
   run_check "menucheck.js (Menue ↔ HR-Tab-Sperren-Katalog)" node "$CHECKS/menucheck.js"
 
+  # Folien duerfen nichts abschneiden: rendert den Foliensatz mit einem absichtlich vollen
+  # Datensatz (22 Personen, lange Namen) und meldet jede Folie, deren Inhalt ueber den Rand ragt.
+  # Exit 2 = kein Browser -> Warnung statt Abbruch (wie beim Smoketest).
+  printf "  %-30s " "slidecheck (Folien-Ueberlauf)"
+  if node "$CHECKS/slidecheck.mjs" > /tmp/tive_slides.out 2>&1; then
+    echo "OK"
+  else
+    rc=$?
+    if [ "$rc" = "2" ]; then echo "uebersprungen ($(tail -1 /tmp/tive_slides.out))";
+    else echo "FEHLER"; cat /tmp/tive_slides.out; exit 1; fi
+  fi
+
   # Smoke-Test: startet einen lokalen Server auf dem NEUEN frontend/-Stand, meldet sich mit dem
   # Claude-Test-Zugang an und klickt durch alle Ansichten. Exit 1 = Absturz/leere Ansicht -> Abbruch;
   # Exit 2 = nicht lauffaehig (kein Browser/kein Passwort) -> Warnung, kein Block.
