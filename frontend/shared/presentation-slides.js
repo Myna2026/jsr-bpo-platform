@@ -365,12 +365,25 @@
       ]),
       h('div',{key:'l'}, list.map(row))
     ]); }
+    // Bei wenigen Stichproben ist "die staerksten" und "zum Nachschaerfen" eine Aussage, die die
+    // Grundlage nicht traegt (Vorgabe Eigentuemer 2026-09-29). Dann: EINE Liste mit allen Gespraechen
+    // und ein klarer Satz, dass es zu wenige sind. Ab CS_MIN bleibt die gewohnte Zweiteilung.
+    var CS_MIN=5; var thinCount=0;
     var cols=[];
-    if(best.length) cols.push(col(best,'Stärkste Gespräche','#059669'));
-    if(best.length&&worst.length) cols.push(h('div',{key:'sep',style:{width:1,alignSelf:'stretch',background:'#e5e7eb'}}));
-    if(worst.length) cols.push(col(worst,'Zum Nachschärfen','#dc2626'));
+    if(count<CS_MIN){
+      var alle=best.concat(worst).filter(function(e,i,a2){ return a2.findIndex(function(x){ return x.name===e.name&&x.pct===e.pct; })===i; })
+        .sort(function(x,y){ return numOr(y.pct,0)-numOr(x.pct,0); });
+      thinCount=alle.length;
+      cols.push(col(alle,'Alle bewerteten Mitarbeiter','#0f2830'));
+    } else {
+      if(best.length) cols.push(col(best,'Stärkste Gespräche','#059669'));
+      if(best.length&&worst.length) cols.push(h('div',{key:'sep',style:{width:1,alignSelf:'stretch',background:'#e5e7eb'}}));
+      if(worst.length) cols.push(col(worst,'Zum Nachschärfen','#dc2626'));
+    }
+    var duenn=(count<CS_MIN)?h('div',{key:'thin',style:{marginTop:'1.2cqw',padding:'.9cqw 1.2cqw',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:'.8cqw',fontSize:'1.2cqw',color:'#92400e',lineHeight:1.5}},
+      'Nur '+count+' Gespräch'+(count>1?'e':'')+' bewertet'+(thinCount?(', verteilt auf '+thinCount+' Mitarbeiter'):'')+'. Das reicht nicht für eine Aussage über das Team — hier steht jeder bewertete Mitarbeiter, keine Auswahl der stärksten.'):null;
     var legend=(cs&&cs.thresholds)?h('div',{key:'leg',style:{marginTop:'1.4cqw',fontSize:'1.1cqw',color:P.muted}}, 'Ampel: ab '+fmtNum(cs.thresholds.green,0)+(unit==='points'?' Pkt':' %')+' grün · ab '+fmtNum(cs.thresholds.yellow,0)+(unit==='points'?' Pkt':' %')+' gelb · darunter rot'):null;
-    var body=[ head, panel(P, [ h('div',{key:'cols',style:{flex:1,minHeight:0,display:'flex',gap:'4cqw',alignItems:'flex-start'}}, cols), legend ]) ];
+    var body=[ head, panel(P, [ h('div',{key:'cols',style:{flex:1,minHeight:0,display:'flex',gap:'4cqw',alignItems:'flex-start'}}, cols), duenn, legend ]) ];
     return Slide(ctx, body, {overlay: open?detailOverlay(open):null});
 
     function detailOverlay(e){ var det=e._detail||{}; var scores=det.scores||[]; var last=null;
@@ -414,7 +427,7 @@
     // darf nicht so schwer wiegen wie einer mit 60. (Je Agent ist der Ø schon nach Anzahl gewichtet.)
     var allCells=[]; rows.forEach(function(r){ weeks.forEach(function(w){ var c=r.cells[w.key]; if(c&&c.v!=null) allCells.push(c); }); });
     var teamAvg=allCells.length?wavg(allCells):wavg(rows.map(function(r){ return {v:r.avg,n:1}; }));
-    var pages=agentPages(rows, 11); var pr=pages[page]||[]; var isLast=(page===pages.length-1);
+    var pages=agentPages(rows, 7); var pr=pages[page]||[]; var isLast=(page===pages.length-1);
     var head=page===0?fondHead(P, lbl+' · CSAT', 'Kundenzufriedenheit', rangeTxt+(pages.length>1?(' · '+rows.length+' MA · '+pages.length+' Seiten'):'')):null;
     var colName='30cqw';
     function valCell(c){ if(!c||c.v==null) return h('div',{style:{flex:1,textAlign:'center',fontFamily:MONO,fontSize:'1.4cqw',color:'#cbd5e1'}},'—');
@@ -695,7 +708,7 @@
     if(!rows.length) return emptyPanel(ctx, fondHead(P, lbl+' · '+eyebrow, 'Mail-Kennzahlen'), P, 'Keine Mail-Kennzahlen in diesem Zeitraum.');
     var tot=(blk&&blk.total)||{};
     var dom=zoomDomain(rows.map(function(r){ return r.meh||0; }));
-    var pages=agentPages(rows,14); var pa=pages[page]||[]; var base=pages.slice(0,page).reduce(function(s,p){ return s+p.length; },0);
+    var pages=agentPages(rows,10); var pa=pages[page]||[]; var base=pages.slice(0,page).reduce(function(s,p){ return s+p.length; },0);
     var head=page===0?fondHead(P, lbl+' · '+eyebrow, 'Mail-Kennzahlen', rows.length+' Agenten'+(pages.length>1?(' · '+pages.length+' Seiten'):'')):null;
     function row(r,rank){ var w=Math.max(6,frac(r.meh||0,dom)*100);
       return h('div',{key:r.id,style:{display:'flex',alignItems:'center',gap:'1.2cqw'}},[
@@ -752,12 +765,12 @@
       addPaged('calls','Calls (Vorwoche)', agentPages(callsAgents(ctx,k,'vorwoche'),14).length, function(pi){ return Calls(ctx,k,pi); });
       addPaged('callsmtd','Calls (Monat)', agentPages(callsAgents(ctx,k,'monat'),14).length, function(pi){ return CallsMtd(ctx,k,pi); });
       addPaged('callaht','AHT je Agent', agentPages((td.callaht||{}).agents||[]).length, function(pi){ return CallAgentAht(ctx,k,pi); });
-      addPaged('mailvorwoche','Mail (Vorwoche)', agentPages(mailRows(ctx,k,'vorwoche'),14).length, function(pi){ return MailKpis(ctx,k,'vorwoche',pi); });
-      addPaged('mailmonat','Mail (Monat)', agentPages(mailRows(ctx,k,'monat'),14).length, function(pi){ return MailKpis(ctx,k,'monat',pi); });
+      addPaged('mailvorwoche','Mail (Vorwoche)', agentPages(mailRows(ctx,k,'vorwoche'),10).length, function(pi){ return MailKpis(ctx,k,'vorwoche',pi); });
+      addPaged('mailmonat','Mail (Monat)', agentPages(mailRows(ctx,k,'monat'),10).length, function(pi){ return MailKpis(ctx,k,'monat',pi); });
         addPaged('mailagent','Mail je Agent', agentPages(((( (ctx.deck.teams||{})[k]||{}).mailtrend)||{}).agents||[]).length, function(pi){ return MailAgentTrend(ctx,k,pi); });
     }
     if(deckShowCalls(ctx)) add('callscores','Call-Qualität',function(){return CallScores(ctx,k);});
-    addPaged('csat','CSAT', agentPages((td.csat||{}).rows||[],11).length, function(pi){ return Csat(ctx,k,pi); });
+    addPaged('csat','CSAT', agentPages((td.csat||{}).rows||[],7).length, function(pi){ return Csat(ctx,k,pi); });
     add('massnahmen','Maßnahmen',function(){return Massnahmen(ctx,k);});
     return p;
   }
