@@ -39043,7 +39043,18 @@ function LongtermImport({projId, initYear, onSaved}){
     const recs=Object.keys(sheetsData).map(sk=>({project_id:projId, skill:sk, start_year:Number(year), start_month:Number(startMonth), rows:sheetsData[sk], file_name:file&&file.name||null, updated_by:uid, updated_at:new Date().toISOString()}));
     const up=await sb.from('report_longterm').upsert(recs,{onConflict:'project_id,skill'});
     if(up.error){ setBusy(false); setErr('Nicht gespeichert: '+(up.error.message||up.error)); return; }
-    { const ts=isoLocal(new Date())+'_'+fileHash; await archiveImportFile(projId+'/longterm/'+ts+'_'+(file.name||'longterm.xlsx'),file,'Langzeitforecast'); }
+    // Rohdatei archivieren UND protokollieren. Das Protokoll fehlte hier als einziger Quelle: die
+    // Datei landete im Archiv, tauchte aber in "Letzte Importe" nie auf, und ein fehlgeschlagenes
+    // Archivieren blieb unsichtbar (Befund 2026-09-29).
+    const ts=isoLocal(new Date())+'_'+fileHash;
+    const arch=await archiveImportFile(projId+'/longterm/'+ts+'_'+(file.name||'longterm.xlsx'),file,'Langzeitforecast');
+    const skills=Object.keys(sheetsData);
+    const zeilen=skills.reduce((a,k)=>a+(sheetsData[k]||[]).length,0);
+    let uname=null; try{ if(uid){ const nr=await sb.from('app_users').select('full_name').eq('user_id',uid).single(); uname=nr&&nr.data&&nr.data.full_name||null; } }catch(e){}
+    try{ await sb.from('data_imports').insert({ project_id:projId, source_type:'longterm', kw:null, year:Number(year),
+      file_name:file.name, file_hash:fileHash, storage_path:arch.path, status:'ok',
+      warnings:archiveFailNote(arch,[{type:'info',message:'Blätter: '+skills.join(', ')+' · Start '+LONGTERM_MONTHS[Number(startMonth)-1]+' '+year}]),
+      row_count:zeilen, matched_count:zeilen, unmatched_count:0, uploaded_by:uid, uploaded_by_name:uname }); }catch(e){}
     setBusy(false); setSaved(true); setSheetsData(null); setFile(null); onSaved&&onSaved();
   }
   return <div style={{fontSize:13}}>
@@ -39141,16 +39152,42 @@ function ForecastImport({projId, skill, initYear, onSaved}){
       const dUp=await sb.from('forecast_day').upsert(dRows,{onConflict:'project_id,skill,work_date'});
       if(dUp.error){ setBusy(false); setErr('Tageswerte nicht gespeichert: '+(dUp.error.message||dUp.error)); return; }
     }
-    const kws=clean.map(r=>r.kw); const jahre=[...new Set(clean.map(r=>r.year))];
-    if(clean.length){
-      for(const Y2 of jahre){ const kw2=clean.filter(r=>r.year===Y2).map(r=>r.kw);
+    // Wochenwerte aus forecast_day rechnen, nicht nur aus dieser Datei. Eine Woche am Monatswechsel
+    // (KW 40 = 28.09. bis 04.10.) ist in KEINER Monatsdatei vollstaendig und bekam deshalb nie einen
+    // Wochenwert, auch nicht nachdem beide Monate hochgeladen waren. Jetzt fuellt sie sich, sobald
+    // der zweite Monat da ist. Ein im Vorschau-Feld geaenderter Wert schlaegt die Tagesrechnung.
+    const wochen={};
+    (days||[]).forEach(d2=>{ const w=getISOWeek(new Date(d2.ds+'T00:00:00')); const k=w.year+'|'+w.kw;
+      if(wochen[k]) return; const mo=isoWeekMonday(w.year,w.kw); const so=new Date(mo); so.setDate(mo.getDate()+6);
+      wochen[k]={year:w.year, kw:w.kw, mo:isoLocal(mo), so:isoLocal(so)}; });
+    const wl=Object.keys(wochen).map(k=>wochen[k]);
+    let voll=[]; const luecke=[];
+    if(wl.length){
+      const von=wl.map(w=>w.mo).sort()[0], bis=wl.map(w=>w.so).sort().pop();
+      const fdR=await sb.from('forecast_day').select('work_date,fc_total,committed')
+        .eq('project_id',projId).eq('skill',skill).gte('work_date',von).lte('work_date',bis);
+      if(fdR.error){ setBusy(false); setErr('Tageswerte nicht lesbar: '+(fdR.error.message||fdR.error)); return; }
+      const agg={}; (fdR.data||[]).forEach(r2=>{ const ds2=String(r2.work_date).slice(0,10);
+        const w=getISOWeek(new Date(ds2+'T00:00:00')); const a=agg[w.year+'|'+w.kw]||(agg[w.year+'|'+w.kw]={n:0,fc:0,pl:0,plN:0});
+        a.n++; a.fc+=Number(r2.fc_total)||0; if(r2.committed!=null){ a.pl+=Number(r2.committed)||0; a.plN++; } });
+      const rnd=v=>Math.round(v*100)/100;
+      wl.forEach(w=>{ const a=agg[w.year+'|'+w.kw];
+        if(!a||a.n<7){ luecke.push('KW '+w.kw+' ('+((a&&a.n)||0)+' von 7 Tagen)'); return; }
+        const eig=clean.find(c=>c.kw===w.kw&&c.year===w.year);       // im Vorschau-Feld gesetzt
+        voll.push({kw:w.kw, year:w.year, fc:(eig?eig.fc:rnd(a.fc)), planned:(eig&&eig.planned!=null)?eig.planned:(a.plN?rnd(a.pl):null)}); });
+    }
+    if(!voll.length) voll=clean;   // ohne Tageswerte bleibt es bei der Rechnung aus der Datei
+    const kws=voll.map(r=>r.kw); const jahre=[...new Set(voll.map(r=>r.year))];
+    if(voll.length){
+      for(const Y2 of jahre){ const kw2=voll.filter(r=>r.year===Y2).map(r=>r.kw);
         const del=await sb.from('report_forecast').delete().eq('project_id',projId).eq('skill',skill).eq('year',Y2).in('kw',kw2);
         if(del.error){ setBusy(false); setErr('Alte Werte nicht ersetzbar: '+(del.error.message||del.error)); return; } }
-      const insRows=clean.map(r=>({project_id:projId, skill, year:r.year, kw:r.kw, fc_hours:r.fc, planned_hours:r.planned, file_name:(file&&file.name)||null, updated_by:uid}));
+      const insRows=voll.map(r=>({project_id:projId, skill, year:r.year, kw:r.kw, fc_hours:r.fc, planned_hours:r.planned, file_name:(file&&file.name)||null, updated_by:uid}));
       const ins=await sb.from('report_forecast').insert(insRows).select('id');
       if(ins.error){ setBusy(false); setErr('Nicht gespeichert: '+(ins.error.message||ins.error)); return; }
       if((ins.data||[]).length!==insRows.length){ setBusy(false); setErr('Nur '+((ins.data||[]).length)+' von '+insRows.length+' Werten geschrieben (Rechte/Policy prüfen).'); return; }
     }
+    if(luecke.length) warn.push('Noch ohne Wochenwert, weil Tage fehlen: '+luecke.join(', ')+'. Fehlt der Nachbarmonat, ergaenzt ihn der naechste Upload.');
     const Y=jahre[0]||Number(year);
     // Rohdatei + Protokoll erst nach verifiziertem Schreiben.
     const ts=isoLocal(new Date())+'_'+fileHash; const path=projId+'/forecast_'+skill+'/'+ts+'_'+(file.name||'forecast.xlsx');
