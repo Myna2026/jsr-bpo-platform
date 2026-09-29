@@ -38961,78 +38961,93 @@ function LongtermImport({projId, initYear, onSaved}){
   </div>;
 }
 
-// Forecast-Import (Blatt 5 "Planung+Rueckmeldung KW"): je KW die FC-Stunden -> report_forecast.
-// Erkennung am Inhalt: Blatt mit "KW"-Spalte + Titel der mit "FC" beginnt, OHNE Tages-/Intervall-
-// Marker (datum/wochentag/intervall) und mit EINDEUTIGER KW-Spalte (nur das Wochenblatt aggregiert
-// je KW). Jahr beim Upload (Blatt 5 hat keine Jahresspalte, sicher an der Jahresgrenze). Skill je Slot.
+// Forecast-Import. Gueltige Quelle ist das TAGESBLATT "Tagesplanung" (Antwort des Auftraggebers
+// vom 2026-09-29): Spalte E = Gesamtbedarf des Tages, bei Support "FC in Stunden (Support + Task)",
+// bei Sales "FC in Stunden (Salestelefonie + Backoffice)". Backoffice und Task zaehlen zur Leistung.
+// Das Wochenblatt "Planung + Rueckmeldung KW" wird NICHT mehr gelesen: es fuehrt nur die Telefonie
+// und hat den Bericht monatelang gegen ein zu kleines Ziel rechnen lassen.
+// Unsere Zusage steht im Blatt "Rueckmeldung Monatsebene", Spalte G, und wird mitgenommen.
+// Geschrieben wird beides: die Tageswerte nach forecast_day und die Wochensumme nach report_forecast.
+// Angebrochene Wochen (weniger als sieben Tage in der Datei) liefern KEINEN Wochenwert, sonst faellt er
+// kuenstlich klein aus; ihre Tageswerte kommen trotzdem in die Datenbank.
 function ForecastImport({projId, skill, initYear, onSaved}){
   const [file,setFile]=useState(null); const [fileHash,setFileHash]=useState('');
   const [year,setYear]=useState(initYear||new Date().getFullYear());
-  const [rows,setRows]=useState(null);        // [{kw, fc}] editierbar
-  const [meta,setMeta]=useState(null);        // {sheet, fcTitle, skillWarn}
+  const [rows,setRows]=useState(null);
+  const [days,setDays]=useState(null);
+  const [meta,setMeta]=useState(null);
   const [warn,setWarn]=useState([]);
   const [err,setErr]=useState(''); const [busy,setBusy]=useState(false); const [saved,setSaved]=useState(false);
   const skLabel = skill==='sales'?'Sales':skill==='support'?'Support':skill;
 
-  function onFile(f){ if(!f) return; setErr(''); setSaved(false); setRows(null); setMeta(null); setWarn([]);
+  const xlDate=v=>{ if(v instanceof Date) return isoLocal(v);
+    if(typeof v==='number'&&v>20000&&v<60000){ const d=new Date(Date.UTC(1899,11,30)+v*86400000); return isoLocal(new Date(d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate())); }
+    const m=String(v||'').trim().match(/^(\d{4})-(\d{2})-(\d{2})/); return m?m[0]:null; };
+
+  function onFile(f){ if(!f) return; setErr(''); setSaved(false); setRows(null); setDays(null); setMeta(null); setWarn([]);
     const rd=new FileReader();
     rd.onload=ev=>{ try{
       const bytes=new Uint8Array(ev.target.result);
       const wb=XLSX.read(bytes,{type:'array',cellDates:true});
-      const sheets=wb.SheetNames.map(nm=>{ const aoa=XLSX.utils.sheet_to_json(wb.Sheets[nm],{header:1,defval:''});
-        return {name:nm, headers:(aoa[0]||[]).map(x=>String(x==null?'':x)), rows:aoa.slice(1)}; });
-      // Kandidaten: KW-Spalte + FC-Titel, ohne Tages-/Intervall-Marker.
-      const cand=[];
-      sheets.forEach(s=>{ const norm=s.headers.map(cqNormHead);
-        const kwCol=norm.findIndex(h=>h==='kw');
-        const fcCol=norm.findIndex(h=>h.indexOf('fc')===0);
-        const plCol=norm.findIndex(h=>h.indexOf('geplante')===0);   // „geplante Stunden" = unsere Rückmeldung
-        const perDay=norm.some(h=>h.indexOf('datum')===0||h.indexOf('wochentag')===0||h.indexOf('intervall')===0);
-        if(kwCol>=0 && fcCol>=0 && !perDay){
-          const kws=s.rows.map(r=>parseInt(String(r[kwCol]).replace(/[^\d]/g,''),10)).filter(n=>n>=1&&n<=53);
-          const uniq=kws.length>0 && new Set(kws).size===kws.length;
-          cand.push({s,kwCol,fcCol,plCol,fcTitle:s.headers[fcCol],uniq,n:kws.length});
-        }
-      });
-      const pick=cand.filter(c=>c.uniq).sort((a,b)=>a.n-b.n)[0];
-      if(!pick){ setErr('Kein Wochenblatt gefunden. Erwartet: ein Blatt mit Spalte „KW" und einem Titel, der mit „FC" beginnt, je KW eine Zeile (Blatt „Planung+Rueckmeldung KW"). Blätter in der Datei: '+sheets.map(s=>s.name).join(', ')); return; }
-      // Zeilen extrahieren
-      const out=[]; const seen={}; let skipped=0, dupes=0;
-      pick.s.rows.forEach(r=>{ const kw=parseInt(String(r[pick.kwCol]).replace(/[^\d]/g,''),10);
-        if(!(kw>=1&&kw<=53)){ return; }
-        const fc=cqNumV(r[pick.fcCol]);
-        if(fc==null){ skipped++; return; }
-        const planned=pick.plCol>=0?cqNumV(r[pick.plCol]):null;
-        if(seen[kw]!=null){ dupes++; } seen[kw]={fc:Math.round(fc*10)/10, planned:(planned==null?null:Math.round(planned*10)/10)};
-      });
-      Object.keys(seen).map(Number).sort((a,b)=>a-b).forEach(kw=>out.push({kw, fc:seen[kw].fc, planned:seen[kw].planned}));
+      const sheetNamed=pref=>wb.SheetNames.find(nm=>cqNormHead(nm).indexOf(cqNormHead(pref))===0);
+      const tagNm=sheetNamed('Tagesplanung');
+      const rmNm=sheetNamed('Rückmeldung Monatsebene')||sheetNamed('Rueckmeldung Monatsebene');
+      if(!tagNm){ setErr('Kein Blatt „Tagesplanung" in der Datei. Blätter: '+wb.SheetNames.join(', ')); return; }
+      const aoa=nm=>XLSX.utils.sheet_to_json(wb.Sheets[nm],{header:1,defval:''});
+      const tg=aoa(tagNm); const hd=(tg[0]||[]).map(x=>String(x==null?'':x));
+      const norm=hd.map(cqNormHead);
+      const cDat=norm.findIndex(h=>h.indexOf('datum')===0);
+      const cGes=norm.findIndex(h=>h.indexOf('fc_in_stunden')===0);
+      if(cDat<0||cGes<0){ setErr('Im Blatt „'+tagNm+'" fehlen „Datum" und „FC in Stunden …". Gefunden: '+hd.filter(Boolean).join(' · ')); return; }
+      const zus={};
+      if(rmNm){ const rm=aoa(rmNm); const rn=(rm[0]||[]).map(cqNormHead);
+        const rdt=rn.findIndex(h=>h.indexOf('datum')===0); const rg=rn.findIndex(h=>h.indexOf('geplante_stunden')===0);
+        if(rdt>=0&&rg>=0) rm.slice(1).forEach(r=>{ const ds=xlDate(r[rdt]); if(ds) zus[ds]=cqNumV(r[rg]); }); }
+      const dl=[]; tg.slice(1).forEach(r=>{ const ds=xlDate(r[cDat]); if(!ds) return;
+        dl.push({ds, total:cqNumV(r[cGes]), main:cqNumV(r[cGes+1]), second:cqNumV(r[cGes+2]), committed:(zus[ds]==null?null:zus[ds])}); });
+      if(!dl.length){ setErr('Im Blatt „'+tagNm+'" keine Zeile mit Datum gefunden.'); return; }
+      const by={}; dl.forEach(d=>{ const w=getISOWeek(new Date(d.ds+'T00:00:00')); const k=w.year+'|'+w.kw;
+        const o=by[k]||(by[k]={year:w.year,kw:w.kw,fc:0,planned:0,tage:0,hatZusage:false});
+        o.fc+=d.total||0; if(d.committed!=null){ o.planned+=d.committed; o.hatZusage=true; } o.tage++; });
+      const out=Object.keys(by).map(k=>by[k]).sort((a,b)=>a.year-b.year||a.kw-b.kw)
+        .map(o=>({kw:o.kw, year:o.year, fc:Math.round(o.fc*10)/10, planned:(o.hatZusage?Math.round(o.planned*10)/10:null), tage:o.tage, voll:o.tage===7}));
       const ws=[];
-      if(skipped) ws.push(skipped+' Zeile(n) ohne FC-Wert übersprungen');
-      if(dupes) ws.push(dupes+' doppelte KW (jeweils letzte Zeile gilt)');
-      // Skill-Plausibilität aus dem FC-Titel + Dateiname (nur Warnung, nie blockieren).
-      const tl=cqNormHead(pick.fcTitle), fn=String(f.name||'').toLowerCase();
-      const wantsSales=skill==='sales', hasSales=tl.indexOf('sales')>=0||fn.indexOf('sales')>=0, hasSupport=tl.indexOf('support')>=0||fn.indexOf('support')>=0;
-      let skillWarn=''; if(wantsSales && hasSupport && !hasSales) skillWarn='Diese Datei sieht nach Support aus, du bist im Sales-Slot.';
-      else if(!wantsSales && hasSales && !hasSupport) skillWarn='Diese Datei sieht nach Sales aus, du bist im Support-Slot.';
-      if(skillWarn) ws.push(skillWarn);
-      setFile(f); setFileHash('sz'+bytes.length); setRows(out); setMeta({sheet:pick.s.name, fcTitle:pick.fcTitle, skillWarn}); setWarn(ws);
-      if(!out.length) setErr('Blatt „'+pick.s.name+'" erkannt, aber keine gültigen KW/FC-Zeilen gefunden.');
+      const teil=out.filter(o=>!o.voll).map(o=>'KW '+o.kw+' ('+o.tage+' Tage)');
+      if(teil.length) ws.push('Angebrochene Wochen ohne Wochenwert: '+teil.join(', ')+'. Die Tageswerte werden trotzdem gespeichert.');
+      if(!rmNm) ws.push('Kein Blatt „Rückmeldung Monatsebene" gefunden, die zugesagten Stunden fehlen.');
+      const tl=cqNormHead(hd[cGes]||''), fn=String(f.name||'').toLowerCase();
+      if(skill==='sales'&&(tl.indexOf('support')>=0||fn.indexOf('support')>=0)) ws.push('Diese Datei sieht nach Support aus, du bist im Sales-Slot.');
+      if(skill==='support'&&tl.indexOf('support')<0&&(tl.indexOf('sales')>=0||fn.indexOf('sales')>=0)) ws.push('Diese Datei sieht nach Sales aus, du bist im Support-Slot.');
+      setFile(f); setFileHash('sz'+bytes.length); setRows(out); setDays(dl);
+      setMeta({sheet:tagNm, col:hd[cGes], rm:rmNm||null, tage:dl.length}); setWarn(ws);
     }catch(e){ setErr('Datei nicht lesbar: '+(e.message||'')); } };
     rd.readAsArrayBuffer(f);
   }
   function setFc(kw,v){ setRows(rs=>rs.map(r=>r.kw===kw?{...r,fc:v}:r)); }
 
   async function save(){ if(!rows||!rows.length||busy) return; setBusy(true); setErr('');
-    const clean=rows.map(r=>({kw:r.kw, fc:cqNumV(r.fc), planned:(r.planned==null||r.planned===''?null:cqNumV(r.planned))})).filter(r=>r.fc!=null);
-    if(!clean.length){ setBusy(false); setErr('Keine gültigen Werte zum Speichern.'); return; }
+    // Wochenwert nur aus vollstaendigen Wochen (7 Tage in der Datei). Tageswerte gehen immer mit.
+    const clean=rows.filter(r=>r.voll).map(r=>({kw:r.kw, year:r.year, fc:cqNumV(r.fc), planned:(r.planned==null||r.planned===''?null:cqNumV(r.planned))})).filter(r=>r.fc!=null);
+    if(!clean.length&&!(days||[]).length){ setBusy(false); setErr('Keine gültigen Werte zum Speichern.'); return; }
     let uid=null,uname=null; try{ const u=await sb.auth.getUser(); uid=u&&u.data&&u.data.user&&u.data.user.id||null; if(uid){ const nr=await sb.from('app_users').select('full_name').eq('user_id',uid).single(); uname=nr&&nr.data&&nr.data.full_name||null; } }catch(e){}
-    const Y=Number(year); const kws=clean.map(r=>r.kw);
-    const del=await sb.from('report_forecast').delete().eq('project_id',projId).eq('skill',skill).eq('year',Y).in('kw',kws);
-    if(del.error){ setBusy(false); setErr('Alte Werte nicht ersetzbar: '+(del.error.message||del.error)); return; }
-    const insRows=clean.map(r=>({project_id:projId, skill, year:Y, kw:r.kw, fc_hours:r.fc, planned_hours:r.planned, file_name:file&&file.name||null, updated_by:uid}));
-    const ins=await sb.from('report_forecast').insert(insRows).select('id');
-    if(ins.error){ setBusy(false); setErr('Nicht gespeichert: '+(ins.error.message||ins.error)); return; }
-    if((ins.data||[]).length!==insRows.length){ setBusy(false); setErr('Nur '+((ins.data||[]).length)+' von '+insRows.length+' Werten geschrieben (Rechte/Policy prüfen).'); return; }
+    // Tageswerte zuerst: sie sind die eigentliche Quelle, der Wochenwert ist daraus gerechnet.
+    if((days||[]).length){
+      const dRows=days.map(d2=>({project_id:projId, skill, work_date:d2.ds, fc_total:d2.total, fc_main:d2.main,
+        fc_second:d2.second, committed:d2.committed, file_name:(file&&file.name)||null, updated_by:uid, updated_at:new Date().toISOString()}));
+      const dUp=await sb.from('forecast_day').upsert(dRows,{onConflict:'project_id,skill,work_date'});
+      if(dUp.error){ setBusy(false); setErr('Tageswerte nicht gespeichert: '+(dUp.error.message||dUp.error)); return; }
+    }
+    const kws=clean.map(r=>r.kw); const jahre=[...new Set(clean.map(r=>r.year))];
+    if(clean.length){
+      for(const Y2 of jahre){ const kw2=clean.filter(r=>r.year===Y2).map(r=>r.kw);
+        const del=await sb.from('report_forecast').delete().eq('project_id',projId).eq('skill',skill).eq('year',Y2).in('kw',kw2);
+        if(del.error){ setBusy(false); setErr('Alte Werte nicht ersetzbar: '+(del.error.message||del.error)); return; } }
+      const insRows=clean.map(r=>({project_id:projId, skill, year:r.year, kw:r.kw, fc_hours:r.fc, planned_hours:r.planned, file_name:(file&&file.name)||null, updated_by:uid}));
+      const ins=await sb.from('report_forecast').insert(insRows).select('id');
+      if(ins.error){ setBusy(false); setErr('Nicht gespeichert: '+(ins.error.message||ins.error)); return; }
+      if((ins.data||[]).length!==insRows.length){ setBusy(false); setErr('Nur '+((ins.data||[]).length)+' von '+insRows.length+' Werten geschrieben (Rechte/Policy prüfen).'); return; }
+    }
+    const Y=jahre[0]||Number(year);
     // Rohdatei + Protokoll erst nach verifiziertem Schreiben.
     const ts=isoLocal(new Date())+'_'+fileHash; const path=projId+'/forecast_'+skill+'/'+ts+'_'+(file.name||'forecast.xlsx');
     const arch=await archiveImportFile(path,file,'Forecast '+skill); const storagePath=arch.path;
@@ -39041,7 +39056,7 @@ function ForecastImport({projId, skill, initYear, onSaved}){
   }
 
   return <div style={{fontSize:13}}>
-    <div style={{fontSize:12,color:'var(--muted)',marginBottom:8}}>Auftraggeber-Excel ({skLabel}) mit Blatt „Planung+Rueckmeldung KW". Erkennung am Inhalt (Spalte „KW" + Titel mit „FC"). KW kommen aus der Datei, das Jahr wählst du hier.</div>
+    <div style={{fontSize:12,color:'var(--muted)',marginBottom:8}}>Auftraggeber-Excel ({skLabel}). Gelesen wird das Blatt „Tagesplanung", Spalte „FC in Stunden …" — der Gesamtbedarf inklusive {skill==='support'?'Task':'Backoffice'}. Die Woche und das Jahr kommen aus dem Datum in der Datei. Das Wochenblatt wird nicht mehr gelesen.</div>
     <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap',marginBottom:8}}>
       <label style={{fontSize:12}}>Jahr <input type="number" min={2024} max={2100} value={year} onChange={e=>setYear(e.target.value)} style={{width:80,padding:'4px 6px',border:'1px solid var(--border)',borderRadius:6}}/></label>
       <input type="file" accept=".xlsx,.xls" onChange={e=>onFile(e.target.files&&e.target.files[0])}/>
@@ -39049,17 +39064,18 @@ function ForecastImport({projId, skill, initYear, onSaved}){
     {err && <div style={{padding:'8px 10px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:8,color:'#b91c1c',fontSize:12,marginBottom:8}}>{err}</div>}
     {saved && <div style={{padding:'8px 10px',background:'#ecfdf5',border:'1px solid #a7f3d0',borderRadius:8,color:'#059669',fontSize:12,fontWeight:700,marginBottom:8}}>✓ Forecast gespeichert.</div>}
     {rows && rows.length>0 && <React.Fragment>
-      <div style={{fontSize:11,color:'var(--muted)',marginBottom:6}}>Erkanntes Blatt: <b>{meta&&meta.sheet}</b> · FC-Spalte: <b>{meta&&meta.fcTitle}</b> · {rows.length} KW</div>
+      <div style={{fontSize:11,color:'var(--muted)',marginBottom:6}}>Blatt <b>{meta&&meta.sheet}</b> · Spalte <b>{meta&&meta.col}</b> · {meta&&meta.tage} Tage · {rows.filter(r=>r.voll).length} vollständige Wochen{meta&&meta.rm?(' · Zusage aus „'+meta.rm+'"'):''}</div>
       {warn.map((w,i)=><div key={i} style={{padding:'6px 10px',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:8,color:'#92400e',fontSize:11,marginBottom:6}}>{w}</div>)}
       <div style={{overflowX:'auto'}}><table style={{borderCollapse:'collapse',fontSize:12}}>
         <thead><tr style={{color:'var(--muted)'}}><th style={{padding:'4px 10px',textAlign:'left'}}>KW</th><th style={{padding:'4px 10px',textAlign:'right'}}>FC-Stunden</th><th style={{padding:'4px 10px',textAlign:'right'}}>Geplant (Rückm.)</th></tr></thead>
-        <tbody>{rows.map(r=><tr key={r.kw} style={{borderTop:'1px solid var(--border)'}}>
-          <td style={{padding:'3px 10px',fontWeight:700}}>KW {r.kw}/{year}</td>
+        <tbody>{rows.map(r=><tr key={r.year+'-'+r.kw} style={{borderTop:'1px solid var(--border)',opacity:r.voll?1:.55}}>
+          <td style={{padding:'3px 10px',fontWeight:700}}>KW {r.kw}/{r.year}
+            {!r.voll&&<span style={{marginLeft:6,fontSize:10.5,fontWeight:700,color:'#92400e'}}>nur {r.tage} Tage, kein Wochenwert</span>}</td>
           <td style={{padding:'3px 10px',textAlign:'right'}}><input value={r.fc==null?'':r.fc} onChange={e=>setFc(r.kw,e.target.value)} style={{width:90,padding:'4px 6px',border:'1px solid var(--border)',borderRadius:6,textAlign:'right',fontFamily:'var(--mono)'}}/></td>
           <td style={{padding:'3px 10px',textAlign:'right',fontFamily:'var(--mono)',color:r.planned==null?'var(--muted)':'var(--text)'}}>{r.planned==null?'—':fmtNum(r.planned,1)}</td>
         </tr>)}</tbody>
       </table></div>
-      <div style={{fontSize:11,color:'var(--muted)',margin:'6px 0'}}>Werte vor dem Speichern korrigierbar. Ersetzt bestehende Forecast-Werte dieser KWs/{skLabel}.</div>
+      <div style={{fontSize:11,color:'var(--muted)',margin:'6px 0'}}>Werte vor dem Speichern korrigierbar. Gespeichert werden die Tageswerte und die vollständigen Wochen; bestehende Werte dieser KWs ({skLabel}) werden ersetzt.</div>
       <button className="btn btn-sm btn-primary" disabled={busy} onClick={save}>💾 Forecast speichern</button>
     </React.Fragment>}
   </div>;
@@ -47550,6 +47566,15 @@ function PresentationsView({projects, employees, team, showToast}){
       const rv=ws[ws.length-1]; const wcWin=(wc||[]).filter(inWin); const callsByEmp={}; wcWin.filter(r=>r.kw===rv.kw&&r.year===rv.yr).forEach(r=>{ callsByEmp[r.employee_id]=r; });   // Vorwoche = ausgewertete Woche (Review)
       const {data:wg}=await sb.from('weekly_gauges').select('employee_id,kw,year,gesamt_pct,anzahl,dauer_sec,nps,csat').eq('project_id',selProj.id).in('year',years).in('kw',kws);
       const gaugesWin=(wg||[]).filter(inWin);   // 5-Wochen-Fenster, für CSAT (Schnitt 5b)
+      // Mail-Kennzahlen: der Mailer-Import legt Mails/h je Agent in kpi_entries ab, STD Task und
+      // Mails stehen in der Spur (raw). Die KPI heisst "Mails/h" und haengt am Projekt+Skill.
+      let mailWin=[];
+      try{ const {data:mc}=await sb.from('kpi_config').select('id,project_id,skill,name,level');
+        const mailIds=(mc||[]).filter(k=>k&&/^\s*mails\s*\/\s*h\s*$/i.test(String(k.name||''))&&(!k.project_id||k.project_id===selProj.id)&&k.level!=='team').map(k=>k.id);
+        if(mailIds.length){ const {data:me}=await sb.from('kpi_entries').select('emp_id,kpi_id,value,kw,year,raw')
+          .in('kpi_id',mailIds).in('year',years).in('kw',kws);
+          mailWin=(me||[]).filter(inWin); }
+      }catch(e){}
       const {data:ke}=await sb.from('kpi_entries').select('emp_id,kpi_id,value,kw,year').in('kpi_id',['kpi_hc_open_bookings','kpi_hc_osl']).in('year',years).in('kw',kws);
       const kpiWin=(ke||[]).filter(inWin);      // Buchungen (offen/OSL) je MA/KW — manuell im KPI-Tab; Sales Calls kommen aus scByEmp (Import)
       // Rueckmeldung = geplante Nettostunden aus dem Schichtplan, abzueglich Urlaub und Krankheit.
@@ -47559,17 +47584,47 @@ function PresentationsView({projects, employees, team, showToast}){
       const {data:sa}=await sbAllData((a2,b2)=>sb.from('shift_assignments').select('employee_id,skill,work_date,net_hours')
         .eq('project_id',selProj.id).gte('work_date',isoLocal(wMon)).lte('work_date',isoLocal(wSun)).order('work_date',{ascending:true}).range(a2,b2));
       const empById={}; (employees||[]).forEach(e=>{ if(e) empById[e.id]=e; });
-      const planH={};
+      // Wer laut abrechenbarem Anteil auf 0 steht, liefert keine Telefoniezeit — Teamleitung, Trainer,
+      // Projektleitung. Solche Stunden gehoeren nicht in die Rueckmeldung an den Auftraggeber, sonst
+      // sagen wir 532 h zu und liefern 326 (Befund KW 35). Teilanteile (50/75 %) bleiben VOLL drin:
+      // die Leute liefern, nur abgerechnet wird anders.
+      let hcCfgRaw=null; try{ hcCfgRaw=await loadConfigFromDB(HC_BILLING_KEY); }catch(e){}
+      const hcCfg=hcCfgNorm(hcCfgRaw);
+      const tpR=await sb.from('training_plans').select('name,start_date,end_date,status').eq('project_id',selProj.id);
+      const trainDays={}; (tpR.data||[]).forEach(tp=>{ const a3=String(tp.start_date||'').slice(0,10), b3=String(tp.end_date||'').slice(0,10);
+        if(!a3||!b3||b3<a3) return; const st=String(tp.status||''); if(st==='done'||st==='cancelled') return;
+        let d=new Date(a3+'T00:00:00'); const e3=new Date(b3+'T00:00:00'); let g=0;
+        while(d<=e3&&g<400){ trainDays[isoLocal(d)]=true; d=new Date(d.getFullYear(),d.getMonth(),d.getDate()+1); g++; } });
+      const planH={}, planAus={}, planOffen={};
+      const OVERHEAD_POS=['Teamleiter','Trainer','QM','Projektleiter'];
       (sa||[]).forEach(r=>{ const ds=String(r.work_date).slice(0,10); const net=Number(r.net_hours)||0; if(net<=0) return;
-        const f=cpoAbsFactor(empById[r.employee_id], ds); const w=getISOWeek(new Date(ds+'T00:00:00'));
-        const kk=String(r.skill||'').toLowerCase()+'|'+w.year+'|'+w.kw; planH[kk]=(planH[kk]||0)+net*f; });
+        const emp=empById[r.employee_id];
+        const f=cpoAbsFactor(emp, ds); const w=getISOWeek(new Date(ds+'T00:00:00'));
+        const sk=String(r.skill||'').toLowerCase(); const kk=sk+'|'+w.year+'|'+w.kw;
+        const pct=(hcPctFor(hcCfg, r.employee_id, ds, trainDays)||{}).pct;   // hcPctFor liefert {pct,src}, nicht die Zahl
+        if(!(pct>0)){ const nm=emp?((emp.first_name||'')+' '+(emp.last_name||'')).trim():'Unbekannt';
+          (planAus[kk]=planAus[kk]||{})[nm]=((planAus[kk][nm])||0)+net*f; return; }
+        if(emp&&OVERHEAD_POS.indexOf(String(emp.position||'').trim())>=0&&!(hcCfg.entries||[]).some(x=>x&&x.emp===r.employee_id))
+          (planOffen[sk]=planOffen[sk]||{})[((emp.first_name||'')+' '+(emp.last_name||'')).trim()+' ('+emp.position+')']=true;
+        planH[kk]=(planH[kk]||0)+net*f; });
+      // Telefonie-Anteil der gelieferten Stunden. Der importierte Forecast ist eine Telefonie-Zahl,
+      // "Geliefert" enthaelt auch Mail und Backoffice — ohne diese Aufschluesselung vergleicht die Folie
+      // zwei verschiedene Groessen (Befund 2026-09-29: Support KW 35, Ziel 219,6 gegen 326,2 geliefert,
+      // davon nur 66,8 h am Telefon).
+      const {data:dh2}=await sbAllData((a4,b4)=>sb.from('daily_hours').select('skill,work_date,hours,raw')
+        .eq('project_id',selProj.id).gte('work_date',isoLocal(wMon)).lte('work_date',isoLocal(wSun)).order('work_date',{ascending:true}).range(a4,b4));
+      const telH={};
+      (dh2||[]).forEach(r=>{ const w=getISOWeek(new Date(String(r.work_date).slice(0,10)+'T00:00:00'));
+        const kk=String(r.skill||'').toLowerCase()+'|'+w.year+'|'+w.kw;
+        const sec=Number((r.raw||{}).logtimetelefon)||0;
+        telH[kk]=(telH[kk]||0)+sec/3600; });
       const {data:fte}=await sb.from('report_fte').select('employee_id,fte').eq('project_id',selProj.id);
       const fm={}; (fte||[]).forEach(x=>{ fm[x.employee_id]=Number(x.fte); });
       const {data:rf}=await sb.from('report_forecast').select('skill,year,kw,fc_hours,planned_hours').eq('project_id',selProj.id).in('year',years).in('kw',kws);
       const forecast={}, forecastPlanned={}; (rf||[]).forEach(r=>{ if(!inWin(r)) return; const kk=String(r.skill||'').toLowerCase()+'|'+r.year+'|'+r.kw; forecast[kk]=(r.fc_hours==null?null:Number(r.fc_hours)); forecastPlanned[kk]=(r.planned_hours==null?null:Number(r.planned_hours)); });
-      if(alive){ setStores({hours,scByEmp,callsByEmp,callsWin:wcWin,callsCount:wcWin.length,gaugesCount:gaugesWin.length,gaugesWin,kpiWin,forecast,forecastPlanned,planH,loaded:true}); setFteStd(fm); }
-    }catch(e){ if(alive){ setStores({hours:{},scByEmp:{},callsByEmp:{},callsWin:[],callsCount:0,gaugesCount:0,gaugesWin:[],kpiWin:[],forecast:{},forecastPlanned:{},planH:{},loaded:true}); } }
-  })(); return ()=>{alive=false;}; },[selProjId,pNo,pYear]);
+      if(alive){ setStores({hours,scByEmp,callsByEmp,callsWin:wcWin,callsCount:wcWin.length,gaugesCount:gaugesWin.length,gaugesWin,kpiWin,forecast,forecastPlanned,planH,planAus,planOffen,telH,mailWin,loaded:true}); setFteStd(fm); }
+    }catch(e){ if(alive){ setStores({hours:{},scByEmp:{},callsByEmp:{},callsWin:[],callsCount:0,gaugesCount:0,gaugesWin:[],kpiWin:[],forecast:{},forecastPlanned:{},planH:{},planAus:{},planOffen:{},telH:{},mailWin:[],loaded:true}); } }
+  })(); return ()=>{alive=false;}; },[selProjId,pNo,pYear,(employees||[]).length]);
   // Langzeit-Modell (report_longterm) in den Bericht ziehen, wenn für den Skill noch nichts gepflegt ist.
   // setDeck (kein upd) → kein Dirty-Flag; unverändert lassen, wenn schon vorhanden.
   useEffect(()=>{ if(!selProj) return; let alive=true; (async()=>{
@@ -47627,13 +47682,48 @@ function PresentationsView({projects, employees, team, showToast}){
     upd(n=>{ n.teams[t].csat={weeks, rows, _src:'imported'}; }); }
   // Support-Folie: AHT je Agent über das 5-Wochen-Fenster (weekly_calls avg_handle_sec, gewichtet nach Answered).
   // Nur MA mit echter Call-Zeile (Overhead fällt raus). Newbie = Start ≤ newbieWeeks vor der Berichtswoche.
+  // Neu im Team = Vertragsbeginn hoechstens `newbieWeeks` vor der Berichtswoche. Ohne Startdatum: NICHT neu.
+  const isNewbieFn=()=>{ const revMon=reviewMonday(); const cutoff=new Date(revMon); cutoff.setDate(revMon.getDate()-newbieWeeks*7);
+    return e=>{ const st=(e&&e.contract&&e.contract.start)||(e&&e.contract_start)||(e&&e.hire_date); if(!st) return false;
+      const d=new Date(String(st).slice(0,10)+'T12:00:00'); return !isNaN(d.getTime())&&d>=cutoff; }; };
+  // Mail-Kennzahlen (Support): STD Task und Mails/h je Agent, Vorwoche und Monat bis heute.
+  // Quelle ist der Mailer-Import: Mails/h steht als KPI-Wert, die Stunden und die Mails in der Spur.
+  function applyMailKpi(t){ const ws=windowWeeks(); const members=membersFor(t); const win=stores.mailWin||[];
+    const rv=ws[ws.length-1]; const rm=isoWeekMonth(rv.yr,rv.kw);
+    const mtdKeys=ws.filter(w=>{ const m=isoWeekMonth(w.yr,w.kw); return m.y===rm.y&&m.m===rm.m; }).map(w=>w.yr+'-'+w.kw);
+    const isNew=isNewbieFn();
+    const bau=keys=>{ const rows=[];
+      members.forEach(e=>{ let std=0, mails=0, any=false;
+        win.forEach(r=>{ if(r.emp_id!==e.id) return; if(keys.indexOf(r.year+'-'+r.kw)<0) return;
+          const h=Number((r.raw||{}).hours), m=Number((r.raw||{}).mails);
+          if(isFinite(h)) std+=h; if(isFinite(m)) mails+=m; any=true; });
+        if(!any) return;
+        rows.push({id:e.id, name:empName(e), std:Math.round(std*100)/100, mails:Math.round(mails),
+          meh:(std>0?Math.round(mails/std*100)/100:null), newbie:isNew(e)}); });
+      rows.sort((a,b)=>(b.meh||0)-(a.meh||0));
+      const std=rows.reduce((a,r)=>a+r.std,0), mails=rows.reduce((a,r)=>a+r.mails,0);
+      return {rows, total:{std:Math.round(std*100)/100, mails, meh:(std>0?Math.round(mails/std*100)/100:null)}}; };
+    // Verlauf je Agent ueber die fuenf Wochen — Grundlage der Mail-Grafik.
+    const weeks=ws.map(w=>({kw:w.kw,key:w.yr+'-'+w.kw}));
+    const trend=members.map(e=>{ const byWeek={}; let ms=0, hs=0;
+      weeks.forEach(wk=>{ let std=0, mails=0, any=false;
+        win.forEach(r=>{ if(r.emp_id!==e.id||r.year+'-'+r.kw!==wk.key) return;
+          const h2=Number((r.raw||{}).hours), m2=Number((r.raw||{}).mails);
+          if(isFinite(h2)) std+=h2; if(isFinite(m2)) mails+=m2; any=true; });
+        if(any&&std>0){ byWeek[wk.key]={meh:Math.round(mails/std*100)/100}; ms+=mails; hs+=std; } });
+      return {id:e.id, name:empName(e), byWeek, tot:{meh:(hs>0?Math.round(ms/hs*100)/100:null)}, newbie:isNew(e)}; })
+      .filter(a2=>Object.keys(a2.byWeek).length)
+      .sort((a2,b2)=>(b2.tot.meh||0)-(a2.tot.meh||0));
+    upd(n=>{ n.teams[t].mailtrend={weeks, agents:trend, _src:'imported'}; });
+    upd(n=>{ n.teams[t].mail={ vorwoche:{...bau([rv.yr+'-'+rv.kw]), kw:rv.kw},
+      monat:{...bau(mtdKeys), label:MONTHS_DE[rm.m]+' '+rm.y, weekKws:mtdKeys.map(k=>Number(k.split('-')[1]))},
+      _src:'imported' }; }); }
   function applyImportCallAht(t){ const ws=windowWeeks(); const members=membersFor(t); const win=stores.callsWin||[];
     const memberSet={}; members.forEach(e=>{ memberSet[e.id]=e; });
     const byEmp={}; win.forEach(r=>{ if(!memberSet[r.employee_id]) return; if(!ws.some(w=>w.yr===r.year&&w.kw===r.kw)) return; const wk=r.year+'-'+r.kw;
       (byEmp[r.employee_id]=byEmp[r.employee_id]||{})[wk]={aht:(r.avg_handle_sec==null?null:Number(r.avg_handle_sec)), answered:(Number(r.answered)||Number(r.handled)||0)}; });
     const weeks=ws.map(w=>({kw:w.kw,key:w.yr+'-'+w.kw}));
-    const revMon=reviewMonday(); const cutoff=new Date(revMon); cutoff.setDate(revMon.getDate()-newbieWeeks*7);
-    const isNewbie=e=>{ const s=(e.contract&&e.contract.start)||e.contract_start||e.hire_date; if(!s) return false; const d=new Date(String(s).slice(0,10)+'T12:00:00'); return !isNaN(d.getTime())&&d>=cutoff; };
+    const isNewbie=isNewbieFn();
     const agents=members.map(e=>{ const bw=byEmp[e.id]||{}; const byWeek={}; let ts=0,tw=0;
         weeks.forEach(wk=>{ const c=bw[wk.key]; if(c&&c.aht!=null){ byWeek[wk.key]={aht:c.aht}; const w=(c.answered||0)||1; ts+=c.aht*w; tw+=w; } });
         return {id:e.id, name:empName(e), byWeek, tot:{aht: tw? Math.round(ts/tw) : null}, newbie:isNewbie(e)}; })
@@ -47918,7 +48008,12 @@ function PresentationsView({projects, employees, team, showToast}){
       <thead><tr style={{color:'var(--muted)',textAlign:'right'}}>
         {['KW','Geplant FC','Rückmeldung','Diff R−P','Geliefert','Diff G−R','% (auf Rückm.)','Erklärung'].map((h,i)=><th key={i} style={{padding:'4px 6px',fontWeight:700,textAlign:i===7?'left':'right'}}>{h}</th>)}
       </tr></thead>
-      <tbody>{rows.map((r,i)=>{ const dRP=numOr(r.rueck,0)-numOr(r.plan,0); const dGR=numOr(r.geliefert,0)-numOr(r.rueck,0); const pc=pctDiff(r.geliefert,r.rueck);
+      <tbody>{rows.map((r,i)=>{
+        // numOr liefert fuer ein leeres Feld eine 0 — hier braucht es den Unterschied zwischen
+        // "null Stunden" und "nichts eingetragen", sonst steht als Differenz der volle Planwert.
+        const zahl=v=>{ const t2=String(v==null?'':v).trim(); if(t2==='') return null; const n=Number(t2.replace(',','.')); return isNaN(n)?null:n; };
+        const _p=zahl(r.plan), _r=zahl(r.rueck), _g=zahl(r.geliefert);
+        const dRP=(_p==null||_r==null)?null:(_r-_p); const dGR=(_g==null||_r==null)?null:(_g-_r); const pc=(_g==null||_r==null)?null:pctDiff(r.geliefert,r.rueck);
         return (<tr key={i} style={{borderTop:'1px solid var(--border)'}}>
           <td style={{padding:'3px 6px',width:70}}>{inp(r.kw,v=>upd(n=>{n.teams[t].stunden[i].kw=v;}),'KW')}</td>
           <td style={{padding:'3px 6px',width:110}}>
@@ -47932,13 +48027,13 @@ function PresentationsView({projects, employees, team, showToast}){
             {r.rsrc==='system'&&<div style={{fontSize:9,color:'#0891b2',fontWeight:700,textAlign:'right',marginTop:1}}>● System</div>}
             {r.rsrc==='manual'&&<div style={{fontSize:9,color:'var(--muted)',fontWeight:700,textAlign:'right',marginTop:1}}>● manuell</div>}
           </td>
-          <td style={{padding:'3px 6px',width:80,textAlign:'right',fontFamily:'var(--mono)',color:dRP<0?'#dc2626':'#059669'}}>{fmtNum(dRP)}</td>
+          <td style={{padding:'3px 6px',width:80,textAlign:'right',fontFamily:'var(--mono)',color:dRP==null?'var(--muted)':(dRP<0?'#dc2626':'#059669')}}>{dRP==null?'—':fmtNum(dRP)}</td>
           <td style={{padding:'3px 6px',width:110}}>
             {inp(r.geliefert,v=>upd(n=>{n.teams[t].stunden[i].geliefert=v;n.teams[t].stunden[i].gsrc='manual';}))}
             {r.gsrc==='imported'&&<div style={{fontSize:9,color:'#2563eb',fontWeight:700,textAlign:'right',marginTop:1}}>● Import</div>}
             {r.gsrc==='manual'&&<div style={{fontSize:9,color:'var(--muted)',fontWeight:700,textAlign:'right',marginTop:1}}>● manuell</div>}
           </td>
-          <td style={{padding:'3px 6px',width:80,textAlign:'right',fontFamily:'var(--mono)',color:dGR<0?'#dc2626':'#059669'}}>{fmtNum(dGR)}</td>
+          <td style={{padding:'3px 6px',width:80,textAlign:'right',fontFamily:'var(--mono)',color:dGR==null?'var(--muted)':(dGR<0?'#dc2626':'#059669')}}>{dGR==null?'—':fmtNum(dGR)}</td>
           <td style={{padding:'3px 6px',width:90,textAlign:'right',fontFamily:'var(--mono)',color:pc==null?'var(--muted)':pc<0?'#dc2626':'#059669'}}>{pc==null?'—':fmtNum(pc,1)+' %'}</td>
           <td style={{padding:'3px 6px'}}><input value={r.erkl||''} onChange={e=>upd(n=>{n.teams[t].stunden[i].erkl=e.target.value;})} placeholder="z.B. Ardita 4 Tage krank" style={{width:'100%',boxSizing:'border-box',padding:'5px 7px',border:'1px solid var(--border)',borderRadius:6,fontSize:12}}/></td>
         </tr>); })}</tbody>
@@ -47960,7 +48055,9 @@ function PresentationsView({projects, employees, team, showToast}){
         </tr>); })}
         {members.length>0&&<tr style={{borderTop:'2px solid '+accent,fontWeight:800}}>
           <td style={{padding:'5px 6px'}}>Gesamt</td>
-          {cols.map(col=><td key={col.k} style={{padding:'5px 6px',textAlign:'right',fontFamily:'var(--mono)'}}>{col.t==='time'?wavgTime(rows,col.k,'answered'):(col.t==='num'?fmtNum(sumCol(rows,col.k),1):fmtNum(sumCol(rows,col.k)))}</td>)}
+          {cols.map(col=>{ const hat=rows.some(r=>{ const v=(r[col.k]==null||r[col.k]==='')&&col.alt?r[col.alt]:r[col.k]; return v!=null&&v!==''; });
+            return <td key={col.k} style={{padding:'5px 6px',textAlign:'right',fontFamily:'var(--mono)',color:hat?'inherit':'var(--dim)'}}>
+              {!hat?'—':(col.t==='time'?wavgTime(rows,col.k,'answered'):(col.t==='num'?fmtNum(sumCol(rows,col.k),1):fmtNum(sumCol(rows,col.k))))}</td>; })}
         </tr>}
       </tbody>
     </table><div style={{fontSize:11,color:'var(--muted)',marginTop:4}}>Namen aus dem System. Gesamt: Summe bei Anzahlen, gewichteter Ø (nach Answered) bei Zeiten (mm:ss).</div></div>);
@@ -48020,11 +48117,32 @@ function PresentationsView({projects, employees, team, showToast}){
       <Section title="Gelieferte Stunden (5 Wochen)">
         <div style={{marginBottom:6,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
           <button className="btn btn-sm" disabled={!stores.loaded} title={stores.loaded?'':'Daten werden noch geladen'} onClick={()=>applyRueckmeldung(t)}>Rückmeldung aus dem Schichtplan</button>
-          <span style={{fontSize:11,color:'var(--muted)'}}>Rückmeldung = geplante Nettostunden aus dem Schichtplan, abzüglich Urlaub und Krankheit — dieselbe Zahl wie im HC Stundenabgleich. Wochen ohne Plan bleiben leer. Überschreibbar.</span>
+          <span style={{fontSize:11,color:'var(--muted)'}}>Rückmeldung = geplante Nettostunden aus dem Schichtplan, abzüglich Urlaub und Krankheit. Wer laut abrechenbarem Anteil auf 0 steht (Teamleitung, Trainer, Projektleitung), zählt nicht mit — diese Stunden erreichen den Auftraggeber nie. Wochen ohne Plan bleiben leer. Überschreibbar.</span>
+          {(()=>{ const ws=windowWeeks(); const aus={};
+            ws.forEach(w=>{ const m=(stores.planAus||{})[t+'|'+w.yr+'|'+w.kw]||{}; Object.keys(m).forEach(nm=>{ aus[nm]=(aus[nm]||0)+m[nm]; }); });
+            const namen=Object.keys(aus).sort((x,y)=>aus[y]-aus[x]);
+            return namen.length?<span style={{fontSize:11,color:'var(--muted)'}}>
+              Nicht mitgezählt über die fünf Wochen: {namen.map(nm=>nm+' ('+fmtNum(Math.round(aus[nm]*10)/10,1)+' h)').join(', ')} — abrechenbarer Anteil 0 %.
+            </span>:null; })()}
+          {Object.keys((stores.planOffen||{})[t]||{}).length>0&&<span style={{fontSize:11,color:'#b45309'}}>
+            Ohne hinterlegten Anteil, zählt voll mit: {Object.keys((stores.planOffen||{})[t]||{}).join(', ')}.</span>}
+          {(()=>{ // Der Systemwert im Bericht kann aus einer aelteren Rechnung stammen (gespeicherter Stand).
+            const ws=windowWeeks(); const rows=(deck.teams[t].stunden)||[];
+            const alt=ws.some((w,i)=>{ const r=rows[i]; if(!r||r.rsrc!=='system') return false;
+              const jetzt=(stores.planH||{})[t+'|'+w.yr+'|'+w.kw];
+              const war=numOr(r.rueck,null);
+              return jetzt!=null&&war!=null&&Math.abs(jetzt-war)>0.6; });
+            return alt?<span style={{fontSize:11,fontWeight:700,color:'#b45309'}}>Die gespeicherten Werte stammen aus einer älteren Rechnung — neu berechnen.</span>:null; })()}
           {stores.loaded&&!windowWeeks().some(w=>(stores.planH||{})[t+'|'+w.yr+'|'+w.kw]!=null)&&
             <span style={{fontSize:11,fontWeight:700,color:'#b45309'}}>Für keine der fünf Wochen steht ein Schichtplan.</span>}
         </div>
         <StundenEdit t={t}/>
+        {(()=>{ // Fehlt fuer eine Woche das Ziel, sagt die Folie das statt eine Differenz gegen 0 zu zeigen.
+          const ws=windowWeeks(); const ohne=ws.filter(w=>(stores.forecast||{})[t+'|'+w.yr+'|'+w.kw]==null).map(w=>'KW '+w.kw);
+          return ohne.length?<div style={{border:'1px solid #fde68a',background:'#fffbeb',borderRadius:8,padding:'9px 12px',fontSize:12,color:'#92400e',marginTop:8,lineHeight:1.6}}>
+            <b>Kein Ziel hinterlegt für {ohne.join(', ')}.</b> Die Werte aus dem Wochenblatt wurden entfernt — der Auftraggeber hat bestätigt, dass sie nicht aus der gültigen Quelle stammen.
+            Gültig ist das Tagesblatt „Tagesplanung", Spalte „FC in Stunden". Sobald die September- und Oktober-Datei eingelesen sind, füllt sich die Spalte.
+          </div>:null; })()}
       </Section>
       <Section title="Fehlzeiten / Krankheitstage (5 Wochen)">
         <div style={{marginBottom:6,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
@@ -48048,6 +48166,13 @@ function PresentationsView({projects, employees, team, showToast}){
           {(td.calls||{})._vwsrc==='imported'&&<span style={{fontSize:11,color:'#2563eb',fontWeight:700}}>● Import</span>}
           {(td.calls||{})._vwsrc==='manual'&&<span style={{fontSize:11,color:'var(--muted)',fontWeight:700}}>● manuell geändert</span>}
           <span style={{fontSize:11,color:'var(--muted)'}}>Answered/Handle/Outbound/No Answer + Zeiten (mm:ss) aus weekly_calls, KW {reviewWeek().kw}. {Object.keys(stores.callsByEmp||{}).length} MA im Import. Berichtet wird Answered; Handle steht daneben und zeigt, was die Outbound-Leute leisten.</span>
+          {(()=>{ const rs=Object.values(stores.callsByEmp||{});
+            const fehlt=[]; if(rs.length&&!rs.some(r=>r.handled!=null)) fehlt.push('Handle');
+            if(rs.length&&!rs.some(r=>r.outbound!=null)) fehlt.push('Outbound');
+            if(rs.length&&!rs.some(r=>r.no_answer!=null)) fehlt.push('No Answer');
+            return fehlt.length?<span style={{fontSize:11,color:'#b45309'}}>
+              Ohne Werte: {fehlt.join(', ')}. Outbound und No Answer standen im Export ab KW 36 als Zeitangaben und wurden entfernt, Handle kommt erst mit dem nächsten Import. Leer heißt hier „nicht gemessen", nicht „null".
+            </span>:null; })()}
         </div>
         <CallsEdit t={t} period="vorwoche"/>
       </Section>
@@ -48086,6 +48211,43 @@ function PresentationsView({projects, employees, team, showToast}){
           </table></div>
         ):<div style={{fontSize:11,color:'var(--muted)'}}>Noch nicht übernommen.</div>}
       </Section>
+      {t==='support'&&<Section title="Mail-Kennzahlen (Vorwoche + Monat)">
+        <div style={{marginBottom:6,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+          <button className="btn btn-sm btn-primary" disabled={!(stores.mailWin||[]).length} onClick={()=>applyMailKpi(t)}>Aus Import übernehmen</button>
+          {(td.mail||{})._src==='imported'&&<span style={{fontSize:11,color:'#2563eb',fontWeight:700}}>● {((td.mail.vorwoche||{}).rows||[]).length} Agenten</span>}
+          <span style={{fontSize:11,color:'var(--muted)'}}>STD Task und Mails/h je Agent aus dem Mailer-Import ({(stores.mailWin||[]).length} Werte im Fenster). Mails/h = Mails ÷ STD Task, die Teamzeile rechnet aus den Summen.</span>
+          {!(stores.mailWin||[]).length&&<span style={{fontSize:11,fontWeight:700,color:'#b45309'}}>Für dieses Fenster liegt kein Mailer-Import vor.</span>}
+        </div>
+        {td.mail&&td.mail.vorwoche?<div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(300px,1fr))',gap:12}}>
+          {[['vorwoche','Vorwoche · KW '+(td.mail.vorwoche.kw||'')],['monat','Monat · '+((td.mail.monat||{}).label||'')]].map(([mk,lbl])=>{
+            const blk=td.mail[mk]||{rows:[],total:{}};
+            return <div key={mk} style={{border:'1px solid var(--border)',borderRadius:10,overflow:'hidden'}}>
+              <div style={{padding:'7px 10px',background:'var(--surface-2)',fontSize:12,fontWeight:800}}>{lbl}</div>
+              <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+                <thead><tr style={{color:'var(--muted)',fontSize:10.5,textTransform:'uppercase',letterSpacing:'.04em'}}>
+                  <th style={{padding:'4px 8px',textAlign:'left'}}>Mitarbeiter</th>
+                  <th style={{padding:'4px 8px',textAlign:'right'}}>STD Task</th>
+                  <th style={{padding:'4px 8px',textAlign:'right'}}>Mails</th>
+                  <th style={{padding:'4px 8px',textAlign:'right'}}>Mails/h</th></tr></thead>
+                <tbody>
+                  {(blk.rows||[]).map(r=><tr key={r.id} style={{borderTop:'1px solid var(--border)'}}>
+                    <td style={{padding:'3px 8px'}}>{r.name}{r.newbie?<span style={{marginLeft:5,fontSize:9.5,fontWeight:800,color:'#2563eb'}}>NEU</span>:null}</td>
+                    <td style={{padding:'3px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{fmtNum(r.std,2)}</td>
+                    <td style={{padding:'3px 8px',textAlign:'right',fontFamily:'var(--mono)',color:'var(--muted)'}}>{fmtNum(r.mails)}</td>
+                    <td style={{padding:'3px 8px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:700}}>{r.meh==null?'—':fmtNum(r.meh,1)}</td>
+                  </tr>)}
+                  {!(blk.rows||[]).length&&<tr><td colSpan={4} style={{padding:9,color:'var(--muted)'}}>Keine Werte in diesem Zeitraum.</td></tr>}
+                  {(blk.rows||[]).length>0&&<tr style={{borderTop:'2px solid var(--border)',fontWeight:800,background:'var(--surface-2)'}}>
+                    <td style={{padding:'5px 8px'}}>Gesamtteam</td>
+                    <td style={{padding:'5px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{fmtNum(blk.total.std,2)}</td>
+                    <td style={{padding:'5px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{fmtNum(blk.total.mails)}</td>
+                    <td style={{padding:'5px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{blk.total.meh==null?'—':fmtNum(blk.total.meh,1)}</td>
+                  </tr>}
+                </tbody>
+              </table>
+            </div>; })}
+        </div>:<div style={{fontSize:11,color:'var(--muted)'}}>Noch nicht übernommen.</div>}
+      </Section>}
       <Section title="CSAT (5 Wochen)">
         <div style={{marginBottom:6,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
           <button className="btn btn-sm btn-primary" disabled={!(stores.gaugesWin||[]).length} onClick={()=>applyImportCsat(t)}>Aus Import übernehmen</button>
@@ -48186,7 +48348,7 @@ function PresentationsView({projects, employees, team, showToast}){
       <label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,fontWeight:700,color:'var(--text)',cursor:'pointer',border:'1px solid var(--border)',borderRadius:8,padding:'5px 10px'}} title="Call-Reviews-Folie je Skill in diesen Bericht aufnehmen. Aus = Folie entfällt (Kommentare bleiben erhalten).">
         <input type="checkbox" checked={deck.callReviews!==false} onChange={e=>setDeck(d=>({...d,callReviews:e.target.checked}))}/>Call-Reviews
       </label>
-      <label style={{display:'flex',alignItems:'center',gap:5,fontSize:12,fontWeight:700,color:'var(--text)',border:'1px solid var(--border)',borderRadius:8,padding:'5px 10px'}} title="Newbie-Grenze: Start bis N Wochen vor der Berichtswoche wird als NEU markiert (Mail-KPIs und AHT je Agent). Beim nächsten Import-Übernehmen wirksam.">Newbie ≤ <input type="number" min="1" max="52" value={newbieWeeks} onChange={e=>{ const v=Math.max(1,Number(e.target.value)||8); setNewbieWeeks(v); saveConfigToDB('jsr_report_newbie_weeks',v); }} style={{width:44,padding:'2px 4px',border:'1px solid var(--border)',borderRadius:6,fontSize:12}}/> Wo.</label>
+      <label style={{display:'flex',alignItems:'center',gap:5,fontSize:12,fontWeight:700,color:'var(--text)',border:'1px solid var(--border)',borderRadius:8,padding:'5px 10px'}} title="Newbie-Grenze: Start bis N Wochen vor der Berichtswoche wird als NEU markiert (Mail-KPIs und AHT je Agent). Beim nächsten Import-Übernehmen wirksam.">Newbie ≤ <input type="number" min="1" max="52" value={newbieWeeks} onChange={e=>{ const v=Math.min(52,Math.max(1,Number(e.target.value)||8)); setNewbieWeeks(v); saveConfigToDB('jsr_report_newbie_weeks',v); }} style={{width:44,padding:'2px 4px',border:'1px solid var(--border)',borderRadius:6,fontSize:12}}/> Wo.</label>
       <button className="btn btn-sm" onClick={dummy?discardDummy:fillDummy} style={{border:'1px solid '+(dummy?'#dc2626':'var(--border)'),color:dummy?'#dc2626':'var(--text)',fontWeight:700}}>{dummy?'Beispiel verwerfen':'Beispiel füllen'}</button>
       <button className="btn btn-primary btn-sm" disabled={busy||dummy} title={dummy?'Beispieldaten werden nicht gespeichert':''} onClick={save}>💾 Speichern</button>
       <button className="btn btn-sm" disabled={busy||dummy} onClick={publish} style={{background:published?'transparent':'#059669',color:published?'#059669':'#fff',border:'1px solid #059669',fontWeight:700}} title="Für das Kundenportal freigeben (nur veröffentlichte Berichte sind für den Kunden sichtbar)">{published?'✓ Veröffentlicht — aktualisieren':'🌐 Veröffentlichen'}</button>

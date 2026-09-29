@@ -685,13 +685,50 @@
     h('div',{key:'s',style:{fontSize:'1.5cqw',marginTop:'1cqw',color:P.muted,maxWidth:'56cqw',lineHeight:1.4}},sub)
   ]))); }
   // Mail-KPIs (Vorwoche/Monat) — Struktur steht, Daten folgen. Newbies (Start ≤ Grenze) werden hier markiert.
-  function MailKpis(ctx, tk, mode){ var P=pal(ctx.accent); var lbl=skillLabel(ctx,tk);
-    return Slide(ctx,[ fondHead(P, lbl+' · '+(mode==='monat'?'Monat (MTD)':'Vorwoche'), 'Mail-Kennzahlen'),
-      pendingBody(ctx, P, 'Mail-Kennzahlen folgen', 'Die Mail-Daten werden noch angebunden. Neue Mitarbeiter (Start ≤ 8 Wochen) werden hier gekennzeichnet.') ]);
+  // Mail-Kennzahlen: STD Task und Mails/h je Agent, sortiert nach Mails/h, mit Teamzeile.
+  // Quelle ist der Mailer-Import; Mails/h = Mails geteilt durch die Task-Stunden, die Teamzeile
+  // rechnet aus den Summen und nicht als Mittel der Einzelwerte.
+  function mailRows(ctx, tk, mode){ var d=((ctx.deck.teams||{})[tk]||{}).mail||{}; var b=d[mode]||null; return (b&&b.rows)||[]; }
+  function MailKpis(ctx, tk, mode, page){ page=page||0; var P=pal(ctx.accent); var lbl=skillLabel(ctx,tk);
+    var d=((ctx.deck.teams||{})[tk]||{}).mail||{}; var blk=d[mode]||null; var rows=(blk&&blk.rows)||[];
+    var eyebrow=(mode==='monat')?('Monat (MTD)'+((blk&&blk.label)?(' · '+blk.label):'')):('Vorwoche'+((blk&&blk.kw)?(' · KW '+blk.kw):''));
+    if(!rows.length) return emptyPanel(ctx, fondHead(P, lbl+' · '+eyebrow, 'Mail-Kennzahlen'), P, 'Keine Mail-Kennzahlen in diesem Zeitraum.');
+    var tot=(blk&&blk.total)||{};
+    var dom=zoomDomain(rows.map(function(r){ return r.meh||0; }));
+    var pages=agentPages(rows,14); var pa=pages[page]||[]; var base=pages.slice(0,page).reduce(function(s,p){ return s+p.length; },0);
+    var head=page===0?fondHead(P, lbl+' · '+eyebrow, 'Mail-Kennzahlen', rows.length+' Agenten'+(pages.length>1?(' · '+pages.length+' Seiten'):'')):null;
+    function row(r,rank){ var w=Math.max(6,frac(r.meh||0,dom)*100);
+      return h('div',{key:r.id,style:{display:'flex',alignItems:'center',gap:'1.2cqw'}},[
+        h('span',{key:'r',style:{width:'2.2cqw',textAlign:'right',fontFamily:MONO,fontSize:'1.1cqw',fontWeight:700,color:P.muted,flexShrink:0}},rank+'.'),
+        h('span',{key:'n',style:{width:'16cqw',fontSize:'1.25cqw',fontWeight:600,color:P.ink,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',flexShrink:0}},[
+          r.name, r.newbie?h('span',{key:'nb',style:{marginLeft:'.6cqw',fontSize:'.95cqw',fontWeight:800,color:P.onLight,letterSpacing:'.06em'}},'NEU'):null ]),
+        h('div',{key:'b',style:{flex:1,height:'0.85cqw',background:'#eef2f4',borderRadius:'.5cqw',overflow:'hidden'}}, h('div',{style:{width:w+'%',height:'100%',background:P.onLight,borderRadius:'.5cqw'}})),
+        h('span',{key:'s',style:{width:'6cqw',textAlign:'right',fontFamily:MONO,fontSize:'1.15cqw',color:P.muted,flexShrink:0}},fmtNum(r.std,2)+' h'),
+        h('span',{key:'v',style:{width:'5cqw',textAlign:'right',fontFamily:MONO,fontWeight:700,fontSize:'1.25cqw',color:P.ink,flexShrink:0}},r.meh==null?'—':fmtNum(r.meh,1)) ]); }
+    var body=panel(P, h('div',{style:{display:'flex',flexDirection:'column',height:'100%',minHeight:0,gap:'1.4cqw'}},[
+      page===0?h('div',{key:'big',style:{display:'flex',gap:'4.5cqw',alignItems:'baseline',flexWrap:'wrap',flexShrink:0}},[
+        h('div',{key:'a',style:{display:'flex',alignItems:'baseline',gap:'.9cqw'}},[
+          h('span',{style:{fontSize:'3.4cqw',fontWeight:800,color:P.ink,lineHeight:1,fontVariantNumeric:'tabular-nums'}}, tot.meh==null?'—':fmtNum(tot.meh,1)),
+          h('span',{style:{fontSize:'1.15cqw',color:P.muted,fontWeight:700}},'Mails/h Gesamtteam') ]),
+        h('div',{key:'b',style:{display:'flex',alignItems:'baseline',gap:'.9cqw'}},[
+          h('span',{style:{fontSize:'3.4cqw',fontWeight:800,color:P.ink,lineHeight:1,fontVariantNumeric:'tabular-nums'}}, fmtNum(tot.std,1)),
+          h('span',{style:{fontSize:'1.15cqw',color:P.muted,fontWeight:700}},'Stunden Task') ]),
+        h('div',{key:'c',style:{display:'flex',alignItems:'baseline',gap:'.9cqw'}},[
+          h('span',{style:{fontSize:'3.4cqw',fontWeight:800,color:P.ink,lineHeight:1,fontVariantNumeric:'tabular-nums'}}, fmtNum(tot.mails)),
+          h('span',{style:{fontSize:'1.15cqw',color:P.muted,fontWeight:700}},'Mails') ]) ]):null,
+      h('div',{key:'list',style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',gap:'.75cqw',overflow:'hidden'}},
+        pa.map(function(r,i){ return row(r, base+i+1); })),
+      h('div',{key:'foot',style:{fontSize:'1cqw',color:P.muted,flexShrink:0}},
+        'Mails/h = Mails geteilt durch die Task-Stunden. Die Teamzahl rechnet aus den Summen, nicht als Mittel der Einzelwerte.'
+        +(pages.length>1?('  ·  Seite '+(page+1)+'/'+pages.length):'')) ]));
+    return Slide(ctx, head?[head,body]:[body]);
   }
-  function MailAgentTrend(ctx, tk){ var P=pal(ctx.accent); var lbl=skillLabel(ctx,tk);
-    return Slide(ctx,[ fondHead(P, lbl, 'Mail je Agent · 5 Wochen'),
-      pendingBody(ctx, P, 'Mail-Verlauf je Agent folgt', 'Folgt mit den Mail-Daten; bricht bei vielen Agenten automatisch um.') ]);
+  function MailAgentTrend(ctx, tk, page){ var td=(ctx.deck.teams||{})[tk]||{}; var d=td.mailtrend||{};
+    return AgentMultiples(ctx, tk, page, { agents:d.agents, weeks:d.weeks, title:'Mail je Agent · 5 Wochen',
+      value:function(a,w){ var c=a.byWeek&&a.byWeek[w.key]; return (c&&c.meh!=null)?c.meh:null; },
+      fmtAvg:function(a){ return (a.tot&&a.tot.meh!=null)?fmtNum(a.tot.meh,1)+' Mails/h':'—'; },
+      foot:'Balken = Mails/h je Woche',
+      emptyTitle:'Kein Mail-Verlauf', emptySub:'Für dieses Fenster liegen keine Mail-Kennzahlen vor.' });
   }
   // EINE Wahrheit für Folienreihenfolge + Anker-Keys je Skill. Sales-Set (mit CR) ≠ Support-Set (mit Mail).
   function skillPlan(ctx, k){ var L=skillLabel(ctx,k); var kind=(k==='sales')?'sales':'support'; var p=[]; var td=(ctx.deck.teams||{})[k]||{};
@@ -715,9 +752,9 @@
       addPaged('calls','Calls (Vorwoche)', agentPages(callsAgents(ctx,k,'vorwoche'),14).length, function(pi){ return Calls(ctx,k,pi); });
       addPaged('callsmtd','Calls (Monat)', agentPages(callsAgents(ctx,k,'monat'),14).length, function(pi){ return CallsMtd(ctx,k,pi); });
       addPaged('callaht','AHT je Agent', agentPages((td.callaht||{}).agents||[]).length, function(pi){ return CallAgentAht(ctx,k,pi); });
-      add('mailvorwoche','Mail (Vorwoche)',function(){return MailKpis(ctx,k,'vorwoche');});
-      add('mailmonat','Mail (Monat)',function(){return MailKpis(ctx,k,'monat');});
-      add('mailagent','Mail je Agent',function(){return MailAgentTrend(ctx,k);});
+      addPaged('mailvorwoche','Mail (Vorwoche)', agentPages(mailRows(ctx,k,'vorwoche'),14).length, function(pi){ return MailKpis(ctx,k,'vorwoche',pi); });
+      addPaged('mailmonat','Mail (Monat)', agentPages(mailRows(ctx,k,'monat'),14).length, function(pi){ return MailKpis(ctx,k,'monat',pi); });
+        addPaged('mailagent','Mail je Agent', agentPages(((( (ctx.deck.teams||{})[k]||{}).mailtrend)||{}).agents||[]).length, function(pi){ return MailAgentTrend(ctx,k,pi); });
     }
     if(deckShowCalls(ctx)) add('callscores','Call-Qualität',function(){return CallScores(ctx,k);});
     addPaged('csat','CSAT', agentPages((td.csat||{}).rows||[],11).length, function(pi){ return Csat(ctx,k,pi); });
