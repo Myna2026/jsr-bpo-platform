@@ -47651,21 +47651,20 @@ function PresentationsView({projects, employees, team, showToast}){
   const teamFteSum=t=>membersFor(t).reduce((s,e)=>s+(fteStd[e.id]!=null?fteStd[e.id]:1),0);
   const fteOhneStandard=t=>membersFor(t).filter(e=>fteStd[e.id]==null).map(e=>empName(e));
   // „Gelieferte Stunden" je Skill aus weekly_hours übernehmen → geliefert + KW, Provenance 'imported'.
-  function applyImportHours(t){ const ws=windowWeeks(); const members=membersFor(t);
-    // Rückmeldung automatisch mit-rechnen: Team-FTE = gesetztes td.fte ODER Summe der report_fte-Standards.
-    const fte = numOr(deck.teams[t].fte, null)!=null ? numOr(deck.teams[t].fte,null) : (members.some(e=>fteStd[e.id]!=null)? teamFteSum(t) : null);
-    const locCount={}; members.forEach(e=>{ const l=(e.location||e.city||''); locCount[l]=(locCount[l]||0)+1; });
-    const domLoc=Object.keys(locCount).sort((a,b)=>locCount[b]-locCount[a])[0]||'';
-    const holSet=holidayDatesForLocation(domLoc);
-    const workdays=(kw,yr)=>{ const mon=isoWeekMonday(yr,kw); let n=0; for(let i=0;i<5;i++){ const d=new Date(mon); d.setDate(mon.getDate()+i); if(!holSet.has(isoLocal(d))) n++; } return n; };
+  function applyImportHours(t){ const ws=windowWeeks();
+    // Nur Geliefert und Geplant FC. Die RÜCKMELDUNG bleibt unangetastet: sie kommt aus dem
+    // Schichtplan und hat genau einen Knopf. Bis 2026-09-29 hat dieser Import sie mit den
+    // "geplanten Stunden" aus der Auftraggeber-Datei überschrieben — dort standen 64,5 h, während
+    // der Schichtplan 417,7 h sagt. Zwei Quellen für dasselbe Feld, die letzte gewinnt: genau der
+    // Fall, der die Folie unbrauchbar gemacht hat.
     upd(n=>{ const rows=n.teams[t].stunden;
       ws.forEach((w,i)=>{ if(!rows[i]) rows[i]=hcEmptyRow(); rows[i].kw=''+w.kw;
         const h=stores.hours[t+'|'+w.yr+'|'+w.kw]; if(h!=null){ rows[i].geliefert=String(Math.round(h*10)/10).replace('.',','); rows[i].gsrc='imported'; }
-        const plImp=(stores.forecastPlanned||{})[t+'|'+w.yr+'|'+w.kw];
-        if(plImp!=null && rows[i].rsrc!=='manual'){ rows[i].rueck=String(Math.round(plImp*10)/10).replace('.',','); rows[i].rsrc='imported'; }   // geplante Stunden aus Blatt 5 = unsere Rückmeldung
-        else if(fte!=null && rows[i].rsrc!=='manual'){ const wd=workdays(w.kw,w.yr); rows[i].rueck=String(Math.round(fte*7.5*wd*10)/10).replace('.',','); rows[i].rsrc='system'; }   // Rückfall: FTE × 7,5 × Werktage
-        const p=(stores.forecast||{})[t+'|'+w.yr+'|'+w.kw]; if(p!=null && rows[i].psrc!=='manual'){ rows[i].plan=String(Math.round(p*10)/10).replace('.',','); rows[i].psrc='imported'; }
+        const p=(stores.forecast||{})[t+'|'+w.yr+'|'+w.kw];
+        if(p!=null && rows[i].psrc!=='manual'){ rows[i].plan=String(Math.round(p*10)/10).replace('.',','); rows[i].psrc='imported'; }
+        else if(p==null && rows[i].psrc!=='manual'){ rows[i].plan=''; }
       }); }); }
+
   // Call-Kennzahlen Vorwoche (Berichts-KW) aus weekly_calls je Mitarbeiter übernehmen. Sekunden → mm:ss.
   const secToMmss=s=>{ if(s==null||s==='') return ''; const x=Math.round(Number(s)||0); return Math.floor(x/60)+':'+String(x%60).padStart(2,'0'); };
   function applyImportCalls(t){ const members=membersFor(t); upd(n=>{ const cur=n.teams[t].calls.vorwoche={...(n.teams[t].calls.vorwoche||{})};
@@ -47702,7 +47701,7 @@ function PresentationsView({projects, employees, team, showToast}){
         win.forEach(r=>{ if(r.emp_id!==e.id) return; if(keys.indexOf(r.year+'-'+r.kw)<0) return;
           const h=Number((r.raw||{}).hours), m=Number((r.raw||{}).mails);
           if(isFinite(h)) std+=h; if(isFinite(m)) mails+=m; any=true; });
-        if(!any) return;
+        if(!any||(std<=0&&mails<=0)) return;   // Zeile ohne Stunden UND ohne Mails sagt nichts
         rows.push({id:e.id, name:empName(e), std:Math.round(std*100)/100, mails:Math.round(mails),
           meh:(std>0?Math.round(mails/std*100)/100:null), newbie:isNew(e)}); });
       rows.sort((a,b)=>(b.meh||0)-(a.meh||0));
@@ -47721,7 +47720,8 @@ function PresentationsView({projects, employees, team, showToast}){
       .sort((a2,b2)=>(b2.tot.meh||0)-(a2.tot.meh||0));
     upd(n=>{ n.teams[t].mailtrend={weeks, agents:trend, _src:'imported'}; });
     upd(n=>{ n.teams[t].mail={ vorwoche:{...bau([rv.yr+'-'+rv.kw]), kw:rv.kw},
-      monat:{...bau(mtdKeys), label:MONTHS_DE[rm.m]+' '+rm.y, weekKws:mtdKeys.map(k=>Number(k.split('-')[1]))},
+      monat:{...bau(mtdKeys), label:MONTHS_DE[rm.m]+' '+rm.y, weekKws:mtdKeys.map(k=>Number(k.split('-')[1])),
+        mitKws:mtdKeys.filter(k=>win.some(r=>r.year+'-'+r.kw===k&&(r.raw||{}).hours!=null)).map(k=>Number(k.split('-')[1]))},
       _src:'imported' }; }); }
   function applyImportCallAht(t){ const ws=windowWeeks(); const members=membersFor(t); const win=stores.callsWin||[];
     const memberSet={}; members.forEach(e=>{ memberSet[e.id]=e; });
@@ -48222,10 +48222,18 @@ function PresentationsView({projects, employees, team, showToast}){
           <button className="btn btn-sm btn-primary" disabled={!(stores.mailWin||[]).length} onClick={()=>applyMailKpi(t)}>Aus Import übernehmen</button>
           {(td.mail||{})._src==='imported'&&<span style={{fontSize:11,color:'#2563eb',fontWeight:700}}>● {((td.mail.vorwoche||{}).rows||[]).length} Agenten</span>}
           <span style={{fontSize:11,color:'var(--muted)'}}>STD Task und Mails/h je Agent aus dem Mailer-Import ({(stores.mailWin||[]).length} Werte im Fenster). Mails/h = Mails ÷ STD Task, die Teamzeile rechnet aus den Summen.</span>
-          {!(stores.mailWin||[]).length&&<span style={{fontSize:11,fontWeight:700,color:'#b45309'}}>Für dieses Fenster liegt kein Mailer-Import vor.</span>}
+          {(()=>{ const ws2=windowWeeks(); const win2=stores.mailWin||[];
+            if(!win2.length) return <span style={{fontSize:11,fontWeight:700,color:'#b45309'}}>Für dieses Fenster liegt kein Mailer-Import vor.</span>;
+            const mit=ws2.filter(w=>win2.some(r=>r.year===w.yr&&r.kw===w.kw&&(r.raw||{}).hours!=null)).map(w=>w.kw);
+            const ohne=ws2.filter(w=>mit.indexOf(w.kw)<0).map(w=>w.kw);
+            if(!ohne.length) return null;
+            return <span style={{fontSize:11,color:'#b45309'}}>
+              Werte nur für KW {mit.length?mit.join(', '):'—'}. Ohne Mailer-Import: KW {ohne.join(', ')} — deshalb bleibt die Vorwoche leer, während der Monat gefüllt ist.
+            </span>; })()}
         </div>
         {td.mail&&td.mail.vorwoche?<div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(300px,1fr))',gap:12}}>
-          {[['vorwoche','Vorwoche · KW '+(td.mail.vorwoche.kw||'')],['monat','Monat · '+((td.mail.monat||{}).label||'')]].map(([mk,lbl])=>{
+          {[['vorwoche','Vorwoche · KW '+(td.mail.vorwoche.kw||'')],
+            ['monat','Monat · '+((td.mail.monat||{}).label||'')+(((td.mail.monat||{}).mitKws||[]).length?(' · Werte aus KW '+(td.mail.monat.mitKws.join(', '))):'')]].map(([mk,lbl])=>{
             const blk=td.mail[mk]||{rows:[],total:{}};
             return <div key={mk} style={{border:'1px solid var(--border)',borderRadius:10,overflow:'hidden'}}>
               <div style={{padding:'7px 10px',background:'var(--surface-2)',fontSize:12,fontWeight:800}}>{lbl}</div>
