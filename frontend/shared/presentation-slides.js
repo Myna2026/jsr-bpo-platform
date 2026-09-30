@@ -110,13 +110,13 @@
 
   function Stunden(ctx, tk){ var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk);
     var rows=(td.stunden||[]).filter(function(r){ return r.kw!==''||r.plan!==''||r.geliefert!==''; });
-    if(!rows.length) return emptyPanel(ctx, fondHead(P, lbl, 'Gelieferte Stunden', 'Plan · Rückmeldung · Geliefert'), P, 'Keine Stundendaten in diesem Zeitraum.');
+    if(!rows.length) return emptyPanel(ctx, fondHead(P, lbl, 'Gelieferte Stunden', 'Plan · Rückmeldung (geplant) · Geliefert (geleistet)'), P, 'Keine Stundendaten in diesem Zeitraum.');
     var vals=[]; rows.forEach(function(r){ ['plan','rueck','geliefert'].forEach(function(k){ if(r[k]!==''&&r[k]!=null) vals.push(numOr(r[k],0)); }); });
     var dom=zoomDomain(vals);
-    var bar3=[{k:'plan',c:'#d5dde3',tc:'#94a3b8',l:'Plan'},{k:'rueck',c:rgba(P.onLight,.42),tc:P.onLight,l:'Rückmeldung'},{k:'geliefert',c:P.onLight,tc:P.onLightTxt,l:'Geliefert'}];
+    var bar3=[{k:'plan',c:'#d5dde3',tc:'#94a3b8',l:'Plan'},{k:'rueck',c:rgba(P.onLight,.42),tc:P.onLight,l:'Rückmeldung (geplant)'},{k:'geliefert',c:P.onLight,tc:P.onLightTxt,l:'Geliefert (geleistet)'}];
     var notes=rows.filter(function(r){ return r.erkl; });
     return Slide(ctx, [
-      fondHead(P, lbl, 'Gelieferte Stunden', 'Plan · Rückmeldung · Geliefert'),
+      fondHead(P, lbl, 'Gelieferte Stunden', 'Plan · Rückmeldung (geplant) · Geliefert (geleistet)'),
       panel(P, [
         // Diagramm = Hauptinhalt: Wochenspalten füllen die volle Breite (flex:1), Balken füllen die Höhe,
         // Werte stehen an jedem Balken, KW + %-Delta konsistent unter JEDER Woche.
@@ -245,12 +245,17 @@
   // Folie 3 — Gelieferte Stunden als 8-Spalten-Tabelle (KW · Plan · Rückmeldung · Diff R−P · Geliefert · Diff G−R · % · Erläuterung).
   function StundenTable(ctx, tk){ var P=pal(ctx.accent); var td=(ctx.deck.teams||{})[tk]||{}; var lbl=skillLabel(ctx,tk);
     var rows=(td.stunden||[]).filter(function(r){ return r.kw!==''||r.plan!==''||r.geliefert!==''||r.rueck!==''; });
-    var head=fondHead(P, lbl, 'Gelieferte Stunden', 'Plan · Rückmeldung · Geliefert');
+    var head=fondHead(P, lbl, 'Gelieferte Stunden', 'Plan · Rückmeldung (geplant) · Geliefert (geleistet)');
     if(!rows.length){ return Slide(ctx,[head, panel(P, h('div',{style:{flex:1,display:'flex',alignItems:'center',justifyContent:'center',color:P.muted,fontSize:'1.6cqw'}},'Keine Stundendaten in diesem Zeitraum.'))]); }
-    var heads=['KW','Geplant FC','Rückmeldung','Diff R−P','Geliefert','Diff G−R','% (Rückm.)','Erläuterung'];
+    // Rueckmeldung ist geplante Zeit (Schichtplan netto), Geliefert ist geleistete Zeit aus dem
+    // System des Auftraggebers. Genau an dieser Stelle wurden die beiden verwechselt, deshalb
+    // steht der Unterschied jetzt im Spaltenkopf und nicht nur in der Fussnote.
+    var heads=['KW','Geplant FC',['Rückmeldung','geplant, nicht geleistet'],'Diff R−P',['Geliefert','tatsächlich geleistet'],'Diff G−R','% (Rückm.)','Erläuterung'];
     var ws=['9%','13%','14%','11%','13%','11%','11%','18%'];
     function cell(txt,i,st){ return h('div',{key:i,style:Object.assign({width:ws[i],padding:'0 .6cqw',boxSizing:'border-box',textAlign:i===0?'left':i===7?'left':'right',fontFamily:i>=1&&i<=6?MONO:'inherit'},st||{})}, txt); }
-    var hdr=h('div',{key:'h',style:{display:'flex',alignItems:'flex-end',paddingBottom:'.7cqw',borderBottom:'1px solid #e6edef',marginBottom:'.4cqw',fontSize:'1.15cqw',fontWeight:700,color:P.muted,textTransform:'uppercase',letterSpacing:'.04em'}}, heads.map(function(hh,i){ return cell(hh,i); }));
+    var hdr=h('div',{key:'h',style:{display:'flex',alignItems:'flex-end',paddingBottom:'.7cqw',borderBottom:'1px solid #e6edef',marginBottom:'.4cqw',fontSize:'1.15cqw',fontWeight:700,color:P.muted,textTransform:'uppercase',letterSpacing:'.04em'}},
+      heads.map(function(hh,i){ if(typeof hh==='string') return cell(hh,i);
+        return cell([h('div',{key:'a'},hh[0]), h('div',{key:'b',style:{fontSize:'.88cqw',fontWeight:600,textTransform:'none',letterSpacing:0,opacity:.85,whiteSpace:'nowrap'}},hh[1])], i); }));
     var sp=0,sr=0,sg=0;
     var body=rows.map(function(r,ri){ var plan=numOr(r.plan,null),rueck=numOr(r.rueck,null),gel=numOr(r.geliefert,null);
       if(r.plan!==''&&r.plan!=null)sp+=plan; if(r.rueck!==''&&r.rueck!=null)sr+=rueck; if(r.geliefert!==''&&r.geliefert!=null)sg+=gel;
@@ -275,7 +280,7 @@
     ]);
     return Slide(ctx, [ head, panel(P, [
       h('div',{key:'tbl',style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',overflow:'hidden'}}, [hdr].concat(body).concat([totalRow])),
-      h('div',{key:'ft',style:{fontSize:'1.1cqw',color:P.muted,marginTop:'1cqw'}},'Diff R−P, Diff G−R und % werden gerechnet · Prozent bezogen auf die Rückmeldung.')
+      h('div',{key:'ft',style:{fontSize:'1.1cqw',color:P.muted,marginTop:'1cqw'}},'Rückmeldung = die Stunden, die wir laut Schichtplanung zugesagt haben, nach Abzug von Pausen, Urlaub und Krankheit. Geliefert = die Stunden, die im System tatsächlich protokolliert sind. Diff R−P, Diff G−R und % werden gerechnet, Prozent bezogen auf die Rückmeldung.')
     ]) ]);
   }
 
