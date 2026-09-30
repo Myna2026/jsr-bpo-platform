@@ -115,6 +115,24 @@ beschränken (bzw. Antrag für gekündigte/inaktive MA gar nicht erst zulassen
 oder sichtbar warnen).
 
 
+### Offene Vorschläge bleiben still liegen (Erinnerung fehlt)
+
+`kb_fact_changes` und das neue `coach_question_changes` haben beide die Spalten
+`reminded_at`, `reminder_count` und `escalated_at`. **Es läuft aber kein Cron
+dafür.** Ein offener Vorschlag bleibt damit unbemerkt liegen, bis jemand
+zufällig hinsieht; bei `kb_fact_changes` liegt seit dem Aufsetzen ein Vorschlag
+im Status `open`.
+
+Gebraucht wird eine Edge Function, die beide Tabellen prüft und über den
+bestehenden Agenten-Mailweg erinnert: nach 7 Tagen eine Erinnerung an die
+Entscheider, nach 14 Tagen eine Eskalation an das Management, je Vorschlag
+höchstens eine Erinnerung pro Stufe (dafür sind die Spalten da). Die
+Coach-Vorschläge gehen an uns, die Wissensänderungen an den Kunden, die
+Richtungen sind also verschieden und müssen getrennt formuliert werden.
+
+Vom User am 2026-09-30 ausdrücklich beauftragt, aber nach dem Kundenportal
+einzuplanen.
+
 ## Auth-Konsolidierung — offene Go-Live-Blocker
 
 Kontext: Login/Rollen/Portale laufen bereits über Supabase (`app_users` +
