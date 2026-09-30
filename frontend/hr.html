@@ -43896,8 +43896,21 @@ function mailerHoursToH(v){ const n=Number(String(v==null?'':v).replace(',','.')
 // meist fehlen die LogTime-Minuten (Mails auf fast null Stunden). Wird gemeldet, nie still verrechnet.
 const MAILER_MAX_PLAUSIBLE=30;
 function mailerNum(v){ return Number(String(v==null?'':v).replace(',','.'))||0; }
-function mailerYw(v){ if(v==null||v==='') return null; const d = v instanceof Date ? v : new Date(String(v).slice(0,10)); if(isNaN(d.getTime())) return null; const w=getISOWeek(d); return w.year+'-'+String(w.kw).padStart(2,'0'); }
-function mailerDay(v){ if(v==null||v==='') return null; const d = v instanceof Date ? v : new Date(String(v).slice(0,10)); if(isNaN(d.getTime())) return null; return isoLocal(d); }   // YYYY-MM-DD (Tagesebene, wie die Kundenformel je Datum)
+// Datum aus der Kundendatei, zeitzonenfrei. Excel-Seriennummern werden in reiner UTC-Arithmetik
+// umgerechnet; ein Date zur lokalen Mitternacht wuerde in einer anderen Zeitzone auf den Vortag
+// kippen und die ganze Woche verschieben.
+function mailerDate(v){
+  if(v==null||v==='') return null;
+  if(typeof v==='number'&&v>20000&&v<60000){ const d=new Date(Date.UTC(1899,11,30)+v*86400000); return new Date(d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate()); }
+  if(v instanceof Date) return isNaN(v.getTime())?null:new Date(v.getFullYear(),v.getMonth(),v.getDate());
+  const t=String(v).trim();
+  let m=t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/); if(m) return new Date(Number(m[1]),Number(m[2])-1,Number(m[3]));
+  m=t.match(/^(\d{1,2})[.\/](\d{1,2})[.\/](\d{2,4})/);
+  if(m){ let y=Number(m[3]); if(y<100) y+=2000; return new Date(y,Number(m[2])-1,Number(m[1])); }
+  const d=new Date(t.slice(0,10)); return isNaN(d.getTime())?null:new Date(d.getFullYear(),d.getMonth(),d.getDate());
+}
+function mailerYw(v){ const d=mailerDate(v); if(!d) return null; const w=getISOWeek(d); return w.year+'-'+String(w.kw).padStart(2,'0'); }
+function mailerDay(v){ const d=mailerDate(v); return d?isoLocal(d):null; }   // YYYY-MM-DD, Tagesebene wie die Kundenformel
 function mailerIsME(v){ return String(v==null?'':v).trim().toUpperCase()==='ME'; }   // Excel „=ME" ist case-insensitiv
 
 function MailerImport({employees, onSaved}){
@@ -43925,7 +43938,11 @@ function MailerImport({employees, onSaved}){
     const rd=new FileReader();
     rd.onload=async ev=>{ try{
       const bytes=new Uint8Array(ev.target.result);
-      const wb=XLSX.read(bytes,{type:'array',cellDates:true,raw:false});
+      // Ohne cellDates: Datumszellen kommen als Seriennummer und werden in mailerDate zeitzonenfrei
+      // umgerechnet. Mit cellDates baut die Bibliothek ein Date zur LOKALEN Mitternacht, das in einer
+      // anderen Zeitzone auf den Vortag kippt. Genau so lag der Tages-Forecast um einen Tag daneben
+      // (Befund 2026-09-30).
+      const wb=XLSX.read(bytes,{type:'array'});
       const roh=sheetAoa(wb,/rohdaten/i); const qm=sheetAoa(wb,MAILER_HOURS_SOURCE.sheetRx);
       if(!roh) throw new Error('Blatt „Rohdaten Novo" fehlt. Blätter: '+wb.SheetNames.join(', '));
       if(!qm)  throw new Error('Blatt „vw_agent_qm" (Stunden) fehlt. Blätter: '+wb.SheetNames.join(', '));
