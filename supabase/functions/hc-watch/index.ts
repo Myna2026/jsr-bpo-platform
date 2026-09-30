@@ -66,7 +66,7 @@ Deno.serve(async (req) => {
       funde.push({
         titel: "Woche läuft unter Ziel: " + s.label, ton: "bad",
         text: "Bis einschließlich " + dmy(morgen) + " stehen " + hrs(bis) + " abrechenbar gegen ein anteiliges Wochenziel von "
-          + hrs(s.ziel) + " — es fehlen " + hrs(s.ziel - bis)
+          + hrs(s.ziel) + ", es fehlen " + hrs(s.ziel - bis)
           + (s.rate != null ? (" oder " + eur((s.ziel - bis) * s.rate)) : "") + ".",
       });
     }
@@ -171,7 +171,7 @@ Deno.serve(async (req) => {
     const sh7 = shR7.data || [];
     const ids7 = [...new Set(sh7.map((r: any) => r.employee_id).filter(Boolean))];
     const empR7 = ids7.length
-      ? await admin.from("employees").select("id,first_name,last_name,termination_date,absences,updated_at").in("id", ids7)
+      ? await admin.from("employees").select("id,first_name,last_name,termination_date,absences,termination_date_changed_at").in("id", ids7)
       : { data: [] as any[] };
     const emp7: Record<string, any> = {}; (empR7.data || []).forEach((e: any) => { emp7[e.id] = e; });
     const cfg7 = cfgNorm(cfgR7.data && cfgR7.data.value);
@@ -197,8 +197,12 @@ Deno.serve(async (req) => {
         name: ((e.first_name || "") + " " + (e.last_name || "")).trim() || "Unbekannt",
         ende, n: 0, h: 0, eur: 0, von: ds, bis: ds,
         zukunft: ende > today,
-        frisch: !!e.updated_at && String(e.updated_at).slice(0, 10) >= addDays(today, -7),
+        // Eigenes Feld statt updated_at: der Trigger employees_termination_stamp haelt fest, wann
+        // das Austrittsdatum gesetzt oder geaendert wurde, und sonst nichts. Leer heisst unbekannt
+        // (Altbestand) und warnt nicht.
+        geaendert: e.termination_date_changed_at ? String(e.termination_date_changed_at).slice(0, 10) : null,
       });
+      q.frisch = !!q.geaendert && q.geaendert >= addDays(today, -7);
       q.n++; q.h += weg; q.eur += weg * (rate7[sk] || 0);
       if (ds < q.von) q.von = ds;
       if (ds > q.bis) q.bis = ds;
@@ -212,8 +216,8 @@ Deno.serve(async (req) => {
         text: liste7.map((q) =>
           q.name + " (Austritt " + dmy(q.ende) + "): " + q.n + " Schicht" + (q.n === 1 ? "" : "en") + " danach, "
           + hrs(q.h) + " oder " + eur(q.eur) + " fallen weg, " + dmy(q.von) + " bis " + dmy(q.bis)
-          + (q.zukunft ? " — Achtung: der Austritt liegt in der Zukunft, das Datum könnte zu früh oder falsch gesetzt sein" : "")
-          + (q.frisch ? " — der Datensatz wurde in den letzten 7 Tagen geändert, Austrittsdatum prüfen" : "")
+          + (q.zukunft ? ". Achtung: der Austritt liegt in der Zukunft, das Datum könnte zu früh oder falsch gesetzt sein" : "")
+          + (q.frisch ? ". Austrittsdatum wurde am " + dmy(q.geaendert) + " gesetzt oder geändert, bitte prüfen" : "")
           + "."
         ).join("<br>") + "<br><br>Die Schichten bleiben im Plan stehen, sie erzeugen nur kein Geld mehr. Entweder der Plan gehört bereinigt oder das Austrittsdatum stimmt nicht.",
       });

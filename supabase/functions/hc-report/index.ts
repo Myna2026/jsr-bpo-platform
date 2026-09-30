@@ -116,7 +116,7 @@ Deno.serve(async (req) => {
   inner += button(PORTAL_URL + "?goto=hcstunden", "HC Stundenabgleich öffnen", brand.accent);
   inner += refLine((slot === "13"
     ? "Zwischenstand: die bis 13:00 Uhr gelaufene Schichtzeit, anteilig gerechnet."
-    : "Tagesabschluss: der ganze geplante Tag. Grundlage ist der Schichtplan, nicht die Stempelung — später ändert sich daran nichts mehr.")
+    : "Tagesabschluss: der ganze geplante Tag. Grundlage ist der Schichtplan, nicht die Stempelung: später ändert sich daran nichts mehr.")
     + " Abrechenbar = Schichtplan netto, abzüglich Urlaub und Krankheit, je Person mit ihrem hinterlegten Anteil."
     + " Die Kacheln zeigen den Tag, Ziel und Lücke dagegen die Woche seit Montag: der Forecast ist ein Wochenwert,"
     + " und ein einzelner Tag dagegen gestellt ergibt keine belastbare Aussage. Das anteilige Wochenziel richtet sich"
