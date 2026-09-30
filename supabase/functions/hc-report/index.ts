@@ -77,20 +77,20 @@ Deno.serve(async (req) => {
   ]);
 
   let inner = lead("<b>" + eur(R.total.eur) + "</b> " + (slot === "13" ? "stehen bis 13:00 Uhr auf der Uhr" : "sind heute zusammengekommen") + ". "
-    + "Das sind " + hrs(R.total.abr) + " abrechenbare Zeit aus " + hrs(R.total.netto) + " geplanter Nettozeit"
+    + "Das sind " + hrs(R.total.abr) + " abrechenbare Zeit aus " + hrs(R.total.netto) + " Plan netto"
     + (R.total.abw > 0 ? (", nach " + hrs(R.total.abw) + " Abwesenheit") : "") + ".");
   inner += kacheln;
 
   // Je Skill: Ziel, Ist und die Luecke — IMMER als "Woche bis heute". Das Ziel liegt je Woche vor;
   // ein Tageswert dagegen zu stellen erzeugt an jedem Werktag ein Plus und am Wochenende ein Minus,
   // ohne dass sich an der Lage etwas geaendert haette (Befund 2026-09-30).
-  inner += '<tr><td style="padding:16px 16px 4px;font-size:13px;font-weight:bold;color:#0f2830;">Woche bis heute: Ziel und Lieferung je Skill</td></tr>';
+  inner += '<tr><td style="padding:16px 16px 4px;font-size:13px;font-weight:bold;color:#0f2830;">Woche bis heute: Ziel und abrechenbarer Plan je Skill</td></tr>';
   aktive.forEach((s) => {
     const bis = (s as any).abrBis != null ? (s as any).abrBis : s.abr;
     const pct = s.ziel > 0 ? Math.round(bis / s.ziel * 100) : 0;
     const tone = s.ziel <= 0 ? "neutral" : (pct >= 98 ? "good" : (pct >= 90 ? "warn" : "bad"));
     const note = s.ziel > 0
-      ? (hrs(bis) + " von " + hrs(s.ziel) + " Ziel seit Montag · " + (s.luecke! >= 0 ? "+" : "") + hrs(s.luecke!) + (s.lueckeEur != null ? (" · " + (s.lueckeEur >= 0 ? "+" : "") + eur(s.lueckeEur)) : ""))
+      ? (hrs(bis) + " abrechenbar von " + hrs(s.ziel) + " Ziel seit Montag · " + (s.luecke! >= 0 ? "+" : "") + hrs(s.luecke!) + (s.lueckeEur != null ? (" · " + (s.lueckeEur >= 0 ? "+" : "") + eur(s.lueckeEur)) : ""))
       : "kein Forecast hinterlegt, deshalb kein Ziel";
     inner += perfRow({ name: s.label, value: eur(s.eur || 0), tone, note, valuePct: Math.min(100, pct) });
   });
