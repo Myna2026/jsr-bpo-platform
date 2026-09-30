@@ -28,6 +28,11 @@ export function daysBetween(from: string, to: string) {
   return out;
 }
 // ISO-Kalenderwoche samt ISO-Jahr (am Jahreswechsel sind die beiden verschieden).
+// Montag der ISO-Woche, in der dieser Tag liegt.
+export function isoMonday(ds: string) {
+  const dow = new Date(ds + "T00:00:00").getDay() || 7;   // So = 7
+  return addDays(ds, 1 - dow);
+}
 export function isoWeek(ds: string) {
   const d = new Date(ds + "T00:00:00");
   d.setHours(0, 0, 0, 0);
@@ -103,7 +108,7 @@ export function shiftShare(shiftValue: string, nowMin: number | null) {
 }
 
 export type HcSkill = {
-  skill: string; label: string; rate: number | null;
+  skill: string; label: string; rate: number | null; abrBis?: number;
   ziel: number; zielTeil: boolean;
   plan: number; abw: number; netto: number; abr: number; nichtAbr: number;
   eur: number | null; zielEur: number | null; luecke: number | null; lueckeEur: number | null;
@@ -112,10 +117,18 @@ export type HcSkill = {
 
 // Eine Rechnung fuer einen Zeitraum. nowMin begrenzt den letzten Tag anteilig (Zwischenstand).
 export async function hcCompute(admin: any, from: string, to: string, nowMin: number | null) {
-  const years = [...new Set([Number(from.slice(0, 4)), Number(to.slice(0, 4))])];
+  // Das Ziel liegt je WOCHE vor. Ein Tagesziel als Wochenziel geteilt durch sieben ist keine
+  // Groesse: geliefert wird werktags, das Ziel verteilt sich aber auf sieben Kalendertage. Jeder
+  // Werktag meldete deshalb ein Plus und jedes Wochenende ein grosses Minus, und ueber die Woche
+  // kippte bei Sales sogar das Vorzeichen (Befund 2026-09-30). Verglichen wird jetzt "Woche bis
+  // <Ende des Zeitraums>": das Wochenziel anteilig nach dem geplanten Volumen der bereits
+  // vergangenen Tage. Dafuer werden die Schichten der GANZEN ISO-Wochen geladen.
+  const wkFrom = isoMonday(from);
+  const wkTo = addDays(isoMonday(to), 6);
+  const years = [...new Set([Number(wkFrom.slice(0, 4)), Number(wkTo.slice(0, 4))])];
   const [shR, dhR, fcR, tpR, cfgR, skR] = await Promise.all([
     admin.from("shift_assignments").select("employee_id,skill,work_date,net_hours,shift_value")
-      .eq("project_id", HC_PROJECT).gte("work_date", from).lte("work_date", to),
+      .eq("project_id", HC_PROJECT).gte("work_date", wkFrom).lte("work_date", wkTo),
     admin.from("daily_hours").select("employee_id,skill,work_date,hours")
       .eq("project_id", HC_PROJECT).gte("work_date", from).lte("work_date", to),
     admin.from("report_forecast").select("skill,year,kw,fc_hours").eq("project_id", HC_PROJECT).in("year", years),
@@ -134,28 +147,26 @@ export async function hcCompute(admin: any, from: string, to: string, nowMin: nu
   (skR.data || []).forEach((s: any) => { const v = Number(s.rate); rateBy[s.key] = isFinite(v) && v > 0 ? v : null; });
 
   const days = daysBetween(from, to);
+  // Schulungstage ueber die GANZEN Wochen, nicht nur ueber den Zeitraum: das Wochenvolumen fuer das
+  // anteilige Ziel rechnet auch Tage vor dem Zeitraum, und dort muss "0 % waehrend der Klasse" gelten.
+  // trainNames meldet nur, was IM Zeitraum liegt, sonst stuende in der Mail eine laengst beendete Klasse.
   const trainDays: Record<string, boolean> = {}; const trainNames: Record<string, boolean> = {};
   (tpR.data || []).forEach((t: any) => {
     const a = String(t.start_date || "").slice(0, 10), b = String(t.end_date || "").slice(0, 10);
     if (!a || !b || b < a) return;
     const st = String(t.status || "");
     if (st === "done" || st === "cancelled") return;
-    days.forEach((ds) => { if (ds >= a && ds <= b) { trainDays[ds] = true; trainNames[t.name || "Schulung"] = true; } });
+    daysBetween(wkFrom, wkTo).forEach((ds) => { if (ds >= a && ds <= b) trainDays[ds] = true; });
+    days.forEach((ds) => { if (ds >= a && ds <= b) trainNames[t.name || "Schulung"] = true; });
   });
 
   // Ziel: Wochen-Forecast, fuer Teilwochen anteilig auf die Tage verteilt.
   const fcBy: Record<string, number> = {};
   (fcR.data || []).forEach((r: any) => { fcBy[String(r.skill || "").toLowerCase() + "|" + r.year + "-" + r.kw] = Number(r.fc_hours) || 0; });
-  const weekDays: Record<string, number> = {};
-  days.forEach((ds) => { const w = isoWeek(ds); const k = w.year + "-" + w.kw; weekDays[k] = (weekDays[k] || 0) + 1; });
-  const zielOf = (skill: string) => {
-    let sum = 0, teil = false, gefunden = false;
-    Object.keys(weekDays).forEach((k) => {
-      const v = fcBy[skill + "|" + k]; if (v == null) return;
-      gefunden = true; const n = weekDays[k]; if (n < 7) teil = true; sum += v * n / 7;
-    });
-    return { h: gefunden ? sum : 0, teil };
-  };
+  const wochen: string[] = [];
+  daysBetween(wkFrom, wkTo).forEach((ds) => { const w = isoWeek(ds); const k = w.year + "-" + w.kw; if (wochen.indexOf(k) < 0) wochen.push(k); });
+  // Je Skill und Woche: abrechenbares Volumen der ganzen Woche und das bis zum Ende des Zeitraums.
+  const wkVol: Record<string, { bis: number; ganz: number }> = {};
 
   const istBy: Record<string, number> = {};
   (dhR.data || []).forEach((r: any) => { const k = r.employee_id + "|" + r.skill; istBy[k] = (istBy[k] || 0) + (Number(r.hours) || 0); });
@@ -170,6 +181,11 @@ export async function hcCompute(admin: any, from: string, to: string, nowMin: nu
     const nach = net * absFactor(emp, ds);
     const pct = pctFor(cfg, r.employee_id, ds, trainDays);
     const abr = nach * (pct / 100);
+    // Wochenvolumen fuer das anteilige Ziel: ueber die GANZE Woche, "bis" nur bis zum Zeitraum-Ende.
+    const wkKey = sk + "|" + (() => { const w = isoWeek(ds); return w.year + "-" + w.kw; })();
+    const wv = wkVol[wkKey] || (wkVol[wkKey] = { bis: 0, ganz: 0 });
+    wv.ganz += abr; if (ds <= to) wv.bis += abr;
+    if (ds < from || ds > to) return;              // nur der gewaehlte Zeitraum kommt in die Liste
     const k = r.employee_id + "|" + sk;
     const q = per[k] || (per[k] = {
       id: r.employee_id, skill: sk,
@@ -188,6 +204,22 @@ export async function hcCompute(admin: any, from: string, to: string, nowMin: nu
     return q;
   }).sort((a, b) => b.abr - a.abr);
 
+  // Ziel "Woche bis <to>": das Wochenziel anteilig nach dem geplanten Volumen der Tage bis dahin.
+  // Volle Wochen ergeben damit exakt das Wochenziel, Teilwochen einen fairen Anteil. Steht fuer eine
+  // Woche gar kein Plan, gibt es auch kein anteiliges Ziel - sonst waere die Luecke frei erfunden.
+  const zielOf = (skill: string) => {
+    let ziel = 0, abrBis = 0, teil = false, gefunden = false;
+    wochen.forEach((k) => {
+      const v = fcBy[skill + "|" + k]; if (v == null) return;
+      gefunden = true;
+      const wv = wkVol[skill + "|" + k] || { bis: 0, ganz: 0 };
+      const anteil = wv.ganz > 0 ? wv.bis / wv.ganz : 0;
+      if (anteil < 0.999) teil = true;
+      ziel += v * anteil; abrBis += wv.bis;
+    });
+    return { h: gefunden ? ziel : 0, abrBis, teil };
+  };
+
   const skills: HcSkill[] = HC_SKILLS.map((sk) => {
     const rows = list.filter((r) => r.skill === sk);
     const rate = rateBy[sk] != null ? rateBy[sk] : null;
@@ -198,15 +230,19 @@ export async function hcCompute(admin: any, from: string, to: string, nowMin: nu
       skill: sk, label: sk === "sales" ? "Sales" : "Support", rate,
       ziel: z.h, zielTeil: z.teil,
       plan: sum("plan"), abw: sum("abw"), netto, abr, nichtAbr: netto - abr,
+      // abrBis = abrechenbar seit Wochenbeginn bis zum Ende des Zeitraums. NUR diese Zahl gehoert
+      // gegen das Ziel: abr zaehlt den gewaehlten Zeitraum (oft ein Tag), das Ziel ist ein Wochenwert.
+      abrBis: z.abrBis,
       eur: rate != null ? abr * rate : null,
       zielEur: rate != null && z.h > 0 ? z.h * rate : null,
-      luecke: z.h > 0 ? abr - z.h : null,
-      lueckeEur: rate != null && z.h > 0 ? (abr - z.h) * rate : null,
+      luecke: z.h > 0 ? z.abrBis - z.h : null,
+      lueckeEur: rate != null && z.h > 0 ? (z.abrBis - z.h) * rate : null,
       rows,
     };
   });
 
   const total = {
+    abrBis: skills.reduce((a, s) => a + (s as any).abrBis, 0),
     abr: skills.reduce((a, s) => a + s.abr, 0),
     netto: skills.reduce((a, s) => a + s.netto, 0),
     plan: skills.reduce((a, s) => a + s.plan, 0),

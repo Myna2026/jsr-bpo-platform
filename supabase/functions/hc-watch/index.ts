@@ -55,14 +55,18 @@ Deno.serve(async (req) => {
   const morgen = addDays(today, 1);
 
   // ── 1 Unterdeckung morgen ─────────────────────────────────────────────────
+  // Verglichen wird "Woche bis morgen" gegen das anteilige Wochenziel. Ein einzelner Tag gegen ein
+  // Wochenziel meldete an jedem Werktag ein Plus und an jedem Wochenende ein Minus (Befund 2026-09-30).
   const M = await hcCompute(admin, morgen, morgen, null);
   const mSkills = M.skills.filter((s) => s.ziel > 0);
   mSkills.forEach((s) => {
-    if (s.abr < s.ziel * UNTER) {
+    const bis = (s as any).abrBis != null ? (s as any).abrBis : s.abr;
+    if (bis < s.ziel * UNTER) {
       funde.push({
-        titel: "Morgen zu dünn geplant: " + s.label, ton: "bad",
-        text: hrs(s.abr) + " abrechenbar gegen ein Ziel von " + hrs(s.ziel) + " — es fehlen " + hrs(s.ziel - s.abr)
-          + (s.rate != null ? (" oder " + eur((s.ziel - s.abr) * s.rate)) : "") + ".",
+        titel: "Woche läuft unter Ziel: " + s.label, ton: "bad",
+        text: "Bis einschließlich " + dmy(morgen) + " stehen " + hrs(bis) + " abrechenbar gegen ein anteiliges Wochenziel von "
+          + hrs(s.ziel) + " — es fehlen " + hrs(s.ziel - bis)
+          + (s.rate != null ? (" oder " + eur((s.ziel - bis) * s.rate)) : "") + ".",
       });
     }
   });
@@ -78,7 +82,8 @@ Deno.serve(async (req) => {
     // Steht fuer die Woche ueberhaupt noch kein Plan, ist das die Meldung — nicht die Luecke zum Ziel.
     // Sonst kaeme dieselbe Sache zweimal, einmal als fehlender Plan und einmal als Unterdeckung.
     if (W.list.length) W.skills.filter((s) => s.ziel > 0).forEach((s) => {
-      if (s.abr < s.ziel * UNTER) {
+      const bis = (s as any).abrBis != null ? (s as any).abrBis : s.abr;
+      if (bis < s.ziel * UNTER) {
         funde.push({
           titel: "Kommende Woche unter Ziel: " + s.label, ton: "warn",
           text: "KW " + isoWeek(mo).kw + ": " + hrs(s.abr) + " geplant gegen " + hrs(s.ziel) + " Ziel, es fehlen " + hrs(s.ziel - s.abr)
