@@ -38577,10 +38577,12 @@ function HcHoursView({projects, team}){
       const k=r.employee_id+'|'+sk;
       const q=per_[k]||(per_[k]={id:r.employee_id, skill:sk, name:nameOf(r.employee_id),
         position:((empBy[r.employee_id]||{}).position||''), plan:0, abw:0, netto:0, abr:0, pctDays:[], srcs:{}, notes:{},
-        krank:0, urlaub:0, unbez:0, austritt:0, pctSum:0, planJ:0, nettoJ:0, krankJ:0, urlaubJ:0, unbezJ:0, austrittJ:0, rate:0});
+        krank:0, urlaub:0, unbez:0, austritt:0, pctSum:0, planJ:0, nettoJ:0, krankJ:0, urlaubJ:0, unbezJ:0, austrittJ:0, rate:0,
+        ende:((empBy[r.employee_id]||{}).termination_date?String((empBy[r.employee_id]||{}).termination_date).slice(0,10):null), aVon:null, aBis:null, aN:0});
       q.plan+=net; q.abw+=net-nach; q.netto+=nach; q.abr+=abr;
       const weg=net-nach;
-      if(weg>0){ if(absT==='exit') q.austritt+=weg; else if(absT==='sick') q.krank+=weg; else if(absT==='vacation') q.urlaub+=weg; else if(absT==='unpaid') q.unbez+=weg; }
+      if(weg>0){ if(absT==='exit'){ q.austritt+=weg; q.aN++; if(!q.aVon||ds<q.aVon) q.aVon=ds; if(!q.aBis||ds>q.aBis) q.aBis=ds; }
+        else if(absT==='sick') q.krank+=weg; else if(absT==='vacation') q.urlaub+=weg; else if(absT==='unpaid') q.unbez+=weg; }
       q.pctSum+=net*(p.pct/100);                            // fuer den Euro-Wert der Ausfaelle
       // Der beurteilbare Teil: nur Tage, die der Zeitexport abdeckt. ALLE Spalten der
       // Soll-Erfuellung kommen aus diesen Werten, sonst stuenden Spalten und Prozentsatz auf
@@ -38627,6 +38629,17 @@ function HcHoursView({projects, team}){
         krankJ:f('krankJ'), urlaubJ:f('urlaubJ'), unbezJ:f('unbezJ'), austrittJ:f('austrittJ'),
         krankEur:eur('krank'), urlaubEur:eur('urlaub'), unbezEur:eur('unbez'), austrittEur:eur('austritt'), offenEur:eur('offen'),
         grad:(f('nettoJ')>0?f('istJ')/f('nettoJ'):null)}; })();
+    // Wer ist vom Austrittsfilter betroffen? Direkt unter der Kachel auflisten, damit man das
+    // Austrittsdatum auf einen Blick gegenpruefen kann - ein zu frueh gesetztes Datum senkt die
+    // abrechenbare Zahl still.
+    const austritte=(()=>{ const by={};
+      soll.forEach(r=>{ if(!(r.austritt>0.05)) return;
+        const q=by[r.id]||(by[r.id]={name:r.name, ende:r.ende, h:0, eur:0, n:0, von:r.aVon, bis:r.aBis});
+        q.h+=r.austritt; q.eur+=r.austritt*r.anteil*r.rate; q.n+=r.aN;
+        if(r.aVon&&(!q.von||r.aVon<q.von)) q.von=r.aVon;
+        if(r.aBis&&(!q.bis||r.aBis>q.bis)) q.bis=r.aBis; });
+      return Object.keys(by).map(k=>by[k]).sort((a,b)=>b.h-a.h); })();
+
     // Bis wohin reicht der beurteilbare Teil des Zeitraums?
     const sollBis=(istBisDs&&istBisDs<per.to)?istBisDs:per.to;
 
@@ -38727,7 +38740,7 @@ function HcHoursView({projects, team}){
     return {days, skills, list, dayRows, trainDays, trainNames:Object.keys(trainNames),
             from:per.from, to:per.to,
             offenOverhead:Object.keys(offen).map(k=>offen[k]), heute, todayDs,
-            bloecke, ref, refMon, refM0, soll, sollSum, istBisDs, sollBis,
+            bloecke, ref, refMon, refM0, soll, sollSum, istBisDs, sollBis, austritte,
             istBis:(raw.istBis||null), istOffen:(!raw.istBis||raw.istBis<per.to),
             hatSchulung:Object.keys(trainDays).length>0};
   },[raw,cfg,proj,per.from,per.to]);
@@ -38830,6 +38843,16 @@ function HcHoursView({projects, team}){
                 <div style={{fontSize:11.5,color:'var(--muted)'}}>{h>0?('entgangen '+cpoEur(e)):'kein Ausfall'}</div>
               </div>)}
           </div>
+          {R.austritte.length>0&&<div style={{margin:'0 14px 12px',padding:'9px 11px',border:'1px solid var(--border)',borderRadius:9,background:'var(--surface-2)'}}>
+            <div style={{fontSize:11,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',marginBottom:5}}>Nach dem Austritt geplant, im Einzelnen</div>
+            {R.austritte.map(a=><div key={a.name} style={{fontSize:12,lineHeight:1.65}}>
+              <b>{a.name}</b>, Austritt <b>{a.ende?fmtDate(a.ende):'ohne Datum'}</b>
+              {a.ende&&a.ende>today?<span style={{color:'#b91c1c',fontWeight:700}}> (liegt in der Zukunft, Datum prüfen)</span>:null}
+              {' · '}{a.n} {a.n===1?'Schicht':'Schichten'} danach{a.von?(' , '+fmtDate(a.von)+' bis '+fmtDate(a.bis)):''}
+              {' · '}<b>{cpoHours(a.h)}</b> oder <b>{cpoEur(a.eur)}</b> fallen weg
+            </div>)}
+            <div style={{fontSize:10.5,color:'var(--muted)',marginTop:5}}>Die Schichten bleiben im Plan stehen, sie erzeugen nur kein Geld mehr. Entweder der Plan gehört bereinigt oder das Austrittsdatum stimmt nicht.</div>
+          </div>}
           <div style={{padding:'0 14px 12px',fontSize:11,color:'var(--muted)',lineHeight:1.55}}>
             Stunden = geplante Nettostunden, die ausgefallen sind. Euro = dieselbe Zeit mit dem abrechenbaren Anteil der Person und dem Stundensatz des Skills bewertet, also der tatsächlich entgangene Umsatz.
             „Plan nicht ausgeschöpft" heißt: die Person war da, im Zeitexport des Auftraggebers stehen aber weniger Stunden als geplant. Das wird nur für Tage gerechnet, die der Export abdeckt{R.istBisDs?(', aktuell bis '+fmtDate(R.istBisDs)):''}.

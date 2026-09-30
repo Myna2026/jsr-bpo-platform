@@ -10,6 +10,7 @@
 //  4 Planhorizont endet         weniger als 10 Tage im Voraus geplant
 //  5 Geplant, nichts geliefert  letzte volle Woche: im Plan, nichts protokolliert, keine Abwesenheit
 //  6 Forecast fehlt             für die kommende Woche liegt für einen Skill kein Ziel vor
+//  7 Plan zaehlt nicht mehr    Schichten nach dem Austrittsdatum, die der Austrittsfilter auf null setzt
 //
 // Zu 5: die protokollierten Stunden kommen aus dem Wochen-Import des Auftraggebers und hinken dem
 // Plan hinterher. Deshalb schaut diese Prüfung bewusst auf die letzte abgeschlossene Woche und nur
@@ -22,7 +23,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { agentBrand, shell, lead, callout, perfRow, button, refLine, PORTAL_URL } from "../_shared/agent_mail.ts";
 import { smtpSend, agentMailSender } from "../_shared/agent_send.ts";
-import { hcCompute, berlinNow, isoDay, addDays, daysBetween, isoWeek, eur, hrs, dmy, HC_PROJECT, HC_SKILLS } from "../_shared/hc_hours.ts";
+import { hcCompute, cfgNorm, pctFor, absFactor, berlinNow, isoDay, addDays, daysBetween, isoWeek, eur, hrs, dmy, HC_PROJECT, HC_BILLING_KEY, HC_SKILLS } from "../_shared/hc_hours.ts";
 
 const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 const cors = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type", "Access-Control-Allow-Methods": "POST, OPTIONS" };
@@ -150,6 +151,73 @@ Deno.serve(async (req) => {
       titel: "Kein Ziel für KW " + w.kw, ton: "warn",
       text: "Für " + fehlt.map((s) => s === "sales" ? "Sales" : "Support").join(" und ") + " liegt kein Forecast vor. Ohne Ziel lässt sich die Lücke nicht rechnen.",
     });
+  }
+
+  // ── 7 Plan vorhanden, zaehlt aber nicht mehr ─────────────────────────────
+  // Seit dem 2026-09-30 setzt ein Tag nach dem Austritt den abrechenbaren Wert auf null. Die
+  // Schichtzeilen bleiben stehen, damit die Planungshistorie erhalten bleibt - dadurch kann aber
+  // Plan im System stehen, der kein Geld mehr erzeugt, ohne dass es jemand sieht. Besonders heikel
+  // bei einem zu frueh oder falsch gesetzten Austrittsdatum: die Zahl sinkt still.
+  {
+    const von7 = (() => { const d = new Date(today + "T00:00:00"); return isoDay(new Date(d.getFullYear(), d.getMonth() - 1, 1)); })();
+    const bis7 = addDays(today, 120);
+    const [shR7, cfgR7, tpR7, skR7] = await Promise.all([
+      admin.from("shift_assignments").select("employee_id,skill,work_date,net_hours")
+        .eq("project_id", HC_PROJECT).gte("work_date", von7).lte("work_date", bis7),
+      admin.from("app_config").select("value").eq("key", HC_BILLING_KEY).maybeSingle(),
+      admin.from("training_plans").select("name,start_date,end_date,status").eq("project_id", HC_PROJECT),
+      admin.from("project_skills").select("key,rate").eq("project_id", HC_PROJECT),
+    ]);
+    const sh7 = shR7.data || [];
+    const ids7 = [...new Set(sh7.map((r: any) => r.employee_id).filter(Boolean))];
+    const empR7 = ids7.length
+      ? await admin.from("employees").select("id,first_name,last_name,termination_date,absences,updated_at").in("id", ids7)
+      : { data: [] as any[] };
+    const emp7: Record<string, any> = {}; (empR7.data || []).forEach((e: any) => { emp7[e.id] = e; });
+    const cfg7 = cfgNorm(cfgR7.data && cfgR7.data.value);
+    const rate7: Record<string, number> = {};
+    (skR7.data || []).forEach((x: any) => { const v = Number(x.rate); if (isFinite(v) && v > 0) rate7[x.key] = v; });
+    const train7: Record<string, boolean> = {};
+    (tpR7.data || []).forEach((t: any) => {
+      const a = String(t.start_date || "").slice(0, 10), b = String(t.end_date || "").slice(0, 10);
+      const st = String(t.status || ""); if (!a || !b || b < a || st === "done" || st === "cancelled") return;
+      daysBetween(a < von7 ? von7 : a, b > bis7 ? bis7 : b).forEach((ds) => { train7[ds] = true; });
+    });
+    const tot7: Record<string, any> = {};
+    sh7.forEach((r: any) => {
+      const ds = String(r.work_date).slice(0, 10);
+      const e = emp7[r.employee_id]; if (!e) return;
+      const ende = e.termination_date ? String(e.termination_date).slice(0, 10) : "";
+      if (!ende || ds <= ende) return;                   // nur Schichten NACH dem Austritt
+      const net = Number(r.net_hours) || 0; if (net <= 0) return;
+      const sk = String(r.skill || "").toLowerCase();
+      // Was der Austrittsfilter tatsaechlich wegnimmt: die Stunden, die sonst abrechenbar waeren.
+      const weg = net * absFactor(e, ds) * (pctFor(cfg7, r.employee_id, ds, train7) / 100);
+      const q = tot7[r.employee_id] || (tot7[r.employee_id] = {
+        name: ((e.first_name || "") + " " + (e.last_name || "")).trim() || "Unbekannt",
+        ende, n: 0, h: 0, eur: 0, von: ds, bis: ds,
+        zukunft: ende > today,
+        frisch: !!e.updated_at && String(e.updated_at).slice(0, 10) >= addDays(today, -7),
+      });
+      q.n++; q.h += weg; q.eur += weg * (rate7[sk] || 0);
+      if (ds < q.von) q.von = ds;
+      if (ds > q.bis) q.bis = ds;
+    });
+    const liste7 = Object.keys(tot7).map((k) => tot7[k]).filter((q) => q.h > 0.05).sort((a, b) => b.h - a.h);
+    if (liste7.length) {
+      const brisant = liste7.filter((q) => q.zukunft || q.frisch);
+      funde.push({
+        titel: liste7.length === 1 ? "Plan vorhanden, zählt aber nicht mehr" : liste7.length + " Personen mit Plan, der nicht mehr zählt",
+        ton: brisant.length ? "bad" : "warn",
+        text: liste7.map((q) =>
+          q.name + " (Austritt " + dmy(q.ende) + "): " + q.n + " Schicht" + (q.n === 1 ? "" : "en") + " danach, "
+          + hrs(q.h) + " oder " + eur(q.eur) + " fallen weg, " + dmy(q.von) + " bis " + dmy(q.bis)
+          + (q.zukunft ? " — Achtung: der Austritt liegt in der Zukunft, das Datum könnte zu früh oder falsch gesetzt sein" : "")
+          + (q.frisch ? " — der Datensatz wurde in den letzten 7 Tagen geändert, Austrittsdatum prüfen" : "")
+          + "."
+        ).join("<br>") + "<br><br>Die Schichten bleiben im Plan stehen, sie erzeugen nur kein Geld mehr. Entweder der Plan gehört bereinigt oder das Austrittsdatum stimmt nicht.",
+      });
+    }
   }
 
   if (dry) return json({ ok: true, today, funde });
