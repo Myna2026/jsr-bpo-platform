@@ -38355,6 +38355,13 @@ function hcEntryFor(cfg, empId, ds){
   });
   return best;
 }
+// Welcher Grund kuerzt diesen Tag? Gibt den Typ der Abwesenheit zurueck, die an diesem Tag greift,
+// sonst null. Dieselbe Auswahl wie cpoAbsFactor, damit Faktor und Grund nie auseinanderfallen.
+function hcAbsTyp(emp, ds){
+  const a=emp?((emp.absences||[]).find(x=>absCoversDay(x, ds))):null;
+  return a?String(a.type||'').toLowerCase():null;
+}
+const HC_GRUND={sick:'Krankheit', vacation:'Urlaub', unpaid:'unbezahlt'};
 function hcPctFor(cfg, empId, ds, trainDays){
   if((cfg.training_zero||[]).indexOf(empId)>=0&&trainDays&&trainDays[ds]) return {pct:0, src:'schulung'};
   const e=hcEntryFor(cfg, empId, ds);
@@ -38534,8 +38541,12 @@ function HcHoursView({projects, team}){
       return {h:gefunden?ziel:0, abrBis, teil};
     };
 
-    // Ist aus dem Kundensystem (Kontrollspalte)
-    const istBy={}; (raw.dh||[]).forEach(r=>{ const k=r.employee_id+'|'+r.skill; istBy[k]=(istBy[k]||0)+(Number(r.hours)||0); });
+    // Ist aus dem Kundensystem. istByJ zaehlt nur die Tage, die der Zeitexport ueberhaupt abdeckt -
+    // fuer spaetere Tage waere eine Null keine Untererfuellung, sondern ein fehlender Import.
+    const istBisDs=raw.istBis||null;
+    const istBy={}, istByJ={}; (raw.dh||[]).forEach(r=>{ const k=r.employee_id+'|'+r.skill; const h=Number(r.hours)||0;
+      istBy[k]=(istBy[k]||0)+h;
+      const ds=String(r.work_date).slice(0,10); if(istBisDs&&ds<=istBisDs) istByJ[k]=(istByJ[k]||0)+h; });
 
     // Plan je Person und Skill
     // Heute-Leiste: was bis jetzt gelaufen ist, gegen den ganzen geplanten Tag und das Tagesziel.
@@ -38550,6 +38561,7 @@ function HcHoursView({projects, team}){
       const nach=net*f;                                    // nach Urlaub/Krankheit
       const p=hcPctFor(cfg, r.employee_id, ds, trainDays);
       const abr=nach*(p.pct/100);                          // abrechenbar
+      const absT=hcAbsTyp(emp, ds);                        // welcher Grund kuerzt den Tag
       const wkKey=sk+'|'+(()=>{ const w=getISOWeek(new Date(ds+'T00:00:00')); return w.year+'-'+w.kw; })();
       const wv=wkVol[wkKey]||(wkVol[wkKey]={bis:0, ganz:0});
       wv.ganz+=abr; if(ds<=per.to) wv.bis+=abr;
@@ -38559,8 +38571,17 @@ function HcHoursView({projects, team}){
       if(ds<per.from||ds>per.to) return;                   // nur der gewaehlte Zeitraum kommt in die Liste
       const k=r.employee_id+'|'+sk;
       const q=per_[k]||(per_[k]={id:r.employee_id, skill:sk, name:nameOf(r.employee_id),
-        position:((empBy[r.employee_id]||{}).position||''), plan:0, abw:0, netto:0, abr:0, pctDays:[], srcs:{}, notes:{}});
+        position:((empBy[r.employee_id]||{}).position||''), plan:0, abw:0, netto:0, abr:0, pctDays:[], srcs:{}, notes:{},
+        krank:0, urlaub:0, unbez:0, pctSum:0, planJ:0, nettoJ:0, krankJ:0, urlaubJ:0, unbezJ:0, rate:0});
       q.plan+=net; q.abw+=net-nach; q.netto+=nach; q.abr+=abr;
+      const weg=net-nach;
+      if(weg>0){ if(absT==='sick') q.krank+=weg; else if(absT==='vacation') q.urlaub+=weg; else if(absT==='unpaid') q.unbez+=weg; }
+      q.pctSum+=net*(p.pct/100);                            // fuer den Euro-Wert der Ausfaelle
+      // Der beurteilbare Teil: nur Tage, die der Zeitexport abdeckt. ALLE Spalten der
+      // Soll-Erfuellung kommen aus diesen Werten, sonst stuenden Spalten und Prozentsatz auf
+      // verschiedenen Zeitraeumen (Befund beim Nachmessen 2026-09-30).
+      if(istBisDs&&ds<=istBisDs){ q.planJ+=net; q.nettoJ+=nach;
+        if(weg>0){ if(absT==='sick') q.krankJ+=weg; else if(absT==='vacation') q.urlaubJ+=weg; else if(absT==='unpaid') q.unbezJ+=weg; } }
       q.pctDays.push(p.pct); q.srcs[p.src]=true; if(p.note) q.notes[p.note]=true;
       if(ds===todayDs){
         const rateH=(()=>{ const x=((proj.skills||[]).find(y=>y.key===sk)||{}); const v=Number(x.rate); return isFinite(v)&&v>0?v:0; })();
@@ -38573,7 +38594,36 @@ function HcHoursView({projects, team}){
     const list=Object.keys(per_).map(k=>{ const q=per_[k];
       q.pct=q.pctDays.length?Math.round(q.pctDays.reduce((a,b)=>a+b,0)/q.pctDays.length):100;
       q.ist=istBy[q.id+'|'+q.skill]||0;
+      q.istJ=istByJ[q.id+'|'+q.skill]||0;                   // protokolliert im beurteilbaren Teil
+      q.rate=(()=>{ const x=((proj.skills||[]).find(y=>y.key===q.skill)||{}); const v=Number(x.rate); return isFinite(v)&&v>0?v:0; })();
+      // Anteil, mit dem Ausfallstunden in Euro zaehlen: der mittlere abrechenbare Anteil der Person.
+      q.anteil=q.plan>0?(q.pctSum/q.plan):1;
+      // Plan nicht ausgeschoepft: nur fuer Tage, die der Zeitexport abdeckt, und nur nach unten.
+      q.offen=(q.nettoJ>0?Math.max(0, q.nettoJ-q.istJ):0);
+      q.ueber=(q.nettoJ>0?Math.max(0, q.istJ-q.nettoJ):0);
+      q.grad=(q.nettoJ>0?q.istJ/q.nettoJ:null);
       return q; }).sort((a,b)=>b.abr-a.abr);
+    // Soll-Erfuellung: schlechtester Grad zuerst, damit oben steht wo es hakt. Ohne beurteilbare
+    // Tage (kein Zeitexport im Zeitraum) ans Ende, das ist keine schlechte Erfuellung sondern
+    // schlicht keine Aussage.
+    // Wer mit 0 Prozent gefuehrt wird (Projektleitung, Trainer waehrend der Klasse), protokolliert
+    // keine oder kaum Stunden und gehoert nicht an die Spitze der Rangliste: dort steht, wo Geld
+    // verloren geht, und bei 0 Prozent geht keines verloren. Solche Zeilen laufen hinten mit.
+    const soll=list.slice().sort((a,b)=>{
+      const a0=!(a.anteil>0), b0=!(b.anteil>0);
+      if(a0!==b0) return a0?1:-1;
+      if(a.grad==null&&b.grad==null) return b.nettoJ-a.nettoJ;
+      if(a.grad==null) return 1; if(b.grad==null) return -1;
+      return a.grad-b.grad; });
+    const sollSum=(()=>{ const f=k=>soll.reduce((a,r)=>a+(Number(r[k])||0),0);
+      const eur=k=>soll.reduce((a,r)=>a+(Number(r[k])||0)*r.anteil*r.rate,0);
+      return {plan:f('plan'), netto:f('netto'), ist:f('ist'), istJ:f('istJ'), nettoJ:f('nettoJ'), planJ:f('planJ'),
+        krank:f('krank'), urlaub:f('urlaub'), unbez:f('unbez'), offen:f('offen'), ueber:f('ueber'),
+        krankJ:f('krankJ'), urlaubJ:f('urlaubJ'), unbezJ:f('unbezJ'),
+        krankEur:eur('krank'), urlaubEur:eur('urlaub'), unbezEur:eur('unbez'), offenEur:eur('offen'),
+        grad:(f('nettoJ')>0?f('istJ')/f('nettoJ'):null)}; })();
+    // Bis wohin reicht der beurteilbare Teil des Zeitraums?
+    const sollBis=(istBisDs&&istBisDs<per.to)?istBisDs:per.to;
 
     const skills=['sales','support'].map(sk=>{
       const rows=list.filter(r=>r.skill===sk);
@@ -38671,7 +38721,7 @@ function HcHoursView({projects, team}){
     return {days, skills, list, dayRows, trainDays, trainNames:Object.keys(trainNames),
             from:per.from, to:per.to,
             offenOverhead:Object.keys(offen).map(k=>offen[k]), heute, todayDs,
-            bloecke, ref, refMon, refM0,
+            bloecke, ref, refMon, refM0, soll, sollSum, istBisDs, sollBis,
             istBis:(raw.istBis||null), istOffen:(!raw.istBis||raw.istBis<per.to),
             hatSchulung:Object.keys(trainDays).length>0};
   },[raw,cfg,proj,per.from,per.to]);
@@ -38693,6 +38743,8 @@ function HcHoursView({projects, team}){
     <div style={{display:'flex',gap:8,marginBottom:12,flexWrap:'wrap'}}>
       <button className="btn btn-sm" onClick={()=>setTab('abgleich')}
         style={{background:tab==='abgleich'?BRAND.main:'var(--card)',color:tab==='abgleich'?'#fff':'var(--text)',fontWeight:800}}>Abgleich</button>
+      <button className="btn btn-sm" onClick={()=>setTab('soll')}
+        style={{background:tab==='soll'?BRAND.main:'var(--card)',color:tab==='soll'?'#fff':'var(--text)',fontWeight:800}}>Soll-Erfüllung</button>
       <button className="btn btn-sm" onClick={()=>setTab('anteile')}
         style={{background:tab==='anteile'?BRAND.main:'var(--card)',color:tab==='anteile'?'#fff':'var(--text)',fontWeight:800}}>Abrechenbare Anteile</button>
     </div>
@@ -38751,6 +38803,87 @@ function HcHoursView({projects, team}){
         In diesem Zeitraum läuft eine Schulung ({R.trainNames.join(', ')}). Wer dafür auf 0 Prozent gesetzt ist, wird an diesen Tagen nicht abgerechnet.
       </div>}
 
+      {/* Soll-Erfuellung je Person: was war geplant, was kam an, und woran die Differenz liegt. */}
+      {tab==='soll'&&R&&<React.Fragment>
+        <div style={{border:'1px solid var(--border)',borderRadius:12,background:'var(--card)',marginBottom:12,overflow:'hidden'}}>
+          <div style={{padding:'9px 14px',borderBottom:'1px solid var(--border)',background:'var(--surface-2)',display:'flex',gap:10,alignItems:'baseline',flexWrap:'wrap'}}>
+            <span style={{fontSize:13.5,fontWeight:800}}>Ausfall im Zeitraum</span>
+            <span style={{fontSize:12,color:'var(--muted)'}}>{fmtDate(per.from)}{per.from!==per.to?(' bis '+fmtDate(per.to)):''}</span>
+          </div>
+          <div style={{padding:'12px 14px',display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:12}}>
+            {[['Krankheit',R.sollSum.krank,R.sollSum.krankEur,'#b91c1c'],
+              ['Urlaub',R.sollSum.urlaub,R.sollSum.urlaubEur,'#b45309'],
+              ['unbezahlt',R.sollSum.unbez,R.sollSum.unbezEur,'#7c3aed'],
+              ['Plan nicht ausgeschöpft',R.sollSum.offen,R.sollSum.offenEur,'#0369a1']].map(([l,h,e,c])=>
+              <div key={l}>
+                <div style={{fontSize:11,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em'}}>{l}</div>
+                <div style={{fontSize:21,fontWeight:800,fontFamily:'var(--mono)',color:h>0?c:'var(--muted)'}}>{cpoNum(h,1)} h</div>
+                <div style={{fontSize:11.5,color:'var(--muted)'}}>{h>0?('entgangen '+cpoEur(e)):'kein Ausfall'}</div>
+              </div>)}
+          </div>
+          <div style={{padding:'0 14px 12px',fontSize:11,color:'var(--muted)',lineHeight:1.55}}>
+            Stunden = geplante Nettostunden, die ausgefallen sind. Euro = dieselbe Zeit mit dem abrechenbaren Anteil der Person und dem Stundensatz des Skills bewertet, also der tatsächlich entgangene Umsatz.
+            „Plan nicht ausgeschöpft" heißt: die Person war da, im Zeitexport des Auftraggebers stehen aber weniger Stunden als geplant. Das wird nur für Tage gerechnet, die der Export abdeckt{R.istBisDs?(', aktuell bis '+fmtDate(R.istBisDs)):''}.
+          </div>
+        </div>
+
+        <div style={{border:'1px solid var(--border)',borderRadius:12,background:'var(--card)',marginBottom:14,overflow:'hidden'}}>
+          <div style={{padding:'9px 14px',borderBottom:'1px solid var(--border)',background:'var(--surface-2)'}}>
+            <span style={{fontSize:13.5,fontWeight:800}}>Je Mitarbeiter</span>
+            <span style={{fontSize:12,color:'var(--muted)',marginLeft:10}}>{fmtDate(per.from)} bis {fmtDate(R.sollBis)} · schlechteste Erfüllung oben</span>
+            {R.sollBis!==per.to&&<span style={{fontSize:11,color:'#b45309',marginLeft:10}}>Der Zeitexport reicht nur bis hierher, spätere Tage sind nicht beurteilbar.</span>}
+          </div>
+          <div style={{overflowX:'auto'}}>
+            <table style={{borderCollapse:'collapse',width:'100%',fontSize:12.5,minWidth:960}}>
+              <thead><tr>
+                {['Mitarbeiter','Rolle','Geplant','Krankheit','Urlaub','unbezahlt','Erwartet','Protokolliert','nicht ausgeschöpft','Erfüllung'].map((h,i2)=>
+                  <th key={i2} style={{textAlign:i2<2?'left':'right',padding:'6px 9px',fontSize:10.5,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.04em',whiteSpace:'nowrap'}}>{h}</th>)}
+              </tr></thead>
+              <tbody>
+                {R.soll.map(r=>{ const g=r.grad; const ohne=!(r.anteil>0);
+                  const amp=ohne?'var(--muted)':(g==null?'var(--muted)':(g>=0.98?'#15803d':(g>=0.9?'#b45309':'#b91c1c')));
+                  const z=(v,c)=><td style={{padding:'5px 9px',textAlign:'right',fontFamily:'var(--mono)',color:c||(v>0?'var(--text)':'var(--muted)')}}>{v>0?cpoNum(v,1):'—'}</td>;
+                  return <tr key={r.id+r.skill} style={{borderTop:'1px solid var(--border)',opacity:ohne?.6:1}}>
+                    <td style={{padding:'5px 9px',fontWeight:600}}>{r.name}<span style={{color:'var(--muted)',fontWeight:500}}> · {r.skill==='sales'?'Sales':'Support'}</span>
+                      {ohne&&<div style={{fontSize:9.5,color:'var(--muted)'}}>0 Prozent, nicht in der Abrechnung</div>}</td>
+                    <td style={{padding:'5px 9px',color:'var(--muted)'}}>{r.position||'—'}</td>
+                    {z(r.planJ)}
+                    {z(r.krankJ,r.krankJ>0?'#b91c1c':null)}
+                    {z(r.urlaubJ,r.urlaubJ>0?'#b45309':null)}
+                    {z(r.unbezJ,r.unbezJ>0?'#7c3aed':null)}
+                    {z(r.nettoJ)}
+                    <td style={{padding:'5px 9px',textAlign:'right',fontFamily:'var(--mono)'}}>
+                      {r.nettoJ>0?cpoNum(r.istJ,1):<span style={{fontSize:10,fontStyle:'italic',color:'var(--muted)'}}>liegt noch nicht vor</span>}</td>
+                    {z(r.offen,r.offen>0?'#0369a1':null)}
+                    <td style={{padding:'5px 9px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:800,color:amp}}>
+                      {g==null?'—':(Math.round(g*100)+' %')}
+                      {r.ueber>0.05?<div style={{fontSize:9.5,fontWeight:600,color:'#15803d'}}>+{cpoNum(r.ueber,1)} h über Plan</div>:null}</td>
+                  </tr>; })}
+                <tr style={{borderTop:'2px solid var(--border)',fontWeight:800,background:'var(--surface-2)'}}>
+                  <td style={{padding:'7px 9px'}} colSpan={2}>Summe</td>
+                  <td style={{padding:'7px 9px',textAlign:'right',fontFamily:'var(--mono)'}}>{cpoNum(R.sollSum.planJ,1)}</td>
+                  <td style={{padding:'7px 9px',textAlign:'right',fontFamily:'var(--mono)',color:'#b91c1c'}}>{cpoNum(R.sollSum.krankJ,1)}</td>
+                  <td style={{padding:'7px 9px',textAlign:'right',fontFamily:'var(--mono)',color:'#b45309'}}>{cpoNum(R.sollSum.urlaubJ,1)}</td>
+                  <td style={{padding:'7px 9px',textAlign:'right',fontFamily:'var(--mono)',color:'#7c3aed'}}>{cpoNum(R.sollSum.unbezJ,1)}</td>
+                  <td style={{padding:'7px 9px',textAlign:'right',fontFamily:'var(--mono)'}}>{cpoNum(R.sollSum.nettoJ,1)}</td>
+                  <td style={{padding:'7px 9px',textAlign:'right',fontFamily:'var(--mono)'}}>{cpoNum(R.sollSum.istJ,1)}</td>
+                  <td style={{padding:'7px 9px',textAlign:'right',fontFamily:'var(--mono)',color:'#0369a1'}}>{cpoNum(R.sollSum.offen,1)}</td>
+                  <td style={{padding:'7px 9px',textAlign:'right',fontFamily:'var(--mono)'}}>{R.sollSum.grad==null?'—':(Math.round(R.sollSum.grad*100)+' %')}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div style={{padding:'9px 14px',fontSize:11,color:'var(--muted)',lineHeight:1.55,borderTop:'1px solid var(--border)'}}>
+            Geplant = Nettostunden aus dem Schichtplan, Pausen schon abgezogen. Erwartet = geplant abzüglich der drei Ausfallgründe.
+            Protokolliert = Stunden aus dem Zeitexport des Auftraggebers, nur für die Tage, die er abdeckt. Erfüllung = protokolliert geteilt durch erwartet, auf dieselben Tage bezogen.
+            Alle Spalten dieser Tabelle beziehen sich auf denselben beurteilbaren Ausschnitt des Zeitraums, nicht auf den ganzen. Wer keinen abgedeckten Tag hat, steht ohne Erfüllungsgrad am Ende, das ist keine schlechte Erfüllung sondern keine Aussage.
+            Personen mit abrechenbarem Anteil 0 laufen ebenfalls hinten mit: bei ihnen geht kein Umsatz verloren, und ihre Stunden werden im Zeitexport gar nicht oder nur teilweise geführt.
+            Die Kacheln oben zeigen dagegen den GANZEN gewählten Zeitraum, dort geht es um den Ausfall, nicht um die Erfüllung.
+          </div>
+        </div>
+      </React.Fragment>}
+
+      {tab!=='soll'&&<React.Fragment>
       {/* Fuenf getrennte Zeitspannen, jede als eigener Block. Nichts wird vermischt: in einem Block
           beziehen sich alle Zahlen auf denselben Zeitraum. Der Forecast kommt taggenau aus
           forecast_day, Woche und Monat sind Summen derselben Tageswerte. */}
@@ -38889,9 +39022,10 @@ function HcHoursView({projects, team}){
       <div style={{fontSize:11.5,color:'var(--muted)',marginTop:10,lineHeight:1.65,maxWidth:880}}>
         Plan = Nettostunden aus dem Schichtplan (Pausen schon abgezogen). Abwesenheit kürzt den Tag ganz oder halb.
         Der Anteil kommt aus den abrechenbaren Anteilen und kann je Person und Zeitraum eingestellt werden.
-        Der Forecast liegt nur je Kalenderwoche vor. Deshalb vergleicht die Lücke nie einen einzelnen Tag gegen ein Wochenziel, sondern die Woche bis zum Ende des gewählten Zeitraums gegen den Teil des Wochenziels, der auf das bis dahin geplante Volumen entfällt. Am Sonntag steht damit genau das Wochenziel.
+        Der Forecast kommt taggenau aus dem Blatt „Tagesplanung“ des Auftraggebers; Woche und Monat sind Summen genau dieser Tageswerte.
         Die Spalte „protokolliert" stammt aus dem Zeitexport des Auftraggebers und dient nur der Kontrolle, nicht der Abrechnung.
       </div>
+      </React.Fragment>}
     </React.Fragment>}
   </div>;
 }
