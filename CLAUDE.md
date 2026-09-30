@@ -100,6 +100,34 @@ Vorgabe. Vollständige Modelle: `docs/fachmodell/`.
 - Nie Fake- oder Dummy-Daten bei leerem Ergebnis; Loads an den Login
   koppeln; Herkunft jeder Zahl sichtbar (siehe `ARCHITEKTUR.md` §8).
 
+### Jede neue Kennzahl wird validiert, bevor sie ausgeliefert wird
+Verbindlich seit 2026-09-30. Gilt für jede Zahl, die neu entsteht oder deren
+Rechenweg sich ändert, in der Oberfläche wie in Mails und Agenten-Meldungen.
+
+1. **Gegenprobe aus einer zweiten Richtung**, bevor die Zahl gezeigt wird. Tag
+   gegen Woche, Cockpit gegen Mail, System gegen Kundendatei, Summe gegen
+   Einzelwerte. Eine Zahl, die nur aus sich selbst heraus stimmt, ist nicht
+   geprüft.
+2. **Herkunft und Gegenprobe mitliefern.** Zu jeder gelieferten Zahl gehört,
+   aus welcher Tabelle oder Datei sie kommt und wogegen sie geprüft wurde.
+   Ohne das ist die Zahl eine Behauptung.
+3. **Entsteht eine Zahl an zwei Stellen, ist das selbst der Befund** und wird
+   gemeldet, nicht erst wenn die beiden Stellen auseinanderlaufen. Gleiches
+   Ergebnis heute heißt nur, dass es noch niemand gemerkt hat. Deshalb beim
+   Bauen einer neuen Kennzahl zuerst fragen, wo dieselbe Größe sonst noch
+   gerechnet wird, statt es hinterher zu bemerken.
+4. **Sieht ein Ergebnis komisch aus, wird es gesagt**, auch ohne Beweis und
+   auch wenn es die eigene Arbeit in Frage stellt. Lieber einmal zu viel
+   gefragt.
+
+Drei Fälle aus einem einzigen Tag, an denen die Regel hängt: die Folie zeigte
+für Sales 882,5 Stunden und das Cockpit 797,9, weil dieselbe Rechnung an drei
+Stellen stand und eine davon die Teilanteile nicht anwandte. Die Tageslücke
+gegen ein Siebtel des Wochenziels meldete an jedem Werktag ein Plus, während
+die Woche 13,1 Stunden unter Ziel lag. Und der Langzeit-Import rundete auf zwei
+Nachkommastellen, wodurch Productivity, Coverage und Net Difference um ein
+halbes Prozent verschoben waren, ohne dass irgendwo etwas falsch aussah.
+
 ## Deployment und Git
 
 **Frontend** geht per `./deploy.sh` (als `bash -c 'bash deploy.sh'`) per rsync
