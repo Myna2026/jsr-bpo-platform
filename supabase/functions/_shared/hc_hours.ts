@@ -131,7 +131,8 @@ export async function hcCompute(admin: any, from: string, to: string, nowMin: nu
       .eq("project_id", HC_PROJECT).gte("work_date", wkFrom).lte("work_date", wkTo),
     admin.from("daily_hours").select("employee_id,skill,work_date,hours")
       .eq("project_id", HC_PROJECT).gte("work_date", from).lte("work_date", to),
-    admin.from("report_forecast").select("skill,year,kw,fc_hours").eq("project_id", HC_PROJECT).in("year", years),
+    admin.from("forecast_day").select("skill,work_date,fc_total").eq("project_id", HC_PROJECT)
+      .gte("work_date", wkFrom).lte("work_date", wkTo),
     admin.from("training_plans").select("name,start_date,end_date,status").eq("project_id", HC_PROJECT),
     admin.from("app_config").select("value").eq("key", HC_BILLING_KEY).maybeSingle(),
     admin.from("project_skills").select("key,rate").eq("project_id", HC_PROJECT),
@@ -160,12 +161,20 @@ export async function hcCompute(admin: any, from: string, to: string, nowMin: nu
     days.forEach((ds) => { if (ds >= a && ds <= b) trainNames[t.name || "Schulung"] = true; });
   });
 
-  // Ziel: Wochen-Forecast, fuer Teilwochen anteilig auf die Tage verteilt.
-  const fcBy: Record<string, number> = {};
-  (fcR.data || []).forEach((r: any) => { fcBy[String(r.skill || "").toLowerCase() + "|" + r.year + "-" + r.kw] = Number(r.fc_hours) || 0; });
-  const wochen: string[] = [];
-  daysBetween(wkFrom, wkTo).forEach((ds) => { const w = isoWeek(ds); const k = w.year + "-" + w.kw; if (wochen.indexOf(k) < 0) wochen.push(k); });
-  // Je Skill und Woche: abrechenbares Volumen der ganzen Woche und das bis zum Ende des Zeitraums.
+  // Ziel JE TAG aus dem Tagesblatt des Auftraggebers (forecast_day). Bis zum 2026-09-30 wurde
+  // stattdessen der Wochenwert aus report_forecast anteilig verteilt - eine Schaetzung, die je nach
+  // Verteilung um zweistellige Stundenbetraege danebenlag und sogar das Vorzeichen drehen konnte
+  // (Sales KW 40 bis Mittwoch: geschaetzt -7,7 h, tatsaechlich +10,6 h). Seit dem Umstieg auf das
+  // Tagesblatt liegt das Ziel taggenau vor, also wird nichts mehr verteilt. Gegenprobe: die Summe
+  // der Tageswerte trifft in 24 von 24 vollen Wochen den gespeicherten Wochenwert.
+  // report_forecast bleibt die Quelle der Praesentation, wird hier aber NICHT mehr gelesen: eine
+  // zweite Rechenstelle fuer dieselbe Groesse ist genau das, was auseinanderlaeuft.
+  const fcDay: Record<string, number> = {};
+  (fcR.data || []).forEach((r: any) => {
+    const ds = String(r.work_date).slice(0, 10);
+    const k = String(r.skill || "").toLowerCase() + "|" + ds;
+    fcDay[k] = (fcDay[k] || 0) + (Number(r.fc_total) || 0);
+  });
   const wkVol: Record<string, { bis: number; ganz: number }> = {};
 
   const istBy: Record<string, number> = {};
@@ -204,20 +213,19 @@ export async function hcCompute(admin: any, from: string, to: string, nowMin: nu
     return q;
   }).sort((a, b) => b.abr - a.abr);
 
-  // Ziel "Woche bis <to>": das Wochenziel anteilig nach dem geplanten Volumen der Tage bis dahin.
-  // Volle Wochen ergeben damit exakt das Wochenziel, Teilwochen einen fairen Anteil. Steht fuer eine
-  // Woche gar kein Plan, gibt es auch kein anteiliges Ziel - sonst waere die Luecke frei erfunden.
+  // Verglichen wird die Woche bis zum Ende des Zeitraums: Montag dieser Woche bis "to". Bei einem
+  // Aufruf ueber eine ganze Woche ist das genau die Woche, bei einem Tagesaufruf der Wochenverlauf
+  // bis zu diesem Tag. Ziel und Lieferung decken damit immer dieselben Tage ab.
+  const bisVon = isoMonday(to);
   const zielOf = (skill: string) => {
-    let ziel = 0, abrBis = 0, teil = false, gefunden = false;
-    wochen.forEach((k) => {
-      const v = fcBy[skill + "|" + k]; if (v == null) return;
-      gefunden = true;
-      const wv = wkVol[skill + "|" + k] || { bis: 0, ganz: 0 };
-      const anteil = wv.ganz > 0 ? wv.bis / wv.ganz : 0;
-      if (anteil < 0.999) teil = true;
-      ziel += v * anteil; abrBis += wv.bis;
+    let ziel = 0, abrBis = 0, gefunden = false, luecken = 0;
+    daysBetween(bisVon, to).forEach((ds) => {
+      const v = fcDay[skill + "|" + ds];
+      if (v == null) luecken++; else { gefunden = true; ziel += v; }
     });
-    return { h: gefunden ? ziel : 0, abrBis, teil };
+    const wv = wkVol[skill + "|" + (() => { const w = isoWeek(to); return w.year + "-" + w.kw; })()] || { bis: 0, ganz: 0 };
+    abrBis = wv.bis;
+    return { h: gefunden ? ziel : 0, abrBis, teil: (to !== addDays(bisVon, 6)), luecken };
   };
 
   const skills: HcSkill[] = HC_SKILLS.map((sk) => {

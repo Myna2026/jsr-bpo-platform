@@ -38441,18 +38441,30 @@ function HcHoursView({projects, team}){
   // Zeitraum beruehrt: nur so laesst sich "Woche bis <Ende>" gegen ein anteiliges Wochenziel stellen.
   const wk=(()=>{ const md=ds=>{ const dow=(new Date(ds+'T00:00:00').getDay()||7); const m=new Date(ds+'T00:00:00'); m.setDate(m.getDate()-(dow-1)); return isoLocal(m); };
     const a=md(per.from); const b=new Date(md(per.to)+'T00:00:00'); b.setDate(b.getDate()+6); return {from:a, to:isoLocal(b)}; })();
+  // Die Uebersicht zeigt Tag, Woche und Monat nebeneinander. Geladen wird deshalb der groesste
+  // Rahmen, den eine dieser drei Zeilen braucht: der Monat des Zeitraums plus die angebrochenen
+  // ISO-Wochen an seinen Raendern.
+  const rng=(()=>{ const m0=per.from.slice(0,8)+'01';
+    const d1=new Date(per.to+'T00:00:00'); const mEnd=isoLocal(new Date(d1.getFullYear(), d1.getMonth()+1, 0));
+    return {from:(wk.from<m0?wk.from:m0), to:(wk.to>mEnd?wk.to:mEnd)}; })();
 
   useEffect(()=>{ if(!proj){ setBusy(false); return; } let alive=true;
     (async()=>{
       setBusy(true);
-      const y0=Number(wk.from.slice(0,4)), y1=Number(wk.to.slice(0,4));
+      const y0=Number(rng.from.slice(0,4)), y1=Number(rng.to.slice(0,4));
       const years=y0===y1?[y0]:[y0,y1];
-      const [shR, dhR, fcR, tpR, cfgRaw]=await Promise.all([
+      const [shR, dhR, fcR, fdR, tpR, cfgRaw]=await Promise.all([
         sbAllData((a,b)=>sb.from('shift_assignments').select('employee_id,skill,work_date,net_hours,gross_hours,shift_value')
-          .eq('project_id',proj.id).gte('work_date',wk.from).lte('work_date',wk.to).order('work_date',{ascending:true}).range(a,b)),
+          .eq('project_id',proj.id).gte('work_date',rng.from).lte('work_date',rng.to).order('work_date',{ascending:true}).range(a,b)),
         sbAllData((a,b)=>sb.from('daily_hours').select('employee_id,skill,work_date,hours')
           .eq('project_id',proj.id).gte('work_date',per.from).lte('work_date',per.to).order('work_date',{ascending:true}).range(a,b)),
         sb.from('report_forecast').select('skill,year,kw,fc_hours').eq('project_id',proj.id).in('year',years),
+        // Tages-Forecast: seit dem Umstieg auf das Tagesblatt liegt das Ziel JE TAG vor. Damit
+        // braucht die Tageszeile kein verteiltes Wochenziel mehr. Gegenprobe 2026-09-30: die Summe
+        // der Tageswerte trifft in 24 von 24 vollen Wochen den gespeicherten Wochenwert (KW 32-43,
+        // beide Skills), Abweichung nur in der Rundung auf eine Nachkommastelle.
+        sb.from('forecast_day').select('skill,work_date,fc_total').eq('project_id',proj.id)
+          .gte('work_date',rng.from).lte('work_date',rng.to),
         sb.from('training_plans').select('id,name,start_date,end_date,status').eq('project_id',proj.id),
         loadConfigFromDB(HC_BILLING_KEY),
       ]);
@@ -38472,11 +38484,11 @@ function HcHoursView({projects, team}){
       const empR=ids.length?await sb.from('employees').select('id,first_name,last_name,position,absences').in('id',ids):{data:[]};
       if(!alive) return;
       setCfg(c);
-      setRaw({sh, dh:(dhR.data||[]), fc:(fcR.data||[]), tp:(tpR.data||[]), emps:(empR.data||[]), istBis});
+      setRaw({sh, dh:(dhR.data||[]), fc:(fcR.data||[]), fd:(fdR.data||[]), tp:(tpR.data||[]), emps:(empR.data||[]), istBis});
       setBusy(false);
     })();
     return ()=>{ alive=false; };
-  },[proj&&proj.id, per.from, per.to, wk.from, wk.to, reload]);
+  },[proj&&proj.id, per.from, per.to, wk.from, wk.to, rng.from, rng.to, reload]);
 
   // ── Rechnen ───────────────────────────────────────────────────────────────
   const R=useMemo(()=>{
@@ -38539,14 +38551,15 @@ function HcHoursView({projects, team}){
       const wkKey=sk+'|'+(()=>{ const w=getISOWeek(new Date(ds+'T00:00:00')); return w.year+'-'+w.kw; })();
       const wv=wkVol[wkKey]||(wkVol[wkKey]={bis:0, ganz:0});
       wv.ganz+=abr; if(ds<=per.to) wv.bis+=abr;
+      // Tagesreihe ueber den ganzen geladenen Rahmen: daraus kommen Tag, Woche und Monat.
+      const dk0=ds+'|'+sk; const dd0=daySeries[dk0]||(daySeries[dk0]={ds, skill:sk, plan:0, netto:0, abr:0});
+      dd0.plan+=net; dd0.netto+=nach; dd0.abr+=abr;
       if(ds<per.from||ds>per.to) return;                   // nur der gewaehlte Zeitraum kommt in die Liste
       const k=r.employee_id+'|'+sk;
       const q=per_[k]||(per_[k]={id:r.employee_id, skill:sk, name:nameOf(r.employee_id),
         position:((empBy[r.employee_id]||{}).position||''), plan:0, abw:0, netto:0, abr:0, pctDays:[], srcs:{}, notes:{}});
       q.plan+=net; q.abw+=net-nach; q.netto+=nach; q.abr+=abr;
       q.pctDays.push(p.pct); q.srcs[p.src]=true; if(p.note) q.notes[p.note]=true;
-      const dk=ds+'|'+sk; const dd=daySeries[dk]||(daySeries[dk]={ds, skill:sk, plan:0, netto:0, abr:0});
-      dd.plan+=net; dd.netto+=nach; dd.abr+=abr;
       if(ds===todayDs){
         const rateH=(()=>{ const x=((proj.skills||[]).find(y=>y.key===sk)||{}); const v=Number(x.rate); return isFinite(v)&&v>0?v:0; })();
         const anteil=hcShiftShare(r.shift_value, nowMin);
@@ -38593,7 +38606,46 @@ function HcHoursView({projects, team}){
           return a+net2*cpoAbsFactor(e2,ds2)*(hcPctFor(cfg,r2.employee_id,ds2,trainDays).pct/100); },0);
         heute.abrBis+=bisHeute;
         heute.ziel+=(wv.ganz>0?v*bisHeute/wv.ganz:0); }); }
-    const dayRows=Object.keys(daySeries).map(k=>daySeries[k]).sort((a,b)=>a.ds<b.ds?-1:(a.ds>b.ds?1:(a.skill<b.skill?-1:1)));
+    const dayRows=Object.keys(daySeries).map(k=>daySeries[k]).filter(d=>d.ds>=per.from&&d.ds<=per.to)
+      .sort((a,b)=>a.ds<b.ds?-1:(a.ds>b.ds?1:(a.skill<b.skill?-1:1)));
+
+    // ── Uebersicht: je Skill Tag, Woche bis heute und Monat bis heute in einer Zeile ───────────
+    // Der Forecast kommt JE TAG aus forecast_day (Tagesblatt des Auftraggebers). Woche und Monat
+    // sind Summen derselben Tageswerte, nicht eigenstaendige Zahlen - so koennen die drei Zeilen
+    // nicht auseinanderlaufen. Fehlt fuer einen Tag ein Forecast, bleibt das Ziel leer statt aus
+    // dem Wochenwert geschaetzt zu werden: eine erfundene Luecke ist schlimmer als keine.
+    const fdBy={}; (raw.fd||[]).forEach(r=>{ const ds=String(r.work_date).slice(0,10);
+      const k=String(r.skill||'').toLowerCase()+'|'+ds; fdBy[k]=(fdBy[k]||0)+(Number(r.fc_total)||0); });
+    // Bezugstag: heute, wenn heute im Zeitraum liegt, sonst das Ende des Zeitraums. Sonst hiesse
+    // "Woche bis heute" in der Wochenansicht die ganze Woche inklusive der Tage, die noch kommen.
+    const ref=(todayDs>=per.from&&todayDs<=per.to)?todayDs:per.to;
+    const refMon=(()=>{ const d=new Date(ref+'T00:00:00'); const dow=(d.getDay()||7); const m=new Date(d); m.setDate(d.getDate()-(dow-1)); return isoLocal(m); })();
+    const refM0=ref.slice(0,8)+'01';
+    const spanne=(sk,a,b)=>{ let fc=0, fcTage=0, netto=0, abr=0, plan=0;
+      let d=new Date(a+'T00:00:00'); const e=new Date(b+'T00:00:00');
+      while(d<=e){ const ds=isoLocal(d);
+        const f=fdBy[sk+'|'+ds]; if(f!=null){ fc+=f; fcTage++; }
+        const dd=daySeries[ds+'|'+sk]; if(dd){ plan+=dd.plan; netto+=dd.netto; abr+=dd.abr; }
+        d=new Date(d.getFullYear(),d.getMonth(),d.getDate()+1); }
+      const rate=(()=>{ const x=((proj.skills||[]).find(y=>y.key===sk)||{}); const v=Number(x.rate); return isFinite(v)&&v>0?v:null; })();
+      const hatZiel=fcTage>0;
+      return {von:a, bis:b, fc:(hatZiel?fc:null), plan, netto, abr, rate,
+              eur:(rate!=null?abr*rate:null),
+              delta:(hatZiel?abr-fc:null),
+              deltaEur:(hatZiel&&rate!=null?(abr-fc)*rate:null)};
+    };
+    const uebersicht=['sales','support'].map(sk=>({
+      skill:sk, label:sk==='sales'?'Sales':'Support',
+      tag:spanne(sk, ref, ref), woche:spanne(sk, refMon, ref), monat:spanne(sk, refM0, ref),
+    })).filter(u=>u.tag.plan>0||u.woche.plan>0||u.monat.plan>0||u.monat.fc!=null);
+    const uGesamt=['tag','woche','monat'].reduce((o,k)=>{ const rs=uebersicht.map(u=>u[k]);
+      const hatZ=rs.some(r=>r.fc!=null);
+      o[k]={fc:(hatZ?rs.reduce((a,r)=>a+(r.fc||0),0):null), plan:rs.reduce((a,r)=>a+r.plan,0),
+            netto:rs.reduce((a,r)=>a+r.netto,0), abr:rs.reduce((a,r)=>a+r.abr,0),
+            eur:rs.reduce((a,r)=>a+(r.eur||0),0),
+            delta:(hatZ?rs.reduce((a,r)=>a+(r.delta||0),0):null),
+            deltaEur:(hatZ?rs.reduce((a,r)=>a+(r.deltaEur||0),0):null)};
+      return o; },{});
     // Overhead ohne eigene Regel faellt sonst still mit 100 Prozent durch.
     const OVERHEAD=['Teamleiter','Trainer','QM','Projektleiter'];
     const offen={};
@@ -38606,6 +38658,7 @@ function HcHoursView({projects, team}){
     return {days, skills, list, dayRows, trainDays, trainNames:Object.keys(trainNames),
             from:per.from, to:per.to,
             offenOverhead:Object.keys(offen).map(k=>offen[k]), heute, todayDs,
+            uebersicht, uGesamt, ref, refMon, refM0,
             istBis:(raw.istBis||null), istOffen:(!raw.istBis||raw.istBis<per.to),
             hatSchulung:Object.keys(trainDays).length>0};
   },[raw,cfg,proj,per.from,per.to]);
@@ -38685,26 +38738,70 @@ function HcHoursView({projects, team}){
         In diesem Zeitraum läuft eine Schulung ({R.trainNames.join(', ')}). Wer dafür auf 0 Prozent gesetzt ist, wird an diesen Tagen nicht abgerechnet.
       </div>}
 
+      {/* Uebersicht: je Skill Tag, Woche und Monat in einer Zeile. Alle Zahlen kommen aus denselben
+          Tageswerten, Woche und Monat sind reine Summen davon. */}
+      {R&&R.uebersicht.length>0&&<div style={{border:'1px solid var(--border)',borderRadius:12,background:'var(--card)',marginBottom:14,overflow:'hidden'}}>
+        <div style={{padding:'11px 14px',borderBottom:'1px solid var(--border)',display:'flex',alignItems:'baseline',gap:10,flexWrap:'wrap'}}>
+          <span style={{fontSize:14,fontWeight:800}}>Übersicht</span>
+          <span style={{fontSize:12,color:'var(--muted)'}}>Bezugstag {fmtDate(R.ref)} · Woche ab {fmtDate(R.refMon)} · Monat ab {fmtDate(R.refM0)}</span>
+        </div>
+        <div style={{overflowX:'auto'}}>
+          <table style={{borderCollapse:'collapse',width:'100%',fontSize:12.5,minWidth:820}}>
+            <thead><tr style={{background:'var(--surface-2)'}}>
+              {['','Zeitraum','Forecast','Geliefert laut Plan','Abrechenbar','Umsatz','Delta Stunden','Delta Euro'].map((h,i)=>
+                <th key={i} style={{textAlign:i<2?'left':'right',padding:'7px 10px',fontSize:10.5,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.04em',whiteSpace:'nowrap'}}>{h}</th>)}
+            </tr></thead>
+            <tbody>
+              {R.uebersicht.map(u=>['tag','woche','monat'].map((k,ki)=>{ const r=u[k];
+                const lab=k==='tag'?'Tag':(k==='woche'?'Woche bis heute':'Monat bis heute');
+                const neg=r.delta!=null&&r.delta<0;
+                return <tr key={u.skill+k} style={{borderTop:'1px solid var(--border)',background:ki===0?'transparent':'var(--surface-2)'}}>
+                  <td style={{padding:'6px 10px',fontWeight:800}}>{ki===0?u.label:''}</td>
+                  <td style={{padding:'6px 10px',color:'var(--muted)'}}>{lab}</td>
+                  <td style={{padding:'6px 10px',textAlign:'right',fontFamily:'var(--mono)'}}>{r.fc==null?'—':cpoNum(r.fc,1)}</td>
+                  <td style={{padding:'6px 10px',textAlign:'right',fontFamily:'var(--mono)',color:'var(--muted)'}}>{cpoNum(r.netto,1)}</td>
+                  <td style={{padding:'6px 10px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:800,color:BRAND.main}}>{cpoNum(r.abr,1)}</td>
+                  <td style={{padding:'6px 10px',textAlign:'right',fontFamily:'var(--mono)'}}>{r.eur==null?'—':cpoEur(r.eur)}</td>
+                  <td style={{padding:'6px 10px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:800,color:r.delta==null?'var(--muted)':(neg?'#b91c1c':'#15803d')}}>
+                    {r.delta==null?'—':((r.delta>0?'+':'')+cpoNum(r.delta,1))}</td>
+                  <td style={{padding:'6px 10px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:800,color:r.deltaEur==null?'var(--muted)':(neg?'#b91c1c':'#15803d')}}>
+                    {r.deltaEur==null?'—':((r.deltaEur>0?'+':'')+cpoEur(r.deltaEur))}</td>
+                </tr>; }))}
+              {R.uebersicht.length>1&&['tag','woche','monat'].map((k,ki)=>{ const r=R.uGesamt[k];
+                const lab=k==='tag'?'Tag':(k==='woche'?'Woche bis heute':'Monat bis heute');
+                const neg=r.delta!=null&&r.delta<0;
+                return <tr key={'g'+k} style={{borderTop:ki===0?'2px solid var(--border)':'1px solid var(--border)',fontWeight:800,background:ki===0?'var(--card)':'var(--surface-2)'}}>
+                  <td style={{padding:'7px 10px'}}>{ki===0?'Gesamt':''}</td>
+                  <td style={{padding:'7px 10px',color:'var(--muted)',fontWeight:600}}>{lab}</td>
+                  <td style={{padding:'7px 10px',textAlign:'right',fontFamily:'var(--mono)'}}>{r.fc==null?'—':cpoNum(r.fc,1)}</td>
+                  <td style={{padding:'7px 10px',textAlign:'right',fontFamily:'var(--mono)'}}>{cpoNum(r.netto,1)}</td>
+                  <td style={{padding:'7px 10px',textAlign:'right',fontFamily:'var(--mono)',color:BRAND.main}}>{cpoNum(r.abr,1)}</td>
+                  <td style={{padding:'7px 10px',textAlign:'right',fontFamily:'var(--mono)'}}>{cpoEur(r.eur)}</td>
+                  <td style={{padding:'7px 10px',textAlign:'right',fontFamily:'var(--mono)',color:r.delta==null?'var(--muted)':(neg?'#b91c1c':'#15803d')}}>
+                    {r.delta==null?'—':((r.delta>0?'+':'')+cpoNum(r.delta,1))}</td>
+                  <td style={{padding:'7px 10px',textAlign:'right',fontFamily:'var(--mono)',color:r.deltaEur==null?'var(--muted)':(neg?'#b91c1c':'#15803d')}}>
+                    {r.deltaEur==null?'—':((r.deltaEur>0?'+':'')+cpoEur(r.deltaEur))}</td>
+                </tr>; })}
+            </tbody>
+          </table>
+        </div>
+        <div style={{padding:'9px 14px',fontSize:11,color:'var(--muted)',lineHeight:1.55,borderTop:'1px solid var(--border)'}}>
+          Forecast = Tageswert aus dem Tagesblatt des Auftraggebers (<code>forecast_day</code>). Woche und Monat sind Summen genau dieser Tageswerte, keine eigene Rechnung.
+          Geliefert laut Plan = Schichtplan netto nach Urlaub und Krankheit. Abrechenbar = davon der hinterlegte Anteil je Person. Delta = abrechenbar minus Forecast, plus heißt über Ziel.
+          Fehlt für einen Tag ein Forecast, bleibt das Ziel leer statt aus dem Wochenwert geschätzt zu werden.
+        </div>
+      </div>}
+
       {R&&R.skills.map(s=><div key={s.skill} style={{border:'1px solid var(--border)',borderRadius:12,background:'var(--card)',marginBottom:14,overflow:'hidden'}}>
         <div style={{padding:'11px 14px',borderBottom:'1px solid var(--border)',display:'flex',alignItems:'baseline',gap:10,flexWrap:'wrap'}}>
           <span style={{fontSize:14,fontWeight:800}}>{s.label}</span>
           <span style={{fontSize:12,color:'var(--muted)'}}>{s.rate!=null?(cpoEur(s.rate)+' je Stunde'):'kein Stundensatz hinterlegt'}</span>
         </div>
-        <div style={{padding:'12px 14px',display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:12}}>
-          <div><div style={{fontSize:11,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em'}}>Ziel {s.zielTeil?'(Woche bis '+fmtDate(per.to)+')':'(Forecast)'}</div>
-            <div style={{fontSize:21,fontWeight:800,fontFamily:'var(--mono)'}}>{s.ziel>0?cpoHours(s.ziel):'—'}</div>
-            <div style={{fontSize:11.5,color:'var(--muted)'}}>{s.ziel>0?((s.zielEur!=null?cpoEur(s.zielEur):'')+(s.zielTeil?' · Wochenziel anteilig nach geplantem Volumen':'')):'kein Forecast hinterlegt'}</div></div>
-          <div><div style={{fontSize:11,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em'}}>Geplant netto</div>
-            <div style={{fontSize:21,fontWeight:800,fontFamily:'var(--mono)'}}>{cpoHours(s.netto)}</div>
-            <div style={{fontSize:11.5,color:'var(--muted)'}}>{cpoHours(s.plan)} geplant, {cpoHours(s.abw)} Abwesenheit</div></div>
-          <div><div style={{fontSize:11,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em'}}>Abrechenbar</div>
-            <div style={{fontSize:21,fontWeight:800,fontFamily:'var(--mono)',color:BRAND.main}}>{cpoHours(s.abr)}</div>
-            <div style={{fontSize:11.5,color:'var(--muted)'}}>{s.eur!=null?cpoEur(s.eur):'—'}{s.nichtAbr>0?(' · '+cpoHours(s.nichtAbr)+' nicht abrechenbar'):''}</div></div>
-          <div><div style={{fontSize:11,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em'}}>Lücke {s.zielTeil?'Woche bis heute':'zum Ziel'}</div>
-            <div style={{fontSize:21,fontWeight:800,fontFamily:'var(--mono)',color:(s.luecke==null?'var(--text)':(s.luecke<0?'#b91c1c':'#15803d'))}}>
-              {s.luecke==null?'—':((s.luecke>0?'+':'')+cpoNum(s.luecke,1)+' h')}</div>
-            <div style={{fontSize:11.5,color:'var(--muted)'}}>{s.luckEur==null?'':((s.luckEur>0?'+':'')+cpoEur(s.luckEur))}
-              {s.zielTeil&&s.abrBis!=null?<span> · {cpoHours(s.abrBis)} seit Montag</span>:null}</div></div>
+        <div style={{padding:'10px 14px',display:'flex',gap:16,flexWrap:'wrap',fontSize:12,color:'var(--muted)'}}>
+          <span>Zeitraum {fmtDate(per.from)}{per.from!==per.to?(' bis '+fmtDate(per.to)):''}</span>
+          <span>geplant {cpoHours(s.plan)}, Abwesenheit {cpoHours(s.abw)}, netto <b style={{color:'var(--text)'}}>{cpoHours(s.netto)}</b></span>
+          <span>abrechenbar <b style={{color:BRAND.main}}>{cpoHours(s.abr)}</b>{s.nichtAbr>0?(' · '+cpoHours(s.nichtAbr)+' nicht abrechenbar'):''}</span>
+          <span>{s.eur!=null?cpoEur(s.eur):'—'}</span>
         </div>
 
         <div style={{padding:'0 14px 14px',overflowX:'auto'}}>
