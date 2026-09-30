@@ -48550,6 +48550,11 @@ function PresentationsView({projects, employees, team, showToast}){
     }catch(e){ if(alive) setCallScores({}); }
   })(); return ()=>{alive=false;}; },[selProjId,pNo,pYear,dummy]);
 
+  // Zustand fuer "Alles uebernehmen". MUSS vor den fruehen Returns stehen, sonst laeuft der Hook
+  // in manchen Rendern nicht und React zaehlt anders (Rules of Hooks).
+  const [alleBusy,setAlleBusy]=useState(false);
+  const [alleStatus,setAlleStatus]=useState(null);   // {gefuellt:[], fehlt:[], zeit}
+
   if(!projList.length) return <div style={{padding:40,textAlign:'center',color:'var(--muted)'}}>Keine Projekte vorhanden.</div>;
   if(!selProj) return <div style={{padding:40,textAlign:'center',color:'var(--muted)'}}>Projekt wählen.</div>;
 
@@ -48618,6 +48623,49 @@ function PresentationsView({projects, employees, team, showToast}){
         </tr>}
       </tbody>
     </table><div style={{fontSize:11,color:'var(--muted)',marginTop:4}}>Namen aus dem System. Gesamt: Summe bei Anzahlen, gewichteter Ø (nach Answered) bei Zeiten (mm:ss).</div></div>);
+  }
+
+  // ── Ein Knopf fuer alles ───────────────────────────────────────────────────
+  // Jeden Abschnitt einzeln anzuklicken ist die haeufigste Fehlerquelle beim Fuellen: man vergisst
+  // einen, und die Folie bleibt still leer. Diese Funktion geht alle Bereiche fuer alle Skills
+  // durch, uebernimmt was da ist, und sagt danach, was gefuellt wurde und was fehlt. Uebersprungen
+  // wird nur, wo die Quelle leer ist - dann steht der Grund im Bericht.
+  async function applyAlles(){
+    if(alleBusy) return; setAlleBusy(true); setAlleStatus(null);
+    const ws=windowWeeks();
+    const gefuellt=[], fehlt=[];
+    const skillKeys=(skills||[]).map(x=>x.key).filter(k=>deck.teams&&deck.teams[k]);
+    for(const t of skillKeys){
+      const L=(skills.find(x=>x.key===t)||{}).label||t;
+      const plan=[
+        {n:'Stunden (geliefert + Geplant FC)', da:()=>ws.some(w=>stores.hours[t+'|'+w.yr+'|'+w.kw]!=null)||ws.some(w=>(stores.forecast||{})[t+'|'+w.yr+'|'+w.kw]!=null),
+         fn:()=>applyImportHours(t), warum:'kein Rohdaten-Import und kein Forecast in diesen fünf Wochen'},
+        {n:'Rückmeldung', da:()=>stores.loaded&&ws.some(w=>(stores.planH||{})[t+'|'+w.yr+'|'+w.kw]!=null),
+         fn:()=>applyRueckmeldung(t), warum:'für keine der fünf Wochen steht ein Schichtplan'},
+        {n:'FTE', da:()=>stores.loaded&&membersFor(t).length>0,
+         fn:()=>applyFteList(t), warum:'keine Mitarbeiter auf diesem Skill'},
+        {n:'Krankheitstage', da:()=>membersFor(t).length>0,
+         fn:()=>applyFehlzeiten(t), warum:'keine Mitarbeiter auf diesem Skill'},
+        {n:'Call-Kennzahlen Vorwoche', da:()=>Object.keys(stores.callsByEmp||{}).length>0,
+         fn:()=>applyImportCalls(t), warum:'kein Call-Import für die Berichtswoche'},
+        {n:'Call-Kennzahlen Monat', da:()=>(stores.callsWin||[]).length>0,
+         fn:()=>applyImportCallsMtd(t), warum:'kein Call-Import im Fünf-Wochen-Fenster'},
+        {n:'CSAT', da:()=>(stores.gaugesWin||[]).length>0,
+         fn:()=>applyImportCsat(t), warum:'kein Gauges-Import im Fünf-Wochen-Fenster'},
+      ];
+      if(t==='support') plan.push({n:'Mail-Kennzahlen', da:()=>(stores.mailWin||[]).length>0,
+        fn:()=>applyMailKpi(t), warum:'kein Mailer-Import im Fünf-Wochen-Fenster'});
+      if(t==='sales') plan.push({n:'CR & Buchungen', da:()=>true,
+        fn:()=>applyImportCr(t), warum:''});
+      for(const p of plan){
+        let ok=false, grund=p.warum;
+        try{ if(p.da()){ await p.fn(); ok=true; } }
+        catch(e){ ok=false; grund='Fehler beim Übernehmen: '+((e&&e.message)||'unbekannt'); }
+        (ok?gefuellt:fehlt).push({skill:L, bereich:p.n, grund});
+      }
+    }
+    setAlleStatus({gefuellt, fehlt, zeit:new Date()});
+    setAlleBusy(false);
   }
 
   const Section=({title,children})=><div style={{marginBottom:18}}><div style={{fontSize:13,fontWeight:800,marginBottom:6,color:accent}}>{title}</div>{children}</div>;
@@ -48997,6 +49045,33 @@ function PresentationsView({projects, employees, team, showToast}){
             <label style={{fontSize:12}}>Datum<input value={deck.titel.datum||''} onChange={e=>upd(n=>{n.titel.datum=e.target.value;})} className="form-input" style={{width:'100%',marginTop:2}} placeholder="z.B. 12.08.2026"/></label>
             <label style={{fontSize:12}}>Ansprechpartner<input value={deck.titel.ansprech||''} onChange={e=>upd(n=>{n.titel.ansprech=e.target.value;})} className="form-input" style={{width:'100%',marginTop:2}}/></label>
           </div>
+        </div>
+        <div className="card" style={{padding:'12px 16px',marginBottom:12}}>
+          <div style={{display:'flex',gap:12,alignItems:'center',flexWrap:'wrap'}}>
+            <button className="btn btn-primary" disabled={alleBusy||!stores.loaded} onClick={applyAlles}
+              title={stores.loaded?'Füllt alle Bereiche für alle Skills auf einmal':'Importdaten werden noch geladen'}>
+              {alleBusy?'⏳ Übernehme…':'⚡ Alles übernehmen'}</button>
+            <span style={{fontSize:11.5,color:'var(--muted)',lineHeight:1.5,flex:'1 1 320px'}}>
+              Füllt Stunden, Forecast, Rückmeldung, Call-Kennzahlen, Mail, CSAT, CR, Krankheitstage und FTE für alle Skills.
+              Vorhandene Eingaben in diesen Bereichen werden überschrieben, von Hand gesetzte Erklärtexte und Maßnahmen bleiben.
+            </span>
+          </div>
+          {alleStatus&&<div style={{marginTop:10,borderTop:'1px solid var(--border)',paddingTop:9,fontSize:12,lineHeight:1.7}}>
+            <div style={{fontWeight:800,marginBottom:3}}>
+              {alleStatus.gefuellt.length} {alleStatus.gefuellt.length===1?'Bereich':'Bereiche'} gefüllt
+              {alleStatus.fehlt.length>0?(', '+alleStatus.fehlt.length+' ohne Daten'):', nichts fehlt'}
+            </div>
+            {alleStatus.gefuellt.length>0&&<div style={{color:'#15803d'}}>
+              ✓ {[...new Set(alleStatus.gefuellt.map(x=>x.skill))].map(sk=>
+                sk+': '+alleStatus.gefuellt.filter(x=>x.skill===sk).map(x=>x.bereich).join(', ')).join(' · ')}
+            </div>}
+            {alleStatus.fehlt.map((x,i)=><div key={i} style={{color:'#b45309'}}>
+              ⚠ {x.skill}: <b>{x.bereich}</b>{x.grund?(' — '+x.grund):''}
+            </div>)}
+            <div style={{color:'var(--muted)',fontSize:11,marginTop:4}}>
+              Stand {alleStatus.zeit.toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'})}. Danach speichern nicht vergessen.
+            </div>
+          </div>}
         </div>
         <div style={{display:'flex',gap:6,marginBottom:12,flexWrap:'wrap'}}>
           {skills.map(s=><button key={s.key} className="btn btn-sm" onClick={()=>setTab(s.key)} style={{background:tab===s.key?accent:'transparent',color:tab===s.key?'#fff':'var(--text)',border:'1px solid '+(tab===s.key?accent:'var(--border)'),fontWeight:700}}>{s.label}</button>)}
