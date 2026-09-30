@@ -139,6 +139,16 @@ Smoketest), sichert den Live-Stand (letzte 10, `./rollback.sh`), kompiliert
 `text/babel` vor (classic runtime, `retainLines`) und stempelt eine Build-ID.
 Ein fehlgeschlagener Check überträgt nichts.
 
+**Datenbank-Sicherung:** täglich 03:15 per Cron auf der Hetzner-VM,
+`/usr/local/bin/tive-db-backup.sh` (im Repo: `scripts/tive-db-backup.sh`),
+Ablage `/var/backups/tive360-db`, Log `/var/log/tive-db-backup.log`.
+Aufbewahrung: die letzten 14 Tagessicherungen plus die erste jedes Monats für
+12 Monate. Zugang über die Nur-Lese-Rolle `tive_backup`
+(`/root/.tive_backup_url`, Rechte 600, nicht im Repo). Das Projekt hat **kein
+Point-in-Time-Recovery** und keine abrufbaren Supabase-Backups; dieser Dump ist
+die einzige Rückholmöglichkeit. Er liegt bewusst außerhalb von `/var/www`, weil
+er das `auth`-Schema enthält.
+
 **Supabase** rollt Claude selbst aus, im selben Zug wie der Edit:
 - Edge Function: `supabase functions deploy <name> --use-api`
 - Migration: `supabase db query --linked -f migrations/<datei>.sql`
