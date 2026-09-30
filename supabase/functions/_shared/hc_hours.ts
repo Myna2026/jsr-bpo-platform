@@ -89,6 +89,14 @@ export function pctFor(cfg: HcCfg, empId: string, ds: string, trainDays: Record<
   if (e) return Math.max(0, Math.min(100, Number(e.pct) || 0));
   return cfg.default_pct == null ? 100 : Number(cfg.default_pct);
 }
+// Obergrenze in Stunden je Tag, unabhaengig vom Anteil. Fuer Leute, die nur einen Teil des Tages
+// operativ arbeiten und bei denen keine Prozentregel passt (Ardita: hoechstens 6,5 Stunden am Tag,
+// auch wenn mehr geplant ist, Vorgabe des Auftraggebers 2026-09-30). Null heisst keine Grenze.
+export function capFor(cfg: HcCfg, empId: string, ds: string): number | null {
+  const e = entryFor(cfg, empId, ds) as any;
+  const v = e && e.max_h != null ? Number(e.max_h) : NaN;
+  return isFinite(v) && v >= 0 ? v : null;
+}
 // Anteil einer Schicht, der bis zur Uhrzeit (Minuten seit Mitternacht) gelaufen ist.
 // nowMin = null heisst: der ganze geplante Tag zaehlt.
 export function shiftShare(shiftValue: string, nowMin: number | null) {
@@ -195,7 +203,9 @@ export async function hcCompute(admin: any, from: string, to: string, nowMin: nu
     const raus = !!ende && ds > ende;
     const nach = raus ? 0 : net * absFactor(emp, ds);
     const pct = pctFor(cfg, r.employee_id, ds, trainDays);
-    const abr = nach * (pct / 100);
+    const cap = capFor(cfg, r.employee_id, ds);
+    let abr = nach * (pct / 100);
+    if (cap != null && abr > cap) abr = cap;      // Obergrenze in Stunden schlaegt den Anteil
     // Wochenvolumen fuer das anteilige Ziel: ueber die GANZE Woche, "bis" nur bis zum Zeitraum-Ende.
     const wkKey = sk + "|" + (() => { const w = isoWeek(ds); return w.year + "-" + w.kw; })();
     const wv = wkVol[wkKey] || (wkVol[wkKey] = { bis: 0, ganz: 0 });

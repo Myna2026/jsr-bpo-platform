@@ -38369,9 +38369,16 @@ const HC_GRUND={sick:'Krankheit', vacation:'Urlaub', unpaid:'unbezahlt', exit:'a
 function hcPctFor(cfg, empId, ds, trainDays){
   if((cfg.training_zero||[]).indexOf(empId)>=0&&trainDays&&trainDays[ds]) return {pct:0, src:'schulung'};
   const e=hcEntryFor(cfg, empId, ds);
-  if(e) return {pct:Math.max(0,Math.min(100,Number(e.pct)||0)), src:((e.from||e.to)?'zeitraum':'dauerhaft'), note:(e.note||'')};
-  return {pct:(cfg.default_pct==null?100:Number(cfg.default_pct)), src:'standard'};
+  if(e){ const mh=(e.max_h==null?null:Number(e.max_h));
+    return {pct:Math.max(0,Math.min(100,Number(e.pct)||0)), src:((e.from||e.to)?'zeitraum':'dauerhaft'), note:(e.note||''),
+            cap:(isFinite(mh)&&mh>=0?mh:null)}; }
+  return {pct:(cfg.default_pct==null?100:Number(cfg.default_pct)), src:'standard', cap:null};
 }
+// Abrechenbare Stunden eines Tages: Anteil anwenden, dann die Obergrenze in Stunden. Die Grenze
+// schlaegt den Anteil, nicht umgekehrt. An EINER Stelle, damit Cockpit, Bericht und Mail gleich
+// rechnen (dieselbe Regel in _shared/hc_hours.ts).
+function hcAbrTag(netto, p){ let v=netto*((p&&p.pct!=null?p.pct:100)/100);
+  if(p&&p.cap!=null&&v>p.cap) v=p.cap; return v; }
 const HC_SRC_LABEL={schulung:'Schulung läuft, nur solange', zeitraum:'befristete Regel', dauerhaft:'feste Regel, dauerhaft', standard:'Standard'};
 // Anteil einer Schicht, der bis zur Uhrzeit (Minuten seit Mitternacht) gelaufen ist. Fuer die Heute-Leiste.
 function hcShiftShare(shiftValue, nowMin){
@@ -38576,20 +38583,20 @@ function HcHoursView({projects, team}){
       if(ds<per.from||ds>per.to) return;                   // nur der gewaehlte Zeitraum kommt in die Liste
       const k=r.employee_id+'|'+sk;
       const q=per_[k]||(per_[k]={id:r.employee_id, skill:sk, name:nameOf(r.employee_id),
-        position:((empBy[r.employee_id]||{}).position||''), plan:0, abw:0, netto:0, abr:0, pctDays:[], srcs:{}, notes:{},
+        position:((empBy[r.employee_id]||{}).position||''), plan:0, abw:0, netto:0, abr:0, pctDays:[], srcs:{}, notes:{}, cap:null,
         krank:0, urlaub:0, unbez:0, austritt:0, pctSum:0, planJ:0, nettoJ:0, krankJ:0, urlaubJ:0, unbezJ:0, austrittJ:0, rate:0,
         ende:((empBy[r.employee_id]||{}).termination_date?String((empBy[r.employee_id]||{}).termination_date).slice(0,10):null), aVon:null, aBis:null, aN:0});
       q.plan+=net; q.abw+=net-nach; q.netto+=nach; q.abr+=abr;
       const weg=net-nach;
       if(weg>0){ if(absT==='exit'){ q.austritt+=weg; q.aN++; if(!q.aVon||ds<q.aVon) q.aVon=ds; if(!q.aBis||ds>q.aBis) q.aBis=ds; }
         else if(absT==='sick') q.krank+=weg; else if(absT==='vacation') q.urlaub+=weg; else if(absT==='unpaid') q.unbez+=weg; }
-      q.pctSum+=net*(p.pct/100);                            // fuer den Euro-Wert der Ausfaelle
+      q.pctSum+=hcAbrTag(net, p);                          // fuer den Euro-Wert der Ausfaelle
       // Der beurteilbare Teil: nur Tage, die der Zeitexport abdeckt. ALLE Spalten der
       // Soll-Erfuellung kommen aus diesen Werten, sonst stuenden Spalten und Prozentsatz auf
       // verschiedenen Zeitraeumen (Befund beim Nachmessen 2026-09-30).
       if(istBisDs&&ds<=istBisDs){ q.planJ+=net; q.nettoJ+=nach;
         if(weg>0){ if(absT==='exit') q.austrittJ+=weg; else if(absT==='sick') q.krankJ+=weg; else if(absT==='vacation') q.urlaubJ+=weg; else if(absT==='unpaid') q.unbezJ+=weg; } }
-      q.pctDays.push(p.pct); q.srcs[p.src]=true; if(p.note) q.notes[p.note]=true;
+      q.pctDays.push(p.pct); q.srcs[p.src]=true; if(p.note) q.notes[p.note]=true; if(p.cap!=null) q.cap=p.cap;
       if(ds===todayDs){
         const rateH=(()=>{ const x=((proj.skills||[]).find(y=>y.key===sk)||{}); const v=Number(x.rate); return isFinite(v)&&v>0?v:0; })();
         const anteil=hcShiftShare(r.shift_value, nowMin);
@@ -38999,8 +39006,9 @@ function HcHoursView({projects, team}){
                 <td style={{padding:'6px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{cpoNum(r.netto,1)}</td>
                 <td style={{padding:'6px 8px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:700,color:r.pct===100?'var(--muted)':BRAND.main}}>
                   {r.pct} %
-                  {r.pct!==100&&<div style={{fontSize:9.5,fontWeight:600,fontFamily:'var(--font)',color:Object.keys(r.srcs)[0]==='schulung'?'#2563eb':'var(--muted)',lineHeight:1.3,marginTop:1}}>
+                  {(r.pct!==100||r.cap!=null)&&<div style={{fontSize:9.5,fontWeight:600,fontFamily:'var(--font)',color:Object.keys(r.srcs)[0]==='schulung'?'#2563eb':'var(--muted)',lineHeight:1.3,marginTop:1}}>
                     {Object.keys(r.srcs).map(k=>HC_SRC_LABEL[k]||k).join(' · ')}
+                    {r.cap!=null&&<div style={{color:'#b45309',fontWeight:700}}>höchstens {cpoNum(r.cap,1)} h/Tag</div>}
                     {Object.keys(r.notes||{}).length>0&&<div style={{color:'var(--muted)'}}>{Object.keys(r.notes).join('; ')}</div>}
                   </div>}</td>
                 <td style={{padding:'6px 8px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:800}}>{cpoNum(r.abr,1)}</td>
@@ -39070,6 +39078,7 @@ function HcShareEditor({cfg, list, raw, today, onSaved}){
   const [gFrom,setGFrom]=useState(today);
   const [gTo,setGTo]=useState(today);
   const [note,setNote]=useState('');
+  const [maxH,setMaxH]=useState('');            // Obergrenze Stunden je Tag, leer = keine
   const c=cfg||hcCfgNorm(null);
   const people=(()=>{
     const by={};
@@ -39099,9 +39108,14 @@ function HcShareEditor({cfg, list, raw, today, onSaved}){
     if(!emp) return;
     const p=Math.max(0,Math.min(100,Number(String(pct).replace(',','.'))||0));
     const sp=spanOf();
-    const e={id:'hcb_'+Date.now(), emp, pct:p, from:sp.from, to:sp.to, note:note||null};
+    // Obergrenze in Stunden je Tag. Sie schlaegt den Anteil: wer 100 Prozent und hoechstens 6,5
+    // Stunden hat, wird an einem 7-Stunden-Tag mit 6,5 gerechnet.
+    const mhRaw=String(maxH).trim().replace(',','.');
+    const mh=(mhRaw===''?null:Math.max(0,Number(mhRaw)));
+    const e={id:'hcb_'+Date.now(), emp, pct:p, from:sp.from, to:sp.to, note:note||null,
+             max_h:(mh!=null&&isFinite(mh)?mh:null)};
     write({...c, entries:[...(c.entries||[]), e]});
-    setNote('');
+    setNote(''); setMaxH('');
   };
   const del=(id)=>write({...c, entries:(c.entries||[]).filter(e=>e.id!==id)});
   const toggleTraining=(id)=>{
@@ -39112,6 +39126,7 @@ function HcShareEditor({cfg, list, raw, today, onSaved}){
   return <div>
     <div style={{fontSize:13,color:'var(--muted)',marginBottom:12,maxWidth:820,lineHeight:1.6}}>
       Wie viel Prozent der geplanten Nettozeit einer Person abgerechnet werden. Ohne Eintrag gelten {c.default_pct} Prozent.
+      Zusätzlich lässt sich eine Obergrenze in Stunden je Tag setzen; sie schlägt den Anteil. Wer 100 Prozent und höchstens 6,5 Stunden hat, wird an einem Sieben-Stunden-Tag mit 6,5 gerechnet.
       Eine befristete Regel schlägt eine dauerhafte, bei gleicher Art gilt die zuletzt beginnende.
     </div>
 
@@ -39125,6 +39140,8 @@ function HcShareEditor({cfg, list, raw, today, onSaved}){
           </select></div>
         <div style={{width:110}}><label className="form-label">Anteil (%)</label>
           <input className="form-input" value={pct} disabled={busy} onChange={e=>setPct(e.target.value)}/></div>
+        <div style={{width:150}}><label className="form-label" title="Höchstens so viele Stunden je Tag, unabhängig vom Anteil. Leer lassen, wenn es keine Grenze gibt.">Höchstens h/Tag</label>
+          <input className="form-input" value={maxH} disabled={busy} onChange={e=>setMaxH(e.target.value)} placeholder="z. B. 6,5"/></div>
         <div style={{minWidth:150}}><label className="form-label">Gilt für</label>
           <select className="form-select" value={geltung} disabled={busy} onChange={e=>setGeltung(e.target.value)}>
             <option value="dauerhaft">dauerhaft</option>
@@ -39151,6 +39168,7 @@ function HcShareEditor({cfg, list, raw, today, onSaved}){
             {(c.entries||[]).map(e=><div key={e.id} style={{display:'flex',gap:10,alignItems:'center',padding:'7px 0',borderTop:'1px solid var(--border)',fontSize:12.5,flexWrap:'wrap'}}>
               <span style={{fontWeight:700,minWidth:170}}>{nameOf(e.emp)}</span>
               <span style={{fontFamily:'var(--mono)',fontWeight:800,color:BRAND.main,width:56,textAlign:'right'}}>{e.pct} %</span>
+              {e.max_h!=null&&<span style={{fontFamily:'var(--mono)',fontWeight:800,color:'#b45309',whiteSpace:'nowrap'}} title="Obergrenze in Stunden je Tag, schlägt den Anteil">max {cpoNum(Number(e.max_h),1)} h/Tag</span>}
               <span style={{color:'var(--muted)'}}>{(e.from||e.to)?(fmtDate(e.from)+' bis '+fmtDate(e.to)):'dauerhaft'}</span>
               {e.note?<span style={{color:'var(--muted)',fontStyle:'italic'}}>{e.note}</span>:null}
               <button className="btn btn-sm" style={{marginLeft:'auto'}} disabled={busy} onClick={()=>del(e.id)}>Entfernen</button>
@@ -48124,15 +48142,15 @@ function PresentationsView({projects, employees, team, showToast}){
         // eine andere Zahl als der HC Stundenabgleich, und es haengt davon ab, wo jemand hinsieht.
         // Befund 2026-09-29: Sales September, Folie 950,0 h gegen Cockpit 865,4 h, weil Bleart (50 %)
         // und Ardita (75 %) hier voll durchliefen. Gleiche Rechnung wie in HcHoursView und hc_hours.ts.
-        const pct=(hcPctFor(hcCfg, r.employee_id, ds, trainDays)||{}).pct;   // hcPctFor liefert {pct,src}, nicht die Zahl
-        const p=(pct==null?100:Math.max(0,Math.min(100,Number(pct)||0)));
+        const pi=hcPctFor(hcCfg, r.employee_id, ds, trainDays)||{};   // {pct, src, note, cap}
         const nm=emp?((emp.first_name||'')+' '+(emp.last_name||'')).trim():'Unbekannt';
         const netto=net*f;
-        if(p<100) (planAus[kk]=planAus[kk]||{})[nm]=((planAus[kk][nm])||0)+netto*(100-p)/100;
-        if(!(p>0)) return;
+        const abrT=hcAbrTag(netto, pi);                    // Anteil, dann Obergrenze in Stunden
+        if(netto-abrT>0.001) (planAus[kk]=planAus[kk]||{})[nm]=((planAus[kk][nm])||0)+(netto-abrT);
+        if(!(abrT>0)) return;
         if(emp&&OVERHEAD_POS.indexOf(String(emp.position||'').trim())>=0&&!(hcCfg.entries||[]).some(x=>x&&x.emp===r.employee_id))
           (planOffen[sk]=planOffen[sk]||{})[nm+' ('+emp.position+')']=true;
-        planH[kk]=(planH[kk]||0)+netto*p/100; });
+        planH[kk]=(planH[kk]||0)+abrT; });
       // Telefonie-Anteil der gelieferten Stunden. Der importierte Forecast ist eine Telefonie-Zahl,
       // "Geliefert" enthaelt auch Mail und Backoffice — ohne diese Aufschluesselung vergleicht die Folie
       // zwei verschiedene Groessen (Befund 2026-09-29: Support KW 35, Ziel 219,6 gegen 326,2 geliefert,
