@@ -141,7 +141,7 @@ export async function hcCompute(admin: any, from: string, to: string, nowMin: nu
   const cfg = cfgNorm(cfgR.data && cfgR.data.value);
   const ids = [...new Set(sh.map((r: any) => r.employee_id).filter(Boolean))];
   const empR = ids.length
-    ? await admin.from("employees").select("id,first_name,last_name,position,absences").in("id", ids)
+    ? await admin.from("employees").select("id,first_name,last_name,position,absences,termination_date").in("id", ids)
     : { data: [] as any[] };
   const empBy: Record<string, any> = {}; (empR.data || []).forEach((e: any) => { empBy[e.id] = e; });
   const rateBy: Record<string, number | null> = {};
@@ -189,7 +189,11 @@ export async function hcCompute(admin: any, from: string, to: string, nowMin: nu
     // Letzter Tag nur anteilig, wenn ein Zwischenstand gerechnet wird.
     if (nowMin != null && ds === to) net = net * shiftShare(r.shift_value, nowMin);
     const emp = empBy[r.employee_id];
-    const nach = net * absFactor(emp, ds);
+    // Nach dem Austritt gibt es nichts abzurechnen. Die Schichtzeile bleibt als Planungshistorie
+    // stehen, sie erzeugt nur kein Geld mehr (Entscheidung 2026-09-30).
+    const ende = emp && emp.termination_date ? String(emp.termination_date).slice(0, 10) : "";
+    const raus = !!ende && ds > ende;
+    const nach = raus ? 0 : net * absFactor(emp, ds);
     const pct = pctFor(cfg, r.employee_id, ds, trainDays);
     const abr = nach * (pct / 100);
     // Wochenvolumen fuer das anteilige Ziel: ueber die GANZE Woche, "bis" nur bis zum Zeitraum-Ende.

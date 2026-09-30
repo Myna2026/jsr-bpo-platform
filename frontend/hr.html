@@ -38355,13 +38355,17 @@ function hcEntryFor(cfg, empId, ds){
   });
   return best;
 }
+// Nach dem Austritt gibt es nichts mehr abzurechnen: wer weg ist, erzeugt kein Geld, auch wenn
+// die Schichtzeile noch im Plan steht. Die Zeile bleibt absichtlich stehen (Planungshistorie),
+// sie zaehlt nur nicht mehr mit (Entscheidung 2026-09-30).
+function hcRaus(emp, ds){ const t=emp&&emp.termination_date?String(emp.termination_date).slice(0,10):''; return !!t && ds>t; }
 // Welcher Grund kuerzt diesen Tag? Gibt den Typ der Abwesenheit zurueck, die an diesem Tag greift,
 // sonst null. Dieselbe Auswahl wie cpoAbsFactor, damit Faktor und Grund nie auseinanderfallen.
 function hcAbsTyp(emp, ds){
   const a=emp?((emp.absences||[]).find(x=>absCoversDay(x, ds))):null;
   return a?String(a.type||'').toLowerCase():null;
 }
-const HC_GRUND={sick:'Krankheit', vacation:'Urlaub', unpaid:'unbezahlt'};
+const HC_GRUND={sick:'Krankheit', vacation:'Urlaub', unpaid:'unbezahlt', exit:'ausgetreten'};
 function hcPctFor(cfg, empId, ds, trainDays){
   if((cfg.training_zero||[]).indexOf(empId)>=0&&trainDays&&trainDays[ds]) return {pct:0, src:'schulung'};
   const e=hcEntryFor(cfg, empId, ds);
@@ -38490,7 +38494,7 @@ function HcHoursView({projects, team}){
       sh.forEach(r=>{ if(r.employee_id&&ids.indexOf(r.employee_id)<0) ids.push(r.employee_id); });
       const c=hcCfgNorm(cfgRaw);
       (c.entries||[]).forEach(e=>{ if(e&&e.emp&&ids.indexOf(e.emp)<0) ids.push(e.emp); });
-      const empR=ids.length?await sb.from('employees').select('id,first_name,last_name,position,absences').in('id',ids):{data:[]};
+      const empR=ids.length?await sb.from('employees').select('id,first_name,last_name,position,absences,termination_date').in('id',ids):{data:[]};
       if(!alive) return;
       setCfg(c);
       setRaw({sh, dh:(dhR.data||[]), fc:(fcR.data||[]), fd:(fdR.data||[]), tp:(tpR.data||[]), emps:(empR.data||[]), istBis});
@@ -38557,11 +38561,12 @@ function HcHoursView({projects, team}){
       const ds=String(r.work_date).slice(0,10); const sk=String(r.skill||'').toLowerCase();
       const net=Number(r.net_hours)||0; if(net<=0) return;
       const emp=empBy[r.employee_id];
-      const f=cpoAbsFactor(emp, ds);
-      const nach=net*f;                                    // nach Urlaub/Krankheit
+      const raus=hcRaus(emp, ds);                          // Schicht liegt nach dem Austritt
+      const f=raus?0:cpoAbsFactor(emp, ds);
+      const nach=net*f;                                    // nach Austritt, Urlaub und Krankheit
       const p=hcPctFor(cfg, r.employee_id, ds, trainDays);
       const abr=nach*(p.pct/100);                          // abrechenbar
-      const absT=hcAbsTyp(emp, ds);                        // welcher Grund kuerzt den Tag
+      const absT=raus?'exit':hcAbsTyp(emp, ds);            // welcher Grund kuerzt den Tag
       const wkKey=sk+'|'+(()=>{ const w=getISOWeek(new Date(ds+'T00:00:00')); return w.year+'-'+w.kw; })();
       const wv=wkVol[wkKey]||(wkVol[wkKey]={bis:0, ganz:0});
       wv.ganz+=abr; if(ds<=per.to) wv.bis+=abr;
@@ -38572,16 +38577,16 @@ function HcHoursView({projects, team}){
       const k=r.employee_id+'|'+sk;
       const q=per_[k]||(per_[k]={id:r.employee_id, skill:sk, name:nameOf(r.employee_id),
         position:((empBy[r.employee_id]||{}).position||''), plan:0, abw:0, netto:0, abr:0, pctDays:[], srcs:{}, notes:{},
-        krank:0, urlaub:0, unbez:0, pctSum:0, planJ:0, nettoJ:0, krankJ:0, urlaubJ:0, unbezJ:0, rate:0});
+        krank:0, urlaub:0, unbez:0, austritt:0, pctSum:0, planJ:0, nettoJ:0, krankJ:0, urlaubJ:0, unbezJ:0, austrittJ:0, rate:0});
       q.plan+=net; q.abw+=net-nach; q.netto+=nach; q.abr+=abr;
       const weg=net-nach;
-      if(weg>0){ if(absT==='sick') q.krank+=weg; else if(absT==='vacation') q.urlaub+=weg; else if(absT==='unpaid') q.unbez+=weg; }
+      if(weg>0){ if(absT==='exit') q.austritt+=weg; else if(absT==='sick') q.krank+=weg; else if(absT==='vacation') q.urlaub+=weg; else if(absT==='unpaid') q.unbez+=weg; }
       q.pctSum+=net*(p.pct/100);                            // fuer den Euro-Wert der Ausfaelle
       // Der beurteilbare Teil: nur Tage, die der Zeitexport abdeckt. ALLE Spalten der
       // Soll-Erfuellung kommen aus diesen Werten, sonst stuenden Spalten und Prozentsatz auf
       // verschiedenen Zeitraeumen (Befund beim Nachmessen 2026-09-30).
       if(istBisDs&&ds<=istBisDs){ q.planJ+=net; q.nettoJ+=nach;
-        if(weg>0){ if(absT==='sick') q.krankJ+=weg; else if(absT==='vacation') q.urlaubJ+=weg; else if(absT==='unpaid') q.unbezJ+=weg; } }
+        if(weg>0){ if(absT==='exit') q.austrittJ+=weg; else if(absT==='sick') q.krankJ+=weg; else if(absT==='vacation') q.urlaubJ+=weg; else if(absT==='unpaid') q.unbezJ+=weg; } }
       q.pctDays.push(p.pct); q.srcs[p.src]=true; if(p.note) q.notes[p.note]=true;
       if(ds===todayDs){
         const rateH=(()=>{ const x=((proj.skills||[]).find(y=>y.key===sk)||{}); const v=Number(x.rate); return isFinite(v)&&v>0?v:0; })();
@@ -38618,9 +38623,9 @@ function HcHoursView({projects, team}){
     const sollSum=(()=>{ const f=k=>soll.reduce((a,r)=>a+(Number(r[k])||0),0);
       const eur=k=>soll.reduce((a,r)=>a+(Number(r[k])||0)*r.anteil*r.rate,0);
       return {plan:f('plan'), netto:f('netto'), ist:f('ist'), istJ:f('istJ'), nettoJ:f('nettoJ'), planJ:f('planJ'),
-        krank:f('krank'), urlaub:f('urlaub'), unbez:f('unbez'), offen:f('offen'), ueber:f('ueber'),
-        krankJ:f('krankJ'), urlaubJ:f('urlaubJ'), unbezJ:f('unbezJ'),
-        krankEur:eur('krank'), urlaubEur:eur('urlaub'), unbezEur:eur('unbez'), offenEur:eur('offen'),
+        krank:f('krank'), urlaub:f('urlaub'), unbez:f('unbez'), austritt:f('austritt'), offen:f('offen'), ueber:f('ueber'),
+        krankJ:f('krankJ'), urlaubJ:f('urlaubJ'), unbezJ:f('unbezJ'), austrittJ:f('austrittJ'),
+        krankEur:eur('krank'), urlaubEur:eur('urlaub'), unbezEur:eur('unbez'), austrittEur:eur('austritt'), offenEur:eur('offen'),
         grad:(f('nettoJ')>0?f('istJ')/f('nettoJ'):null)}; })();
     // Bis wohin reicht der beurteilbare Teil des Zeitraums?
     const sollBis=(istBisDs&&istBisDs<per.to)?istBisDs:per.to;
@@ -38817,7 +38822,8 @@ function HcHoursView({projects, team}){
             {[['Krankheit',R.sollSum.krank,R.sollSum.krankEur,'#b91c1c'],
               ['Urlaub',R.sollSum.urlaub,R.sollSum.urlaubEur,'#b45309'],
               ['unbezahlt',R.sollSum.unbez,R.sollSum.unbezEur,'#7c3aed'],
-              ['Plan nicht ausgeschöpft',R.sollSum.offen,R.sollSum.offenEur,'#0369a1']].map(([l,h,e,c])=>
+              ['Plan nicht ausgeschöpft',R.sollSum.offen,R.sollSum.offenEur,'#0369a1'],
+              ...(R.sollSum.austritt>0.05?[['nach dem Austritt geplant',R.sollSum.austritt,R.sollSum.austrittEur,'#475569']]:[])].map(([l,h,e,c])=>
               <div key={l}>
                 <div style={{fontSize:11,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em'}}>{l}</div>
                 <div style={{fontSize:21,fontWeight:800,fontFamily:'var(--mono)',color:h>0?c:'var(--muted)'}}>{cpoNum(h,1)} h</div>
