@@ -167,8 +167,10 @@ export async function hcCompute(admin: any, from: string, to: string, nowMin: nu
   // (Sales KW 40 bis Mittwoch: geschaetzt -7,7 h, tatsaechlich +10,6 h). Seit dem Umstieg auf das
   // Tagesblatt liegt das Ziel taggenau vor, also wird nichts mehr verteilt. Gegenprobe: die Summe
   // der Tageswerte trifft in 24 von 24 vollen Wochen den gespeicherten Wochenwert.
-  // report_forecast bleibt die Quelle der Praesentation, wird hier aber NICHT mehr gelesen: eine
-  // zweite Rechenstelle fuer dieselbe Groesse ist genau das, was auseinanderlaeuft.
+  // forecast_day ist seit dem 2026-09-30 die einzige Quelle des Forecasts, auch fuer die
+  // Praesentation. report_forecast ist nur noch die abgeleitete Wochenebene mit genau einem
+  // Schreiber (dem Import) und wird hier nicht gelesen: eine zweite Rechenstelle fuer dieselbe
+  // Groesse ist genau das, was irgendwann auseinanderlaeuft.
   const fcDay: Record<string, number> = {};
   (fcR.data || []).forEach((r: any) => {
     const ds = String(r.work_date).slice(0, 10);
