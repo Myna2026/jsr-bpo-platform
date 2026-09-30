@@ -171,6 +171,17 @@ Ein fehlgeschlagener Check überträgt nichts.
   `ClientAccountsTab`).
 - **Nach Änderungen an Neuanlage-Modals** immer beide Fälle testen (Entity
   vorhanden und `null`); `no-undef` fängt das nicht.
+- **Vor Massen-Updates die Trigger der Tabelle prüfen**
+  (`select tgname, pg_get_triggerdef(t.oid) from pg_trigger t join pg_class c
+  on c.oid=t.tgrelid where c.relname='<tabelle>' and not t.tgisinternal`).
+  Ein `UPDATE` über viele Zeilen feuert jeden BEFORE-Trigger mit, auch wenn es
+  fachlich nichts ändert, und überschreibt dabei Felder, die man gar nicht
+  anfassen wollte. Am 2026-09-30 hat ein fehlgeschlagener Backfill auf
+  `employees` alle 23 Zeilen berührt; `update_employees_updated_at` hat dabei
+  `updated_at` auf „jetzt" gesetzt und die ursprünglichen Zeitstempel
+  vernichtet. Es gibt weder PITR noch ein abrufbares Backup, die Werte sind
+  weg. Also: Trigger lesen, nötigenfalls gezielt `disable trigger` /
+  `enable trigger` um den Backfill legen, und erst an einer Zeile testen.
 - **Zeitzonen:** lokale Daten mit `isoLocal()`, nie `toISOString()` auf ein
   lokales `Date`.
 - **Sichtbare Texte** ohne lange Gedankenstriche (Komma, Doppelpunkt, Punkt).
