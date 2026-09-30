@@ -38445,8 +38445,10 @@ function HcHoursView({projects, team}){
   // Rahmen, den eine dieser drei Zeilen braucht: der Monat des Zeitraums plus die angebrochenen
   // ISO-Wochen an seinen Raendern.
   const rng=(()=>{ const m0=per.from.slice(0,8)+'01';
+    const vw=(()=>{ const d=new Date(wk.from+'T00:00:00'); d.setDate(d.getDate()-7); return isoLocal(d); })();   // letzte Woche
     const d1=new Date(per.to+'T00:00:00'); const mEnd=isoLocal(new Date(d1.getFullYear(), d1.getMonth()+1, 0));
-    return {from:(wk.from<m0?wk.from:m0), to:(wk.to>mEnd?wk.to:mEnd)}; })();
+    const a=[m0, vw, wk.from].sort()[0]; const b=[mEnd, wk.to, per.to].sort().pop();
+    return {from:a, to:b}; })();
 
   useEffect(()=>{ if(!proj){ setBusy(false); return; } let alive=true;
     (async()=>{
@@ -38619,7 +38621,9 @@ function HcHoursView({projects, team}){
     // Bezugstag: heute, wenn heute im Zeitraum liegt, sonst das Ende des Zeitraums. Sonst hiesse
     // "Woche bis heute" in der Wochenansicht die ganze Woche inklusive der Tage, die noch kommen.
     const ref=(todayDs>=per.from&&todayDs<=per.to)?todayDs:per.to;
-    const refMon=(()=>{ const d=new Date(ref+'T00:00:00'); const dow=(d.getDay()||7); const m=new Date(d); m.setDate(d.getDate()-(dow-1)); return isoLocal(m); })();
+    const minus=(ds,n)=>{ const d=new Date(ds+'T00:00:00'); d.setDate(d.getDate()-n); return isoLocal(d); };
+    const monOf=ds=>{ const d=new Date(ds+'T00:00:00'); const dow=(d.getDay()||7); const m=new Date(d); m.setDate(d.getDate()-(dow-1)); return isoLocal(m); };
+    const refMon=monOf(ref);
     const refM0=ref.slice(0,8)+'01';
     const spanne=(sk,a,b)=>{ let fc=0, fcTage=0, netto=0, abr=0, plan=0;
       let d=new Date(a+'T00:00:00'); const e=new Date(b+'T00:00:00');
@@ -38634,18 +38638,27 @@ function HcHoursView({projects, team}){
               delta:(hatZiel?abr-fc:null),
               deltaEur:(hatZiel&&rate!=null?(abr-fc)*rate:null)};
     };
-    const uebersicht=['sales','support'].map(sk=>({
-      skill:sk, label:sk==='sales'?'Sales':'Support',
-      tag:spanne(sk, ref, ref), woche:spanne(sk, refMon, ref), monat:spanne(sk, refM0, ref),
-    })).filter(u=>u.tag.plan>0||u.woche.plan>0||u.monat.plan>0||u.monat.fc!=null);
-    const uGesamt=['tag','woche','monat'].reduce((o,k)=>{ const rs=uebersicht.map(u=>u[k]);
-      const hatZ=rs.some(r=>r.fc!=null);
-      o[k]={fc:(hatZ?rs.reduce((a,r)=>a+(r.fc||0),0):null), plan:rs.reduce((a,r)=>a+r.plan,0),
-            netto:rs.reduce((a,r)=>a+r.netto,0), abr:rs.reduce((a,r)=>a+r.abr,0),
-            eur:rs.reduce((a,r)=>a+(r.eur||0),0),
-            delta:(hatZ?rs.reduce((a,r)=>a+(r.delta||0),0):null),
-            deltaEur:(hatZ?rs.reduce((a,r)=>a+(r.deltaEur||0),0):null)};
-      return o; },{});
+    // Fuenf getrennte Zeitspannen, jede fuer sich abgeschlossen. Keine Zeile mischt Zeitraeume.
+    const vorMon=minus(refMon,7);
+    const SPANNEN=[
+      {key:'gestern', titel:'Gestern',        von:minus(ref,1), bis:minus(ref,1)},
+      {key:'heute',   titel:'Heute',          von:ref,          bis:ref, laufend:true},
+      {key:'woche',   titel:'Laufende Woche', von:refMon,       bis:ref},
+      {key:'vorwoche',titel:'Letzte Woche',   von:vorMon,       bis:minus(refMon,1)},
+      {key:'monat',   titel:'Laufender Monat',von:refM0,        bis:ref},
+    ];
+    const bloecke=SPANNEN.map(sp=>{
+      const rows=['sales','support'].map(sk=>({skill:sk, label:sk==='sales'?'Sales':'Support', ...spanne(sk,sp.von,sp.bis)}))
+        .filter(r=>r.plan>0||r.fc!=null);
+      const hatZ=rows.some(r=>r.fc!=null);
+      const ges={fc:(hatZ?rows.reduce((a,r)=>a+(r.fc||0),0):null), plan:rows.reduce((a,r)=>a+r.plan,0),
+        netto:rows.reduce((a,r)=>a+r.netto,0), abr:rows.reduce((a,r)=>a+r.abr,0),
+        eur:rows.reduce((a,r)=>a+(r.eur||0),0),
+        delta:(hatZ?rows.reduce((a,r)=>a+(r.delta||0),0):null),
+        deltaEur:(hatZ?rows.reduce((a,r)=>a+(r.deltaEur||0),0):null)};
+      return {...sp, rows, ges};
+    }).filter(b=>b.rows.length>0);
+
     // Overhead ohne eigene Regel faellt sonst still mit 100 Prozent durch.
     const OVERHEAD=['Teamleiter','Trainer','QM','Projektleiter'];
     const offen={};
@@ -38658,7 +38671,7 @@ function HcHoursView({projects, team}){
     return {days, skills, list, dayRows, trainDays, trainNames:Object.keys(trainNames),
             from:per.from, to:per.to,
             offenOverhead:Object.keys(offen).map(k=>offen[k]), heute, todayDs,
-            uebersicht, uGesamt, ref, refMon, refM0,
+            bloecke, ref, refMon, refM0,
             istBis:(raw.istBis||null), istOffen:(!raw.istBis||raw.istBis<per.to),
             hatSchulung:Object.keys(trainDays).length>0};
   },[raw,cfg,proj,per.from,per.to]);
@@ -38738,58 +38751,54 @@ function HcHoursView({projects, team}){
         In diesem Zeitraum läuft eine Schulung ({R.trainNames.join(', ')}). Wer dafür auf 0 Prozent gesetzt ist, wird an diesen Tagen nicht abgerechnet.
       </div>}
 
-      {/* Uebersicht: je Skill Tag, Woche und Monat in einer Zeile. Alle Zahlen kommen aus denselben
-          Tageswerten, Woche und Monat sind reine Summen davon. */}
-      {R&&R.uebersicht.length>0&&<div style={{border:'1px solid var(--border)',borderRadius:12,background:'var(--card)',marginBottom:14,overflow:'hidden'}}>
-        <div style={{padding:'11px 14px',borderBottom:'1px solid var(--border)',display:'flex',alignItems:'baseline',gap:10,flexWrap:'wrap'}}>
-          <span style={{fontSize:14,fontWeight:800}}>Übersicht</span>
-          <span style={{fontSize:12,color:'var(--muted)'}}>Bezugstag {fmtDate(R.ref)} · Woche ab {fmtDate(R.refMon)} · Monat ab {fmtDate(R.refM0)}</span>
-        </div>
-        <div style={{overflowX:'auto'}}>
-          <table style={{borderCollapse:'collapse',width:'100%',fontSize:12.5,minWidth:820}}>
-            <thead><tr style={{background:'var(--surface-2)'}}>
-              {['','Zeitraum','Forecast','Geliefert laut Plan','Abrechenbar','Umsatz','Delta Stunden','Delta Euro'].map((h,i)=>
-                <th key={i} style={{textAlign:i<2?'left':'right',padding:'7px 10px',fontSize:10.5,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.04em',whiteSpace:'nowrap'}}>{h}</th>)}
-            </tr></thead>
-            <tbody>
-              {R.uebersicht.map(u=>['tag','woche','monat'].map((k,ki)=>{ const r=u[k];
-                const lab=k==='tag'?'Tag':(k==='woche'?'Woche bis heute':'Monat bis heute');
-                const neg=r.delta!=null&&r.delta<0;
-                return <tr key={u.skill+k} style={{borderTop:'1px solid var(--border)',background:ki===0?'transparent':'var(--surface-2)'}}>
-                  <td style={{padding:'6px 10px',fontWeight:800}}>{ki===0?u.label:''}</td>
-                  <td style={{padding:'6px 10px',color:'var(--muted)'}}>{lab}</td>
-                  <td style={{padding:'6px 10px',textAlign:'right',fontFamily:'var(--mono)'}}>{r.fc==null?'—':cpoNum(r.fc,1)}</td>
-                  <td style={{padding:'6px 10px',textAlign:'right',fontFamily:'var(--mono)',color:'var(--muted)'}}>{cpoNum(r.netto,1)}</td>
-                  <td style={{padding:'6px 10px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:800,color:BRAND.main}}>{cpoNum(r.abr,1)}</td>
-                  <td style={{padding:'6px 10px',textAlign:'right',fontFamily:'var(--mono)'}}>{r.eur==null?'—':cpoEur(r.eur)}</td>
-                  <td style={{padding:'6px 10px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:800,color:r.delta==null?'var(--muted)':(neg?'#b91c1c':'#15803d')}}>
-                    {r.delta==null?'—':((r.delta>0?'+':'')+cpoNum(r.delta,1))}</td>
-                  <td style={{padding:'6px 10px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:800,color:r.deltaEur==null?'var(--muted)':(neg?'#b91c1c':'#15803d')}}>
-                    {r.deltaEur==null?'—':((r.deltaEur>0?'+':'')+cpoEur(r.deltaEur))}</td>
-                </tr>; }))}
-              {R.uebersicht.length>1&&['tag','woche','monat'].map((k,ki)=>{ const r=R.uGesamt[k];
-                const lab=k==='tag'?'Tag':(k==='woche'?'Woche bis heute':'Monat bis heute');
-                const neg=r.delta!=null&&r.delta<0;
-                return <tr key={'g'+k} style={{borderTop:ki===0?'2px solid var(--border)':'1px solid var(--border)',fontWeight:800,background:ki===0?'var(--card)':'var(--surface-2)'}}>
-                  <td style={{padding:'7px 10px'}}>{ki===0?'Gesamt':''}</td>
-                  <td style={{padding:'7px 10px',color:'var(--muted)',fontWeight:600}}>{lab}</td>
-                  <td style={{padding:'7px 10px',textAlign:'right',fontFamily:'var(--mono)'}}>{r.fc==null?'—':cpoNum(r.fc,1)}</td>
-                  <td style={{padding:'7px 10px',textAlign:'right',fontFamily:'var(--mono)'}}>{cpoNum(r.netto,1)}</td>
-                  <td style={{padding:'7px 10px',textAlign:'right',fontFamily:'var(--mono)',color:BRAND.main}}>{cpoNum(r.abr,1)}</td>
-                  <td style={{padding:'7px 10px',textAlign:'right',fontFamily:'var(--mono)'}}>{cpoEur(r.eur)}</td>
-                  <td style={{padding:'7px 10px',textAlign:'right',fontFamily:'var(--mono)',color:r.delta==null?'var(--muted)':(neg?'#b91c1c':'#15803d')}}>
-                    {r.delta==null?'—':((r.delta>0?'+':'')+cpoNum(r.delta,1))}</td>
-                  <td style={{padding:'7px 10px',textAlign:'right',fontFamily:'var(--mono)',color:r.deltaEur==null?'var(--muted)':(neg?'#b91c1c':'#15803d')}}>
-                    {r.deltaEur==null?'—':((r.deltaEur>0?'+':'')+cpoEur(r.deltaEur))}</td>
-                </tr>; })}
-            </tbody>
-          </table>
-        </div>
-        <div style={{padding:'9px 14px',fontSize:11,color:'var(--muted)',lineHeight:1.55,borderTop:'1px solid var(--border)'}}>
-          Forecast = Tageswert aus dem Tagesblatt des Auftraggebers (<code>forecast_day</code>). Woche und Monat sind Summen genau dieser Tageswerte, keine eigene Rechnung.
-          Geliefert laut Plan = Schichtplan netto nach Urlaub und Krankheit. Abrechenbar = davon der hinterlegte Anteil je Person. Delta = abrechenbar minus Forecast, plus heißt über Ziel.
-          Fehlt für einen Tag ein Forecast, bleibt das Ziel leer statt aus dem Wochenwert geschätzt zu werden.
-        </div>
+      {/* Fuenf getrennte Zeitspannen, jede als eigener Block. Nichts wird vermischt: in einem Block
+          beziehen sich alle Zahlen auf denselben Zeitraum. Der Forecast kommt taggenau aus
+          forecast_day, Woche und Monat sind Summen derselben Tageswerte. */}
+      {R&&R.bloecke.map(b=>{
+        const kopf=b.von===b.bis?fmtDate(b.von):(fmtDate(b.von)+' bis '+fmtDate(b.bis));
+        const zelle=(v,st)=><td style={{padding:'6px 10px',textAlign:'right',fontFamily:'var(--mono)',...(st||{})}}>{v}</td>;
+        const dz=(v,eur)=>{ if(v==null) return <td style={{padding:'6px 10px',textAlign:'right',fontFamily:'var(--mono)',color:'var(--muted)'}}>—</td>;
+          return <td style={{padding:'6px 10px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:800,color:v<0?'#b91c1c':'#15803d'}}>
+            {(v>0?'+':'')+(eur?cpoEur(v):cpoNum(v,1))}</td>; };
+        return <div key={b.key} style={{border:'1px solid var(--border)',borderRadius:12,background:'var(--card)',marginBottom:12,overflow:'hidden'}}>
+          <div style={{padding:'9px 14px',borderBottom:'1px solid var(--border)',display:'flex',alignItems:'baseline',gap:10,flexWrap:'wrap',background:'var(--surface-2)'}}>
+            <span style={{fontSize:13.5,fontWeight:800}}>{b.titel}</span>
+            <span style={{fontSize:12,color:'var(--muted)'}}>{kopf}</span>
+            {b.laufend&&<span style={{fontSize:10.5,fontWeight:800,color:'#b45309',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:6,padding:'1px 7px'}}>läuft noch</span>}
+          </div>
+          <div style={{overflowX:'auto'}}>
+            <table style={{borderCollapse:'collapse',width:'100%',fontSize:12.5,minWidth:760}}>
+              <thead><tr>
+                {['','Forecast','Geliefert laut Plan','Abrechenbar','Umsatz','Delta Stunden','Delta Euro'].map((h,i2)=>
+                  <th key={i2} style={{textAlign:i2===0?'left':'right',padding:'6px 10px',fontSize:10.5,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.04em',whiteSpace:'nowrap'}}>{h}</th>)}
+              </tr></thead>
+              <tbody>
+                {b.rows.map(r=><tr key={r.skill} style={{borderTop:'1px solid var(--border)'}}>
+                  <td style={{padding:'6px 10px',fontWeight:700}}>{r.label}</td>
+                  {zelle(r.fc==null?'—':cpoNum(r.fc,1), r.fc==null?{color:'var(--muted)'}:null)}
+                  {zelle(cpoNum(r.netto,1),{color:'var(--muted)'})}
+                  {zelle(cpoNum(r.abr,1),{fontWeight:800,color:BRAND.main})}
+                  {zelle(r.eur==null?'—':cpoEur(r.eur))}
+                  {dz(r.delta,false)}
+                  {dz(r.deltaEur,true)}
+                </tr>)}
+                {b.rows.length>1&&<tr style={{borderTop:'2px solid var(--border)',fontWeight:800}}>
+                  <td style={{padding:'7px 10px'}}>Gesamt</td>
+                  {zelle(b.ges.fc==null?'—':cpoNum(b.ges.fc,1))}
+                  {zelle(cpoNum(b.ges.netto,1))}
+                  {zelle(cpoNum(b.ges.abr,1),{color:BRAND.main})}
+                  {zelle(cpoEur(b.ges.eur))}
+                  {dz(b.ges.delta,false)}
+                  {dz(b.ges.deltaEur,true)}
+                </tr>}
+              </tbody>
+            </table>
+          </div>
+        </div>; })}
+      {R&&R.bloecke.length>0&&<div style={{fontSize:11,color:'var(--muted)',lineHeight:1.55,margin:'-4px 0 16px',padding:'0 2px'}}>
+        Forecast = Tageswert aus dem Tagesblatt des Auftraggebers. Woche und Monat sind Summen genau dieser Tageswerte, keine eigene Rechnung.
+        Geliefert laut Plan = Schichtplan netto nach Urlaub und Krankheit. Abrechenbar = davon der hinterlegte Anteil je Person.
+        Delta = abrechenbar minus Forecast, plus heißt über Ziel. Fehlt für einen Tag ein Forecast, bleibt das Ziel leer statt geschätzt zu werden.
       </div>}
 
       {R&&R.skills.map(s=><div key={s.skill} style={{border:'1px solid var(--border)',borderRadius:12,background:'var(--card)',marginBottom:14,overflow:'hidden'}}>
@@ -39179,7 +39188,12 @@ const longtermNorm=s=>String(s==null?'':s).toLowerCase().replace(/ä/g,'a').repl
 // Gerechnete Ergebnis-Zeilen (englische Labels der Datei). Rest = Vorgabe/Eingabewerte.
 const LONGTERM_CALC=['workingnet','inoffice','eomforecast','neededfte','productivehour','coverage','overunder','netdifference'];
 function longtermIsCalc(label){ const n=longtermNorm(label); return LONGTERM_CALC.some(k=>n.indexOf(k)>=0); }
-function longtermMonthYear(v){ if(v instanceof Date && !isNaN(v.getTime())) return {month:v.getMonth()+1, year:v.getFullYear()};
+function longtermMonthYear(v){
+  // Excel-Seriennummer zuerst, zeitzonenfrei. Ein Date zur lokalen Mitternacht kippt in einer
+  // anderen Zeitzone auf den Vortag, und weil hier Monatsanfaenge stehen, waere das der Vormonat
+  // (gleiche Falle wie im Forecast-Import, Befund 2026-09-30).
+  if(typeof v==='number'&&v>20000&&v<60000){ const d=new Date(Date.UTC(1899,11,30)+v*86400000); return {month:d.getUTCMonth()+1, year:d.getUTCFullYear()}; }
+  if(v instanceof Date && !isNaN(v.getTime())) return {month:v.getMonth()+1, year:v.getFullYear()};
   const s=String(v==null?'':v).trim(); let m=s.match(/(\d{4})-(\d{1,2})-(\d{1,2})/); if(m) return {month:Number(m[2]), year:Number(m[1])};
   m=s.match(/(\d{1,2})[.\/](\d{1,2})[.\/](\d{4})/); if(m) return {month:Number(m[2]), year:Number(m[3])}; return null; }
 function LongtermImport({projId, initYear, onSaved}){
@@ -39191,7 +39205,7 @@ function LongtermImport({projId, initYear, onSaved}){
   function onFile(f){ if(!f) return; setErr(''); setSaved(false); setSheetsData(null); setDiag(null);
     const rd=new FileReader();
     rd.onload=ev=>{ try{
-      const bytes=new Uint8Array(ev.target.result); const wb=XLSX.read(bytes,{type:'array',cellDates:true});
+      const bytes=new Uint8Array(ev.target.result); const wb=XLSX.read(bytes,{type:'array'});
       const out={}; const dg={}; let detStart=null; const norm=s=>String(s||'').trim().toLowerCase();
       wb.SheetNames.forEach(nm=>{ const key=norm(nm).indexOf('sales')>=0?'sales':norm(nm).indexOf('support')>=0?'support':null; if(!key) return;
         const aoa=XLSX.utils.sheet_to_json(wb.Sheets[nm],{header:1,defval:''});
@@ -39291,7 +39305,13 @@ function ForecastImport({projId, skill, initYear, onSaved}){
     const rd=new FileReader();
     rd.onload=ev=>{ try{
       const bytes=new Uint8Array(ev.target.result);
-      const wb=XLSX.read(bytes,{type:'array',cellDates:true});
+      // OHNE cellDates: Datumszellen kommen als Excel-Seriennummer und werden in xlDate mit reiner
+      // UTC-Arithmetik umgerechnet. Mit cellDates:true baut die Bibliothek ein Date zur LOKALEN
+      // Mitternacht; wird die Datei auf einem Rechner in einer anderen Zeitzone eingelesen, faellt
+      // isoLocal auf den Vortag. Genau das ist am 2026-09-29 passiert: der komplette September- und
+      // Oktober-Forecast lag um einen Tag verschoben in forecast_day (Wert vom 01.09. stand unter
+      // dem 31.08. und so weiter durch alle 61 Tage). Seriennummern sind zeitzonenfrei.
+      const wb=XLSX.read(bytes,{type:'array'});
       const sheetNamed=pref=>wb.SheetNames.find(nm=>cqNormHead(nm).indexOf(cqNormHead(pref))===0);
       const tagNm=sheetNamed('Tagesplanung');
       const rmNm=sheetNamed('Rückmeldung Monatsebene')||sheetNamed('Rueckmeldung Monatsebene');
