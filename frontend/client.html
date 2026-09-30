@@ -2316,14 +2316,298 @@ function KbConnyView({client}){
   useEffect(()=>{ if(!pid) return; sb.from('coach_questions').select('id',{count:'exact',head:true}).eq('project_id',pid).eq('status','active').then(r=>setHasCoach(!!r.count)).catch(()=>setHasCoach(false)); },[pid]);
   // Coach: dieselbe Oberfläche wie im Mitarbeiter-Portal (shared/coach-ui.js), im Probelauf-Modus: Condor übt selbst, nichts wird gespeichert
   useEffect(()=>{ if(tab!=='coach'||!pid) return; try{ coSetCtx({pid, preview:true, hostId:'kbClientCoach', fallbackAgent:()=>agent, greet:'Üben Sie selbst mit '+agent.name+': dieselben Fragen, die Ihr Team bekommt. Ergebnisse werden nicht gespeichert.'}); renderCoach(); }catch(e){ console.error(e); } },[tab,pid]);
-  const tabs=[['ask','Fragen'],['register','Register']].concat(hasCoach?[['coach','Coach']]:[]);
+  const tabs=[['ask','Fragen'],['register','Register']].concat(hasCoach?[['coach','Coach'],['pruefen','Fragen prüfen']]:[]);
   return <div>
     <div style={{display:'flex',gap:4,marginBottom:12,borderBottom:'1px solid #e2e8f0'}}>{tabs.map(([k,l])=><button key={k} onClick={()=>setTab(k)} style={{padding:'9px 16px',border:'none',borderBottom:'2px solid '+(tab===k?agent.color:'transparent'),marginBottom:-1,background:'none',cursor:'pointer',color:tab===k?'#0f172a':'#64748b',fontWeight:tab===k?800:600,fontSize:14,fontFamily:'inherit'}}>{l}</button>)}</div>
     {tab==='ask'&&<div><div style={{fontSize:12.5,color:'#64748b',marginBottom:10}}>Ihre Wissensdatenbank zum internen Gebrauch: Fragen stellen, Antworten mit Quelle aus Ihren Unterlagen. Änderungen am Wissen laufen über den Bereich „Wissensänderungen“.</div><div id="vPartnerwissen"/></div>}
     {tab==='register'&&<KbRegisterClient pid={pid} agent={agent}/>}
+    {tab==='pruefen'&&<CoachFragenClient pid={pid} agent={agent}/>}
     {tab==='coach'&&<div><div style={{fontSize:12.5,color:'#64748b',marginBottom:10}}>Üben wie Ihr Team: Thema, Schwierigkeit und Dauer wählen, dann geht es los. Ihre Durchläufe werden nicht gespeichert und zählen nirgends.</div><div id="kbClientCoach"/></div>}
   </div>;
 }
+// ── Coach-Fragen pruefen (Kunde) ────────────────────────────────────────────────────────────
+// Der Auftraggeber sieht die Fragen seines Projekts, bewertet sie, schlaegt Aenderungen und neue
+// Fragen vor und lehnt Fragen mit Begruendung ab. Geschrieben wird ausschliesslich ueber die
+// Funktionen coach_question_rate und coach_change_propose; die Tabellen selbst sind fuer den
+// Kundenzugang schreibgeschuetzt. Nur die Bewertung steht sofort, alles andere wartet auf Freigabe.
+const CQ_ART={free:'Freitext', mc:'Auswahl', match:'Zuordnen', gap:'Lückentext', order:'Reihenfolge'};
+const CQ_SCHWER={leicht:'leicht', mittel:'mittel', schwer:'schwer'};
+function cqText(v){ return String(v==null?'':v); }
+function CoachFragenClient({pid, agent}){
+  const [fragen,setFragen]=useState(null);
+  const [vors,setVors]=useState([]);
+  const [filterThema,setFilterThema]=useState('');
+  const [filterArt,setFilterArt]=useState('');
+  const [nurOffen,setNurOffen]=useState(false);     // nur noch nicht bewertete
+  const [zeigeBlockiert,setZeigeBlockiert]=useState(false);
+  const [suche,setSuche]=useState('');
+  const [busy,setBusy]=useState('');
+  const [hinweis,setHinweis]=useState(null);        // {art:'ok'|'fehler', text}
+  const [bearbeiten,setBearbeiten]=useState(null);  // Frage im Aenderungs-Dialog
+  const [ablehnen,setAblehnen]=useState(null);      // Frage im Ablehnungs-Dialog
+  const [neuOffen,setNeuOffen]=useState(false);
+
+  const laden=async()=>{
+    if(!pid) return;
+    const alle=[];
+    for(let from=0;;from+=1000){
+      const {data,error}=await sb.from('coach_questions')
+        .select('id,kind,difficulty,topic,zielgebiet,prompt,options,answer,explanation,status,quality,client_quality,client_quality_note,client_quality_at,client_quality_by_name')
+        .eq('project_id',pid).order('topic',{ascending:true}).range(from,from+999);
+      if(error||!data||!data.length) break;
+      alle.push(...data); if(data.length<1000) break;
+    }
+    setFragen(alle);
+    const {data:v}=await sb.from('coach_question_changes').select('*').eq('project_id',pid).order('proposed_at',{ascending:false});
+    setVors(v||[]);
+  };
+  useEffect(()=>{ laden(); },[pid]);
+
+  const melden=(art,text)=>{ setHinweis({art,text}); setTimeout(()=>setHinweis(null), art==='ok'?4000:9000); };
+  const ruf=async(fn,args)=>{ const {data,error}=await sb.rpc(fn,args);
+    if(error) throw new Error(error.message||'Konnte nicht gespeichert werden.');
+    if(data&&data.error) throw new Error(data.error); return data; };
+
+  const bewerten=async(f,sterne)=>{
+    setBusy(f.id);
+    try{ await ruf('coach_question_rate',{p_question:f.id, p_stars:sterne, p_note:f.client_quality_note||null});
+      setFragen(fs=>fs.map(x=>x.id===f.id?{...x, client_quality:sterne, client_quality_at:new Date().toISOString()}:x));
+      melden('ok','Bewertung gespeichert.');
+    }catch(e){ melden('fehler',e.message); }
+    setBusy('');
+  };
+
+  const offeneZu=(id)=>vors.find(v=>v.question_id===id&&v.status==='open')||null;
+  const themen=[...new Set((fragen||[]).map(f=>f.topic).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'de'));
+
+  const sichtbar=(fragen||[])
+    .filter(f=>zeigeBlockiert?f.status==='blocked':f.status==='active')
+    .filter(f=>!filterThema||f.topic===filterThema)
+    .filter(f=>!filterArt||f.kind===filterArt)
+    .filter(f=>!nurOffen||f.client_quality==null)
+    .filter(f=>{ const q=suche.trim().toLowerCase(); return !q||cqText(f.prompt).toLowerCase().includes(q); });
+
+  const offeneVors=vors.filter(v=>v.status==='open');
+
+  if(!pid) return <div className="card"><div className="card-body">Kein Projekt zugeordnet.</div></div>;
+  if(fragen===null) return <div className="card"><div className="card-body" style={{color:'#64748b'}}>Lädt…</div></div>;
+
+  return <div>
+    <div style={{fontSize:12.5,color:'#64748b',marginBottom:10,lineHeight:1.6}}>
+      Die Fragen, mit denen Ihr Team übt. Sie können sie bewerten, ändern, neue vorschlagen und einzelne ablehnen.
+      <b> Ihre Bewertung steht sofort. Änderungen, neue Fragen und Ablehnungen gehen an uns und werden erst nach Freigabe wirksam</b>, die Frage bleibt bis dahin unverändert im Einsatz.
+    </div>
+
+    {hinweis&&<div style={{margin:'0 0 10px',padding:'9px 12px',borderRadius:8,fontSize:13,
+      background:hinweis.art==='ok'?'#ecfdf5':'#fef2f2', border:'1px solid '+(hinweis.art==='ok'?'#a7f3d0':'#fecaca'),
+      color:hinweis.art==='ok'?'#047857':'#b91c1c'}}>{hinweis.text}</div>}
+
+    {offeneVors.length>0&&<div className="card" style={{marginBottom:12}}>
+      <div className="card-body">
+        <div style={{fontWeight:700,marginBottom:6}}>{offeneVors.length} {offeneVors.length===1?'Vorschlag wartet':'Vorschläge warten'} auf Freigabe</div>
+        {offeneVors.map(v=><div key={v.id} style={{display:'flex',gap:10,alignItems:'baseline',flexWrap:'wrap',fontSize:12.5,padding:'4px 0',borderTop:'1px solid #f1f5f9'}}>
+          <span style={{fontWeight:700,color:'#0369a1'}}>{v.change_kind==='edit'?'Änderung':v.change_kind==='new'?'Neue Frage':'Ablehnung'}</span>
+          <span style={{flex:'1 1 320px',color:'#334155'}}>{cqText((v.new_value&&v.new_value.prompt)||(v.old_value&&v.old_value.prompt)).slice(0,120)||'—'}</span>
+          <span style={{color:'#64748b'}}>{new Date(v.proposed_at).toLocaleDateString('de-DE')}</span>
+          <button className="btn btn-sm" disabled={busy===v.id} onClick={async()=>{ setBusy(v.id);
+            try{ await ruf('coach_change_withdraw',{p_id:v.id}); await laden(); melden('ok','Vorschlag zurückgezogen.'); }
+            catch(e){ melden('fehler',e.message); } setBusy(''); }}>Zurückziehen</button>
+        </div>)}
+      </div>
+    </div>}
+
+    <div className="card" style={{marginBottom:12}}><div className="card-body" style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'center'}}>
+      <input value={suche} onChange={e=>setSuche(e.target.value)} placeholder="In den Fragen suchen" style={{flex:'1 1 220px',padding:'7px 10px',border:'1px solid #cbd5e1',borderRadius:8,fontSize:13}}/>
+      <select value={filterThema} onChange={e=>setFilterThema(e.target.value)} style={{padding:'7px 10px',border:'1px solid #cbd5e1',borderRadius:8,fontSize:13}}>
+        <option value="">Alle Themen</option>{themen.map(t=><option key={t} value={t}>{t}</option>)}</select>
+      <select value={filterArt} onChange={e=>setFilterArt(e.target.value)} style={{padding:'7px 10px',border:'1px solid #cbd5e1',borderRadius:8,fontSize:13}}>
+        <option value="">Alle Arten</option>{Object.keys(CQ_ART).map(k=><option key={k} value={k}>{CQ_ART[k]}</option>)}</select>
+      <label style={{fontSize:12.5,display:'flex',gap:6,alignItems:'center'}}>
+        <input type="checkbox" checked={nurOffen} onChange={e=>setNurOffen(e.target.checked)}/>nur unbewertete</label>
+      <label style={{fontSize:12.5,display:'flex',gap:6,alignItems:'center'}} title="Abgelehnte und aussortierte Fragen, die nicht mehr im Einsatz sind">
+        <input type="checkbox" checked={zeigeBlockiert} onChange={e=>setZeigeBlockiert(e.target.checked)}/>stillgelegte zeigen</label>
+      <span style={{marginLeft:'auto',fontSize:12.5,color:'#64748b'}}>{sichtbar.length} von {(fragen||[]).filter(f=>zeigeBlockiert?f.status==='blocked':f.status==='active').length}</span>
+      <button className="btn btn-sm btn-primary" onClick={()=>setNeuOffen(true)}>Neue Frage vorschlagen</button>
+    </div></div>
+
+    {sichtbar.length===0
+      ? <div className="card"><div className="card-body" style={{color:'#64748b'}}>Keine Frage passt zu diesem Filter.</div></div>
+      : sichtbar.map(f=>{ const offen=offeneZu(f.id);
+        return <div key={f.id} className="card" style={{marginBottom:8}}><div className="card-body">
+          <div style={{display:'flex',gap:8,alignItems:'baseline',flexWrap:'wrap',marginBottom:5}}>
+            <span style={{fontSize:11,fontWeight:700,color:'#0369a1',background:'#eff6ff',borderRadius:6,padding:'1px 7px'}}>{CQ_ART[f.kind]||f.kind}</span>
+            {f.topic&&<span style={{fontSize:11,color:'#64748b'}}>{f.topic}</span>}
+            {f.difficulty&&<span style={{fontSize:11,color:'#64748b'}}>· {CQ_SCHWER[f.difficulty]||f.difficulty}</span>}
+            {f.status==='blocked'&&<span style={{fontSize:11,fontWeight:700,color:'#b45309'}}>stillgelegt</span>}
+            {offen&&<span style={{fontSize:11,fontWeight:700,color:'#7c3aed'}}>Vorschlag wartet auf Freigabe</span>}
+          </div>
+          <div style={{fontSize:14,fontWeight:600,color:'#0f172a',lineHeight:1.5}}>{cqText(f.prompt)}</div>
+          {Array.isArray(f.options)&&f.options.length>0&&<ul style={{margin:'6px 0 0 18px',padding:0,fontSize:12.5,color:'#475569'}}>
+            {f.options.map((o,i)=><li key={i}>{cqText(typeof o==='string'?o:(o&&o.text))}</li>)}</ul>}
+          {f.explanation&&<div style={{fontSize:12.5,color:'#64748b',marginTop:6}}><b>Erklärung:</b> {cqText(f.explanation)}</div>}
+          <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap',marginTop:9,paddingTop:8,borderTop:'1px solid #f1f5f9'}}>
+            <span style={{fontSize:12,color:'#64748b'}}>Ihre Bewertung:</span>
+            {[1,2,3,4,5].map(n=><button key={n} disabled={busy===f.id} onClick={()=>bewerten(f,n===f.client_quality?null:n)}
+              title={n+' von 5'} style={{border:'none',background:'none',cursor:'pointer',fontSize:17,lineHeight:1,padding:0,
+                color:(f.client_quality||0)>=n?'#f59e0b':'#cbd5e1'}}>★</button>)}
+            {f.client_quality&&<span style={{fontSize:11.5,color:'#64748b'}}>gespeichert{f.client_quality_by_name?(' von '+f.client_quality_by_name):''}</span>}
+            <span style={{marginLeft:'auto',display:'flex',gap:6}}>
+              <button className="btn btn-sm" disabled={!!offen} title={offen?'Zu dieser Frage wartet bereits ein Vorschlag':''} onClick={()=>setBearbeiten(f)}>Ändern</button>
+              {f.status==='active'&&<button className="btn btn-sm" disabled={!!offen} onClick={()=>setAblehnen(f)}>Ablehnen</button>}
+            </span>
+          </div>
+        </div></div>; })}
+
+    {bearbeiten&&<CqAendernDialog f={bearbeiten} pid={pid} onClose={()=>setBearbeiten(null)}
+      onFertig={async(m)=>{ setBearbeiten(null); await laden(); melden('ok',m); }} onFehler={m=>melden('fehler',m)}/>}
+    {ablehnen&&<CqAblehnenDialog f={ablehnen} pid={pid} onClose={()=>setAblehnen(null)}
+      onFertig={async(m)=>{ setAblehnen(null); await laden(); melden('ok',m); }} onFehler={m=>melden('fehler',m)}/>}
+    {neuOffen&&<CqNeuDialog pid={pid} themen={themen} onClose={()=>setNeuOffen(false)}
+      onFertig={async(m)=>{ setNeuOffen(false); await laden(); melden('ok',m); }} onFehler={m=>melden('fehler',m)}/>}
+  </div>;
+}
+
+// Gemeinsamer Rahmen der drei Dialoge. Bewusst schlicht: ein Kunde soll nicht raten muessen.
+function CqDialog({titel, hinweis, breit, children, fuss}){
+  return <div style={{position:'fixed',inset:0,background:'rgba(15,23,42,.45)',zIndex:60,display:'flex',alignItems:'flex-start',justifyContent:'center',padding:'40px 16px',overflowY:'auto'}}>
+    <div style={{background:'#fff',borderRadius:14,maxWidth:(breit||620),width:'100%',boxShadow:'0 20px 50px rgba(15,23,42,.3)'}}>
+      <div style={{padding:'14px 18px',borderBottom:'1px solid #e2e8f0'}}>
+        <div style={{fontSize:16,fontWeight:800,color:'#0f172a'}}>{titel}</div>
+        {hinweis&&<div style={{fontSize:12.5,color:'#64748b',marginTop:3,lineHeight:1.55}}>{hinweis}</div>}
+      </div>
+      <div style={{padding:'16px 18px'}}>{children}</div>
+      <div style={{padding:'12px 18px',borderTop:'1px solid #e2e8f0',display:'flex',gap:8,justifyContent:'flex-end',flexWrap:'wrap'}}>{fuss}</div>
+    </div>
+  </div>;
+}
+function cqFeld(label, wert, setzen, opts){
+  const o=opts||{};
+  return <div style={{marginBottom:12}}>
+    <label style={{display:'block',fontSize:12,fontWeight:700,color:'#475569',marginBottom:4}}>{label}</label>
+    {o.mehrzeilig
+      ? <textarea value={wert} onChange={e=>setzen(e.target.value)} rows={o.zeilen||3} placeholder={o.platz||''}
+          style={{width:'100%',boxSizing:'border-box',padding:'8px 10px',border:'1px solid #cbd5e1',borderRadius:8,fontSize:13.5,fontFamily:'inherit',lineHeight:1.5}}/>
+      : <input value={wert} onChange={e=>setzen(e.target.value)} placeholder={o.platz||''}
+          style={{width:'100%',boxSizing:'border-box',padding:'8px 10px',border:'1px solid #cbd5e1',borderRadius:8,fontSize:13.5}}/>}
+    {o.hilfe&&<div style={{fontSize:11.5,color:'#94a3b8',marginTop:3}}>{o.hilfe}</div>}
+  </div>;
+}
+// Antwortmoeglichkeiten als eine Zeile je Option, das ist fuer den Kunden das Einfachste.
+function cqOptTexte(options){
+  if(!Array.isArray(options)) return '';
+  return options.map(o=>typeof o==='string'?o:cqText(o&&o.text)).join('\n');
+}
+function cqTexteZuOpt(txt){
+  const zeilen=String(txt||'').split('\n').map(z=>z.trim()).filter(Boolean);
+  return zeilen.length?zeilen:null;
+}
+
+// ── S3 Aendern als Vorschlag ────────────────────────────────────────────────────────────────
+function CqAendernDialog({f, pid, onClose, onFertig, onFehler}){
+  const [prompt,setPrompt]=useState(cqText(f.prompt));
+  const [opt,setOpt]=useState(cqOptTexte(f.options));
+  const [antwort,setAntwort]=useState(f.answer==null?'':(typeof f.answer==='string'?f.answer:JSON.stringify(f.answer)));
+  const [erkl,setErkl]=useState(cqText(f.explanation));
+  const [thema,setThema]=useState(cqText(f.topic));
+  const [note,setNote]=useState('');
+  const [busy,setBusy]=useState(false);
+  const geaendert = prompt!==cqText(f.prompt) || opt!==cqOptTexte(f.options) || erkl!==cqText(f.explanation)
+                 || thema!==cqText(f.topic) || antwort!==(f.answer==null?'':(typeof f.answer==='string'?f.answer:JSON.stringify(f.answer)));
+  const senden=async()=>{
+    if(busy) return; setBusy(true);
+    const neu={prompt:prompt.trim(), explanation:erkl.trim()||null, topic:thema.trim()||null, kind:f.kind, difficulty:f.difficulty};
+    const o=cqTexteZuOpt(opt); if(o) neu.options=o;
+    if(antwort.trim()){ try{ neu.answer=JSON.parse(antwort); }catch(e){ neu.answer=antwort.trim(); } }
+    try{ const {data,error}=await sb.rpc('coach_change_propose',{p_project:pid, p_kind:'edit', p_question:f.id, p_new:neu, p_note:note.trim()||null});
+      if(error) throw new Error(error.message); if(data&&data.error) throw new Error(data.error);
+      onFertig('Ihre Änderung ist als Vorschlag eingegangen. Die Frage bleibt unverändert im Einsatz, bis wir sie freigegeben haben.');
+    }catch(e){ onFehler(e.message||'Konnte nicht gesendet werden.'); setBusy(false); }
+  };
+  return <CqDialog titel="Frage ändern" breit={680}
+    hinweis="Ihre Änderung wird nicht sofort wirksam. Sie geht als Vorschlag an uns; bis zur Freigabe übt Ihr Team mit der bisherigen Fassung weiter."
+    fuss={<>
+      <button className="btn btn-sm" disabled={busy} onClick={onClose}>Abbrechen</button>
+      <button className="btn btn-sm btn-primary" disabled={busy||!geaendert||!prompt.trim()} onClick={senden}>
+        {busy?'Wird gesendet…':'Als Vorschlag senden'}</button></>}>
+    {cqFeld('Frage', prompt, setPrompt, {mehrzeilig:true, zeilen:3})}
+    {(f.kind==='mc'||f.kind==='order'||Array.isArray(f.options))&&cqFeld('Antwortmöglichkeiten', opt, setOpt,
+      {mehrzeilig:true, zeilen:4, hilfe:'Eine Möglichkeit je Zeile.'})}
+    {cqFeld('Richtige Antwort', antwort, setAntwort, {hilfe:'So, wie sie gewertet werden soll.'})}
+    {cqFeld('Erklärung', erkl, setErkl, {mehrzeilig:true, zeilen:3, hilfe:'Was der Mitarbeiter nach der Antwort lesen soll.'})}
+    {cqFeld('Thema', thema, setThema)}
+    {cqFeld('Warum diese Änderung (freiwillig)', note, setNote, {mehrzeilig:true, zeilen:2,
+      platz:'z. B. die Formulierung passt nicht zu unserem Ablauf'})}
+    {!geaendert&&<div style={{fontSize:12.5,color:'#94a3b8'}}>Noch nichts geändert.</div>}
+  </CqDialog>;
+}
+
+// ── S5 Ablehnen mit Begruendung ─────────────────────────────────────────────────────────────
+function CqAblehnenDialog({f, pid, onClose, onFertig, onFehler}){
+  const [grund,setGrund]=useState(''); const [busy,setBusy]=useState(false);
+  const senden=async()=>{
+    if(busy||!grund.trim()) return; setBusy(true);
+    try{ const {data,error}=await sb.rpc('coach_change_propose',{p_project:pid, p_kind:'reject', p_question:f.id, p_new:{}, p_note:grund.trim()});
+      if(error) throw new Error(error.message); if(data&&data.error) throw new Error(data.error);
+      onFertig('Die Ablehnung ist eingegangen. Bis zur Freigabe bleibt die Frage im Einsatz.');
+    }catch(e){ onFehler(e.message||'Konnte nicht gesendet werden.'); setBusy(false); }
+  };
+  return <CqDialog titel="Frage ablehnen"
+    hinweis="Die Frage wird nicht gelöscht, sondern nach unserer Freigabe stillgelegt und nicht mehr gestellt. Sie lässt sich jederzeit zurückholen."
+    fuss={<>
+      <button className="btn btn-sm" disabled={busy} onClick={onClose}>Abbrechen</button>
+      <button className="btn btn-sm btn-primary" disabled={busy||!grund.trim()} onClick={senden}>
+        {busy?'Wird gesendet…':'Ablehnung senden'}</button></>}>
+    <div style={{fontSize:13.5,fontWeight:600,color:'#0f172a',background:'#f8fafc',border:'1px solid #e2e8f0',borderRadius:8,padding:'9px 11px',marginBottom:12,lineHeight:1.5}}>{cqText(f.prompt)}</div>
+    {cqFeld('Begründung', grund, setGrund, {mehrzeilig:true, zeilen:3,
+      platz:'z. B. der Ablauf gilt bei uns seit Juli nicht mehr',
+      hilfe:'Pflichtfeld. Ohne Begründung weiß in drei Monaten niemand mehr, warum die Frage still liegt, und sie entsteht neu.'})}
+  </CqDialog>;
+}
+
+// ── S4 Neue Frage vorschlagen ───────────────────────────────────────────────────────────────
+function CqNeuDialog({pid, themen, onClose, onFertig, onFehler}){
+  const [art,setArt]=useState('free');
+  const [prompt,setPrompt]=useState(''); const [opt,setOpt]=useState(''); const [antwort,setAntwort]=useState('');
+  const [erkl,setErkl]=useState(''); const [thema,setThema]=useState(''); const [schwer,setSchwer]=useState('mittel');
+  const [note,setNote]=useState(''); const [busy,setBusy]=useState(false);
+  const brauchtOpt=(art==='mc'||art==='order'||art==='match');
+  const fertig = prompt.trim() && (!brauchtOpt||cqTexteZuOpt(opt));
+  const senden=async()=>{
+    if(busy||!fertig) return; setBusy(true);
+    const neu={kind:art, difficulty:schwer, prompt:prompt.trim(), explanation:erkl.trim()||null, topic:thema.trim()||null};
+    const o=cqTexteZuOpt(opt); if(o) neu.options=o;
+    if(antwort.trim()){ try{ neu.answer=JSON.parse(antwort); }catch(e){ neu.answer=antwort.trim(); } }
+    try{ const {data,error}=await sb.rpc('coach_change_propose',{p_project:pid, p_kind:'new', p_question:null, p_new:neu, p_note:note.trim()||null});
+      if(error) throw new Error(error.message); if(data&&data.error) throw new Error(data.error);
+      onFertig('Ihre Frage ist als Vorschlag eingegangen. Nach der Freigabe nehmen wir sie in die Übungen auf.');
+    }catch(e){ onFehler(e.message||'Konnte nicht gesendet werden.'); setBusy(false); }
+  };
+  return <CqDialog titel="Neue Frage vorschlagen" breit={680}
+    hinweis="Der Vorschlag geht an uns. Nach der Freigabe erscheint die Frage in den Übungen Ihres Teams."
+    fuss={<>
+      <button className="btn btn-sm" disabled={busy} onClick={onClose}>Abbrechen</button>
+      <button className="btn btn-sm btn-primary" disabled={busy||!fertig} onClick={senden}>
+        {busy?'Wird gesendet…':'Vorschlag senden'}</button></>}>
+    <div style={{display:'flex',gap:10,flexWrap:'wrap',marginBottom:12}}>
+      <div><label style={{display:'block',fontSize:12,fontWeight:700,color:'#475569',marginBottom:4}}>Art</label>
+        <select value={art} onChange={e=>setArt(e.target.value)} style={{padding:'8px 10px',border:'1px solid #cbd5e1',borderRadius:8,fontSize:13.5}}>
+          {Object.keys(CQ_ART).map(k=><option key={k} value={k}>{CQ_ART[k]}</option>)}</select></div>
+      <div><label style={{display:'block',fontSize:12,fontWeight:700,color:'#475569',marginBottom:4}}>Schwierigkeit</label>
+        <select value={schwer} onChange={e=>setSchwer(e.target.value)} style={{padding:'8px 10px',border:'1px solid #cbd5e1',borderRadius:8,fontSize:13.5}}>
+          {Object.keys(CQ_SCHWER).map(k=><option key={k} value={k}>{CQ_SCHWER[k]}</option>)}</select></div>
+      <div style={{flex:'1 1 200px'}}><label style={{display:'block',fontSize:12,fontWeight:700,color:'#475569',marginBottom:4}}>Thema</label>
+        <input value={thema} onChange={e=>setThema(e.target.value)} list="cqThemen" placeholder="z. B. Umbuchung"
+          style={{width:'100%',boxSizing:'border-box',padding:'8px 10px',border:'1px solid #cbd5e1',borderRadius:8,fontSize:13.5}}/>
+        <datalist id="cqThemen">{(themen||[]).map(t=><option key={t} value={t}/>)}</datalist></div>
+    </div>
+    {cqFeld('Frage', prompt, setPrompt, {mehrzeilig:true, zeilen:3, platz:'Was soll der Mitarbeiter beantworten?'})}
+    {brauchtOpt&&cqFeld('Antwortmöglichkeiten', opt, setOpt, {mehrzeilig:true, zeilen:4, hilfe:'Eine Möglichkeit je Zeile. Pflicht bei dieser Art.'})}
+    {cqFeld('Richtige Antwort', antwort, setAntwort, {hilfe:'Bei Auswahlfragen die richtige Möglichkeit, sonst die erwartete Antwort.'})}
+    {cqFeld('Erklärung', erkl, setErkl, {mehrzeilig:true, zeilen:3, hilfe:'Was der Mitarbeiter nach der Antwort lesen soll.'})}
+    {cqFeld('Anmerkung für uns (freiwillig)', note, setNote, {mehrzeilig:true, zeilen:2})}
+  </CqDialog>;
+}
+
 // Register nur lesen (Kunde): nach Zielgebiet oder Thema blättern, suchen; Werte und Quelle je Eintrag. Kein Bearbeiten.
 function KbRegisterClient({pid, agent}){
   const [facts,setFacts]=useState(null); const [docs,setDocs]=useState({}); const [mode,setMode]=useState('zg'); const [q,setQ]=useState(''); const [open,setOpen]=useState(null);

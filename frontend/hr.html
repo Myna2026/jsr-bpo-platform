@@ -44371,6 +44371,117 @@ const KB_CSS = `
 `;
 // ── Coach im HR-Portal (S5): Entwicklung je Mitarbeiter, Team-Lücken je Thema, gemeldete Fragen, Fragenbank pflegen. ──
 // Liest coach_sessions/coach_answers/coach_questions über die internen RLS-Policies (Bereich 'wissen').
+// ── Kundenvorschlaege zu Coach-Fragen: ansehen, ggf. glaetten, freigeben oder verwerfen ─────
+// Der Auftraggeber schlaegt im Kundenportal vor, wirksam wird es erst hier. Freigeben darf nur,
+// wer Schreibrecht auf dem Partner-Wissen hat; die Funktion coach_change_decide prueft das noch
+// einmal serverseitig, der Knopf allein ist keine Sicherung.
+const CQV_ART={edit:'Änderung', new:'Neue Frage', reject:'Ablehnung'};
+const CQV_STATUS={open:'offen', approved:'freigegeben', rejected:'verworfen', withdrawn:'zurückgezogen'};
+function cqvWert(v){ if(v==null) return ''; if(typeof v==='string') return v; if(Array.isArray(v)) return v.map(x=>typeof x==='string'?x:(x&&x.text)||JSON.stringify(x)).join(' · '); return JSON.stringify(v); }
+function CoachVorschlaege({liste, canEdit, neu, showToast}){
+  const [busy,setBusy]=React.useState('');
+  const [notiz,setNotiz]=React.useState({});
+  const [fassung,setFassung]=React.useState({});   // id -> geglaettete Frage
+  const offen=(liste||[]).filter(v=>v.status==='open');
+  const erledigt=(liste||[]).filter(v=>v.status!=='open').slice(0,25);
+
+  const entscheiden=async(v, status)=>{
+    if(busy) return; setBusy(v.id);
+    const wert=fassung[v.id];
+    try{
+      const {data,error}=await sb.rpc('coach_change_decide',{p_id:v.id, p_status:status,
+        p_note:(notiz[v.id]||'').trim()||null, p_value:(status==='approved'&&wert)?wert:null});
+      if(error) throw new Error(error.message); if(data&&data.error) throw new Error(data.error);
+      showToast&&showToast(status==='approved'?'Freigegeben':'Verworfen');
+      await neu();
+    }catch(e){ showToast&&showToast('⚠ '+((e&&e.message)||'Fehlgeschlagen'),'error'); }
+    setBusy('');
+  };
+
+  const zeile=(label, alt, jetzt)=>{
+    const a=cqvWert(alt), b=cqvWert(jetzt);
+    if(!a&&!b) return null;
+    const gleich=a===b;
+    return <div key={label} style={{display:'grid',gridTemplateColumns:'120px 1fr 1fr',gap:10,padding:'5px 0',borderTop:'1px solid var(--border)',fontSize:12.5,alignItems:'start'}}>
+      <div style={{color:'var(--muted)',fontWeight:700}}>{label}</div>
+      <div style={{color:gleich?'var(--muted)':'#b91c1c',whiteSpace:'pre-wrap'}}>{a||'—'}</div>
+      <div style={{color:gleich?'var(--muted)':'#15803d',whiteSpace:'pre-wrap',fontWeight:gleich?400:600}}>{b||'—'}</div>
+    </div>;
+  };
+
+  return <div>
+    <div style={{fontSize:12.5,color:'var(--muted)',marginBottom:12,lineHeight:1.6,maxWidth:840}}>
+      Was der Auftraggeber im Kundenportal vorgeschlagen hat. Nichts davon ist wirksam, solange es hier offen steht;
+      die Frage bleibt bis zur Freigabe unverändert im Einsatz. Vor dem Freigeben lässt sich der Vorschlag noch glätten,
+      dann wird die geglättete Fassung übernommen. Eine Ablehnung setzt die Frage auf stillgelegt, gelöscht wird nie.
+    </div>
+
+    {offen.length===0
+      ? <div className="card"><div className="card-body" style={{color:'var(--muted)'}}>Kein offener Vorschlag.</div></div>
+      : offen.map(v=>{ const alt=v.old_value||{}, vor=v.new_value||{};
+        const f=fassung[v.id]||vor;
+        return <div key={v.id} className="card" style={{marginBottom:12}}><div className="card-body">
+          <div style={{display:'flex',gap:10,alignItems:'baseline',flexWrap:'wrap',marginBottom:8}}>
+            <span style={{fontSize:11.5,fontWeight:800,color:'#fff',background:v.change_kind==='reject'?'#b45309':'#0369a1',borderRadius:6,padding:'2px 8px'}}>{CQV_ART[v.change_kind]||v.change_kind}</span>
+            <span style={{fontSize:12.5,color:'var(--muted)'}}>{v.proposed_by_name||'Auftraggeber'} · {new Date(v.proposed_at).toLocaleDateString('de-DE')}</span>
+          </div>
+
+          {v.change_kind==='reject' ? <div>
+              <div style={{fontSize:13.5,fontWeight:600,marginBottom:6,lineHeight:1.5}}>{cqvWert(alt.prompt)}</div>
+              <div style={{fontSize:12.5,background:'#fffbeb',border:'1px solid #fde68a',borderRadius:8,padding:'8px 11px',color:'#92400e'}}>
+                <b>Begründung:</b> {v.note||'—'}</div>
+            </div>
+          : v.change_kind==='new' ? <div>
+              <div style={{fontSize:12.5,color:'var(--muted)',marginBottom:4}}>Vorgeschlagene Frage, {CQ_ART_HR[f.kind]||f.kind}{f.topic?(' · '+f.topic):''}</div>
+              <textarea value={f.prompt||''} onChange={e=>setFassung(x=>({...x,[v.id]:{...f, prompt:e.target.value}}))}
+                rows={3} style={{width:'100%',boxSizing:'border-box',padding:'8px 10px',border:'1px solid var(--border)',borderRadius:8,fontSize:13.5,fontFamily:'inherit'}}/>
+              {Array.isArray(f.options)&&<div style={{fontSize:12.5,color:'var(--muted)',marginTop:5}}>Antwortmöglichkeiten: {cqvWert(f.options)}</div>}
+              {f.answer!=null&&<div style={{fontSize:12.5,color:'var(--muted)'}}>Richtige Antwort: {cqvWert(f.answer)}</div>}
+              {f.explanation&&<div style={{fontSize:12.5,color:'var(--muted)'}}>Erklärung: {cqvWert(f.explanation)}</div>}
+              {v.note&&<div style={{fontSize:12.5,color:'var(--muted)',marginTop:5}}><b>Anmerkung:</b> {v.note}</div>}
+            </div>
+          : <div>
+              <div style={{display:'grid',gridTemplateColumns:'120px 1fr 1fr',gap:10,fontSize:11,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.04em'}}>
+                <div></div><div>bisher</div><div>vorgeschlagen</div></div>
+              {zeile('Frage', alt.prompt, f.prompt)}
+              {zeile('Möglichkeiten', alt.options, f.options)}
+              {zeile('Antwort', alt.answer, f.answer)}
+              {zeile('Erklärung', alt.explanation, f.explanation)}
+              {zeile('Thema', alt.topic, f.topic)}
+              {v.note&&<div style={{fontSize:12.5,color:'var(--muted)',marginTop:7}}><b>Begründung:</b> {v.note}</div>}
+              <details style={{marginTop:8}}>
+                <summary style={{fontSize:12,color:'var(--muted)',cursor:'pointer'}}>Vorschlag vor der Freigabe glätten</summary>
+                <textarea value={f.prompt||''} onChange={e=>setFassung(x=>({...x,[v.id]:{...f, prompt:e.target.value}}))}
+                  rows={3} style={{width:'100%',boxSizing:'border-box',marginTop:6,padding:'8px 10px',border:'1px solid var(--border)',borderRadius:8,fontSize:13.5,fontFamily:'inherit'}}/>
+                <textarea value={f.explanation||''} onChange={e=>setFassung(x=>({...x,[v.id]:{...f, explanation:e.target.value}}))}
+                  rows={2} placeholder="Erklärung" style={{width:'100%',boxSizing:'border-box',marginTop:6,padding:'8px 10px',border:'1px solid var(--border)',borderRadius:8,fontSize:13,fontFamily:'inherit'}}/>
+              </details>
+            </div>}
+
+          <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap',marginTop:10,paddingTop:9,borderTop:'1px solid var(--border)'}}>
+            <input value={notiz[v.id]||''} onChange={e=>setNotiz(x=>({...x,[v.id]:e.target.value}))}
+              placeholder="Notiz zur Entscheidung (freiwillig, der Kunde sieht sie)"
+              style={{flex:'1 1 260px',padding:'7px 10px',border:'1px solid var(--border)',borderRadius:8,fontSize:12.5}}/>
+            <button className="btn btn-sm" disabled={!canEdit||busy===v.id} onClick={()=>entscheiden(v,'rejected')}>Verwerfen</button>
+            <button className="btn btn-sm btn-primary" disabled={!canEdit||busy===v.id} onClick={()=>entscheiden(v,'approved')}>
+              {busy===v.id?'…':'Freigeben'}</button>
+          </div>
+          {!canEdit&&<div style={{fontSize:11.5,color:'#b45309',marginTop:5}}>Zum Entscheiden fehlt das Schreibrecht auf dem Partner-Wissen dieses Projekts.</div>}
+        </div></div>; })}
+
+    {erledigt.length>0&&<div className="card" style={{marginTop:6}}><div className="card-body">
+      <div style={{fontSize:13,fontWeight:800,marginBottom:6}}>Zuletzt entschieden</div>
+      {erledigt.map(v=><div key={v.id} style={{display:'flex',gap:10,alignItems:'baseline',flexWrap:'wrap',fontSize:12.5,padding:'4px 0',borderTop:'1px solid var(--border)'}}>
+        <span style={{fontWeight:700,color:v.status==='approved'?'#15803d':'var(--muted)'}}>{CQV_STATUS[v.status]||v.status}</span>
+        <span style={{color:'var(--muted)'}}>{CQV_ART[v.change_kind]}</span>
+        <span style={{flex:'1 1 260px'}}>{cqvWert((v.new_value&&v.new_value.prompt)||(v.old_value&&v.old_value.prompt)).slice(0,110)||'—'}</span>
+        <span style={{color:'var(--muted)'}}>{v.decided_by_name||''} {v.decided_at?new Date(v.decided_at).toLocaleDateString('de-DE'):''}</span>
+      </div>)}
+    </div></div>}
+  </div>;
+}
+const CQ_ART_HR={free:'Freitext', mc:'Auswahl', match:'Zuordnen', gap:'Lückentext', order:'Reihenfolge'};
+
 function CoachAdmin({partner, partnerName, canEdit, showToast, team, agentOf}){
   const [days,setDays]=React.useState(30);
   const [assign,setAssign]=React.useState(null);   // Zuweisungen (coach_assignments) des Partners
@@ -44413,6 +44524,17 @@ function CoachAdmin({partner, partnerName, canEdit, showToast, team, agentOf}){
   const fmtD=ts=>{ const d=new Date(ts); return d.toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit'}); };
   const blockQ=async(q,st)=>{ setBusy(q.id); try{ const {error}=await sb.from('coach_questions').update({status:st,updated_at:new Date().toISOString()}).eq('id',q.id); if(error) throw error; showToast&&showToast(st==='blocked'?'Frage gesperrt':'Frage wieder aktiv'); await load(); }catch(e){ showToast&&showToast('Fehlgeschlagen: '+((e&&e.message)||e),'error'); } setBusy(''); };
   const resolveFlag=async(a)=>{ setBusy(a.id); try{ const {error}=await sb.from('coach_answers').update({flag_resolved_at:new Date().toISOString()}).eq('id',a.id); if(error) throw error; await load(); }catch(e){ showToast&&showToast('Fehlgeschlagen: '+((e&&e.message)||e),'error'); } setBusy(''); };
+  // Vorschlaege des Auftraggebers aus dem Kundenportal. Sie liegen in coach_question_changes und
+  // werden erst durch coach_change_decide wirksam; die Fragen selbst ruehrt der Kunde nie an.
+  // MUSS vor dem fruehen Return stehen, sonst laeuft der Hook nicht in jedem Render und React
+  // bricht mit "Rendered more hooks than during the previous render" ab.
+  const [cqv,setCqv]=React.useState([]);
+  const ladeCqv=React.useCallback(async()=>{ if(!partner){ setCqv([]); return; }
+    try{ const {data:d}=await sb.from('coach_question_changes').select('*').eq('project_id',partner)
+      .order('status').order('proposed_at',{ascending:false}); setCqv(d||[]); }catch(e){ setCqv([]); }
+  },[partner]);
+  React.useEffect(()=>{ ladeCqv(); },[partner]);
+
   if(!data) return <div style={{padding:16,color:'var(--muted)',fontSize:13}}>Lädt…</div>;
   const {sessions,answers,questions}=data;
   // Entwicklung je Mitarbeiter
@@ -44433,7 +44555,8 @@ function CoachAdmin({partner, partnerName, canEdit, showToast, team, agentOf}){
   const Spark=({v})=>{ if(!v||v.length<2) return null; const w=90,h=22; const pts=v.map((x,i)=>(i/(v.length-1)*w).toFixed(1)+','+(h-2-(x/100)*(h-4)).toFixed(1)).join(' '); return <svg width={w} height={h}><polyline points={pts} fill="none" stroke={BRAND.main} strokeWidth="1.5"/></svg>; };
   const card={background:'var(--card)',border:'1px solid var(--border)',borderRadius:12,padding:16,marginBottom:14};
   const openA=(assign||[]).filter(a=>a.status==='open').length, openF=flagged.filter(f=>!f.flag_resolved_at).length;
-  const RAIL=[['probe','Üben','dieselbe Einheit wie im Mitarbeiter-Portal'],['settings','Einstellungen','Dauer, Stufe, Fragearten, Themen, Uhr'],['zuweisen','Pflichteinheiten',openA?openA+' offen':'Thema, Dauer, Termin vorgeben'],['entwicklung','Entwicklung','je Mitarbeiter und Team-Lücken'],['meldungen','Meldungen',openF?openF+' offen':'unklare Fragen'],['bank','Fragenbank',qStats.active+' aktiv']];
+  const openV=cqv.filter(v=>v.status==='open').length;
+  const RAIL=[['probe','Üben','dieselbe Einheit wie im Mitarbeiter-Portal'],['settings','Einstellungen','Dauer, Stufe, Fragearten, Themen, Uhr'],['zuweisen','Pflichteinheiten',openA?openA+' offen':'Thema, Dauer, Termin vorgeben'],['entwicklung','Entwicklung','je Mitarbeiter und Team-Lücken'],['meldungen','Meldungen',openF?openF+' offen':'unklare Fragen'],['kundenvorschlaege','Kundenvorschläge',openV?openV+' offen':'nichts offen'],['bank','Fragenbank',qStats.active+' aktiv']];
   const railBtn=([k,l,sub])=><button key={k} onClick={()=>setTab(k)} style={{display:'block',width:'100%',textAlign:'left',border:'none',borderLeft:'3px solid '+(tab===k?'var(--accent,var(--brand))':'transparent'),background:tab===k?'color-mix(in srgb, var(--accent,var(--brand)) 8%, var(--card))':'transparent',padding:'9px 12px',cursor:'pointer',borderRadius:'0 8px 8px 0'}}><div style={{fontSize:13.5,fontWeight:tab===k?800:600,color:'var(--text)'}}>{l}{(k==='zuweisen'&&openA)||(k==='meldungen'&&openF)?<span style={{display:'inline-block',marginLeft:6,width:7,height:7,borderRadius:'50%',background:'#dc2626'}}/>:null}</div><div style={{fontSize:11,color:'var(--muted)'}}>{sub}</div></button>;
   return <div style={{display:'grid',gridTemplateColumns:'minmax(150px,190px) 1fr',gap:18,alignItems:'start'}} className="co-adm">
     <style>{'@media (max-width:760px){.co-adm{grid-template-columns:1fr !important} .co-adm .co-rail{display:flex;flex-wrap:wrap;gap:4px} .co-adm .co-rail button{width:auto !important;border-left:none !important;border-radius:8px !important}}'}</style>
@@ -44463,6 +44586,7 @@ function CoachAdmin({partner, partnerName, canEdit, showToast, team, agentOf}){
       <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(280px,1fr))',gap:'4px 16px',maxHeight:300,overflowY:'auto',border:'1px solid var(--border)',borderRadius:8,padding:10}}>{(()=>{ const cnt={}; questions.filter(q=>q.status==='active').forEach(q=>{ cnt[q.topic]=(cnt[q.topic]||0)+1; }); const all=Object.keys(cnt).sort((a,b)=>a.localeCompare(b,'de')); (cs.hidden_topics||[]).forEach(t=>{ if(!all.includes(t)) all.push(t); }); return all.map(t=>{ const hid=(cs.hidden_topics||[]).includes(t); return <label key={t} style={{display:'flex',gap:6,alignItems:'center',fontSize:12.5,cursor:'pointer',opacity:hid?.6:1}}><input type="checkbox" checked={!hid} disabled={!canEdit} onChange={e=>{ const h=(cs.hidden_topics||[]).filter(x=>x!==t); csSet('hidden_topics',e.target.checked?h:h.concat([t])); }}/> <span style={{flex:1,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={t}>{t}</span><span style={{color:'var(--muted)'}}>{cnt[t]||0}</span></label>; }); })()}</div>
       {canEdit&&<div style={{display:'flex',gap:8,alignItems:'center',marginTop:14}}><button className="btn btn-sm btn-primary" disabled={busy==='cs'||!csDirty} onClick={saveCs}>Speichern</button>{csDirty&&<span style={{fontSize:12,color:'#b45309'}}>Ungespeicherte Änderungen</span>}{cs.updated_at&&!csDirty&&<span style={{fontSize:12,color:'var(--muted)'}}>Stand {new Date(cs.updated_at).toLocaleString('de-DE',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</span>}</div>}
     </div>)}
+    {tab==='kundenvorschlaege'&&<CoachVorschlaege liste={cqv} canEdit={canEdit} neu={ladeCqv} showToast={showToast}/>}
     {tab==='zuweisen'&&<div>
       {canAssign&&<div style={card}>
         <div style={{fontSize:13,fontWeight:800,marginBottom:4}}>Pflichteinheit zuweisen</div>
