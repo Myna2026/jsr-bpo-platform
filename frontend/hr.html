@@ -42497,6 +42497,64 @@ function CpoTariffEditor({projectId, skill, showToast, onChanged}){
     </div>}
   </div>;
 }
+// Fallarten: der erste Schritt im Agenten-Link. Die Liste steht in app_config (jsr_cpo_options_v1.case_kinds)
+// und wird hier gepflegt, damit eine neue Art ohne Code dazukommt. Der Schluessel haengt an den schon
+// erfassten Vorgaengen, deshalb wird nicht geloescht, sondern abgeschaltet: alte Eintraege behalten ihre Art.
+function CpoKindEditor({showToast, onChanged}){
+  const KEY='jsr_cpo_options_v1';
+  const [all,setAll]=React.useState(null);
+  const [open,setOpen]=React.useState(false);
+  const [busy,setBusy]=React.useState(false);
+  const [nm,setNm]=React.useState('');
+  React.useEffect(()=>{ let alive=true; (async()=>{ try{ const v=await loadConfigFromDB(KEY); if(alive) setAll((v&&typeof v==='object')?v:{}); }catch(e){ if(alive) setAll({}); } })(); return ()=>{alive=false;}; },[]);
+  if(all===null) return null;
+  const list=(Array.isArray(all.case_kinds)?all.case_kinds:[]).slice().sort((a,b)=>(Number(a.rank)||99)-(Number(b.rank)||99));
+  const aktiv=list.filter(k=>k.active!==false);
+  const save=async(next)=>{ setBusy(true);
+    try{ const v={...all, case_kinds:next}; await saveConfigToDB(KEY, v); setAll(v); onChanged&&onChanged(v); }
+    catch(e){ showToast&&showToast('⚠ Speichern fehlgeschlagen','error'); }
+    setBusy(false); };
+  const slug=t=>t.toLowerCase().replace(/ä/g,'ae').replace(/ö/g,'oe').replace(/ü/g,'ue').replace(/ß/g,'ss')
+    .replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'').slice(0,40);
+  const add=async()=>{ const label=nm.trim(); if(!label){ showToast&&showToast('Bitte eine Bezeichnung eingeben','error'); return; }
+    const key=slug(label); if(!key){ showToast&&showToast('Die Bezeichnung ergibt keinen Schlüssel','error'); return; }
+    if(list.some(k=>k.key===key)){ showToast&&showToast('Diese Art gibt es schon','error'); return; }
+    await save([...list, {key, label, rank:(list.reduce((a,k)=>Math.max(a,Number(k.rank)||0),0)+1), active:true}]); setNm(''); };
+  const setActive=async(key,v)=>{ await save(list.map(k=>k.key===key?{...k, active:!!v}:k)); };
+  const setRank=async(key,r)=>{ const n=Number(r); if(!isFinite(n)) return; await save(list.map(k=>k.key===key?{...k, rank:n}:k)); };
+  const setLabel=async(key,t)=>{ const label=String(t||'').trim(); if(!label) return; await save(list.map(k=>k.key===key?{...k, label}:k)); };
+  return <div style={{border:'1px solid var(--border)',borderRadius:12,background:'var(--card)',marginBottom:14,overflow:'hidden'}}>
+    <div onClick={()=>setOpen(o=>!o)} style={{padding:'10px 14px',display:'flex',alignItems:'center',gap:10,cursor:'pointer'}}>
+      <span style={{fontSize:13,fontWeight:800}}>Fallarten</span>
+      <span style={{fontSize:12,color:'var(--muted)'}}>{aktiv.length} zur Auswahl{list.length-aktiv.length?(' · '+(list.length-aktiv.length)+' abgeschaltet'):''} · erster Schritt im Agenten-Link</span>
+      <span style={{marginLeft:'auto',fontSize:13,color:'var(--muted)'}}>{open?'▲':'▼'}</span>
+    </div>
+    {open&&<div style={{padding:'0 14px 14px'}}>
+      {!list.length?<div style={{fontSize:12.5,color:'var(--muted)',marginBottom:10}}>Keine Fallart hinterlegt. Dann entfällt der Schritt und die Agenten starten wie bisher mit der Casenummer.</div>:
+        <div style={{marginBottom:10}}>{list.map(k=>(
+          <div key={k.key} style={{display:'flex',alignItems:'center',gap:10,padding:'5px 0',borderTop:'1px solid var(--border)',fontSize:13}}>
+            <input className="form-input" style={{flex:1,minWidth:160}} defaultValue={k.label} disabled={busy}
+              onBlur={e=>{ if(e.target.value.trim()!==k.label) setLabel(k.key, e.target.value); }}/>
+            <span style={{fontSize:11,color:'var(--muted)',fontFamily:'var(--mono)'}}>{k.key}</span>
+            <label style={{fontSize:11.5,color:'var(--muted)'}}>Reihenfolge</label>
+            <input type="number" className="form-input" style={{width:74}} defaultValue={k.rank==null?'':k.rank} disabled={busy}
+              onBlur={e=>{ if(Number(e.target.value)!==Number(k.rank)) setRank(k.key, e.target.value); }}/>
+            <label style={{fontSize:11.5,color:'var(--muted)',display:'flex',alignItems:'center',gap:5,cursor:'pointer'}}
+              title="Abgeschaltet heisst: steht den Agenten nicht mehr zur Wahl. Schon erfasste Vorgaenge behalten ihre Art.">
+              <input type="checkbox" checked={k.active!==false} disabled={busy} onChange={e=>setActive(k.key, e.target.checked)}/>zur Auswahl</label>
+          </div>))}</div>}
+      <div style={{display:'flex',gap:8,alignItems:'flex-end',flexWrap:'wrap'}}>
+        <div style={{flex:'1 1 220px'}}><label className="form-label">Neue Fallart</label>
+          <input className="form-input" placeholder="z. B. Umzug" value={nm} onChange={e=>setNm(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter') add(); }}/></div>
+        <button className="btn btn-sm btn-primary" disabled={busy} onClick={add}>Hinzufügen</button>
+      </div>
+      <div style={{fontSize:11.5,color:'var(--muted)',marginTop:8,lineHeight:1.5}}>
+        Der Agent wählt die Art als erstes, danach läuft die Erfassung unverändert weiter. Die Art ist nur ein Kennzeichen zum Filtern,
+        sie ändert weder CPO noch Abschluss. Eine neue Art wirkt sofort beim nächsten Aufruf des Links, ohne Änderung am Programm.
+      </div>
+    </div>}
+  </div>;
+}
 // Die sechs abzurechnenden CPOs (drei Ergebnisse mal zwei Rabattstufen), direkt aus dem gepflegten Kalkulator.
 // Zum Gegenlesen an einer Stelle: genau diese Beträge friert ein Abschluss beim Erfassen ein.
 function CpoRateTable({projectId, skill}){
@@ -42753,8 +42811,11 @@ function CpoTrackView({team, employees, showToast}){
   const [nowTs,setNowTs]=useState(Date.now());
   const [hourlyAll,setHourlyAll]=useState(null);     // Stundenvergütung je Mandat (app_config)
   const [tab,setTab]=useState('auswertung');         // auswertung | rechner
+  const [kindDefs,setKindDefs]=useState([]);         // Fallarten aus app_config, dieselbe Liste wie im Agenten-Link
   useEffect(()=>{ let alive=true; (async()=>{ try{ const v=await loadConfigFromDB(HOURLY_KEY); if(alive) setHourlyAll((v&&typeof v==='object')?v:{}); }
     catch(e){ if(alive) setHourlyAll({}); } })(); return ()=>{alive=false;}; },[]);
+  useEffect(()=>{ let alive=true; (async()=>{ try{ const v=await loadConfigFromDB('jsr_cpo_options_v1');
+      if(alive) setKindDefs((v&&Array.isArray(v.case_kinds))?v.case_kinds:[]); }catch(e){ if(alive) setKindDefs([]); } })(); return ()=>{alive=false;}; },[]);
   const load=React.useCallback(async()=>{
     try{
       const [r,s,l]=await Promise.all([
@@ -42859,6 +42920,7 @@ function CpoTrackView({team, employees, showToast}){
         else { const f=HRL.fallback; fbDays++; paidPlanH+=f; paidH+=(ds<today?f:(ds===today?f*fbToday:0)); }
       });
       const mine=mineOf[id]||[];
+      const kinds={}; mine.forEach(r=>{ const k=r.case_kind||'__na'; kinds[k]=(kinds[k]||0)+1; });
       const cls=mine.filter(r=>r.is_close);
       const rev=cls.reduce((a,r)=>a+(Number(r.cpo_amount)||0),0);
       const out={up:0, gleich:0, downgrade:0};
@@ -42870,7 +42932,7 @@ function CpoTrackView({team, employees, showToast}){
       const hourRev=HRL.on?paidH*HRL.rate:0;
       const fcHourRev=HRL.on?paidPlanH*HRL.rate:0;   // alle geplanten produktiven Stunden des Zeitraums
       const fcRev=rate.eph==null?null:(rev+restH*rate.eph);
-      return {id, name:empName(id), istAgent, planH, doneH, restH, paidH, paidPlanH, fbDays,
+      return {id, name:empName(id), istAgent, kinds, planH, doneH, restH, paidH, paidPlanH, fbDays,
         n:mine.length, cl:cls.length, rev, hourRev, total:rev+hourRev,
         up:out.up, gleich:out.gleich, down:out.downgrade, reached, lost, l2, rate,
         cph:doneH>0?cls.length/doneH:null,
@@ -42929,6 +42991,20 @@ function CpoTrackView({team, employees, showToast}){
   const rev2=closes.filter(r=>r.discount_level===2).reduce((a,r)=>a+(Number(r.cpo_amount)||0),0);
   const byAction={}; docs.forEach(r=>{ const k=r.action||'—'; byAction[k]=(byAction[k]||0)+1; });
   const byStatus={}; live.forEach(r=>{ const k=r.status||'—'; byStatus[k]=(byStatus[k]||0)+1; });
+  // Fallarten: Anteil am Gesamt des Zeitraums. Gezaehlt werden alle Vorgaenge (nicht nur Abschluesse),
+  // denn die Frage ist, welche Faelle hereinkommen. Vorgaenge aus der Zeit vor dem Schritt haben keine Art
+  // und stehen als "ohne Angabe" — sie fehlen nicht, sie wurden nur nie gefragt.
+  const kindLabel=k=>{ if(k==='__na') return 'ohne Angabe'; const d=(kindDefs||[]).filter(x=>x.key===k)[0]; return d?d.label:k; };
+  const byKind={}; live.forEach(r=>{ const k=r.case_kind||'__na'; byKind[k]=(byKind[k]||0)+1; });
+  const kindKeys=(()=>{
+    const seen={}; const out=[];
+    (kindDefs||[]).slice().sort((a,b)=>(Number(a.rank)||99)-(Number(b.rank)||99))
+      .forEach(d=>{ if(d&&d.key&&!seen[d.key]&&(d.active!==false||byKind[d.key])){ seen[d.key]=1; out.push(d.key); } });
+    Object.keys(byKind).forEach(k=>{ if(k!=='__na'&&!seen[k]){ seen[k]=1; out.push(k); } });
+    if(byKind.__na) out.push('__na');
+    return out;
+  })();
+  const kindRows=kindKeys.map(k=>({k, label:kindLabel(k), n:byKind[k]||0, pct:live.length?Math.round((byKind[k]||0)/live.length*100):0}));
   const actRows=Object.keys(byAction).map(k=>({k,n:byAction[k]})).sort((a,b)=>b.n-a.n);
   const statRows=Object.keys(byStatus).map(k=>({k,n:byStatus[k]})).sort((a,b)=>b.n-a.n);
 
@@ -42988,7 +43064,7 @@ function CpoTrackView({team, employees, showToast}){
       }))), 'Mitarbeiter');
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(all.map(r=>({
         Datum:r.work_date, Zeit:cpoTime(r.created_at), Case:r.case_no, Mitarbeiter:empName(r.employee_id),
-        Status:r.status, Abgeschlossen:r.closed?'ja':'nein', 'Was':r.action, 'Tarif vorher':r.tariff_from||'', 'Tarif neu':r.tariff_to||'',
+        Fallart:r.case_kind?kindLabel(r.case_kind):'', Status:r.status, Abgeschlossen:r.closed?'ja':'nein', 'Was':r.action, 'Tarif vorher':r.tariff_from||'', 'Tarif neu':r.tariff_to||'',
         Ergebnis:r.outcome?CPO_OUT_LABEL[r.outcome]:'', Rabattstufe:r.discount_level||'', 'CPO EUR':r.cpo_amount?Number(r.cpo_amount):'',
         Storniert:r.cancelled_at?'ja':'nein'
       }))), 'Vorgänge');
@@ -43063,6 +43139,7 @@ function CpoTrackView({team, employees, showToast}){
     </div>
 
     <CpoTariffEditor projectId={PROJ} skill={SKILL} showToast={showToast}/>
+    <CpoKindEditor showToast={showToast} onChanged={v=>setKindDefs(Array.isArray(v&&v.case_kinds)?v.case_kinds:[])}/>
     <CpoRateTable projectId={PROJ} skill={SKILL}/>
     {hourlyAll!==null&&<CpoHourlyEditor projectId={PROJ} skill={SKILL} cfg={HRL} allCfg={hourlyAll}
       onSaved={a=>setHourlyAll(a)} showToast={showToast}/>}
@@ -43161,6 +43238,19 @@ function CpoTrackView({team, employees, showToast}){
             </div>
             <div style={{fontSize:11,color:'var(--muted)',marginTop:6}}>Balken = erfasste Vorgänge je Stunde, dunkel = davon Abschlüsse. Zeitpunkt der Erfassung, nicht des Gesprächs.</div>
           </div>; })()}
+      </div>
+      <div style={{border:'1px solid var(--border)',borderRadius:12,padding:'12px 14px',background:'var(--card)'}}>
+        <div style={{fontSize:13,fontWeight:800,marginBottom:2}}>Fallarten</div>
+        <div style={{fontSize:11.5,color:'var(--muted)',marginBottom:8}}>Anteil an allen {live.length} Vorgängen des Zeitraums</div>
+        {!kindRows.length?<div style={{fontSize:12.5,color:'var(--muted)'}}>Keine Vorgänge im Zeitraum.</div>:
+          kindRows.map(r=>(
+            <div key={r.k} style={{marginBottom:7}}>
+              <div style={{display:'flex',justifyContent:'space-between',fontSize:12.5,marginBottom:2}}>
+                <span style={{fontWeight:600,color:r.k==='__na'?'var(--muted)':'var(--text)'}}>{r.label}</span>
+                <span style={{color:'var(--muted)'}}>{r.n}× · <b style={{color:'var(--text)'}}>{r.pct} %</b></span></div>
+              <div style={{height:7,borderRadius:4,background:'var(--surface-2)',overflow:'hidden'}}>
+                <div style={{width:r.pct+'%',height:'100%',background:r.k==='__na'?'#cbd5e1':BRAND.main}}/></div>
+            </div>))}
       </div>
       <div style={{border:'1px solid var(--border)',borderRadius:12,padding:'12px 14px',background:'var(--card)'}}>
         <div style={{fontSize:13,fontWeight:800,marginBottom:8}}>Kontakte ohne Abschluss</div>
@@ -43262,6 +43352,43 @@ function CpoTrackView({team, employees, showToast}){
       </div>
     </div>
 
+    {/* Fallarten je Mitarbeiter: wer bekommt welche Faelle. Prozent je Zeile, damit sich unterschiedlich
+        viele Vorgaenge vergleichen lassen; die Stueckzahl steht daneben, sonst taeuschen kleine Zahlen. */}
+    {kindRows.length>0&&<div style={{border:'1px solid var(--border)',borderRadius:12,background:'var(--card)',marginBottom:14,overflow:'hidden'}}>
+      <div style={{padding:'10px 14px',borderBottom:'1px solid var(--border)',display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+        <span style={{fontSize:13,fontWeight:800}}>Fallarten je Mitarbeiter</span>
+        <span style={{fontSize:12,color:'var(--muted)'}}>Quote je Zeile, in Klammern die Vorgänge</span>
+      </div>
+      <div style={{overflowX:'auto'}}>
+        <table style={{width:'100%',borderCollapse:'collapse',fontSize:12.5,minWidth:520}}>
+          <thead><tr>
+            <th style={{textAlign:'left',padding:'6px 8px',fontSize:10.5,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.04em',background:'var(--surface-2)'}}>Mitarbeiter</th>
+            <th style={{textAlign:'right',padding:'6px 8px',fontSize:10.5,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.04em',background:'var(--surface-2)'}}>Vorg.</th>
+            {kindRows.map(k=><th key={k.k} style={{textAlign:'right',padding:'6px 8px',fontSize:10.5,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.04em',whiteSpace:'nowrap',background:'var(--surface-2)'}}>{k.label}</th>)}
+          </tr></thead>
+          <tbody>
+            {empRows.filter(e=>e.n>0).map(e=>(
+              <tr key={e.id} style={{borderTop:'1px solid var(--border)'}}>
+                <td style={{padding:'6px 8px',fontWeight:600,whiteSpace:'nowrap'}}>{e.name}</td>
+                <td style={{padding:'6px 8px',textAlign:'right',color:'var(--muted)'}}>{e.n}</td>
+                {kindRows.map(k=>{ const c=(e.kinds&&e.kinds[k.k])||0;
+                  return <td key={k.k} style={{padding:'6px 8px',textAlign:'right',fontFamily:'var(--mono)',color:c?(k.k==='__na'?'var(--muted)':'var(--text)'):'var(--border)'}}>
+                    {c?(Math.round(c/e.n*100)+' %'):'—'}{c?<span style={{color:'var(--muted)',fontFamily:'inherit'}}> ({c})</span>:null}</td>; })}
+              </tr>))}
+            <tr style={{borderTop:'2px solid var(--border)',fontWeight:800,background:'var(--surface-2)'}}>
+              <td style={{padding:'7px 8px'}}>Team</td>
+              <td style={{padding:'7px 8px',textAlign:'right'}}>{live.length}</td>
+              {kindRows.map(k=><td key={k.k} style={{padding:'7px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{k.pct} %<span style={{color:'var(--muted)',fontWeight:400,fontFamily:'inherit'}}> ({k.n})</span></td>)}
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div style={{padding:'8px 14px',borderTop:'1px solid var(--border)',fontSize:11.5,color:'var(--muted)',lineHeight:1.6}}>
+        Die Art wählt der Agent zu Beginn der Erfassung. Sie ist ein Kennzeichen und ändert nichts an CPO oder Abschluss.
+        „Ohne Angabe" sind Vorgänge aus der Zeit vor diesem Schritt. Neue Arten kommen oben unter Fallarten dazu.
+      </div>
+    </div>}
+
     {/* Umsatz je Tag */}
     {dayRows.length>0&&<div style={{border:'1px solid var(--border)',borderRadius:12,background:'var(--card)',marginBottom:14,overflow:'hidden'}}>
       <div style={{padding:'10px 14px',borderBottom:'1px solid var(--border)',fontSize:13,fontWeight:800}}>{HRL.on?'Umsatz je Tag, CPO und Stunden':'Umsatz je Tag'}</div>
@@ -43306,8 +43433,8 @@ function CpoTrackView({team, employees, showToast}){
         {!listed.length?<div style={{padding:16,fontSize:13,color:'var(--muted)'}}>Für diesen Zeitraum ist nichts erfasst.</div>:
         <table style={{width:'100%',borderCollapse:'collapse',fontSize:12.5}}>
           <thead><tr style={{position:'sticky',top:0,background:'var(--surface-2)'}}>
-            {['Datum','Zeit','Case','Mitarbeiter','Status','Abg.','Was','Tarif vorher → neu','Ergebnis','Stufe','CPO',''].map((h,i)=>
-              <th key={i} style={{textAlign:i>=9&&i<=10?'right':'left',padding:'6px 10px',fontSize:11,color:'var(--muted)',whiteSpace:'nowrap'}}>{h}</th>)}
+            {['Datum','Zeit','Case','Mitarbeiter','Art','Status','Abg.','Was','Tarif vorher → neu','Ergebnis','Stufe','CPO',''].map((h,i)=>
+              <th key={i} style={{textAlign:i>=10&&i<=11?'right':'left',padding:'6px 10px',fontSize:11,color:'var(--muted)',whiteSpace:'nowrap'}}>{h}</th>)}
           </tr></thead>
           <tbody>{listed.map(r=>(
             <tr key={r.id} style={{borderTop:'1px solid var(--border)',opacity:r.cancelled_at?0.5:1}}>
@@ -43315,6 +43442,7 @@ function CpoTrackView({team, employees, showToast}){
               <td style={{padding:'6px 10px',whiteSpace:'nowrap',fontFamily:'var(--mono)',color:'var(--muted)'}}>{cpoTime(r.created_at)}</td>
               <td style={{padding:'6px 10px',fontFamily:'var(--mono)',fontWeight:700}}>{r.case_no}{r.cancelled_at?<span style={{marginLeft:6,fontSize:10,fontWeight:800,color:'var(--red)'}}>storniert</span>:null}</td>
               <td style={{padding:'6px 10px',whiteSpace:'nowrap'}}>{empName(r.employee_id)}</td>
+              <td style={{padding:'6px 10px',whiteSpace:'nowrap',color:r.case_kind?'var(--text)':'var(--muted)'}}>{r.case_kind?kindLabel(r.case_kind):'—'}</td>
               <td style={{padding:'6px 10px'}}>{r.status}</td>
               <td style={{padding:'6px 10px'}}>{r.closed?'ja':'nein'}</td>
               <td style={{padding:'6px 10px'}}>{r.action}</td>

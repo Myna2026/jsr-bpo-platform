@@ -208,7 +208,7 @@ var MYBUILD='__BUILD_ID__';
 var SB_URL='https://msdiyjxckmpvuomnhvjp.supabase.co', SB_KEY='sb_publishable_exKYOG6Znhj_JlO0v6erQQ_q0HWWiyl';
 var FN=SB_URL+'/functions/v1/cpo-track';
 var TOKEN=(function(){ try{ return new URLSearchParams(location.search).get('t')||''; }catch(e){ return ''; } })();
-var SES=null, ME='', OPT={status:[],action:[],close_action:'Angebot angenommen'}, TAR=[], ENTRIES=[];
+var SES=null, ME='', OPT={status:[],action:[],case_kinds:[],close_action:'Angebot angenommen'}, TAR=[], ENTRIES=[];
 var F={}, STEP=0, STEPS=[], PICKS=[], JUST=null, JUSTPRAISE='';
 var OUT_TXT={upgrade:'Upgrade',downgrade:'Downgrade, aber gehalten',gleich:'Gleiche Tarifklasse'};
 // Lob nur bei einem echten Abschluss. Mehrere Sätze je Ergebnis, der zuletzt gezeigte kommt nicht sofort
@@ -304,12 +304,16 @@ $('fDate').addEventListener('change',function(){ if($('fDate').value){ setDate($
 // ja, wenn die Maßnahme „Angebot angenommen" ist. Alles andere ist Dokumentation.
 function isClose(){ return F.action===OPT.close_action; }
 function buildSteps(){
-  STEPS=['case','status','action'];
+  // Die Art des Falls steht vorn, weil sie der Agent im Moment des Oeffnens am besten weiss. Sie kommt aus
+  // der Konfiguration (app_config jsr_cpo_options_v1, Schluessel case_kinds): neue Arten brauchen keinen Code.
+  // Ist dort nichts hinterlegt, entfaellt der Schritt und alles laeuft wie vorher.
+  STEPS=(OPT.case_kinds&&OPT.case_kinds.length?['art']:[]).concat(['case','status','action']);
   if(isClose()) STEPS.push('abschluss');   // Tarif vorher, Tarif neu und Rabattstufe auf EINEM Bildschirm
   STEPS.push('check');
 }
 function crumbs(){
   var c=[];
+  if(F.case_kind) c.push(['Art',artLabel(F.case_kind)]);
   if(F.case_no) c.push(['Case',F.case_no]);
   if(F.status) c.push(['Status',F.status]);
   if(F.action) c.push(['Was',F.action]);
@@ -318,6 +322,7 @@ function crumbs(){
   if(F.discount_level) c.push(['Stufe',String(F.discount_level)]);
   $('crumb').innerHTML=c.map(function(x){ return '<span class="cb">'+esc(x[0])+' <b>'+esc(x[1])+'</b></span>'; }).join('');
 }
+function artLabel(k){ var a=(OPT.case_kinds||[]).filter(function(x){ return x.key===k; })[0]; return a?a.label:(k||''); }
 function optList(items, cur, two){
   return '<div class="opts">'+items.map(function(it,i){
     var v=(typeof it==='object')?it.v:it, l=(typeof it==='object')?it.l:it;
@@ -368,6 +373,10 @@ function render(){
     $('bNext').addEventListener('click',caseNext);
     return;
   }
+  if(k==='art'){ PICKS=(OPT.case_kinds||[]).map(function(a){ return {v:a.key,l:a.label}; });
+    box.innerHTML='<div class="q">Um welche Art von Fall geht es?</div>'+optList(PICKS,F.case_kind)
+      + '<div style="font-size:12px;color:var(--muted);margin-top:6px">Nur ein Kennzeichen, damit wir sehen, welche Faelle hereinkommen. Danach geht es wie gewohnt weiter.</div>';
+    bindPicks(function(v){ F.case_kind=v; next(); }); showNext(F.case_kind); return; }
   if(k==='status'){ PICKS=OPT.status; box.innerHTML='<div class="q">Status</div>'+optList(PICKS,F.status); bindPicks(function(v){ F.status=v; next(); }); showNext(F.status); return; }
   if(k==='action'){ PICKS=OPT.action; box.innerHTML='<div class="q">Was wurde gemacht?</div>'+optList(PICKS,F.action);
     bindPicks(function(v){ F.action=v; if(!isClose()){ F.tariff_from=null; F.tariff_to=null; F.discount_level=null; } next(); }); showNext(F.action); return; }
@@ -407,7 +416,7 @@ function render(){
     return; }
   var o=outcomeNow();
   box.innerHTML='<div class="q">Passt das?</div>'
-    + '<div class="sum">'+[de(F.work_date), F.case_no, F.status, F.action].map(esc).join(' · ')+'</div>'
+    + '<div class="sum">'+[de(F.work_date), artLabel(F.case_kind), F.case_no, F.status, F.action].filter(Boolean).map(esc).join(' · ')+'</div>'
     + (isClose()?'<div class="ok" style="margin-top:8px">'+esc(F.tariff_from+' → '+F.tariff_to)+' · '+(o?OUT_TXT[o]:'')+' · Stufe '+F.discount_level+'</div>':'')
     + '<div style="margin-top:10px"><label class="f" for="iNote">Notiz (optional, bleibt bei uns)</label>'
     + '<input id="iNote" autocomplete="off" value="'+esc(F.note||'')+'"></div>'
@@ -432,7 +441,7 @@ function outcomeNow(){ var a=rankOf(F.tariff_from), b=rankOf(F.tariff_to); if(a=
 // ── Speichern, danach sofort der nächste Vorgang ────────────────────────────
 function save(){
   var n=$('iNote'); if(n) F.note=n.value.trim();
-  var e={ work_date:F.work_date, case_no:F.case_no, status:F.status, closed:isClose(), action:F.action, note:F.note||'' };
+  var e={ work_date:F.work_date, case_no:F.case_no, status:F.status, closed:isClose(), action:F.action, note:F.note||'', case_kind:F.case_kind||'' };
   if(isClose()){ e.tariff_from=F.tariff_from; e.tariff_to=F.tariff_to; e.discount_level=F.discount_level; }
   $('bSave').disabled=true;
   var praise=isClose()?praiseFor(outcomeNow()):'';
@@ -469,7 +478,7 @@ function render2(){
       + '<div class="grow"><div class="cs">'+esc(e.case_no)+' '
       + (e.is_close?'<span class="tag cl">Abschluss</span> ':'')+(st?'<span class="tag st">storniert</span>':'')
       + '<span style="float:right;font-family:inherit;font-weight:700;font-size:12px;color:var(--muted)">'+hhmm(e.created_at)+'</span></div>'
-      + '<div class="mt">'+esc(e.status)+' · '+esc(e.action)
+      + '<div class="mt">'+(e.case_kind?(esc(artLabel(e.case_kind))+' · '):'')+esc(e.status)+' · '+esc(e.action)
       + (e.tariff_from?(' · '+esc(e.tariff_from)+' → '+esc(e.tariff_to)):'')+(e.note?(' · '+esc(e.note)):'')+'</div></div>'
       + '<div style="display:flex;gap:6px">'
       + (st?'':'<button class="btn ghost sm" data-cancel="'+e.id+'" style="color:var(--red)">Storno</button>')

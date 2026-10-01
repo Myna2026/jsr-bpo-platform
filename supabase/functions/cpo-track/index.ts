@@ -43,6 +43,12 @@ async function options() {
   return {
     status: Array.isArray(v.status) ? v.status : [],
     action: Array.isArray(v.action) ? v.action : [],
+    // Fallarten: Schluessel plus Beschriftung, ohne Code erweiterbar. Leer heisst, der Schritt
+    // entfaellt und es wird nichts gespeichert.
+    case_kinds: (Array.isArray(v.case_kinds) ? v.case_kinds : [])
+      .filter((k: any) => k && k.key && k.active !== false)
+      .sort((a: any, b: any) => (Number(a.rank) || 99) - (Number(b.rank) || 99))
+      .map((k: any) => ({ key: String(k.key), label: String(k.label || k.key) })),
     skill_label: v.skill_label || "Retention",
     close_action: v.close_action || "Angebot angenommen",
   };
@@ -77,7 +83,7 @@ async function cpoFor(projectId: string, skill: string, outcome: string, level: 
   return { amount: Math.round(amount * 100) / 100, basis: { outcome, level, config_updated_at: (data && data.updated_at) || null, cpo_stufe1: row.cpo_stufe1 ?? null, cpo_stufe2: row.cpo_stufe2 ?? null } };
 }
 // Was der Agent von einem Eintrag sehen darf: alles außer Geld.
-const pub = (r: any) => ({ id: r.id, work_date: r.work_date, case_no: r.case_no, status: r.status, closed: r.closed, action: r.action,
+const pub = (r: any) => ({ id: r.id, work_date: r.work_date, case_no: r.case_no, status: r.status, closed: r.closed, action: r.action, case_kind: r.case_kind,
   outcome: r.outcome, discount_level: r.discount_level, tariff_from: r.tariff_from, tariff_to: r.tariff_to,
   note: r.note, is_close: r.is_close, created_at: r.created_at,
   cancelled_at: r.cancelled_at, cancel_reason: r.cancel_reason });
@@ -132,6 +138,11 @@ Deno.serve(async (req) => {
     if (!CASE_RX.test(caseNo.toUpperCase())) return json({ error: "Die Casenummer muss mit CS oder IMS beginnen, gefolgt von Ziffern (z. B. CS5006433)." }, 400);
     if (opt.status.length && !opt.status.includes(String(e.status || ""))) return json({ error: "Bitte einen Status wählen." }, 400);
     if (opt.action.length && !opt.action.includes(String(e.action || ""))) return json({ error: "Bitte auswählen, was gemacht wurde." }, 400);
+    // Fallart: nur ein Kennzeichen, aber trotzdem gegen die Liste geprueft. Ein freier Text im Feld
+    // waere spaeter nicht auswertbar, und genau zum Auswerten gibt es das Feld.
+    const artKeys = opt.case_kinds.map((k: any) => k.key);
+    const art = String(e.case_kind || "").trim();
+    if (artKeys.length && !artKeys.includes(art)) return json({ error: "Bitte die Art des Falls wählen." }, 400);
     // „abgeschlossen = ja" gilt NUR bei „Angebot angenommen" (User 2026-09-23). Deshalb wird es aus der
     // Maßnahme abgeleitet und nicht vom Browser übernommen: sonst entstehen Zeilen wie „WVL, abgeschlossen ja".
     // Bewusst auch für „Case geschlossen" und „Kündigung in K7 erfasst": inhaltlich abgeschlossen, aber ohne
@@ -139,7 +150,8 @@ Deno.serve(async (req) => {
     const closed = String(e.action) === opt.close_action;
     const isClose = closed;
     const row: any = { project_id: ses.link.project_id, skill: ses.link.skill, employee_id: ses.employee_id, work_date: date,
-      case_no: caseNo.toUpperCase(), status: String(e.status), closed, action: String(e.action), note: (String(e.note || "").trim() || null), created_via: "agent" };
+      case_no: caseNo.toUpperCase(), status: String(e.status), closed, action: String(e.action), note: (String(e.note || "").trim() || null),
+      case_kind: (artKeys.length ? art : null), created_via: "agent" };
     if (isClose) {
       // Der Agent wählt zwei Tarife, das Ergebnis rechnet der Server. Nie die Angabe des Browsers übernehmen.
       const tl = await tariffs(ses.link.project_id, ses.link.skill);

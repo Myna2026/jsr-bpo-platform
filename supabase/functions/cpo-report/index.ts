@@ -122,12 +122,18 @@ Deno.serve(async (req) => {
   }
 
   // ── Daten ─────────────────────────────────────────────────────────────────
-  const [{ data: ents }, { data: shifts }, { data: cfgRow }] = await Promise.all([
-    sb.from("cpo_entries").select("employee_id,work_date,case_no,is_close,cpo_amount,created_at,cancelled_at")
+  const [{ data: ents }, { data: shifts }, { data: cfgRow }, { data: optRow }] = await Promise.all([
+    sb.from("cpo_entries").select("employee_id,work_date,case_no,is_close,cpo_amount,created_at,cancelled_at,case_kind")
       .eq("project_id", PROJ).eq("skill", SKILL).eq("work_date", today),
     sb.from("shift_assignments").select("employee_id,shift_value,net_hours").eq("project_id", PROJ).eq("skill", SKILL).eq("work_date", today),
     sb.from("app_config").select("value").eq("key", HOURLY_KEY).maybeSingle(),
+    sb.from("app_config").select("value").eq("key", "jsr_cpo_options_v1").maybeSingle(),
   ]);
+  // Fallarten: dieselbe Liste, die der Agent im Link sieht. Die Beschriftung kommt aus der Konfiguration,
+  // damit eine neue Art ohne Aenderung an dieser Datei in der Mail auftaucht.
+  const kindDefs: any[] = (((optRow && (optRow as any).value) || {}).case_kinds) || [];
+  const kindLabel = (k: string) => { if (k === "__na") return "ohne Angabe";
+    const d = kindDefs.filter((x: any) => x && x.key === k)[0]; return d ? String(d.label || d.key) : k; };
   const hcfgAll = (cfgRow && (cfgRow as any).value) || {};
   const hc = hcfgAll[PROJ + "/" + SKILL] || {};
   const HRL = { on: !!hc.on, rate: Number(hc.rate) || 12.5, fallback: Number(hc.fallback) || 7.5 };
@@ -169,9 +175,25 @@ Deno.serve(async (req) => {
       paid = HRL.fallback * (slot === "13" ? Math.max(0, Math.min(1, (cut - 540) / 510)) : 1);
     }
     const name = ((emp.first_name || "") + " " + (emp.last_name || "")).trim() || "Unbekannt";
-    return { id, name, agent, n: mine.length, cl: cls.length, rev, paid: HRL.on ? paid : 0, fb,
+    return { id, name, agent, n: mine.length, cl: cls.length, rev, paid: HRL.on ? paid : 0, fb, mine,
              hourRev: HRL.on ? paid * HRL.rate : 0, quote: mine.length ? cls.length / mine.length : 0 };
   }).sort((a, b) => b.rev - a.rev || b.cl - a.cl);
+
+  // Verteilung der Fallarten: Anteil am Tagesgesamt, gezaehlt werden alle Vorgaenge, nicht nur Abschluesse.
+  // Vorgaenge ohne Art stammen aus der Zeit vor dem Auswahlschritt und stehen als "ohne Angabe".
+  const kindCount: Record<string, number> = {};
+  live.forEach((r: any) => { const k = r.case_kind || "__na"; kindCount[k] = (kindCount[k] || 0) + 1; });
+  const kindOrder: string[] = [];
+  kindDefs.slice().sort((a: any, b: any) => (Number(a.rank) || 99) - (Number(b.rank) || 99))
+    .forEach((d: any) => { if (d && d.key && kindOrder.indexOf(d.key) < 0 && (d.active !== false || kindCount[d.key])) kindOrder.push(d.key); });
+  Object.keys(kindCount).forEach((k) => { if (k !== "__na" && kindOrder.indexOf(k) < 0) kindOrder.push(k); });
+  if (kindCount.__na) kindOrder.push("__na");
+  const kindMix = (mine: any[]) => {
+    if (!mine.length) return "";
+    const c: Record<string, number> = {};
+    mine.forEach((r: any) => { const k = r.case_kind || "__na"; c[k] = (c[k] || 0) + 1; });
+    return kindOrder.filter((k) => c[k]).map((k) => kindLabel(k) + " " + Math.round(c[k] / mine.length * 100) + " %").join(", ");
+  };
 
   const sum = (k: string) => rows.reduce((a: number, r: any) => a + (Number(r[k]) || 0), 0);
   const total = { n: sum("n"), cl: sum("cl"), rev: sum("rev"), paid: sum("paid"), hourRev: sum("hourRev") };
@@ -190,7 +212,10 @@ Deno.serve(async (req) => {
   if (dry) return json({ ok: true, slot, today, sendeTag, empfaenger: await empfaengerFuer(sb, sendeTag), total, gesamt, quote,
                          jeStd: total.paid > 0 ? Math.round((HRL.on ? gesamt : total.rev) / total.paid * 100) / 100 : null,
                          jeStdCpo: total.paid > 0 ? Math.round(total.rev / total.paid * 100) / 100 : null,
-                         rows, hourly: HRL, fbCount });
+                         rows: rows.map((r: any) => ({ ...r, mine: undefined, arten: kindMix(r.mine || []) })),
+                         arten: kindOrder.map((k) => ({ key: k, label: kindLabel(k), n: kindCount[k] || 0,
+                           pct: live.length ? Math.round((kindCount[k] || 0) / live.length * 100) : 0 })),
+                         hourly: HRL, fbCount });
 
   // ── Mail bauen ────────────────────────────────────────────────────────────
   const brandKey = ((await agentMailSender(sb, "paul")) ? "paul" : "max");
@@ -216,7 +241,8 @@ Deno.serve(async (req) => {
   const zeile = (r: any, tone: string, badge?: string) => perfRow({
     name: r.name, value: eur(r.rev), tone, badge,
     note: r.cl + (r.cl === 1 ? " Abschluss" : " Abschlüsse") + " aus " + r.n + " Vorgängen · " + Math.round(r.quote * 100) + " % Quote"
-          + (HRL.on ? " · " + eur(r.hourRev) + " Stunden" : ""),
+          + (HRL.on ? " · " + eur(r.hourRev) + " Stunden" : "")
+          + (kindMix(r.mine || []) ? " · " + kindMix(r.mine || []) : ""),
     valuePct: Math.round(r.rev / maxRev * 100),
   });
 
@@ -233,6 +259,17 @@ Deno.serve(async (req) => {
   if (resend) {
     inner += callout("Nachversand", "Dieser Tagesabschluss vom " + dmy(today) + " ging gestern Abend noch an die kleinere Runde. "
       + "Hier kommt er einmalig an alle. Ab heute läuft der Takt um 13:00 und 19:15 wieder normal.", "#2563eb");
+  }
+
+  if (kindOrder.length && live.length) {
+    inner += '<tr><td style="padding:16px 16px 4px;font-size:13px;font-weight:bold;color:#0f2830;">'
+      + 'Welche Fälle kamen herein, Anteil an ' + live.length + ' Vorgängen</td></tr>';
+    kindOrder.forEach((k) => {
+      const n2 = kindCount[k] || 0;
+      const pct = Math.round(n2 / live.length * 100);
+      inner += perfRow({ name: kindLabel(k), value: pct + " %", tone: k === "__na" ? "neutral" : "good",
+        note: n2 + (n2 === 1 ? " Vorgang" : " Vorgänge"), valuePct: pct });
+    });
   }
 
   if (liste.length) {
