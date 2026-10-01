@@ -3,7 +3,8 @@
 //
 // Abgerechnet wird, was wir netto liefern: Schichtplan minus Urlaub/Krankheit/Pausen,
 // je Person nur mit ihrem abrechenbaren Anteil (app_config.jsr_hc_billing_v1).
-// Der Forecast ist das ZIEL, nicht die Obergrenze. Er liegt heute nur je Kalenderwoche
+// Der Forecast ist zugleich die OBERGRENZE: HolidayCheck bezahlt den kleineren Wert aus Forecast
+// und geliefert. Zusaetzlich angeforderte Stunden heben den Deckel (Tabelle hc_extra_hours). Er liegt heute nur je Kalenderwoche
 // vor; für Teilzeiträume wird er gleichmäßig auf die Tage verteilt. Sobald der
 // Tages-Forecast eingelesen ist, ändert sich hier nur die Herkunft der Zahl, nicht der Aufbau.
 
@@ -118,7 +119,7 @@ export function shiftShare(shiftValue: string, nowMin: number | null) {
 export type HcSkill = {
   skill: string; label: string; rate: number | null; abrBis?: number;
   ziel: number; zielTeil: boolean;
-  plan: number; abw: number; netto: number; abr: number; nichtAbr: number;
+  plan: number; abw: number; netto: number; abr: number; abrRoh: number; gekappt: number; nichtAbr: number;
   eur: number | null; zielEur: number | null; luecke: number | null; lueckeEur: number | null;
   rows: any[];
 };
@@ -134,7 +135,7 @@ export async function hcCompute(admin: any, from: string, to: string, nowMin: nu
   const wkFrom = isoMonday(from);
   const wkTo = addDays(isoMonday(to), 6);
   const years = [...new Set([Number(wkFrom.slice(0, 4)), Number(wkTo.slice(0, 4))])];
-  const [shR, dhR, fcR, tpR, cfgR, skR] = await Promise.all([
+  const [shR, dhR, fcR, tpR, cfgR, skR, exR] = await Promise.all([
     admin.from("shift_assignments").select("employee_id,skill,work_date,net_hours,shift_value")
       .eq("project_id", HC_PROJECT).gte("work_date", wkFrom).lte("work_date", wkTo),
     admin.from("daily_hours").select("employee_id,skill,work_date,hours")
@@ -144,6 +145,8 @@ export async function hcCompute(admin: any, from: string, to: string, nowMin: nu
     admin.from("training_plans").select("name,start_date,end_date,status").eq("project_id", HC_PROJECT),
     admin.from("app_config").select("value").eq("key", HC_BILLING_KEY).maybeSingle(),
     admin.from("project_skills").select("key,rate").eq("project_id", HC_PROJECT),
+    admin.from("hc_extra_hours").select("skill,work_date,hours,reason,source")
+      .eq("project_id", HC_PROJECT).gte("work_date", wkFrom).lte("work_date", wkTo),
   ]);
   const sh = shR.data || [];
   const cfg = cfgNorm(cfgR.data && cfgR.data.value);
@@ -187,6 +190,51 @@ export async function hcCompute(admin: any, from: string, to: string, nowMin: nu
   });
   const wkVol: Record<string, { bis: number; ganz: number }> = {};
 
+  // ── Der Forecast ist die Obergrenze, nicht nur das Ziel ───────────────────────────────────────
+  // HolidayCheck bezahlt die kleinere der beiden Zahlen, Forecast oder geliefert (Shkurte, 2026-10-01).
+  // Ausnahme sind zusaetzlich angeforderte Stunden; die stehen in hc_extra_hours und heben den Deckel
+  // fuer genau diesen Tag und Skill. Gibt es fuer einen Tag keinen Forecast, wird NICHT gekappt:
+  // ein fehlender Wert ist keine Null, sonst wuerde eine Luecke im Tagesblatt Geld vernichten.
+  const extraBy: Record<string, { h: number; reason: string; source: string }> = {};
+  (exR.data || []).forEach((r: any) => {
+    const k = String(r.skill || "").toLowerCase() + "|" + String(r.work_date).slice(0, 10);
+    const h = Number(r.hours) || 0; if (h <= 0) return;
+    extraBy[k] = { h: (extraBy[k] ? extraBy[k].h : 0) + h, reason: r.reason || "", source: r.source || "" };
+  });
+  // Erster Durchgang: abrechenbare Stunden je Tag und Skill, noch ohne Deckel.
+  const rohTag: Record<string, number> = {};
+  sh.forEach((r: any) => {
+    const ds = String(r.work_date).slice(0, 10), sk = String(r.skill || "").toLowerCase();
+    let net = Number(r.net_hours) || 0; if (net <= 0) return;
+    if (nowMin != null && ds === to) net = net * shiftShare(r.shift_value, nowMin);
+    const emp = empBy[r.employee_id];
+    const ende = emp && emp.termination_date ? String(emp.termination_date).slice(0, 10) : "";
+    if (!!ende && ds > ende) return;
+    const nach = net * absFactor(emp, ds);
+    const pct = pctFor(cfg, r.employee_id, ds, trainDays);
+    const cap = capFor(cfg, r.employee_id, ds);
+    let abr = nach * (pct / 100);
+    if (cap != null && abr > cap) abr = cap;
+    const k = sk + "|" + ds;
+    rohTag[k] = (rohTag[k] || 0) + abr;
+  });
+  // Faktor je Tag und Skill: 1 = nichts gekappt. Er wird gleichmaessig auf die Personen verteilt,
+  // damit die Zeilen weiter zur Skill-Summe passen. Wer wieviel abbekommt, entscheidet HolidayCheck
+  // nicht personenscharf, also ist jede andere Verteilung genauso erfunden und diese wenigstens neutral.
+  const kapF: Record<string, number> = {}; const kapInfo: Record<string, any> = {};
+  Object.keys(rohTag).forEach((k) => {
+    const [sk, ds] = k.split("|");
+    const fc = fcDay[k];
+    const ex = extraBy[k] ? extraBy[k].h : 0;
+    if (fc == null) { kapF[k] = 1; return; }                 // ohne Forecast kein Deckel
+    const deckel = fc + ex;
+    const roh = rohTag[k];
+    const f = roh > deckel && roh > 0 ? deckel / roh : 1;
+    kapF[k] = f;
+    if (f < 1) kapInfo[k] = { ds, skill: sk, roh, deckel, fc, extra: ex, weg: roh - deckel };
+  });
+  const kapOf = (sk: string, ds: string) => { const f = kapF[sk + "|" + ds]; return f == null ? 1 : f; };
+
   const istBy: Record<string, number> = {};
   (dhR.data || []).forEach((r: any) => { const k = r.employee_id + "|" + r.skill; istBy[k] = (istBy[k] || 0) + (Number(r.hours) || 0); });
 
@@ -206,6 +254,8 @@ export async function hcCompute(admin: any, from: string, to: string, nowMin: nu
     const cap = capFor(cfg, r.employee_id, ds);
     let abr = nach * (pct / 100);
     if (cap != null && abr > cap) abr = cap;      // Obergrenze in Stunden schlaegt den Anteil
+    const abrRoh = abr;
+    abr = abr * kapOf(sk, ds);                    // Deckel des Tages: Forecast plus Zusatzstunden
     // Wochenvolumen fuer das anteilige Ziel: ueber die GANZE Woche, "bis" nur bis zum Zeitraum-Ende.
     const wkKey = sk + "|" + (() => { const w = isoWeek(ds); return w.year + "-" + w.kw; })();
     const wv = wkVol[wkKey] || (wkVol[wkKey] = { bis: 0, ganz: 0 });
@@ -215,12 +265,12 @@ export async function hcCompute(admin: any, from: string, to: string, nowMin: nu
     const q = per[k] || (per[k] = {
       id: r.employee_id, skill: sk,
       name: ((emp && emp.first_name || "") + " " + (emp && emp.last_name || "")).trim() || "Unbekannt",
-      position: (emp && emp.position) || "", plan: 0, abw: 0, netto: 0, abr: 0, pcts: [] as number[],
+      position: (emp && emp.position) || "", plan: 0, abw: 0, netto: 0, abr: 0, abrRoh: 0, pcts: [] as number[],
     });
-    q.plan += net; q.abw += net - nach; q.netto += nach; q.abr += abr; q.pcts.push(pct);
+    q.plan += net; q.abw += net - nach; q.netto += nach; q.abr += abr; q.abrRoh += abrRoh; q.pcts.push(pct);
     const dk = ds + "|" + sk;
-    const dd = daySeries[dk] || (daySeries[dk] = { ds, skill: sk, plan: 0, netto: 0, abr: 0 });
-    dd.plan += net; dd.netto += nach; dd.abr += abr;
+    const dd = daySeries[dk] || (daySeries[dk] = { ds, skill: sk, plan: 0, netto: 0, abr: 0, abrRoh: 0, fc: fcDay[sk + "|" + ds] == null ? null : fcDay[sk + "|" + ds], extra: extraBy[sk + "|" + ds] ? extraBy[sk + "|" + ds].h : 0 });
+    dd.plan += net; dd.netto += nach; dd.abr += abr; dd.abrRoh += abrRoh;
   });
   const list = Object.keys(per).map((k) => {
     const q = per[k];
@@ -249,11 +299,11 @@ export async function hcCompute(admin: any, from: string, to: string, nowMin: nu
     const rate = rateBy[sk] != null ? rateBy[sk] : null;
     const z = zielOf(sk);
     const sum = (f: string) => rows.reduce((a, r: any) => a + (Number(r[f]) || 0), 0);
-    const abr = sum("abr"), netto = sum("netto");
+    const abr = sum("abr"), netto = sum("netto"), abrRoh = sum("abrRoh");
     return {
       skill: sk, label: sk === "sales" ? "Sales" : "Support", rate,
       ziel: z.h, zielTeil: z.teil,
-      plan: sum("plan"), abw: sum("abw"), netto, abr, nichtAbr: netto - abr,
+      plan: sum("plan"), abw: sum("abw"), netto, abr, abrRoh, gekappt: Math.max(0, abrRoh - abr), nichtAbr: netto - abr,
       // abrBis = abrechenbar seit Wochenbeginn bis zum Ende des Zeitraums. NUR diese Zahl gehoert
       // gegen das Ziel: abr zaehlt den gewaehlten Zeitraum (oft ein Tag), das Ziel ist ein Wochenwert.
       abrBis: z.abrBis,
@@ -286,6 +336,12 @@ export async function hcCompute(admin: any, from: string, to: string, nowMin: nu
     from, to, days, skills, list, total, cfg,
     daySeries: Object.keys(daySeries).map((k) => daySeries[k]).sort((a, b) => a.ds < b.ds ? -1 : 1),
     trainDays, trainNames: Object.keys(trainNames),
+    // Welche Tage hat der Forecast gedeckelt, und wieviel ging dabei weg? Das gehoert in jede
+    // Darstellung: eine stillschweigend gekappte Stunde sieht sonst aus wie eine nicht geleistete.
+    kapTage: Object.keys(kapInfo).map((k) => kapInfo[k]).filter((x) => x.ds >= from && x.ds <= to)
+      .sort((a, b) => a.ds < b.ds ? -1 : 1),
+    extras: Object.keys(extraBy).map((k) => ({ skill: k.split("|")[0], ds: k.split("|")[1], ...extraBy[k] }))
+      .filter((x) => x.ds >= from && x.ds <= to).sort((a, b) => a.ds < b.ds ? -1 : 1),
     ohneZiel, offenOverhead: [...new Set(offenOverhead)],
   };
 }

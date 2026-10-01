@@ -99,6 +99,22 @@ Deno.serve(async (req) => {
     const wer = R.list.filter((r: any) => r.abw > 0).map((r: any) => r.name + " (" + hrs(r.abw) + ")");
     inner += callout("Abwesenheit kürzt den Tag", hrs(R.total.abw) + " fallen weg: " + wer.join(", ") + ".", "#d97706");
   }
+  // Der Forecast deckelt: was darueber hinaus geleistet wurde, bezahlt HolidayCheck nicht. Das muss
+  // in der Mail stehen, sonst sieht eine gekappte Stunde aus wie eine nicht geleistete.
+  const gekappt = R.skills.reduce((a: number, s: any) => a + (s.gekappt || 0), 0);
+  if (gekappt > 0.05) {
+    const wo = (R as any).kapTage.map((k: any) => dmy(k.ds) + " " + (k.skill === "sales" ? "Sales" : "Support") + " " + hrs(k.weg));
+    inner += callout("Über dem Forecast, deshalb nicht abrechenbar",
+      hrs(gekappt) + " liegen über dem Tagesforecast und zählen nicht: " + wo.slice(0, 6).join(", ")
+      + (wo.length > 6 ? " und " + (wo.length - 6) + " weitere" : "")
+      + ". Hat HolidayCheck die Stunden angefordert, im Leitstand unter Zusatzstunden eintragen, dann zählen sie wieder.", "#d97706");
+  }
+  if ((R as any).extras && (R as any).extras.length) {
+    const ex = (R as any).extras;
+    inner += callout("Zusatzstunden berücksichtigt",
+      ex.map((e: any) => dmy(e.ds) + " " + (e.skill === "sales" ? "Sales" : "Support") + " " + hrs(e.h) + (e.reason ? " (" + e.reason + ")" : "")).join(", ")
+      + ". Diese Stunden heben den Forecast-Deckel des jeweiligen Tages.", "#2563eb");
+  }
   if (R.trainNames.length) {
     inner += callout("Schulung läuft", "Heute läuft " + R.trainNames.join(", ") + ". Wer dafür auf 0 Prozent steht, zählt an diesem Tag nicht mit.", "#2563eb");
   }
@@ -117,7 +133,9 @@ Deno.serve(async (req) => {
   inner += refLine((slot === "13"
     ? "Zwischenstand: die bis 13:00 Uhr gelaufene Schichtzeit, anteilig gerechnet."
     : "Tagesabschluss: der ganze geplante Tag. Grundlage ist der Schichtplan, nicht die Stempelung: später ändert sich daran nichts mehr.")
-    + " Abrechenbar = Schichtplan netto, abzüglich Urlaub und Krankheit, je Person mit ihrem hinterlegten Anteil."
+    + " Abrechenbar = Schichtplan netto, abzüglich Urlaub und Krankheit, je Person mit ihrem hinterlegten Anteil,"
+    + " höchstens jedoch der Forecast des Tages: HolidayCheck bezahlt den kleineren der beiden Werte."
+    + " Angeforderte Zusatzstunden heben diese Grenze für den betroffenen Tag."
     + " Die Kacheln zeigen den Tag, Ziel und Lücke dagegen die Woche seit Montag: der Forecast ist ein Wochenwert,"
     + " und ein einzelner Tag dagegen gestellt ergibt keine belastbare Aussage. Das anteilige Wochenziel richtet sich"
     + " nach dem geplanten Volumen der bisherigen Tage, am Sonntag steht damit genau das Wochenziel.");

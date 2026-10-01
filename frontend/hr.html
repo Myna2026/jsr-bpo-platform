@@ -38425,6 +38425,111 @@ function hcExportXlsx(R, per){
   }catch(e){ console.error('[hc] Export', e); }
 }
 
+// Welche Tage hat der Forecast gedeckelt? Das gehoert sichtbar daneben: eine gekappte Stunde sieht
+// sonst aus wie eine nicht geleistete, und der Unterschied entscheidet, ob jemand nachfassen muss.
+function HcKapListe({tage}){
+  const [open,setOpen]=React.useState(false);
+  const weg=(tage||[]).reduce((a,t)=>a+(t.weg||0),0);
+  if(!tage||!tage.length) return null;
+  return <div style={{border:'1px solid #fde68a',background:'#fffbeb',borderRadius:12,marginBottom:12,overflow:'hidden'}}>
+    <div onClick={()=>setOpen(o=>!o)} style={{padding:'9px 14px',display:'flex',gap:10,alignItems:'center',cursor:'pointer'}}>
+      <span style={{fontSize:13,fontWeight:800,color:'#92400e'}}>Über dem Forecast: {cpoHours(weg)} nicht abrechenbar</span>
+      <span style={{fontSize:12,color:'#92400e'}}>{tage.length} {tage.length===1?'Tag':'Tage'}</span>
+      <span style={{marginLeft:'auto',fontSize:13,color:'#92400e'}}>{open?'▲':'▼'}</span>
+    </div>
+    {open&&<div style={{padding:'0 14px 12px'}}>
+      <table style={{width:'100%',borderCollapse:'collapse',fontSize:12.5}}>
+        <thead><tr style={{color:'#92400e',fontSize:10.5,textTransform:'uppercase',letterSpacing:'.04em'}}>
+          <th style={{textAlign:'left',padding:'4px 6px'}}>Tag</th><th style={{textAlign:'left',padding:'4px 6px'}}>Skill</th>
+          <th style={{textAlign:'right',padding:'4px 6px'}}>geliefert</th><th style={{textAlign:'right',padding:'4px 6px'}}>Deckel</th>
+          <th style={{textAlign:'right',padding:'4px 6px'}}>davon Zusatz</th><th style={{textAlign:'right',padding:'4px 6px'}}>gekappt</th></tr></thead>
+        <tbody>{tage.map(t=><tr key={t.skill+t.ds} style={{borderTop:'1px solid #fde68a'}}>
+          <td style={{padding:'4px 6px'}}>{fmtDate(t.ds)}</td>
+          <td style={{padding:'4px 6px'}}>{t.skill==='sales'?'Sales':'Support'}</td>
+          <td style={{padding:'4px 6px',textAlign:'right',fontFamily:'var(--mono)'}}>{cpoNum(t.roh,1)}</td>
+          <td style={{padding:'4px 6px',textAlign:'right',fontFamily:'var(--mono)'}}>{cpoNum(t.deckel,1)}</td>
+          <td style={{padding:'4px 6px',textAlign:'right',fontFamily:'var(--mono)',color:'var(--muted)'}}>{t.extra>0?cpoNum(t.extra,1):'—'}</td>
+          <td style={{padding:'4px 6px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:800,color:'#b45309'}}>{cpoNum(t.weg,1)}</td>
+        </tr>)}</tbody>
+      </table>
+      <div style={{fontSize:11.5,color:'#92400e',marginTop:8,lineHeight:1.5}}>
+        HolidayCheck bezahlt den kleineren Wert aus Forecast und geliefert. Hat HolidayCheck für einen dieser Tage
+        zusätzliche Stunden angefordert, unten eintragen: dann heben sie den Deckel genau dieses Tages.
+      </div>
+    </div>}
+  </div>;
+}
+// Zusatzstunden: die Ausnahme von der Forecast-Grenze. Sie steht in keiner Datei des Auftraggebers,
+// deshalb pflegen wir sie selbst, mit Grund und Herkunft, damit die Zahl spaeter belegbar bleibt.
+function HcExtraEditor({projectId, rows, von, bis, onChanged}){
+  const [open,setOpen]=React.useState(false);
+  const [busy,setBusy]=React.useState(false);
+  const [ds,setDs]=React.useState(bis||isoLocal(new Date()));
+  const [sk,setSk]=React.useState('sales');
+  const [h,setH]=React.useState('');
+  const [grund,setGrund]=React.useState('');
+  const [quelle,setQuelle]=React.useState('hc_anforderung');
+  const liste=(rows||[]);
+  const add=async()=>{
+    const hh=Number(String(h).replace(',','.'));
+    if(!isFinite(hh)||hh<=0){ cfgToast(false); return; }
+    setBusy(true);
+    try{
+      const {error}=await sb.from('hc_extra_hours').upsert(
+        {project_id:projectId, skill:sk, work_date:ds, hours:hh, reason:grund.trim()||null, source:quelle, updated_at:new Date().toISOString()},
+        {onConflict:'project_id,skill,work_date'});
+      if(error) throw error;
+      cfgToast(true); setH(''); setGrund(''); onChanged&&onChanged();
+    }catch(e){ console.error('[hc] extra', e); cfgToast(false); }
+    setBusy(false);
+  };
+  const del=async(skill, tag)=>{
+    if(!(await uiConfirm({title:'Zusatzstunden entfernen', text:'Für den '+fmtDate(tag)+' gilt dann wieder der reine Forecast als Grenze.', confirmLabel:'Entfernen', danger:true}))) return;
+    setBusy(true);
+    try{ const {error}=await sb.from('hc_extra_hours').delete()
+      .eq('project_id',projectId).eq('skill',skill).eq('work_date',tag);
+      if(error) throw error; cfgToast(true); onChanged&&onChanged();
+    }catch(e){ console.error('[hc] extra del', e); cfgToast(false); }
+    setBusy(false);
+  };
+  return <div style={{border:'1px solid var(--border)',borderRadius:12,background:'var(--card)',marginBottom:14,overflow:'hidden'}}>
+    <div onClick={()=>setOpen(o=>!o)} style={{padding:'10px 14px',display:'flex',alignItems:'center',gap:10,cursor:'pointer'}}>
+      <span style={{fontSize:13,fontWeight:800}}>Zusatzstunden</span>
+      <span style={{fontSize:12,color:'var(--muted)'}}>
+        {liste.length?(liste.length+' Einträge im Zeitraum · '+cpoHours(liste.reduce((a,r)=>a+(r.h||0),0))):'nichts hinterlegt, es gilt der reine Forecast'}</span>
+      <span style={{marginLeft:'auto',fontSize:13,color:'var(--muted)'}}>{open?'▲':'▼'}</span>
+    </div>
+    {open&&<div style={{padding:'0 14px 14px'}}>
+      {!liste.length?null:<div style={{marginBottom:10}}>{liste.map(r=>(
+        <div key={r.skill+r.ds} style={{display:'flex',alignItems:'center',gap:10,padding:'5px 0',borderTop:'1px solid var(--border)',fontSize:13}}>
+          <span style={{width:92}}>{fmtDate(r.ds)}</span>
+          <span style={{width:74,fontWeight:600}}>{r.skill==='sales'?'Sales':'Support'}</span>
+          <span style={{width:70,textAlign:'right',fontFamily:'var(--mono)',fontWeight:800}}>{cpoNum(r.h,1)} h</span>
+          <span style={{flex:1,color:'var(--muted)',fontSize:12}}>{r.source==='bedarf'?'tatsächlicher Bedarf':'von HolidayCheck angefordert'}{r.reason?(' · '+r.reason):''}</span>
+          <button className="btn btn-sm" disabled={busy} onClick={()=>del(r.skill, r.ds)}>Entfernen</button>
+        </div>))}</div>}
+      <div style={{display:'flex',gap:8,alignItems:'flex-end',flexWrap:'wrap'}}>
+        <div><label className="form-label">Tag</label><input type="date" className="form-input" style={{width:150}} value={ds} onChange={e=>setDs(e.target.value)}/></div>
+        <div><label className="form-label">Skill</label>
+          <select className="form-input" style={{width:120}} value={sk} onChange={e=>setSk(e.target.value)}>
+            <option value="sales">Sales</option><option value="support">Support</option></select></div>
+        <div><label className="form-label">Stunden</label><input className="form-input" style={{width:90}} placeholder="13" value={h} onChange={e=>setH(e.target.value)}/></div>
+        <div><label className="form-label">Herkunft</label>
+          <select className="form-input" style={{width:200}} value={quelle} onChange={e=>setQuelle(e.target.value)}>
+            <option value="hc_anforderung">von HolidayCheck angefordert</option>
+            <option value="bedarf">wegen tatsächlichem Bedarf</option></select></div>
+        <div style={{flex:'1 1 200px'}}><label className="form-label">Grund (wer, wann, wofür)</label>
+          <input className="form-input" placeholder="z. B. Mail Shkurte 28.06., Sturmlage" value={grund} onChange={e=>setGrund(e.target.value)}/></div>
+        <button className="btn btn-sm btn-primary" disabled={busy} onClick={add}>Eintragen</button>
+      </div>
+      <div style={{fontSize:11.5,color:'var(--muted)',marginTop:8,lineHeight:1.5}}>
+        HolidayCheck bezahlt sonst höchstens den Forecast des Tages. Was hier steht, hebt diese Grenze für genau
+        diesen Tag und Skill. Ein Eintrag je Tag und Skill, ein neuer überschreibt den alten. Der Grund bleibt
+        stehen, damit die Zahl später noch belegbar ist: in den Dateien des Auftraggebers steht die Anforderung nicht.
+      </div>
+    </div>}
+  </div>;
+}
 function HcHoursView({projects, team}){
   const proj=(projects||[]).find(p=>p&&/holiday/i.test(p.name||''));
   const today=isoLocal(new Date());
@@ -38473,7 +38578,7 @@ function HcHoursView({projects, team}){
       setBusy(true);
       const y0=Number(rng.from.slice(0,4)), y1=Number(rng.to.slice(0,4));
       const years=y0===y1?[y0]:[y0,y1];
-      const [shR, dhR, fcR, fdR, tpR, cfgRaw]=await Promise.all([
+      const [shR, dhR, fcR, fdR, tpR, cfgRaw, exR]=await Promise.all([
         sbAllData((a,b)=>sb.from('shift_assignments').select('employee_id,skill,work_date,net_hours,gross_hours,shift_value')
           .eq('project_id',proj.id).gte('work_date',rng.from).lte('work_date',rng.to).order('work_date',{ascending:true}).range(a,b)),
         sbAllData((a,b)=>sb.from('daily_hours').select('employee_id,skill,work_date,hours')
@@ -38487,6 +38592,9 @@ function HcHoursView({projects, team}){
           .gte('work_date',rng.from).lte('work_date',rng.to),
         sb.from('training_plans').select('id,name,start_date,end_date,status').eq('project_id',proj.id),
         loadConfigFromDB(HC_BILLING_KEY),
+        // Zusaetzlich angeforderte Stunden heben den Forecast-Deckel fuer genau diesen Tag und Skill.
+        sb.from('hc_extra_hours').select('id,skill,work_date,hours,reason,source').eq('project_id',proj.id)
+          .gte('work_date',rng.from).lte('work_date',rng.to),
       ]);
       // Bis wohin liegen ueberhaupt protokollierte Stunden vor? Der Zeitexport des Auftraggebers
       // hinkt rund eine Woche hinterher; fuer spaetere Tage ist eine 0 keine Aussage, sondern ein
@@ -38504,7 +38612,7 @@ function HcHoursView({projects, team}){
       const empR=ids.length?await sb.from('employees').select('id,first_name,last_name,position,absences,termination_date').in('id',ids):{data:[]};
       if(!alive) return;
       setCfg(c);
-      setRaw({sh, dh:(dhR.data||[]), fc:(fcR.data||[]), fd:(fdR.data||[]), tp:(tpR.data||[]), emps:(empR.data||[]), istBis});
+      setRaw({sh, dh:(dhR.data||[]), fc:(fcR.data||[]), fd:(fdR.data||[]), tp:(tpR.data||[]), emps:(empR.data||[]), ex:(exR.data||[]), istBis});
       setBusy(false);
     })();
     return ()=>{ alive=false; };
@@ -38559,6 +38667,37 @@ function HcHoursView({projects, team}){
       istBy[k]=(istBy[k]||0)+h;
       const ds=String(r.work_date).slice(0,10); if(istBisDs&&ds<=istBisDs) istByJ[k]=(istByJ[k]||0)+h; });
 
+    // ── Der Forecast ist zugleich die Obergrenze ──────────────────────────────────────────────
+    // HolidayCheck bezahlt den kleineren Wert aus Forecast und geliefert (Klarstellung Shkurte,
+    // 2026-10-01). Zusaetzlich angeforderte Stunden (hc_extra_hours) heben den Deckel fuer genau
+    // diesen Tag und Skill. Fehlt fuer einen Tag der Forecast, wird NICHT gekappt: ein fehlender
+    // Wert ist keine Null. Gerechnet wird in zwei Durchgaengen, erst die Tagessumme, dann der
+    // Faktor je Tag, damit die Personenzeilen weiter zur Skill-Summe passen.
+    const fdBy={}; (raw.fd||[]).forEach(r=>{ const ds=String(r.work_date).slice(0,10);
+      const k=String(r.skill||'').toLowerCase()+'|'+ds; fdBy[k]=(fdBy[k]||0)+(Number(r.fc_total)||0); });
+    const exBy={}; (raw.ex||[]).forEach(r=>{ const ds=String(r.work_date).slice(0,10);
+      const k=String(r.skill||'').toLowerCase()+'|'+ds; const h=Number(r.hours)||0; if(h<=0) return;
+      exBy[k]={h:((exBy[k]||{}).h||0)+h, reason:r.reason||'', source:r.source||'', id:r.id}; });
+    const rohTag={};
+    raw.sh.forEach(r=>{
+      const ds=String(r.work_date).slice(0,10); const sk=String(r.skill||'').toLowerCase();
+      const net=Number(r.net_hours)||0; if(net<=0) return;
+      const emp=empBy[r.employee_id];
+      if(hcRaus(emp, ds)) return;
+      const nach=net*cpoAbsFactor(emp, ds);
+      const p=hcPctFor(cfg, r.employee_id, ds, trainDays);
+      const k=sk+'|'+ds; rohTag[k]=(rohTag[k]||0)+hcAbrTag(nach, p);
+    });
+    const kapF={}, kapTage=[];
+    Object.keys(rohTag).forEach(k=>{
+      const fc=fdBy[k]; if(fc==null){ kapF[k]=1; return; }
+      const ex=(exBy[k]||{}).h||0; const deckel=fc+ex; const roh=rohTag[k];
+      const f=(roh>deckel&&roh>0)?deckel/roh:1; kapF[k]=f;
+      if(f<1){ const t=k.split('|'); kapTage.push({skill:t[0], ds:t[1], roh, deckel, fc, extra:ex, weg:roh-deckel}); }
+    });
+    kapTage.sort((a,b)=>a.ds<b.ds?-1:1);
+    const kapOf=(sk,ds)=>{ const f=kapF[sk+'|'+ds]; return f==null?1:f; };
+
     // Plan je Person und Skill
     // Heute-Leiste: was bis jetzt gelaufen ist, gegen den ganzen geplanten Tag und das Tagesziel.
     const nowMin=(()=>{ const n=new Date(); return n.getHours()*60+n.getMinutes(); })();
@@ -38572,21 +38711,23 @@ function HcHoursView({projects, team}){
       const f=raus?0:cpoAbsFactor(emp, ds);
       const nach=net*f;                                    // nach Austritt, Urlaub und Krankheit
       const p=hcPctFor(cfg, r.employee_id, ds, trainDays);
-      const abr=nach*(p.pct/100);                          // abrechenbar
+      const abrRoh=hcAbrTag(nach, p);                      // Anteil der Person, dann ihre Stundengrenze
+      const abr=abrRoh*kapOf(sk, ds);                      // Deckel des Tages: Forecast plus Zusatzstunden
       const absT=raus?'exit':hcAbsTyp(emp, ds);            // welcher Grund kuerzt den Tag
       const wkKey=sk+'|'+(()=>{ const w=getISOWeek(new Date(ds+'T00:00:00')); return w.year+'-'+w.kw; })();
       const wv=wkVol[wkKey]||(wkVol[wkKey]={bis:0, ganz:0});
       wv.ganz+=abr; if(ds<=per.to) wv.bis+=abr;
       // Tagesreihe ueber den ganzen geladenen Rahmen: daraus kommen Tag, Woche und Monat.
-      const dk0=ds+'|'+sk; const dd0=daySeries[dk0]||(daySeries[dk0]={ds, skill:sk, plan:0, netto:0, abr:0});
-      dd0.plan+=net; dd0.netto+=nach; dd0.abr+=abr;
+      const dk0=ds+'|'+sk; const dd0=daySeries[dk0]||(daySeries[dk0]={ds, skill:sk, plan:0, netto:0, abr:0, abrRoh:0,
+        fc:(fdBy[sk+'|'+ds]==null?null:fdBy[sk+'|'+ds]), extra:((exBy[sk+'|'+ds]||{}).h||0)});
+      dd0.plan+=net; dd0.netto+=nach; dd0.abr+=abr; dd0.abrRoh+=abrRoh;
       if(ds<per.from||ds>per.to) return;                   // nur der gewaehlte Zeitraum kommt in die Liste
       const k=r.employee_id+'|'+sk;
       const q=per_[k]||(per_[k]={id:r.employee_id, skill:sk, name:nameOf(r.employee_id),
-        position:((empBy[r.employee_id]||{}).position||''), plan:0, abw:0, netto:0, abr:0, pctDays:[], srcs:{}, notes:{}, cap:null,
+        position:((empBy[r.employee_id]||{}).position||''), plan:0, abw:0, netto:0, abr:0, abrRoh:0, pctDays:[], srcs:{}, notes:{}, cap:null,
         krank:0, urlaub:0, unbez:0, austritt:0, pctSum:0, planJ:0, nettoJ:0, krankJ:0, urlaubJ:0, unbezJ:0, austrittJ:0, rate:0,
         ende:((empBy[r.employee_id]||{}).termination_date?String((empBy[r.employee_id]||{}).termination_date).slice(0,10):null), aVon:null, aBis:null, aN:0});
-      q.plan+=net; q.abw+=net-nach; q.netto+=nach; q.abr+=abr;
+      q.plan+=net; q.abw+=net-nach; q.netto+=nach; q.abr+=abr; q.abrRoh+=abrRoh;
       const weg=net-nach;
       if(weg>0){ if(absT==='exit'){ q.austritt+=weg; q.aN++; if(!q.aVon||ds<q.aVon) q.aVon=ds; if(!q.aBis||ds>q.aBis) q.aBis=ds; }
         else if(absT==='sick') q.krank+=weg; else if(absT==='vacation') q.urlaub+=weg; else if(absT==='unpaid') q.unbez+=weg; }
@@ -38655,9 +38796,9 @@ function HcHoursView({projects, team}){
       const rate=(()=>{ const s=((proj.skills||[]).find(x=>x.key===sk)||{}); const v=Number(s.rate); return isFinite(v)&&v>0?v:null; })();
       const z=zielOf(sk);
       const sum=f=>rows.reduce((a,r)=>a+(Number(r[f])||0),0);
-      const abr=sum('abr'), netto=sum('netto'), plan=sum('plan'), abw=sum('abw'), ist=sum('ist');
+      const abr=sum('abr'), netto=sum('netto'), plan=sum('plan'), abw=sum('abw'), ist=sum('ist'), abrRoh=sum('abrRoh');
       return {skill:sk, label:sk==='sales'?'Sales':'Support', rate, ziel:z.h, zielTeil:z.teil,
-              plan, abw, netto, abr, ist, rows,
+              plan, abw, netto, abr, abrRoh, gekappt:Math.max(0, abrRoh-abr), ist, rows,
               // abrBis = abrechenbar seit Wochenbeginn bis zum Ende des Zeitraums. NUR das gehoert
               // gegen das Ziel; abr zaehlt den gewaehlten Zeitraum, das Ziel ist ein Wochenwert.
               abrBis:z.abrBis,
@@ -38691,8 +38832,6 @@ function HcHoursView({projects, team}){
     // sind Summen derselben Tageswerte, nicht eigenstaendige Zahlen - so koennen die drei Zeilen
     // nicht auseinanderlaufen. Fehlt fuer einen Tag ein Forecast, bleibt das Ziel leer statt aus
     // dem Wochenwert geschaetzt zu werden: eine erfundene Luecke ist schlimmer als keine.
-    const fdBy={}; (raw.fd||[]).forEach(r=>{ const ds=String(r.work_date).slice(0,10);
-      const k=String(r.skill||'').toLowerCase()+'|'+ds; fdBy[k]=(fdBy[k]||0)+(Number(r.fc_total)||0); });
     // Bezugstag: heute, wenn heute im Zeitraum liegt, sonst das Ende des Zeitraums. Sonst hiesse
     // "Woche bis heute" in der Wochenansicht die ganze Woche inklusive der Tage, die noch kommen.
     const ref=(todayDs>=per.from&&todayDs<=per.to)?todayDs:per.to;
@@ -38700,15 +38839,16 @@ function HcHoursView({projects, team}){
     const monOf=ds=>{ const d=new Date(ds+'T00:00:00'); const dow=(d.getDay()||7); const m=new Date(d); m.setDate(d.getDate()-(dow-1)); return isoLocal(m); };
     const refMon=monOf(ref);
     const refM0=ref.slice(0,8)+'01';
-    const spanne=(sk,a,b)=>{ let fc=0, fcTage=0, netto=0, abr=0, plan=0;
+    const spanne=(sk,a,b)=>{ let fc=0, fcTage=0, netto=0, abr=0, plan=0, abrRoh=0, extra=0;
       let d=new Date(a+'T00:00:00'); const e=new Date(b+'T00:00:00');
       while(d<=e){ const ds=isoLocal(d);
         const f=fdBy[sk+'|'+ds]; if(f!=null){ fc+=f; fcTage++; }
-        const dd=daySeries[ds+'|'+sk]; if(dd){ plan+=dd.plan; netto+=dd.netto; abr+=dd.abr; }
+        const dd=daySeries[ds+'|'+sk]; if(dd){ plan+=dd.plan; netto+=dd.netto; abr+=dd.abr; abrRoh+=(dd.abrRoh||0); }
+        extra+=((exBy[sk+'|'+ds]||{}).h||0);
         d=new Date(d.getFullYear(),d.getMonth(),d.getDate()+1); }
       const rate=(()=>{ const x=((proj.skills||[]).find(y=>y.key===sk)||{}); const v=Number(x.rate); return isFinite(v)&&v>0?v:null; })();
       const hatZiel=fcTage>0;
-      return {von:a, bis:b, fc:(hatZiel?fc:null), plan, netto, abr, rate, nichtAbr:netto-abr,
+      return {von:a, bis:b, fc:(hatZiel?fc:null), plan, netto, abr, abrRoh, gekappt:Math.max(0, abrRoh-abr), extra, rate, nichtAbr:netto-abr,
               eur:(rate!=null?abr*rate:null),
               delta:(hatZiel?abr-fc:null),
               deltaEur:(hatZiel&&rate!=null?(abr-fc)*rate:null)};
@@ -38728,6 +38868,7 @@ function HcHoursView({projects, team}){
       const hatZ=rows.some(r=>r.fc!=null);
       const ges={fc:(hatZ?rows.reduce((a,r)=>a+(r.fc||0),0):null), plan:rows.reduce((a,r)=>a+r.plan,0),
         netto:rows.reduce((a,r)=>a+r.netto,0), abr:rows.reduce((a,r)=>a+r.abr,0),
+        gekappt:rows.reduce((a,r)=>a+(r.gekappt||0),0), extra:rows.reduce((a,r)=>a+(r.extra||0),0),
         nichtAbr:rows.reduce((a,r)=>a+r.nichtAbr,0),
         eur:rows.reduce((a,r)=>a+(r.eur||0),0),
         delta:(hatZ?rows.reduce((a,r)=>a+(r.delta||0),0):null),
@@ -38748,6 +38889,9 @@ function HcHoursView({projects, team}){
             from:per.from, to:per.to,
             offenOverhead:Object.keys(offen).map(k=>offen[k]), heute, todayDs,
             bloecke, ref, refMon, refM0, soll, sollSum, istBisDs, sollBis, austritte,
+            kapTage:kapTage.filter(k=>k.ds>=per.from&&k.ds<=per.to),
+            extras:Object.keys(exBy).map(k=>({skill:k.split('|')[0], ds:k.split('|')[1], ...exBy[k]}))
+              .filter(x=>x.ds>=per.from&&x.ds<=per.to).sort((a,b)=>a.ds<b.ds?-1:1),
             istBis:(raw.istBis||null), istOffen:(!raw.istBis||raw.istBis<per.to),
             hatSchulung:Object.keys(trainDays).length>0};
   },[raw,cfg,proj,per.from,per.to]);
@@ -38964,13 +39108,19 @@ function HcHoursView({projects, team}){
           <div style={{padding:'7px 14px',borderTop:'1px solid var(--border)',fontSize:11.5,color:'var(--muted)',lineHeight:1.6}}>
             <b style={{color:'var(--text)'}}>{cpoEur(b.ges.eur)}</b> abrechenbar{b.ges.deltaEur!=null?<span>, Abweichung <b style={{color:b.ges.deltaEur<0?'#b91c1c':'#15803d'}}>{(b.ges.deltaEur>0?'+':'')+cpoEur(b.ges.deltaEur)}</b></span>:null}.
             {b.ges.nichtAbr>0.05?<span> Nicht abrechenbar sind zusätzlich <b style={{color:'var(--text)'}}>{cpoHours(b.ges.nichtAbr)}</b> geplante Zeit von Teamleitung, Trainern und Projektleitung. Das ist der Aufschlag, den der Plan über dem Forecast braucht.</span>:null}
+            {b.ges.gekappt>0.05?<span> <b style={{color:'#b45309'}}>{cpoHours(b.ges.gekappt)}</b> liegen über dem Forecast und zählen nicht: HolidayCheck zahlt den kleineren der beiden Werte. Waren die Stunden angefordert, unten als Zusatzstunden eintragen.</span>:null}
+            {b.ges.extra>0.05?<span> Enthält <b style={{color:'var(--text)'}}>{cpoHours(b.ges.extra)}</b> angeforderte Zusatzstunden, die den Forecast dieser Tage anheben.</span>:null}
           </div>
         </div>; })}
       {R&&R.bloecke.length>0&&<div style={{fontSize:11,color:'var(--muted)',lineHeight:1.55,margin:'-4px 0 16px',padding:'0 2px'}}>
         Abrechenbar = Anwesenheit laut Schichtplan, also ohne Pausen, Krankheit, Urlaub und unbezahlte Abwesenheit, je Person mit ihrem hinterlegten Anteil.
         Forecast = Tageswert aus dem Blatt „Tagesplanung" des Auftraggebers, Woche und Monat sind Summen genau dieser Tageswerte. Abweichung = abrechenbar minus Forecast, plus heißt über Ziel.
         Fehlt für einen Tag ein Forecast, bleibt das Ziel leer statt geschätzt zu werden.
+        Der Forecast ist zugleich die Obergrenze: bezahlt wird der kleinere der beiden Werte, Forecast oder geliefert.
+        Mehr als der Forecast zählt nur, wenn HolidayCheck die Stunden angefordert hat, dann stehen sie unten als Zusatzstunden.
       </div>}
+      {R&&R.kapTage&&R.kapTage.length>0&&<HcKapListe tage={R.kapTage}/>}
+      {proj&&<HcExtraEditor projectId={proj.id} rows={R?R.extras:[]} von={per.from} bis={per.to} onChanged={()=>setReload(x=>x+1)}/>}
 
       {R&&R.skills.map(s=><div key={s.skill} style={{border:'1px solid var(--border)',borderRadius:12,background:'var(--card)',marginBottom:14,overflow:'hidden'}}>
         <div style={{padding:'11px 14px',borderBottom:'1px solid var(--border)',display:'flex',alignItems:'baseline',gap:10,flexWrap:'wrap'}}>
