@@ -86,11 +86,16 @@ Deno.serve(async (req) => {
   // ohne dass sich an der Lage etwas geaendert haette (Befund 2026-09-30).
   inner += '<tr><td style="padding:16px 16px 4px;font-size:13px;font-weight:bold;color:#0f2830;">Woche bis heute: Ziel und abrechenbarer Plan je Skill</td></tr>';
   aktive.forEach((s) => {
-    const bis = (s as any).abrBis != null ? (s as any).abrBis : s.abr;
+    // Gegen das Ziel gehoert die GELIEFERTE Zeit, nicht die gedeckelte: der Deckel ist das Ziel,
+    // also waere die Luecke sonst nie positiv und eine Mehrlieferung unsichtbar.
+    const bis = (s as any).abrRohBis != null ? (s as any).abrRohBis : ((s as any).abrBis != null ? (s as any).abrBis : s.abr);
+    const bisAbr = (s as any).abrBis != null ? (s as any).abrBis : s.abr;
     const pct = s.ziel > 0 ? Math.round(bis / s.ziel * 100) : 0;
     const tone = s.ziel <= 0 ? "neutral" : (pct >= 98 ? "good" : (pct >= 90 ? "warn" : "bad"));
     const note = s.ziel > 0
-      ? (hrs(bis) + " abrechenbar von " + hrs(s.ziel) + " Ziel seit Montag · " + (s.luecke! >= 0 ? "+" : "") + hrs(s.luecke!) + (s.lueckeEur != null ? (" · " + (s.lueckeEur >= 0 ? "+" : "") + eur(s.lueckeEur)) : ""))
+      ? (hrs(bis) + " geliefert von " + hrs(s.ziel) + " Ziel seit Montag · " + (s.luecke! >= 0 ? "+" : "") + hrs(s.luecke!)
+         + (s.lueckeEur != null ? (" · " + eur(s.lueckeEur)) : "")
+         + (bis > bisAbr + 0.05 ? (" · abrechenbar davon " + hrs(bisAbr)) : ""))
       : "kein Forecast hinterlegt, deshalb kein Ziel";
     inner += perfRow({ name: s.label, value: eur(s.eur || 0), tone, note, valuePct: Math.min(100, pct) });
   });

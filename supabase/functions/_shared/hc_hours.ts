@@ -117,7 +117,7 @@ export function shiftShare(shiftValue: string, nowMin: number | null) {
 }
 
 export type HcSkill = {
-  skill: string; label: string; rate: number | null; abrBis?: number;
+  skill: string; label: string; rate: number | null; abrBis?: number; abrRohBis?: number;
   ziel: number; zielTeil: boolean;
   plan: number; abw: number; netto: number; abr: number; abrRoh: number; gekappt: number; nichtAbr: number;
   eur: number | null; zielEur: number | null; luecke: number | null; lueckeEur: number | null;
@@ -188,7 +188,7 @@ export async function hcCompute(admin: any, from: string, to: string, nowMin: nu
     const k = String(r.skill || "").toLowerCase() + "|" + ds;
     fcDay[k] = (fcDay[k] || 0) + (Number(r.fc_total) || 0);
   });
-  const wkVol: Record<string, { bis: number; ganz: number }> = {};
+  const wkVol: Record<string, { bis: number; ganz: number; bisRoh: number }> = {};
 
   // ── Der Forecast ist die Obergrenze, nicht nur das Ziel ───────────────────────────────────────
   // HolidayCheck bezahlt die kleinere der beiden Zahlen, Forecast oder geliefert (Shkurte, 2026-10-01).
@@ -258,8 +258,8 @@ export async function hcCompute(admin: any, from: string, to: string, nowMin: nu
     abr = abr * kapOf(sk, ds);                    // Deckel des Tages: Forecast plus Zusatzstunden
     // Wochenvolumen fuer das anteilige Ziel: ueber die GANZE Woche, "bis" nur bis zum Zeitraum-Ende.
     const wkKey = sk + "|" + (() => { const w = isoWeek(ds); return w.year + "-" + w.kw; })();
-    const wv = wkVol[wkKey] || (wkVol[wkKey] = { bis: 0, ganz: 0 });
-    wv.ganz += abr; if (ds <= to) wv.bis += abr;
+    const wv = wkVol[wkKey] || (wkVol[wkKey] = { bis: 0, ganz: 0, bisRoh: 0 });
+    wv.ganz += abr; if (ds <= to) { wv.bis += abr; wv.bisRoh += abrRoh; }
     if (ds < from || ds > to) return;              // nur der gewaehlte Zeitraum kommt in die Liste
     const k = r.employee_id + "|" + sk;
     const q = per[k] || (per[k] = {
@@ -284,14 +284,14 @@ export async function hcCompute(admin: any, from: string, to: string, nowMin: nu
   // bis zu diesem Tag. Ziel und Lieferung decken damit immer dieselben Tage ab.
   const bisVon = isoMonday(to);
   const zielOf = (skill: string) => {
-    let ziel = 0, abrBis = 0, gefunden = false, luecken = 0;
+    let ziel = 0, abrBis = 0, abrRohBis = 0, gefunden = false, luecken = 0;
     daysBetween(bisVon, to).forEach((ds) => {
       const v = fcDay[skill + "|" + ds];
       if (v == null) luecken++; else { gefunden = true; ziel += v; }
     });
-    const wv = wkVol[skill + "|" + (() => { const w = isoWeek(to); return w.year + "-" + w.kw; })()] || { bis: 0, ganz: 0 };
-    abrBis = wv.bis;
-    return { h: gefunden ? ziel : 0, abrBis, teil: (to !== addDays(bisVon, 6)), luecken };
+    const wv = wkVol[skill + "|" + (() => { const w = isoWeek(to); return w.year + "-" + w.kw; })()] || { bis: 0, ganz: 0, bisRoh: 0 };
+    abrBis = wv.bis; abrRohBis = wv.bisRoh;
+    return { h: gefunden ? ziel : 0, abrBis, abrRohBis, teil: (to !== addDays(bisVon, 6)), luecken };
   };
 
   const skills: HcSkill[] = HC_SKILLS.map((sk) => {
@@ -306,11 +306,13 @@ export async function hcCompute(admin: any, from: string, to: string, nowMin: nu
       plan: sum("plan"), abw: sum("abw"), netto, abr, abrRoh, gekappt: Math.max(0, abrRoh - abr), nichtAbr: netto - abr,
       // abrBis = abrechenbar seit Wochenbeginn bis zum Ende des Zeitraums. NUR diese Zahl gehoert
       // gegen das Ziel: abr zaehlt den gewaehlten Zeitraum (oft ein Tag), das Ziel ist ein Wochenwert.
-      abrBis: z.abrBis,
+      abrBis: z.abrBis, abrRohBis: z.abrRohBis,
       eur: rate != null ? abr * rate : null,
       zielEur: rate != null && z.h > 0 ? z.h * rate : null,
-      luecke: z.h > 0 ? z.abrBis - z.h : null,
-      lueckeEur: rate != null && z.h > 0 ? (z.abrBis - z.h) * rate : null,
+      // Die Luecke misst GELIEFERT gegen Ziel. Gegen die gedeckelte Zahl gerechnet waere sie nie
+      // positiv, weil der Deckel genau das Ziel ist: die Mail haette jede Mehrlieferung verschwiegen.
+      luecke: z.h > 0 ? z.abrRohBis - z.h : null,
+      lueckeEur: rate != null && z.h > 0 && z.abrRohBis < z.h ? (z.abrRohBis - z.h) * rate : null,
       rows,
     };
   });

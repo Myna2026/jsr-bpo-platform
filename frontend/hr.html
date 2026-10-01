@@ -38906,10 +38906,14 @@ function HcHoursView({projects, team}){
         d=new Date(d.getFullYear(),d.getMonth(),d.getDate()+1); }
       const rate=(()=>{ const x=((proj.skills||[]).find(y=>y.key===sk)||{}); const v=Number(x.rate); return isFinite(v)&&v>0?v:null; })();
       const hatZiel=fcTage>0;
+      // Abweichung = GELIEFERT gegen Forecast, nicht abrechenbar gegen Forecast. Seit der Deckel
+      // greift, kann abrechenbar den Forecast nie uebersteigen; die Abweichung waere dann nie positiv
+      // und die Information "wir haben mehr geliefert als bestellt" ginge verloren (Befund 2026-10-01).
+      // In Euro steht die Abweichung nur, wenn sie negativ ist: Mehrlieferung bringt kein Geld.
       return {von:a, bis:b, fc:(hatZiel?fc:null), plan, netto, abr, abrRoh, gekappt:Math.max(0, abrRoh-abr), extra, rate, nichtAbr:netto-abr,
               eur:(rate!=null?abr*rate:null),
-              delta:(hatZiel?abr-fc:null),
-              deltaEur:(hatZiel&&rate!=null?(abr-fc)*rate:null)};
+              delta:(hatZiel?abrRoh-fc:null),
+              deltaEur:(hatZiel&&rate!=null&&abrRoh<fc?(abrRoh-fc)*rate:null)};
     };
     // Fuenf getrennte Zeitspannen, jede fuer sich abgeschlossen. Keine Zeile mischt Zeitraeume.
     const vorMon=minus(refMon,7);
@@ -38925,12 +38929,14 @@ function HcHoursView({projects, team}){
         .filter(r=>r.plan>0||r.fc!=null);
       const hatZ=rows.some(r=>r.fc!=null);
       const ges={fc:(hatZ?rows.reduce((a,r)=>a+(r.fc||0),0):null), plan:rows.reduce((a,r)=>a+r.plan,0),
-        netto:rows.reduce((a,r)=>a+r.netto,0), abr:rows.reduce((a,r)=>a+r.abr,0),
+        netto:rows.reduce((a,r)=>a+r.netto,0), abr:rows.reduce((a,r)=>a+r.abr,0), abrRoh:rows.reduce((a,r)=>a+(r.abrRoh||0),0),
         gekappt:rows.reduce((a,r)=>a+(r.gekappt||0),0), extra:rows.reduce((a,r)=>a+(r.extra||0),0),
         nichtAbr:rows.reduce((a,r)=>a+r.nichtAbr,0),
         eur:rows.reduce((a,r)=>a+(r.eur||0),0),
         delta:(hatZ?rows.reduce((a,r)=>a+(r.delta||0),0):null),
-        deltaEur:(hatZ?rows.reduce((a,r)=>a+(r.deltaEur||0),0):null)};
+        // Euro nur, wenn ueberhaupt ein Skill unter dem Forecast liegt. Sonst stuende dort "0,00 Euro
+        // unter Forecast", obwohl gar nichts fehlt.
+        deltaEur:(hatZ&&rows.some(r=>r.deltaEur!=null)?rows.reduce((a,r)=>a+(r.deltaEur||0),0):null)};
       return {...sp, rows, ges};
     }).filter(b=>b.rows.length>0);
 
@@ -38984,9 +38990,9 @@ function HcHoursView({projects, team}){
     <div style={{fontSize:20,fontWeight:700,marginBottom:4}}>⏱ HC Stundenabgleich</div>
     <div style={{fontSize:13,color:'var(--muted)',marginBottom:12,maxWidth:860,lineHeight:1.6}}>
       Abgerechnet wird der Plan netto: Schichtplan abzüglich Pausen, Urlaub und Krankheit, je Person
-      nur mit ihrem abrechenbaren Anteil. Das ist geplante Zeit, nicht geleistete. Was tatsächlich
+      nur mit ihrem abrechenbaren Anteil, höchstens aber der Forecast des Tages. Das ist geplante Zeit, nicht geleistete. Was tatsächlich
       geleistet wurde, steht allein in der Spalte „protokolliert" aus dem Zeitexport des
-      Auftraggebers und im Tab „Soll-Erfüllung". Der Forecast ist das Ziel, nicht die Obergrenze.
+      Auftraggebers und im Tab „Soll-Erfüllung". Der Forecast ist zugleich die Obergrenze: HolidayCheck bezahlt den kleineren Wert aus Forecast und geliefert, mehr nur bei angeforderten Zusatzstunden.
     </div>
 
     <div style={{display:'flex',gap:8,marginBottom:12,flexWrap:'wrap'}}>
@@ -39163,19 +39169,21 @@ function HcHoursView({projects, team}){
           <div style={{overflowX:'auto'}}>
             <table style={{borderCollapse:'collapse',width:'100%',fontSize:12.5,minWidth:760}}>
               <thead><tr>
-                {['','Forecast','Abrechenbar','Abweichung'].map((h,i2)=>
+                {['','Forecast','Geliefert','Abrechenbar','Abweichung'].map((h,i2)=>
                   <th key={i2} style={{textAlign:i2===0?'left':'right',padding:'6px 10px',fontSize:10.5,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.04em',whiteSpace:'nowrap'}}>{h}</th>)}
               </tr></thead>
               <tbody>
                 {b.rows.map(r=><tr key={r.skill} style={{borderTop:'1px solid var(--border)'}}>
                   <td style={{padding:'6px 10px',fontWeight:700}}>{r.label}</td>
                   {zelle(r.fc==null?'—':cpoNum(r.fc,1), r.fc==null?{color:'var(--muted)'}:null)}
+                  {zelle(cpoNum(r.abrRoh,1), r.gekappt>0.05?{color:'#b45309'}:null)}
                   {zelle(cpoNum(r.abr,1),{fontWeight:800,color:BRAND.main})}
                   {dz(r.delta,false)}
                 </tr>)}
                 {b.rows.length>1&&<tr style={{borderTop:'2px solid var(--border)',fontWeight:800}}>
                   <td style={{padding:'7px 10px'}}>Gesamt</td>
                   {zelle(b.ges.fc==null?'—':cpoNum(b.ges.fc,1))}
+                  {zelle(cpoNum(b.ges.abrRoh,1), b.ges.gekappt>0.05?{color:'#b45309'}:null)}
                   {zelle(cpoNum(b.ges.abr,1),{color:BRAND.main})}
                   {dz(b.ges.delta,false)}
                 </tr>}
@@ -39183,7 +39191,7 @@ function HcHoursView({projects, team}){
             </table>
           </div>
           <div style={{padding:'7px 14px',borderTop:'1px solid var(--border)',fontSize:11.5,color:'var(--muted)',lineHeight:1.6}}>
-            <b style={{color:'var(--text)'}}>{cpoEur(b.ges.eur)}</b> abrechenbar{b.ges.deltaEur!=null?<span>, Abweichung <b style={{color:b.ges.deltaEur<0?'#b91c1c':'#15803d'}}>{(b.ges.deltaEur>0?'+':'')+cpoEur(b.ges.deltaEur)}</b></span>:null}.
+            <b style={{color:'var(--text)'}}>{cpoEur(b.ges.eur)}</b> abrechenbar{b.ges.deltaEur!=null?<span>, <b style={{color:'#b91c1c'}}>{cpoEur(b.ges.deltaEur)}</b> unter Forecast</span>:null}.
             {b.ges.nichtAbr>0.05?<span> Nicht abrechenbar sind zusätzlich <b style={{color:'var(--text)'}}>{cpoHours(b.ges.nichtAbr)}</b> geplante Zeit von Teamleitung, Trainern und Projektleitung. Das ist der Aufschlag, den der Plan über dem Forecast braucht.</span>:null}
             {b.ges.gekappt>0.05?<span> <b style={{color:'#b45309'}}>{cpoHours(b.ges.gekappt)}</b> liegen über dem Forecast und zählen nicht: HolidayCheck zahlt den kleineren der beiden Werte. Waren die Stunden angefordert, unten als Zusatzstunden eintragen.</span>:null}
             {b.ges.extra>0.05?<span> Enthält <b style={{color:'var(--text)'}}>{cpoHours(b.ges.extra)}</b> angeforderte Zusatzstunden, die den Forecast dieser Tage anheben.</span>:null}
@@ -39191,7 +39199,9 @@ function HcHoursView({projects, team}){
         </div>; })}
       {R&&R.bloecke.length>0&&<div style={{fontSize:11,color:'var(--muted)',lineHeight:1.55,margin:'-4px 0 16px',padding:'0 2px'}}>
         Abrechenbar = Anwesenheit laut Schichtplan, also ohne Pausen, Krankheit, Urlaub und unbezahlte Abwesenheit, je Person mit ihrem hinterlegten Anteil.
-        Forecast = Tageswert aus dem Blatt „Tagesplanung" des Auftraggebers, Woche und Monat sind Summen genau dieser Tageswerte. Abweichung = abrechenbar minus Forecast, plus heißt über Ziel.
+        Geliefert = genau diese Zeit, bevor der Forecast sie deckelt. Abrechenbar = davon der Teil, den HolidayCheck bezahlt, also höchstens der Forecast plus Zusatzstunden.
+        Forecast = Tageswert aus dem Blatt „Tagesplanung" des Auftraggebers, Woche und Monat sind Summen genau dieser Tageswerte.
+        Abweichung = geliefert minus Forecast: plus heißt mehr geliefert als bestellt (bringt kein Geld), minus heißt Unterdeckung (kostet Geld).
         Fehlt für einen Tag ein Forecast, bleibt das Ziel leer statt geschätzt zu werden.
         Der Forecast ist zugleich die Obergrenze: bezahlt wird der kleinere der beiden Werte, Forecast oder geliefert.
         Mehr als der Forecast zählt nur, wenn HolidayCheck die Stunden angefordert hat, dann stehen sie unten als Zusatzstunden.
@@ -39208,7 +39218,9 @@ function HcHoursView({projects, team}){
         <div style={{padding:'10px 14px',display:'flex',gap:16,flexWrap:'wrap',fontSize:12,color:'var(--muted)'}}>
           <span>Zeitraum {fmtDate(per.from)}{per.from!==per.to?(' bis '+fmtDate(per.to)):''}</span>
           <span>Plan brutto {cpoHours(s.plan)}, Abwesenheit {cpoHours(s.abw)}, Plan netto <b style={{color:'var(--text)'}}>{cpoHours(s.netto)}</b></span>
-          <span>abrechenbar <b style={{color:BRAND.main}}>{cpoHours(s.abr)}</b>{s.nichtAbr>0?(' · '+cpoHours(s.nichtAbr)+' nicht abrechenbar'):''}</span>
+          <span>geliefert <b style={{color:'var(--text)'}}>{cpoHours(s.abrRoh)}</b>, abrechenbar <b style={{color:BRAND.main}}>{cpoHours(s.abr)}</b>
+            {s.gekappt>0.05?<b style={{color:'#b45309'}}>{' · '+cpoHours(s.gekappt)+' über Forecast'}</b>:null}
+            {s.nichtAbr>0?(' · '+cpoHours(s.nichtAbr)+' nicht abrechenbar'):''}</span>
           <span>{s.eur!=null?cpoEur(s.eur):'—'}</span>
         </div>
 
@@ -39223,7 +39235,7 @@ function HcHoursView({projects, team}){
               <th style={{padding:'6px 8px',textAlign:'right'}}>Anteil</th>
               <th style={{padding:'6px 8px',textAlign:'right'}}>abrechenbar</th>
               <th style={{padding:'6px 8px',textAlign:'right'}}>Euro</th>
-              <th style={{padding:'6px 8px',textAlign:'right'}} title="Protokollierte Stunden im Auftraggeber-System, nur zur Kontrolle">protokolliert</th>
+              <th style={{padding:'6px 8px',textAlign:'right'}} title="Protokollierte Stunden im Auftraggeber-System, nur zur Kontrolle. Reicht der Zeitexport nicht bis zum Ende des Zeitraums, deckt die Zahl nur die Tage bis dahin ab.">protokolliert</th>
             </tr></thead>
             <tbody>
               {s.rows.map(r=><tr key={r.id} style={{borderTop:'1px solid var(--border)'}}>
@@ -39234,16 +39246,25 @@ function HcHoursView({projects, team}){
                 <td style={{padding:'6px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{cpoNum(r.netto,1)}</td>
                 <td style={{padding:'6px 8px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:700,color:r.pct===100?'var(--muted)':BRAND.main}}>
                   {r.pct} %
+                  {/* Der Tagesdeckel kuerzt zusaetzlich zum Anteil und wird gleichmaessig verteilt. Ohne
+                      diesen Hinweis sieht es aus, als rechne der Anteil falsch (Befund 2026-10-01). */}
+                  {(r.abrRoh-r.abr)>0.05&&<div style={{fontSize:9.5,fontWeight:700,fontFamily:'var(--font)',color:'#b45309',lineHeight:1.3,marginTop:1}}>
+                    Deckel −{cpoNum(r.abrRoh-r.abr,1)} h</div>}
                   {(r.pct!==100||r.cap!=null)&&<div style={{fontSize:9.5,fontWeight:600,fontFamily:'var(--font)',color:Object.keys(r.srcs)[0]==='schulung'?'#2563eb':'var(--muted)',lineHeight:1.3,marginTop:1}}>
                     {Object.keys(r.srcs).map(k=>HC_SRC_LABEL[k]||k).join(' · ')}
                     {r.cap!=null&&<div style={{color:'#b45309',fontWeight:700}}>höchstens {cpoNum(r.cap,1)} h/Tag</div>}
                     {Object.keys(r.notes||{}).length>0&&<div style={{color:'var(--muted)'}}>{Object.keys(r.notes).join('; ')}</div>}
                   </div>}</td>
-                <td style={{padding:'6px 8px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:800}}>{cpoNum(r.abr,1)}</td>
+                <td style={{padding:'6px 8px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:800}}
+                  title={(r.abrRoh-r.abr)>0.05?('Geliefert '+cpoHours(r.abrRoh)+'. Der Forecast des Tages deckelt die Summe des Skills, davon entfallen '+cpoHours(r.abrRoh-r.abr)+' auf diese Person.'):''}>
+                  {cpoNum(r.abr,1)}</td>
                 <td style={{padding:'6px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{s.rate!=null?cpoEur(r.abr*s.rate):'—'}</td>
                 <td style={{padding:'6px 8px',textAlign:'right',fontFamily:'var(--mono)',color:'var(--muted)'}}
-                  title={R.istOffen?('Der Zeitexport des Auftraggebers reicht bis '+(R.istBis?fmtDate(R.istBis):'—')+'. Fuer spaetere Tage liegt noch nichts vor.'):'Stunden aus dem Zeitexport des Auftraggebers. Weicht diese Zahl stark vom Plan ab, stimmt der Plan nicht.'}>
-                  {r.ist>0?cpoNum(r.ist,1):(R.istOffen?<span style={{fontSize:10,fontFamily:'var(--font)',fontStyle:'italic'}}>liegt noch nicht vor</span>:'—')}</td>
+                  title={R.istOffen?('Der Zeitexport des Auftraggebers reicht nur bis '+(R.istBis?fmtDate(R.istBis):'—')+'. Diese Zahl deckt deshalb nicht den ganzen Zeitraum ab und ist NICHT mit Plan oder abrechenbar vergleichbar.'):'Stunden aus dem Zeitexport des Auftraggebers. Weicht diese Zahl stark vom Plan ab, stimmt der Plan nicht.'}>
+                  {r.ist>0?cpoNum(r.ist,1):(R.istOffen?<span style={{fontSize:10,fontFamily:'var(--font)',fontStyle:'italic'}}>liegt noch nicht vor</span>:'—')}
+                  {/* Ohne diesen Zusatz liest sich ein Tageswert wie eine Wochenzahl: der Zeitexport
+                      hinkt rund eine Woche hinterher, in der laufenden Woche steckt oft nur ein Tag darin. */}
+                  {r.ist>0&&R.istOffen&&<div style={{fontSize:9.5,fontFamily:'var(--font)',color:'#b45309',fontWeight:700,lineHeight:1.2}}>nur bis {R.istBis?fmtDate(R.istBis):'—'}</div>}</td>
               </tr>)}
               <tr style={{borderTop:'2px solid var(--border)',fontWeight:800,background:'var(--surface-2)'}}>
                 <td style={{padding:'7px 8px'}} colSpan={2}>Summe {s.label}</td>
@@ -39254,8 +39275,9 @@ function HcHoursView({projects, team}){
                 <td style={{padding:'7px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{cpoNum(s.abr,1)}</td>
                 <td style={{padding:'7px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{s.eur!=null?cpoEur(s.eur):'—'}</td>
                 <td style={{padding:'7px 8px',textAlign:'right',fontFamily:'var(--mono)'}}
-                  title={R.istOffen?('Der Zeitexport des Auftraggebers reicht bis '+(R.istBis?fmtDate(R.istBis):'—')+'.'):''}>
-                  {s.ist>0?cpoNum(s.ist,1):(R.istOffen?<span style={{fontSize:10,fontWeight:600,fontFamily:'var(--font)',fontStyle:'italic',color:'var(--muted)'}}>liegt noch nicht vor</span>:'—')}</td>
+                  title={R.istOffen?('Der Zeitexport des Auftraggebers reicht nur bis '+(R.istBis?fmtDate(R.istBis):'—')+'.'):''}>
+                  {s.ist>0?cpoNum(s.ist,1):(R.istOffen?<span style={{fontSize:10,fontWeight:600,fontFamily:'var(--font)',fontStyle:'italic',color:'var(--muted)'}}>liegt noch nicht vor</span>:'—')}
+                  {s.ist>0&&R.istOffen&&<div style={{fontSize:9.5,fontFamily:'var(--font)',color:'#b45309',fontWeight:700,lineHeight:1.2}}>nur bis {R.istBis?fmtDate(R.istBis):'—'}</div>}</td>
               </tr>
             </tbody>
           </table>
@@ -39271,6 +39293,8 @@ function HcHoursView({projects, team}){
               <th style={{padding:'5px 8px',textAlign:'left'}}>Skill</th>
               <th style={{padding:'5px 8px',textAlign:'right'}}>Plan</th>
               <th style={{padding:'5px 8px',textAlign:'right'}}>netto</th>
+              <th style={{padding:'5px 8px',textAlign:'right'}}>Forecast</th>
+              <th style={{padding:'5px 8px',textAlign:'right'}}>geliefert</th>
               <th style={{padding:'5px 8px',textAlign:'right'}}>abrechenbar</th>
               <th style={{padding:'5px 8px',textAlign:'left'}}></th>
             </tr></thead>
@@ -39279,8 +39303,10 @@ function HcHoursView({projects, team}){
               <td style={{padding:'5px 8px',color:'var(--muted)'}}>{d.skill==='sales'?'Sales':'Support'}</td>
               <td style={{padding:'5px 8px',textAlign:'right',fontFamily:'var(--mono)',color:'var(--muted)'}}>{cpoNum(d.plan,1)}</td>
               <td style={{padding:'5px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{cpoNum(d.netto,1)}</td>
+              <td style={{padding:'5px 8px',textAlign:'right',fontFamily:'var(--mono)',color:'var(--muted)'}}>{d.fc==null?'—':cpoNum(d.fc,1)}{d.extra>0?<span style={{color:'#1e40af'}}>{' +'+cpoNum(d.extra,1)}</span>:null}</td>
+              <td style={{padding:'5px 8px',textAlign:'right',fontFamily:'var(--mono)',color:(d.abrRoh-d.abr)>0.05?'#b45309':'var(--text)'}}>{cpoNum(d.abrRoh||d.abr,1)}</td>
               <td style={{padding:'5px 8px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:700}}>{cpoNum(d.abr,1)}</td>
-              <td style={{padding:'5px 8px',fontSize:11,color:'#1e40af'}}>{R.trainDays[d.ds]?'Schulung':''}</td>
+              <td style={{padding:'5px 8px',fontSize:11,color:'#1e40af'}}>{R.trainDays[d.ds]?'Schulung':''}{(d.abrRoh-d.abr)>0.05?<span style={{color:'#b45309',marginLeft:6}}>{'Deckel −'+cpoNum(d.abrRoh-d.abr,1)+' h'}</span>:null}</td>
             </tr>)}</tbody>
           </table>
         </div>
@@ -39289,8 +39315,12 @@ function HcHoursView({projects, team}){
       <div style={{fontSize:11.5,color:'var(--muted)',marginTop:10,lineHeight:1.65,maxWidth:880}}>
         Plan = Nettostunden aus dem Schichtplan (Pausen schon abgezogen). Abwesenheit kürzt den Tag ganz oder halb.
         Der Anteil kommt aus den abrechenbaren Anteilen und kann je Person und Zeitraum eingestellt werden.
+        Steht unter dem Anteil „Deckel", kommt die Kürzung nicht vom Anteil, sondern vom Forecast des Tages: er begrenzt die Summe des Skills,
+        und der fehlende Teil wird gleichmäßig auf die Personen des Tages verteilt. Wer wieviel abbekommt, entscheidet der Auftraggeber nicht
+        personenscharf, jede andere Verteilung wäre genauso erfunden.
         Der Forecast kommt taggenau aus dem Blatt „Tagesplanung“ des Auftraggebers; Woche und Monat sind Summen genau dieser Tageswerte.
         Die Spalte „protokolliert" stammt aus dem Zeitexport des Auftraggebers und dient nur der Kontrolle, nicht der Abrechnung.
+        Der Export hinkt rund eine Woche hinterher. Steht dort „nur bis", deckt die Zahl nicht den ganzen Zeitraum ab und darf nicht gegen Plan oder abrechenbar gestellt werden.
       </div>
       </React.Fragment>}
     </React.Fragment>}
