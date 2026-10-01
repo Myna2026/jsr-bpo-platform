@@ -53,6 +53,17 @@ async function options() {
     close_action: v.close_action || "Angebot angenommen",
   };
 }
+// Gehoert die Person zu diesem Mandat? Flaches Feld (Agenten) ODER eine offene Zeile in
+// project_assignments (Overhead). Eine abgelaufene Zuweisung zaehlt nicht mehr.
+async function imProjekt(empId: string, projectId: string) {
+  const { data } = await admin.from("employees").select("project_id,project_assignments").eq("id", empId).maybeSingle();
+  if (!data) return false;
+  if (String((data as any).project_id || "") === projectId) return true;
+  const heute = new Date().toISOString().slice(0, 10);
+  const pa = (data as any).project_assignments;
+  return Array.isArray(pa) && pa.some((a: any) => a && String(a.project_id || "") === projectId
+    && (!a.end_date || String(a.end_date) >= heute));
+}
 // Ohne Token: wenn genau EIN Zugang aktiv ist, nimm den. Das erlaubt die kurze Adresse /retention ohne
 // Token in der URL. Gibt es mehrere, muss der Link den Token tragen — sonst landet jemand im falschen Mandat.
 // Der Token ist ohnehin kein Passwort; angemeldet wird mit der persönlichen PIN.
@@ -111,6 +122,13 @@ Deno.serve(async (req) => {
     const c: any = chk || {};
     if (c.error === "locked") return json({ error: "Zu viele Versuche. Bitte kurz warten." }, 429);
     if (!c.ok || !c.employee_id) return json({ error: "Diese PIN kennen wir nicht." }, 401);
+    // Nur Leute des Mandats duerfen erfassen. Geprueft wird das PROJEKT, nicht der Skill: Aushilfen aus
+    // anderen Skills desselben Projekts sollen durchkommen (Vorgabe 2026-10-01, Faton aus Doku), Fremde nicht.
+    // Die Zuordnung steht an zwei Stellen, je nach Kategorie: Agenten im flachen Feld project_id,
+    // Overhead in project_assignments. Beide werden gelesen, sonst sperrt die Pruefung z. B. die Projektleitung aus.
+    if (!(await imProjekt(String(c.employee_id), link.project_id))) {
+      return json({ error: "Dieser Zugang gehört nicht zu diesem Projekt. Bitte bei der Teamleitung melden." }, 403);
+    }
     const { data: ses, error: se } = await admin.from("cpo_sessions").insert({ token: link.token, employee_id: c.employee_id, emp_name: c.name || null }).select("id").single();
     if (se) return json({ error: "Anmeldung fehlgeschlagen." }, 500);
     return json({ ok: true, session: ses.id, name: c.name || "", sheet: c.name || "", options: await options(), outcomes: OUTCOMES,
