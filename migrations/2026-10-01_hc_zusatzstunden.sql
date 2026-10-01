@@ -1,9 +1,11 @@
 -- HolidayCheck bezahlt grundsaetzlich nur die Stunden, die im Forecast stehen: verguetet wird der
 -- kleinere Wert aus Forecast und geliefert (Klarstellung Shkurte, 2026-10-01). Ausnahme sind Stunden,
 -- die HolidayCheck zusaetzlich angefordert hat oder die wegen des tatsaechlichen Bedarfs noetig waren.
--- Diese Ausnahme steht in KEINER Datei des Auftraggebers, auch nicht in der Spalte
--- "Zusatzinformationen" der Rueckmeldung (im Juni an allen 30 Tagen leer). Sie wird deshalb hier
--- gepflegt: je Tag und Skill die zusaetzlich freigegebenen Stunden plus Begruendung und Herkunft.
+-- Im Monatsblatt des Auftraggebers ("Rueckmeldung Monatsebene") stehen diese Stunden nur versteckt:
+-- die handgetippte Spalte "Vergutet" ist Forecast PLUS Zusatzstunden, die Zusatzstunden sind also
+-- die Differenz zum Forecast. Das liegt erst nach dem Monat vor und ist nicht beschriftet; die
+-- Spalte "Zusatzinformationen" meint laut Kommentar im Blatt die Planannahmen, nicht Zusatzstunden.
+-- Deshalb wird hier tagesaktuell gepflegt: je Tag und Skill die Stunden plus Begruendung und Herkunft.
 create table if not exists hc_extra_hours (
   id          uuid primary key default gen_random_uuid(),
   project_id  text not null,
