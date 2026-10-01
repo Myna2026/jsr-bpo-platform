@@ -122,18 +122,23 @@ Deno.serve(async (req) => {
   }
 
   // ── Daten ─────────────────────────────────────────────────────────────────
-  const [{ data: ents }, { data: shifts }, { data: cfgRow }, { data: optRow }] = await Promise.all([
+  const [{ data: ents }, { data: shifts }, { data: cfgRow }, { data: optRow }, { data: helpRow }] = await Promise.all([
     sb.from("cpo_entries").select("employee_id,work_date,case_no,is_close,cpo_amount,created_at,cancelled_at,case_kind")
       .eq("project_id", PROJ).eq("skill", SKILL).eq("work_date", today),
     sb.from("shift_assignments").select("employee_id,shift_value,net_hours").eq("project_id", PROJ).eq("skill", SKILL).eq("work_date", today),
     sb.from("app_config").select("value").eq("key", HOURLY_KEY).maybeSingle(),
     sb.from("app_config").select("value").eq("key", "jsr_cpo_options_v1").maybeSingle(),
+    sb.from("app_config").select("value").eq("key", "jsr_cpo_helpers_v1").maybeSingle(),
   ]);
   // Fallarten: dieselbe Liste, die der Agent im Link sieht. Die Beschriftung kommt aus der Konfiguration,
   // damit eine neue Art ohne Aenderung an dieser Datei in der Mail auftaucht.
   const kindDefs: any[] = (((optRow && (optRow as any).value) || {}).case_kinds) || [];
   const kindLabel = (k: string) => { if (k === "__na") return "ohne Angabe";
     const d = kindDefs.filter((x: any) => x && x.key === k)[0]; return d ? String(d.label || d.key) : k; };
+  // Aushilfen: erfassen fuer die Retention, werden aber ueber ihren eigenen Skill abgerechnet. Keine
+  // Stunden, kein Rueckfallwert, und sie zaehlen NICHT als Luecke im Schichtplan: es fehlt nichts.
+  const helperIds: string[] = ((((helpRow && (helpRow as any).value) || {})[PROJ + "/" + SKILL]) || []) as string[];
+  const istHilfe = (id: string) => helperIds.indexOf(id) >= 0;
   const hcfgAll = (cfgRow && (cfgRow as any).value) || {};
   const hc = hcfgAll[PROJ + "/" + SKILL] || {};
   const HRL = { on: !!hc.on, rate: Number(hc.rate) || 12.5, fallback: Number(hc.fallback) || 7.5 };
@@ -162,8 +167,9 @@ Deno.serve(async (req) => {
     const f = absFactor(emp, today);
     const sh = shiftBy[id];
     const agent = istAgent(emp);          // Overhead bekommt keine Stundenvergütung
+    const hilfe = istHilfe(String(id));   // Aushilfe: Stunden laufen ueber den eigenen Skill
     let paid = 0, fb = false;
-    if (!agent) { /* keine Stunden */ }
+    if (!agent || hilfe) { /* keine Stunden */ }
     else if (sh) {
       const sp = spans(sh.shift_value);
       const gross = sp.reduce((a, x) => a + (x.e - x.s), 0);
@@ -175,7 +181,7 @@ Deno.serve(async (req) => {
       paid = HRL.fallback * (slot === "13" ? Math.max(0, Math.min(1, (cut - 540) / 510)) : 1);
     }
     const name = ((emp.first_name || "") + " " + (emp.last_name || "")).trim() || "Unbekannt";
-    return { id, name, agent, n: mine.length, cl: cls.length, rev, paid: HRL.on ? paid : 0, fb, mine,
+    return { id, name, agent, hilfe, n: mine.length, cl: cls.length, rev, paid: HRL.on ? paid : 0, fb, mine,
              hourRev: HRL.on ? paid * HRL.rate : 0, quote: mine.length ? cls.length / mine.length : 0 };
   }).sort((a, b) => b.rev - a.rev || b.cl - a.cl);
 
@@ -199,7 +205,7 @@ Deno.serve(async (req) => {
   const total = { n: sum("n"), cl: sum("cl"), rev: sum("rev"), paid: sum("paid"), hourRev: sum("hourRev") };
   const gesamt = total.rev + total.hourRev;
   const quote = total.n ? Math.round(total.cl / total.n * 100) : 0;
-  const fbCount = rows.filter((r) => r.fb && r.agent).length;
+  const fbCount = rows.filter((r) => r.fb && r.agent && !r.hilfe).length;
   const planLos = shiftIds.length === 0;
 
   // Eine Liste statt Bestenliste und Schlusslicht (Vorgabe 2026-09-28): alle, die telefonieren,
@@ -241,7 +247,7 @@ Deno.serve(async (req) => {
   const zeile = (r: any, tone: string, badge?: string) => perfRow({
     name: r.name, value: eur(r.rev), tone, badge,
     note: r.cl + (r.cl === 1 ? " Abschluss" : " Abschlüsse") + " aus " + r.n + " Vorgängen · " + Math.round(r.quote * 100) + " % Quote"
-          + (HRL.on ? " · " + eur(r.hourRev) + " Stunden" : "")
+          + (r.hilfe ? " · Aushilfe, Stunden über den eigenen Skill" : (HRL.on ? " · " + eur(r.hourRev) + " Stunden" : ""))
           + (kindMix(r.mine || []) ? " · " + kindMix(r.mine || []) : ""),
     valuePct: Math.round(r.rev / maxRev * 100),
   });

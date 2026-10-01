@@ -42555,6 +42555,61 @@ function CpoKindEditor({showToast, onChanged}){
     </div>}
   </div>;
 }
+// Aushilfen je Mandat: wer hier steht, erfasst Vorgaenge, wird aber ueber seinen eigenen Skill abgerechnet.
+// Kein Stundenumsatz, kein Rueckfallwert, keine Meldung ueber fehlende Stunden. Gepflegt ohne Code, weil
+// Aushilfen wechseln; die Liste wirkt sofort auf Cockpit und Mail, weil beide dieselbe Konfiguration lesen.
+function CpoHelperEditor({projectId, skill, employees, all, onSaved, showToast}){
+  const mk=projectId+'/'+skill;
+  const [open,setOpen]=React.useState(false);
+  const [busy,setBusy]=React.useState(false);
+  const [sel,setSel]=React.useState('');
+  if(all===null||all===undefined) return null;
+  const ids=Array.isArray(all[mk])?all[mk]:[];
+  const empById={}; (employees||[]).forEach(e=>{ if(e&&e.id) empById[e.id]=e; });
+  const nameOf=id=>{ const e=empById[id]; return e?((((e.first_name||'')+' '+(e.last_name||'')).trim())||id):'Unbekannt (' + String(id).slice(0,8) + ')'; };
+  const skillOf=id=>{ const e=empById[id]; return (e&&e.project_skill)||'ohne Skill'; };
+  const save=async(next)=>{ setBusy(true);
+    try{ const v={...all, [mk]:next}; await saveConfigToDB(HELPER_KEY, v); onSaved&&onSaved(v); }
+    catch(e){ showToast&&showToast('⚠ Speichern fehlgeschlagen','error'); }
+    setBusy(false); };
+  const add=async()=>{ if(!sel){ showToast&&showToast('Bitte eine Person wählen','error'); return; }
+    if(ids.indexOf(sel)>=0){ showToast&&showToast('Steht schon in der Liste','error'); return; }
+    await save([...ids, sel]); setSel(''); };
+  const del=async(id)=>{ await save(ids.filter(x=>x!==id)); };
+  // Zur Wahl stehen alle, die sich am Link anmelden koennen: Leute dieses Projekts.
+  const waehlbar=(employees||[]).filter(e=>e&&e.id&&e.project_id===projectId&&ids.indexOf(e.id)<0
+      &&!String(e.status||'').startsWith('terminated'))
+    .sort((a,b)=>String((a.first_name||'')+a.last_name).localeCompare(String((b.first_name||'')+b.last_name),'de'));
+  return <div style={{border:'1px solid var(--border)',borderRadius:12,background:'var(--card)',marginBottom:14,overflow:'hidden'}}>
+    <div onClick={()=>setOpen(o=>!o)} style={{padding:'10px 14px',display:'flex',alignItems:'center',gap:10,cursor:'pointer'}}>
+      <span style={{fontSize:13,fontWeight:800}}>Aushilfen</span>
+      <span style={{fontSize:12,color:'var(--muted)'}}>{ids.length?(ids.length+' Personen erfassen mit, ohne Stundenvergütung'):'niemand hinterlegt'}</span>
+      <span style={{marginLeft:'auto',fontSize:13,color:'var(--muted)'}}>{open?'▲':'▼'}</span>
+    </div>
+    {open&&<div style={{padding:'0 14px 14px'}}>
+      {!ids.length?<div style={{fontSize:12.5,color:'var(--muted)',marginBottom:10}}>Keine Aushilfen hinterlegt. Alle erfassten Stunden werden ganz normal abgerechnet.</div>:
+        <div style={{marginBottom:10}}>{ids.map(id=>(
+          <div key={id} style={{display:'flex',alignItems:'center',gap:10,padding:'5px 0',borderTop:'1px solid var(--border)',fontSize:13}}>
+            <span style={{flex:1,fontWeight:600}}>{nameOf(id)}</span>
+            <span style={{fontSize:11.5,color:'var(--muted)'}}>Stunden laufen über {skillOf(id)}</span>
+            <button className="btn btn-sm" disabled={busy} onClick={()=>del(id)}>Entfernen</button>
+          </div>))}</div>}
+      <div style={{display:'flex',gap:8,alignItems:'flex-end',flexWrap:'wrap'}}>
+        <div style={{flex:'1 1 260px'}}><label className="form-label">Aushilfe hinzufügen</label>
+          <select className="form-input" value={sel} onChange={e=>setSel(e.target.value)}>
+            <option value="">Person wählen…</option>
+            {waehlbar.map(e=><option key={e.id} value={e.id}>{((e.first_name||'')+' '+(e.last_name||'')).trim()} · {e.project_skill||'ohne Skill'}</option>)}
+          </select></div>
+        <button className="btn btn-sm btn-primary" disabled={busy||!sel} onClick={add}>Hinzufügen</button>
+      </div>
+      <div style={{fontSize:11.5,color:'var(--muted)',marginTop:8,lineHeight:1.5}}>
+        Eine Aushilfe erfasst Vorgänge für die Retention, ihre Arbeitszeit wird aber über ihren eigenen Skill abgerechnet.
+        Abschlüsse und CPO zählen hier mit, Stunden nicht: keine Stundenvergütung, kein Rückfallwert und keine Meldung über
+        fehlende Stunden. In der Mitarbeitertabelle und in Pauls Mail steht bei ihnen das Kennzeichen „Aushilfe".
+      </div>
+    </div>}
+  </div>;
+}
 // Die sechs abzurechnenden CPOs (drei Ergebnisse mal zwei Rabattstufen), direkt aus dem gepflegten Kalkulator.
 // Zum Gegenlesen an einer Stelle: genau diese Beträge friert ein Abschluss beim Erfassen ein.
 function CpoRateTable({projectId, skill}){
@@ -42600,6 +42655,9 @@ function CpoRateTable({projectId, skill}){
 // Backoffice), taucht damit gar nicht erst auf. Satz, Schalter und Rückfallwert stehen in app_config
 // (jsr_retention_hourly_v1) und sind ohne Code änderbar.
 const HOURLY_KEY='jsr_retention_hourly_v1';
+// Aushilfen: erfassen Vorgaenge, werden aber ueber ihren eigenen Skill abgerechnet. Abschluss und CPO
+// zaehlen hier, Stunden nicht. Kein Rueckfallwert und keine Luecken-Meldung: es fehlt nichts.
+const HELPER_KEY='jsr_cpo_helpers_v1';
 const HOURLY_DEFAULT={on:false, rate:12.5, fallback:7.5};
 function hourlyCfgOf(all, projectId, skill){
   const v=(all&&all[projectId+'/'+skill])||{};
@@ -42812,8 +42870,11 @@ function CpoTrackView({team, employees, showToast}){
   const [hourlyAll,setHourlyAll]=useState(null);     // Stundenvergütung je Mandat (app_config)
   const [tab,setTab]=useState('auswertung');         // auswertung | rechner
   const [kindDefs,setKindDefs]=useState([]);         // Fallarten aus app_config, dieselbe Liste wie im Agenten-Link
+  const [helperAll,setHelperAll]=useState(null);     // Aushilfen je Mandat (app_config)
   useEffect(()=>{ let alive=true; (async()=>{ try{ const v=await loadConfigFromDB(HOURLY_KEY); if(alive) setHourlyAll((v&&typeof v==='object')?v:{}); }
     catch(e){ if(alive) setHourlyAll({}); } })(); return ()=>{alive=false;}; },[]);
+  useEffect(()=>{ let alive=true; (async()=>{ try{ const v=await loadConfigFromDB(HELPER_KEY); if(alive) setHelperAll((v&&typeof v==='object')?v:{}); }
+    catch(e){ if(alive) setHelperAll({}); } })(); return ()=>{alive=false;}; },[]);
   useEffect(()=>{ let alive=true; (async()=>{ try{ const v=await loadConfigFromDB('jsr_cpo_options_v1');
       if(alive) setKindDefs((v&&Array.isArray(v.case_kinds))?v.case_kinds:[]); }catch(e){ if(alive) setKindDefs([]); } })(); return ()=>{alive=false;}; },[]);
   const load=React.useCallback(async()=>{
@@ -42831,6 +42892,10 @@ function CpoTrackView({team, employees, showToast}){
   if(rows===null) return <div className="sp-empty">Lädt…</div>;
 
   const HRL=hourlyCfgOf(hourlyAll, PROJ, SKILL);     // an/aus, Satz, Rückfall
+  // Aushilfen: Abschluesse zaehlen hier, Stunden laufen ueber ihren eigenen Skill. Sie bekommen deshalb
+  // keine Stundenverguetung, keinen Rueckfallwert und keine Luecken-Meldung.
+  const helperIds={}; (((helperAll||{})[PROJ+'/'+SKILL])||[]).forEach(id=>{ helperIds[id]=1; });
+  const isHelper=id=>!!helperIds[id];
   const now=new Date(nowTs);
   const today=isoLocal(now);
   const nowMin=now.getHours()*60+now.getMinutes();
@@ -42893,7 +42958,7 @@ function CpoTrackView({team, employees, showToast}){
     if(teamHist.h>=MIN_H && teamHist.cph!=null) return {cph:teamHist.cph, eph:teamHist.eph, src:'team'};
     return {cph:null, eph:null, src:'none'};
   };
-  const RATE_LABEL={live:'eigene Rate heute', hist:'Schnitt der letzten '+HIST_DAYS+' Tage', team:'Teamschnitt', none:'keine Grundlage'};
+  const RATE_LABEL={live:'eigene Rate heute', hist:'Schnitt der letzten '+HIST_DAYS+' Tage', team:'Teamschnitt', none:'keine Grundlage', aushilfe:'Aushilfe, wird nicht hochgerechnet'};
 
   // ── Ein Zeitraum, komplett gerechnet ──────────────────────────────────────────────────────────
   const computeRange=(f,t)=>{
@@ -42912,8 +42977,9 @@ function CpoTrackView({team, employees, showToast}){
     const fbToday=Math.max(0, Math.min(1, (nowMin-540)/510));
     const list=Object.keys(ids).map(id=>{
       const istAgent=cpoIsAgent(empById[id]);
+      const hilf=isHelper(id);
       let planH=0, doneH=0, restH=0, paidH=0, paidPlanH=0, fbDays=0;
-      dates.forEach(ds=>{ const p=planOf(ds,id); planH+=p.plan; doneH+=p.done; restH+=Math.max(0, p.plan-p.done);
+      if(!hilf) dates.forEach(ds=>{ const p=planOf(ds,id); planH+=p.plan; doneH+=p.done; restH+=Math.max(0, p.plan-p.done);
         if(!istAgent) return;                                       // Overhead wird nicht nach Stunden verguetet
         if(!(activeDays[id]&&activeDays[id][ds])) return;          // an diesem Tag nicht telefoniert
         if(p.plan>0){ paidH+=p.done; paidPlanH+=p.plan; }           // Schichtplan ist die Wahrheit
@@ -42928,11 +42994,12 @@ function CpoTrackView({team, employees, showToast}){
       const reached=mine.filter(r=>r.status==='erreicht').length;
       const lost=mine.filter(r=>r.action==='Kündigung in K7 erfasst'||r.action==='Angebot abgelehnt').length;
       const l2=cls.filter(r=>r.discount_level===2).length;
-      const rate=rateFor(id, doneH, cls.length, rev);
+      // Aushilfen werden NICHT hochgerechnet: ohne Stunden gibt es keine Grundlage, und es fehlt auch keine.
+      const rate=hilf?{cph:null, eph:null, src:'aushilfe'}:rateFor(id, doneH, cls.length, rev);
       const hourRev=HRL.on?paidH*HRL.rate:0;
       const fcHourRev=HRL.on?paidPlanH*HRL.rate:0;   // alle geplanten produktiven Stunden des Zeitraums
       const fcRev=rate.eph==null?null:(rev+restH*rate.eph);
-      return {id, name:empName(id), istAgent, kinds, planH, doneH, restH, paidH, paidPlanH, fbDays,
+      return {id, name:empName(id), istAgent, hilf, kinds, planH, doneH, restH, paidH, paidPlanH, fbDays,
         n:mine.length, cl:cls.length, rev, hourRev, total:rev+hourRev,
         up:out.up, gleich:out.gleich, down:out.downgrade, reached, lost, l2, rate,
         cph:doneH>0?cls.length/doneH:null,
@@ -42940,8 +43007,8 @@ function CpoTrackView({team, employees, showToast}){
         // Ohne Stundenvergütung bleibt es der CPO je gelaufener Stunde — die Spalte sagt, was gilt.
         eph:(HRL.on?(paidH>0?(rev+hourRev)/paidH:null):(doneH>0?rev/doneH:null)),
         ephCpo:(HRL.on?(paidH>0?rev/paidH:null):(doneH>0?rev/doneH:null)),
-        fcCl:rate.cph==null?null:(cls.length+restH*rate.cph),
-        fcRev, fcHourRev, fcTotal:(fcRev==null?null:fcRev+fcHourRev)};
+        fcCl:hilf?cls.length:(rate.cph==null?null:(cls.length+restH*rate.cph)),
+        fcRev:hilf?rev:fcRev, fcHourRev, fcTotal:(hilf?rev:(fcRev==null?null:fcRev+fcHourRev))};
     });
     const sum=k=>list.reduce((a,r)=>a+(Number(r[k])||0),0);
     const cls=live.filter(r=>r.is_close);
@@ -43016,7 +43083,7 @@ function CpoTrackView({team, employees, showToast}){
     // Bezahlte Stunden des Tages: nur Agenten, die an diesem Tag Vorgaenge erfasst haben.
     let paid=0;
     if(HRL.on){
-      const aktiv={}; e.forEach(r=>{ if(cpoIsAgent(empById[r.employee_id])) aktiv[r.employee_id]=1; });
+      const aktiv={}; e.forEach(r=>{ if(cpoIsAgent(empById[r.employee_id])&&!isHelper(r.employee_id)) aktiv[r.employee_id]=1; });
       Object.keys(aktiv).forEach(id=>{ const pd=(plan[ds]&&plan[ds][id])||null;
         paid += pd? pd.done : (ds<today?HRL.fallback:(ds===today?HRL.fallback*Math.max(0,Math.min(1,(nowMin-540)/510)):0)); });
     }
@@ -43140,6 +43207,7 @@ function CpoTrackView({team, employees, showToast}){
 
     <CpoTariffEditor projectId={PROJ} skill={SKILL} showToast={showToast}/>
     <CpoKindEditor showToast={showToast} onChanged={v=>setKindDefs(Array.isArray(v&&v.case_kinds)?v.case_kinds:[])}/>
+    <CpoHelperEditor projectId={PROJ} skill={SKILL} employees={employees} all={helperAll} onSaved={v=>setHelperAll(v)} showToast={showToast}/>
     <CpoRateTable projectId={PROJ} skill={SKILL}/>
     {hourlyAll!==null&&<CpoHourlyEditor projectId={PROJ} skill={SKILL} cfg={HRL} allCfg={hourlyAll}
       onSaved={a=>setHourlyAll(a)} showToast={showToast}/>}
@@ -43293,8 +43361,11 @@ function CpoTrackView({team, employees, showToast}){
             const pctUp=e.cl?Math.round(e.up/e.cl*100):null, pctDown=e.cl?Math.round(e.down/e.cl*100):null;
             // Wer im Zeitraum nichts erfasst hat, bleibt sichtbar (das ist ein Befund), tritt aber zurück.
             return <tr key={e.id} style={{borderTop:'1px solid var(--border)',opacity:e.n===0?0.55:1}}>
-              <td style={{padding:'6px 8px',fontWeight:600,whiteSpace:'nowrap'}}>{e.name}</td>
-              <td style={{padding:'6px 8px',textAlign:'right',color:'var(--muted)',whiteSpace:'nowrap'}} title={'geplant '+cpoHours(e.planH)}>{cpoNum(e.doneH,1)}</td>
+              <td style={{padding:'6px 8px',fontWeight:600,whiteSpace:'nowrap'}}>{e.name}
+                {e.hilf?<span title={'Aushilfe: die Stunden laufen über '+((empById[e.id]&&empById[e.id].project_skill)||'den eigenen Skill')+' und werden hier nicht abgerechnet. Abschlüsse und CPO zählen zu Retention.'}
+                  style={{marginLeft:6,fontSize:10,fontWeight:800,letterSpacing:'.03em',textTransform:'uppercase',color:'#1e40af',background:'#eff6ff',border:'1px solid #bfdbfe',borderRadius:5,padding:'1px 5px'}}>Aushilfe</span>:null}</td>
+              <td style={{padding:'6px 8px',textAlign:'right',color:'var(--muted)',whiteSpace:'nowrap'}}
+                title={e.hilf?'Aushilfe: Stunden laufen über den eigenen Skill, hier keine erwartet':('geplant '+cpoHours(e.planH))}>{e.hilf?'—':cpoNum(e.doneH,1)}</td>
               <td style={{padding:'6px 8px',textAlign:'right'}}>{e.n}</td>
               <td style={{padding:'6px 8px',textAlign:'right',fontWeight:800}}>{e.cl}</td>
               <td style={{padding:'6px 8px',textAlign:'right',color:'var(--muted)'}}>{e.cl?(cpoNum(e.n/e.cl,1)+' : 1'):'—'}</td>
@@ -43307,9 +43378,10 @@ function CpoTrackView({team, employees, showToast}){
               <td style={{padding:'6px 8px',textAlign:'right',color:'var(--muted)'}}>{e.cl?Math.round(e.l2/e.cl*100)+' %':'—'}</td>
               <td style={{padding:'6px 8px',textAlign:'right',fontWeight:800,fontFamily:'var(--mono)'}}>{cpoEur(e.rev)}</td>
               {HRL.on?<td style={{padding:'6px 8px',textAlign:'right',fontFamily:'var(--mono)',color:e.paidH>0?'var(--text)':'var(--muted)'}}
-                title={e.paidH>0?(cpoHours(e.paidH)+' bezahlt'+(e.fbDays?(' · '+e.fbDays+' Tage ohne Schichtplan, mit '+cpoHours(HRL.fallback)+' gerechnet'):''))
+                title={e.hilf?'Aushilfe: wird über den eigenen Skill abgerechnet, hier bewusst keine Stundenvergütung'
+                  :(e.paidH>0?(cpoHours(e.paidH)+' bezahlt'+(e.fbDays?(' · '+e.fbDays+' Tage ohne Schichtplan, mit '+cpoHours(HRL.fallback)+' gerechnet'):''))
                   :(!e.istAgent?('Position '+((empById[e.id]&&empById[e.id].position)||'ohne Angabe')+': bearbeitet keine Cases, keine Stundenvergütung')
-                               :'keine Vorgänge erfasst, keine Stundenvergütung')}>
+                               :'keine Vorgänge erfasst, keine Stundenvergütung'))}>
                 {e.paidH>0?cpoEur(e.hourRev):'—'}</td>:null}
               {HRL.on?<td style={{padding:'6px 8px',textAlign:'right',fontWeight:800,fontFamily:'var(--mono)'}}>{cpoEur(e.total)}</td>:null}
               <td style={{padding:'6px 8px',textAlign:'right',fontFamily:'var(--mono)',color:'var(--muted)'}}
@@ -43317,7 +43389,7 @@ function CpoTrackView({team, employees, showToast}){
                 {e.eph!=null?cpoEur(e.eph):'—'}</td>
               {R.hasToday?<td style={{padding:'6px 8px',textAlign:'right',fontFamily:'var(--mono)'}} title={'Grundlage: '+(RATE_LABEL[e.rate.src]||'')+' · Reststunden '+cpoHours(e.restH)}>
                 {e.fcRev!=null?cpoEur(e.fcRev):'—'}
-                <div style={{fontSize:10,color:e.rate.src==='live'?'var(--muted)':'#b45309'}}>{e.rate.src==='live'?'eigene Rate':(e.rate.src==='hist'?'Schnitt '+HIST_DAYS+' Tage':(e.rate.src==='team'?'Teamschnitt':'ohne Grundlage'))}</div>
+                <div style={{fontSize:10,color:(e.rate.src==='live'||e.rate.src==='aushilfe')?'var(--muted)':'#b45309'}}>{e.rate.src==='live'?'eigene Rate':(e.rate.src==='hist'?'Schnitt '+HIST_DAYS+' Tage':(e.rate.src==='team'?'Teamschnitt':(e.rate.src==='aushilfe'?'Aushilfe':'ohne Grundlage')))}</div>
               </td>:null}
             </tr>; })}
             <tr style={{borderTop:'2px solid var(--border)',fontWeight:800,background:'var(--surface-2)'}}>
@@ -43349,6 +43421,8 @@ function CpoTrackView({team, employees, showToast}){
         Stundenvergütung bekommen nur Fall-Bearbeiter (Agent, Senior Agent, ASP, Supervisor) an Tagen mit Vorgängen.
         Gesamt/Std = CPO plus Stundenvergütung geteilt durch die vergüteten Stunden; im Tooltip steht der CPO-Anteil.
         Verloren = „Kündigung in K7 erfasst" oder „Angebot abgelehnt". Die Prognose rechnet die Reststunden mit der Rate hoch, die unter dem Betrag steht.
+        <b> Aushilfe</b> heißt: die Person erfasst Vorgänge für Retention, ihre Arbeitszeit wird aber über ihren eigenen Skill abgerechnet.
+        Abschlüsse und CPO zählen hier mit, Stunden nicht. Dort fehlen keine Stunden, es werden keine erwartet.
       </div>
     </div>
 

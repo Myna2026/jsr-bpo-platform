@@ -72,12 +72,17 @@ Deno.serve(async (req) => {
 
   // ── Daten: 14 Tage zurück reichen für alle Vergleiche ─────────────────────
   const von = (() => { const d = new Date(today + "T00:00:00"); d.setDate(d.getDate() - 14); return iso(d); })();
-  const [{ data: ents }, { data: shifts }] = await Promise.all([
+  const [{ data: ents }, { data: shifts }, { data: helpRow }] = await Promise.all([
     sb.from("cpo_entries").select("employee_id,work_date,is_close,cpo_amount,discount_level,cancelled_at")
       .eq("project_id", PROJ).eq("skill", SKILL).gte("work_date", von).lte("work_date", today),
     sb.from("shift_assignments").select("employee_id,work_date,net_hours")
       .eq("project_id", PROJ).eq("skill", SKILL).gte("work_date", von),
+    sb.from("app_config").select("value").eq("key", "jsr_cpo_helpers_v1").maybeSingle(),
   ]);
+  // Aushilfen erfassen fuer die Retention, ihre Stunden laufen ueber den eigenen Skill. Sie stehen
+  // deshalb nie im Retention-Plan, und das ist kein Befund: Paul darf sie nicht als Luecke melden.
+  const helperIds: string[] = ((((helpRow && (helpRow as any).value) || {})[PROJ + "/" + SKILL]) || []) as string[];
+  const istHilfe = (id: string) => helperIds.indexOf(id) >= 0;
   const all = ents || [], sh = shifts || [];
   const ids = [...new Set([...all.map((r: any) => r.employee_id), ...sh.map((s: any) => s.employee_id)])];
   const { data: emps } = ids.length ? await sb.from("employees").select("id,first_name,last_name,position,absences").in("id", ids) : { data: [] as any[] };
@@ -139,7 +144,7 @@ Deno.serve(async (req) => {
     funde.push({ titel: "Kein Schichtplan für heute", ton: "bad",
       text: "Es wurde erfasst, aber für den " + dmy(today) + " steht keine einzige Schicht im Plan. Die Stundenvergütung rechnet deshalb mit dem Rückfallwert." });
   } else {
-    const ohnePlan = [...heuteAktiv].filter((id) => istAgent(empBy[id]) && !imPlanHeute.includes(id));
+    const ohnePlan = [...heuteAktiv].filter((id) => istAgent(empBy[id]) && !imPlanHeute.includes(id) && !istHilfe(String(id)));
     if (ohnePlan.length) funde.push({ titel: "Erfassung ohne Schicht im Plan", ton: "warn",
       text: ohnePlan.map(nameOf).join(", ") + ": heute erfasst, aber nicht im Plan. Für " + (ohnePlan.length === 1 ? "diesen Tag" : "diese Tage") + " hängt die Stundenvergütung an einer Annahme." });
   }
