@@ -38473,6 +38473,195 @@ function hcExportXlsx(R, per){
   }catch(e){ console.error('[hc] Export', e); }
 }
 
+// Parallelrechnung Plan gegen Ist. Seit dem 2026-10-02 soll abgerechnet werden, was der Auftraggeber
+// in der Performance-Datei zurueckmeldet, also das Ist. Bis eine echte Rechnung von HolidayCheck
+// gegen unsere Zahl gelaufen ist, stehen beide nebeneinander. Zwei Fragen sind offen und deshalb als
+// Varianten sichtbar statt entschieden: gelten unsere Anteile auch auf das Ist (Mergim 0 %, Bleart
+// 50 %, Ardita hoechstens 6,5 h) und greift der Tagesdeckel aus dem Forecast auch dort.
+function HcParallel({p, per, istOffen}){
+  const [detail,setDetail]=React.useState(false);
+  if(!p||!p.zeilen||!p.zeilen.length) return <div className="sp-empty">Für diesen Zeitraum gibt es keine Zahlen.</div>;
+  const sum=k=>p.zeilen.reduce((a,z)=>a+(Number(z[k])||0),0);
+  const eur=k=>p.zeilen.reduce((a,z)=>a+((z.rate!=null?Number(z[k])*z.rate:0)||0),0);
+  const hatFc=p.zeilen.some(z=>z.fc!=null);
+  const pz=(v,st)=><td style={{padding:'7px 10px',textAlign:'right',fontFamily:'var(--mono)',...(st||{})}}>{v}</td>;
+  const karte=(titel, frage, inhalt, farbe)=>(
+    <div style={{flex:'1 1 300px',minWidth:280,border:'1px solid var(--border)',borderLeft:'4px solid '+farbe,borderRadius:12,background:'var(--card)',padding:'12px 14px'}}>
+      <div style={{fontSize:13,fontWeight:800,marginBottom:1}}>{titel}</div>
+      <div style={{fontSize:11.5,color:'var(--muted)',marginBottom:9}}>{frage}</div>
+      {inhalt}
+    </div>);
+  const zeileKlein=(label, wert, ton)=>(
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',gap:8,padding:'3px 0',fontSize:12.5}}>
+      <span style={{color:'var(--muted)'}}>{label}</span>
+      <b style={{fontFamily:'var(--mono)',color:ton||'var(--text)',whiteSpace:'nowrap'}}>{wert}</b>
+    </div>);
+  const vz=v=>(v>0?'+':'')+cpoNum(v,1)+' h';
+  const ton=v=>Math.abs(v)<0.05?'var(--muted)':(v<0?'#b91c1c':'#15803d');
+
+  return <div>
+    <div style={{border:'1px solid var(--border)',background:'var(--surface-2)',borderRadius:12,padding:'11px 14px',marginBottom:14,fontSize:12.5,lineHeight:1.7}}>
+      <b>Drei Ebenen, drei Fragen.</b><br/>
+      <b>Forecast</b> ist der Bedarf des Auftraggebers, danach planen wir.
+      <b> Plan</b> ist unsere Besetzung.
+      <b> Ist</b> sind die zurückgemeldeten Stunden aus der Performance-Datei, und das ist die Abrechnung.
+      Plan gegen Forecast sagt, ob wir richtig geplant haben. Ist gegen Forecast sagt, was wir bezahlt bekommen.
+      Plan gegen Ist sagt, ob das Team geliefert hat, was geplant war.
+    </div>
+
+    {(p.offeneTage||[]).length>0&&<div style={{border:'1px solid #fde68a',background:'#fffbeb',borderRadius:12,padding:'10px 14px',marginBottom:14,fontSize:12.5,color:'#92400e',lineHeight:1.6}}>
+      <b>Das Ist deckt den Zeitraum noch nicht ab.</b> Der Zeitexport reicht bis {p.istBis?fmtDate(p.istBis):'—'}, es fehlen {p.offeneTage.length} Tag{p.offeneTage.length===1?'':'e'}
+      {p.offeneTage.length<=6?(' ('+p.offeneTage.map(fmtDate).join(', ')+')'):''}. Alles, was unten auf dem Ist beruht, ist für diesen Zeitraum noch nicht endgültig.
+    </div>}
+
+    {/* ── Die drei Ebenen nebeneinander ──────────────────────────────────────────────── */}
+    <div style={{border:'1px solid var(--border)',borderRadius:12,background:'var(--card)',overflow:'hidden',marginBottom:14}}>
+      <div style={{padding:'10px 14px',borderBottom:'1px solid var(--border)',fontSize:13,fontWeight:800}}>
+        Die drei Ebenen · {fmtDate(per.from)}{per.from!==per.to?(' bis '+fmtDate(per.to)):''}
+      </div>
+      <div style={{overflowX:'auto'}}>
+        <table style={{width:'100%',borderCollapse:'collapse',fontSize:12.5,minWidth:820}}>
+          <thead><tr style={{color:'var(--muted)',fontSize:10.5,textTransform:'uppercase',letterSpacing:'.04em',background:'var(--surface-2)'}}>
+            <th style={{textAlign:'left',padding:'7px 10px'}}>Skill</th>
+            <th style={{textAlign:'right',padding:'7px 10px'}}>1 Forecast</th>
+            <th style={{textAlign:'right',padding:'7px 10px'}}>2 Plan netto</th>
+            <th style={{textAlign:'right',padding:'7px 10px'}}>davon einsatzwirksam</th>
+            <th style={{textAlign:'right',padding:'7px 10px'}}>3 Ist</th>
+            <th style={{textAlign:'right',padding:'7px 10px'}}>davon abrechenbar</th>
+            <th style={{textAlign:'right',padding:'7px 10px'}}>Umsatz</th>
+          </tr></thead>
+          <tbody>
+            {p.zeilen.map(r=><tr key={r.skill} style={{borderTop:'1px solid var(--border)'}}>
+              <td style={{padding:'7px 10px',fontWeight:700}}>{r.label}</td>
+              {pz(r.fc==null?'—':cpoNum(r.fc,1)+' h',{color:r.fc==null?'var(--muted)':'var(--text)'})}
+              {pz(cpoNum(r.planNetto,1)+' h')}
+              {pz(cpoNum(r.planGeliefert,1)+' h',{color:'var(--muted)'})}
+              {pz(cpoNum(r.istRoh,1)+' h',{fontWeight:700})}
+              {pz(cpoNum(r.istDeckel,1)+' h',{fontWeight:800,color:BRAND.main})}
+              {pz(r.istEur!=null?cpoEur(r.istEur):'—',{fontWeight:800})}
+            </tr>)}
+            <tr style={{borderTop:'2px solid var(--border)',fontWeight:800,background:'var(--surface-2)'}}>
+              <td style={{padding:'8px 10px'}}>Zusammen</td>
+              {pz(hatFc?cpoNum(sum('fc'),1)+' h':'—')}
+              {pz(cpoNum(sum('planNetto'),1)+' h')}
+              {pz(cpoNum(sum('planGeliefert'),1)+' h')}
+              {pz(cpoNum(sum('istRoh'),1)+' h')}
+              {pz(cpoNum(sum('istDeckel'),1)+' h',{color:BRAND.main})}
+              {pz(cpoEur(eur('istDeckel')))}
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div style={{padding:'8px 14px',borderTop:'1px solid var(--border)',fontSize:11.5,color:'var(--muted)',lineHeight:1.6}}>
+        Plan netto = Schichtplan ohne Pausen, abzüglich Abwesenheit. Einsatzwirksam = davon der Teil, der auf den Forecast
+        einzahlt, also ohne Projektleitung, Trainer und Teilanteile. Ist = gemessene Produktivzeit des Auftraggebers,
+        abrechenbar = dieselbe Zeit mit unseren Anteilen und dem Forecast-Deckel.
+      </div>
+    </div>
+
+    {/* ── Drei Fragen, drei Antworten ────────────────────────────────────────────────── */}
+    <div style={{display:'flex',gap:12,flexWrap:'wrap',marginBottom:14}}>
+      {karte('Haben wir richtig geplant?','Plan gegen Forecast', <div>
+        {p.zeilen.map(r=>{ const d=(r.fc==null?null:r.planGeliefert-r.fc);
+          return <div key={r.skill}>{zeileKlein(r.label, d==null?'kein Forecast':(vz(d)+(r.fc?(' · '+Math.round(r.planGeliefert/r.fc*100)+' %'):'')), d==null?'var(--muted)':ton(d))}</div>; })}
+        <div style={{fontSize:11,color:'var(--muted)',marginTop:7,lineHeight:1.5}}>
+          Plus heißt mehr Besetzung geplant als bestellt. Das ist kein Fehler, solange es bewusst passiert:
+          ein Aufschlag deckt Ausfall und Nebenzeiten ab.
+        </div></div>, '#64748b')}
+
+      {karte('Was bekommen wir bezahlt?','Ist gegen Forecast', <div>
+        {p.zeilen.map(r=>(<div key={r.skill}>{zeileKlein(r.label, cpoNum(r.istDeckel,1)+' h · '+(r.istEur!=null?cpoEur(r.istEur):'—'), BRAND.main)}</div>))}
+        {zeileKlein('zusammen', cpoEur(eur('istDeckel')), BRAND.main)}
+        <div style={{fontSize:11,color:'var(--muted)',marginTop:7,lineHeight:1.5}}>
+          {sum('abzugDeckel')>0.05
+            ? <span>Davon hat der Tagesdeckel <b style={{color:'#b45309'}}>{cpoHours(sum('abzugDeckel'))}</b> abgeschnitten: über dem Forecast zahlt HolidayCheck nicht.</span>
+            : <span>Der Forecast wurde an keinem Tag überschritten, es ging nichts durch den Deckel verloren.</span>}
+        </div></div>, BRAND.main)}
+
+      {karte('Hat das Team geliefert?','Plan gegen Ist', <div>
+        {p.zeilen.map(r=>{ const d=r.istRoh-r.planNetto;
+          return <div key={r.skill}>{zeileKlein(r.label, vz(d), ton(d))}</div>; })}
+        <div style={{fontSize:11,color:'var(--muted)',marginTop:7,lineHeight:1.5}}>
+          Minus heißt: Anwesenheit war geplant, produktive Zeit kam nicht an. Erklärbar ist das durch Schulung,
+          Besprechungen und Tätigkeiten ohne eigene Spalte, etwa Führungsarbeit. Plus heißt, es wurde mehr
+          geleistet als geplant, und genau das ist seit der Umstellung bares Geld.
+        </div></div>, '#7c3aed')}
+    </div>
+
+    {/* ── Offene Entscheidungen, in Zahlen ───────────────────────────────────────────── */}
+    <div style={{border:'1px solid var(--border)',borderRadius:12,background:'var(--card)',overflow:'hidden',marginBottom:14}}>
+      <div style={{padding:'10px 14px',borderBottom:'1px solid var(--border)',fontSize:13,fontWeight:800}}>
+        Was die beiden offenen Fragen kosten
+      </div>
+      <div style={{overflowX:'auto'}}>
+        <table style={{width:'100%',borderCollapse:'collapse',fontSize:12.5,minWidth:760}}>
+          <thead><tr style={{color:'var(--muted)',fontSize:10.5,textTransform:'uppercase',letterSpacing:'.04em'}}>
+            <th style={{textAlign:'left',padding:'6px 10px'}}>Variante auf dem Ist</th>
+            {p.zeilen.map(r=><th key={r.skill} style={{textAlign:'right',padding:'6px 10px'}}>{r.label}</th>)}
+            <th style={{textAlign:'right',padding:'6px 10px'}}>Umsatz</th>
+          </tr></thead>
+          <tbody>
+            {[['istRoh','ohne alles: reine gemessene Zeit'],
+              ['istAnteil','mit unseren Anteilen und Obergrenzen'],
+              ['istDeckel','zusätzlich mit dem Forecast-Deckel']].map(([k,lab])=>(
+              <tr key={k} style={{borderTop:'1px solid var(--border)'}}>
+                <td style={{padding:'6px 10px',fontWeight:k==='istDeckel'?800:600}}>{lab}</td>
+                {p.zeilen.map(r=><td key={r.skill} style={{padding:'6px 10px',textAlign:'right',fontFamily:'var(--mono)'}}>{cpoNum(r[k],1)} h</td>)}
+                <td style={{padding:'6px 10px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:800}}>{cpoEur(eur(k))}</td>
+              </tr>))}
+            <tr style={{borderTop:'2px solid var(--border)',background:'var(--surface-2)'}}>
+              <td style={{padding:'6px 10px',fontWeight:800}}>zum Vergleich: heutige Abrechnung aus dem Plan</td>
+              {p.zeilen.map(r=><td key={r.skill} style={{padding:'6px 10px',textAlign:'right',fontFamily:'var(--mono)'}}>{cpoNum(r.planAbr,1)} h</td>)}
+              <td style={{padding:'6px 10px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:800}}>{cpoEur(eur('planAbr'))}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div style={{padding:'8px 14px',borderTop:'1px solid var(--border)',fontSize:11.5,color:'var(--muted)',lineHeight:1.6}}>
+        Die Anteile kosten <b style={{color:'var(--text)'}}>{cpoHours(sum('abzugAnteil'))}</b>, der Tagesdeckel weitere <b style={{color:'var(--text)'}}>{cpoHours(sum('abzugDeckel'))}</b>
+        {p.kapIst&&p.kapIst.length?(' an '+p.kapIst.length+' Tagen'):''}. Beide Fragen sind mit dem Auftraggeber noch nicht geklärt,
+        deshalb steht hier keine Entscheidung, sondern der Preis jeder Antwort. Die letzte Zeile ist die Zahl, die wir heute abrechnen.
+      </div>
+    </div>
+
+    {/* ── Je Person: alle drei Ebenen ─────────────────────────────────────────────────── */}
+    <div style={{border:'1px solid var(--border)',borderRadius:12,background:'var(--card)',overflow:'hidden'}}>
+      <div onClick={()=>setDetail(d=>!d)} style={{padding:'10px 14px',display:'flex',alignItems:'center',gap:10,cursor:'pointer'}}>
+        <span style={{fontSize:13,fontWeight:800}}>Je Person</span>
+        <span style={{fontSize:12,color:'var(--muted)'}}>{(p.personen||[]).length} Personen im Zeitraum</span>
+        <span style={{marginLeft:'auto',fontSize:13,color:'var(--muted)'}}>{detail?'▲':'▼'}</span>
+      </div>
+      {detail&&<div style={{padding:'0 14px 14px',overflowX:'auto'}}>
+        <table style={{width:'100%',borderCollapse:'collapse',fontSize:12.5,minWidth:760}}>
+          <thead><tr style={{color:'var(--muted)',fontSize:10.5,textTransform:'uppercase',letterSpacing:'.04em'}}>
+            <th style={{textAlign:'left',padding:'5px 8px'}}>Person</th>
+            <th style={{textAlign:'left',padding:'5px 8px'}}>Rolle</th>
+            <th style={{textAlign:'left',padding:'5px 8px'}}>Skill</th>
+            <th style={{textAlign:'right',padding:'5px 8px'}}>Plan netto</th>
+            <th style={{textAlign:'right',padding:'5px 8px'}}>Ist</th>
+            <th style={{textAlign:'right',padding:'5px 8px'}}>Plan gegen Ist</th>
+            <th style={{textAlign:'right',padding:'5px 8px'}}>abrechenbar</th>
+          </tr></thead>
+          <tbody>{p.personen.map(r=>{ const d=r.istRoh-r.planNetto;
+            return <tr key={r.id+r.skill} style={{borderTop:'1px solid var(--border)'}}>
+            <td style={{padding:'5px 8px',fontWeight:600}}>{r.name}</td>
+            <td style={{padding:'5px 8px',color:'var(--muted)'}}>{r.position||'—'}</td>
+            <td style={{padding:'5px 8px',color:'var(--muted)'}}>{r.skill==='sales'?'Sales':'Support'}</td>
+            <td style={{padding:'5px 8px',textAlign:'right',fontFamily:'var(--mono)',color:'var(--muted)'}}>{cpoNum(r.planNetto,1)}</td>
+            <td style={{padding:'5px 8px',textAlign:'right',fontFamily:'var(--mono)'}}>{cpoNum(r.istRoh,1)}</td>
+            <td style={{padding:'5px 8px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:800,color:ton(d)}}>{vz(d)}</td>
+            <td style={{padding:'5px 8px',textAlign:'right',fontFamily:'var(--mono)',fontWeight:700,color:BRAND.main}}>{cpoNum(r.istDeckel,1)}</td>
+          </tr>; })}</tbody>
+        </table>
+        <div style={{fontSize:11.5,color:'var(--muted)',marginTop:8,lineHeight:1.5}}>
+          Der Deckel trifft den ganzen Skill, nicht die einzelne Person; er wird deshalb gleichmäßig verteilt, damit die
+          Zeilen zur Summe passen. Wer in der Datei steht, aber keinem Mitarbeiter zugeordnet werden kann, fehlt hier
+          vollständig: seit das Ist abgerechnet wird, ist eine fehlende Zuordnung verlorenes Geld.
+        </div>
+      </div>}
+    </div>
+  </div>;
+}
 // Gegenprobe gegen das Monatsblatt des Auftraggebers. Zwei Messungen derselben Sache: wir rechnen
 // aus dem Schichtplan, HolidayCheck zaehlt die tatsaechliche Zeit. Weichen sie ab, ist das ein Befund
 // und keine Rechenpanne, deshalb steht die Differenz hier offen statt versteckt.
@@ -39001,6 +39190,84 @@ function HcHoursView({projects, team}){
             from:per.from, to:per.to,
             offenOverhead:Object.keys(offen).map(k=>offen[k]), heute, todayDs,
             bloecke, ref, refMon, refM0, soll, sollSum, istBisDs, sollBis, austritte,
+            // ── Parallelrechnung: dieselbe Periode einmal nach Plan, einmal nach Ist ──────────────
+            // Seit dem 2026-10-02 gilt: abgerechnet wird die Rueckmeldung des Auftraggebers, also das
+            // Ist aus der Performance-Datei. Bis eine echte Rechnung von HolidayCheck dagegen gelaufen
+            // ist, stehen beide Zahlen nebeneinander. Zwei Fragen sind noch offen und deshalb als
+            // Varianten ausgewiesen, nicht entschieden: gelten unsere Anteile auch auf das Ist, und
+            // greift der Tagesdeckel auf das Ist.
+            parallel:(()=>{
+              const istTag={};   // 'skill|tag' -> {roh, anteil}
+              const perP={};     // Person -> Zahlen
+              (raw.dh||[]).forEach(r=>{
+                const ds=String(r.work_date).slice(0,10); if(ds<per.from||ds>per.to) return;
+                // Negative Stunden gibt es wirklich: der Auftraggeber korrigiert damit im Nachhinein
+                // (sechs Zeilen seit Juli, zusammen -1,65 h, immer negatives logtimetelefon). Sie
+                // duerfen nicht uebersprungen werden, sonst rechnen wir uns die Zeit schoen.
+                const sk=String(r.skill||'').toLowerCase(); const h=Number(r.hours)||0; if(!h) return;
+                const p=hcPctFor(cfg, r.employee_id, ds, trainDays);
+                let v=h*((p.pct==null?100:p.pct)/100);
+                if(p.cap!=null&&v>p.cap) v=p.cap;        // Obergrenze in Stunden gilt je TAG
+                const k=sk+'|'+ds; const d=istTag[k]||(istTag[k]={roh:0, anteil:0});
+                d.roh+=h; d.anteil+=v;
+                const pk=r.employee_id+'|'+sk;
+                const q=perP[pk]||(perP[pk]={id:r.employee_id, skill:sk, name:nameOf(r.employee_id),
+                  position:((empBy[r.employee_id]||{}).position||''), istRoh:0, istAnteil:0});
+                q.istRoh+=h; q.istAnteil+=v;
+              });
+              // Tagesdeckel auf das Ist, gleiche Regel wie auf den Plan: Forecast plus Zusatzstunden.
+              const kapIst=[]; const sum={};
+              Object.keys(istTag).forEach(k=>{
+                const t=k.split('|'); const sk=t[0], ds=t[1]; const d=istTag[k];
+                const fc=fdBy[k]; const ex=((exBy[k]||{}).h||0);
+                const deckel=(fc==null?null:fc+ex);
+                const ged=(deckel!=null&&d.anteil>deckel)?deckel:d.anteil;
+                if(deckel!=null&&d.anteil>deckel+0.001) kapIst.push({skill:sk, ds, ist:d.anteil, deckel, weg:d.anteil-deckel});
+                const o2=sum[sk]||(sum[sk]={roh:0, anteil:0, deckel:0, tage:0});
+                o2.roh+=d.roh; o2.anteil+=d.anteil; o2.deckel+=ged; o2.tage++;
+                const q=perP[sk]; if(q){ /* nur zur Vollstaendigkeit */ }
+              });
+              // Anteil je Person am Deckel-Abzug, damit die Personenzeilen zur Summe passen.
+              const fakt={}; Object.keys(sum).forEach(sk=>{ fakt[sk]=sum[sk].anteil>0?sum[sk].deckel/sum[sk].anteil:1; });
+              // Planseite je Person dazu, damit die Frage "hat das Team geliefert" personenscharf wird.
+              const planBy={}; list.forEach(r=>{ planBy[r.id+'|'+r.skill]={netto:r.netto, abr:r.abr, abw:r.abw}; });
+              Object.keys(planBy).forEach(k=>{ if(!perP[k]){ const t=k.split('|');
+                const e=empBy[t[0]]||{};
+                perP[k]={id:t[0], skill:t[1], name:nameOf(t[0]), position:e.position||'', istRoh:0, istAnteil:0}; } });
+              const personen=Object.keys(perP).map(k=>{ const q=perP[k]; const pl=planBy[k]||{};
+                return {...q, planNetto:pl.netto||0, planAbr:pl.abr||0, planAbw:pl.abw||0,
+                        istDeckel:q.istAnteil*(fakt[q.skill]==null?1:fakt[q.skill])}; })
+                .sort((a,b)=>(b.istRoh+b.planNetto)-(a.istRoh+a.planNetto));
+              // Bis wohin reicht das Ist im gewaehlten Zeitraum, und welche Tage fehlen?
+              const istBisHier=(raw.istBis&&raw.istBis<per.to)?raw.istBis:per.to;
+              const offeneTage=(()=>{ const out=[]; let d=new Date((istBisHier===per.to?per.to:istBisHier)+'T00:00:00');
+                d.setDate(d.getDate()+1);
+                const e=new Date(per.to+'T00:00:00'); let g=0;
+                while(d<=e&&g<60){ out.push(isoLocal(d)); d.setDate(d.getDate()+1); g++; }
+                return out; })();
+              const zeilen=['sales','support'].map(sk=>{
+                const sp=(skills||[]).find(x=>x.skill===sk)||{};
+                const i=sum[sk]||{roh:0, anteil:0, deckel:0};
+                const rate=sp.rate==null?null:sp.rate;
+                // Plan-Seite: genau die Zahl, die heute abgerechnet wird.
+                const planAbr=Number(sp.abr)||0;
+                // Forecast des Zeitraums, taggenau aus demselben Tagesblatt wie ueberall sonst.
+                let fcS=0, fcTage=0;
+                Object.keys(fdBy).forEach(k2=>{ const t2=k2.split('|');
+                  if(t2[0]!==sk) return; if(t2[1]<per.from||t2[1]>per.to) return; fcS+=fdBy[k2]; fcTage++; });
+                return {skill:sk, label:sk==='sales'?'Sales':'Support', rate,
+                  fc:(fcTage?fcS:null), fcTage,
+                  planBrutto:Number(sp.plan)||0, planNetto:Number(sp.netto)||0, planAbw:Number(sp.abw)||0,
+                  planGeliefert:Number(sp.abrRoh)||0,
+                  planAbr, planEur:(rate!=null?planAbr*rate:null),
+                  istRoh:i.roh, istAnteil:i.anteil, istDeckel:i.deckel,
+                  istEur:(rate!=null?i.deckel*rate:null),
+                  diff:i.deckel-planAbr, diffEur:(rate!=null?(i.deckel-planAbr)*rate:null),
+                  abzugAnteil:i.roh-i.anteil, abzugDeckel:i.anteil-i.deckel};
+              }).filter(z=>z.planAbr>0||z.istRoh>0);
+              return {zeilen, personen, kapIst:kapIst.sort((a,b)=>a.ds<b.ds?-1:1),
+                      istBis:(raw.istBis||null), offeneTage};
+            })(),
             gegen:(()=>{
               // Gegenprobe: was sagt das Monatsblatt des Auftraggebers, was sagen wir. Verglichen wird
               // je Tag und Skill. "Zahlung" ist nach der Regel der kleinere Wert aus Obergrenze und
@@ -39048,6 +39315,8 @@ function HcHoursView({projects, team}){
         style={{background:tab==='abgleich'?BRAND.main:'var(--card)',color:tab==='abgleich'?'#fff':'var(--text)',fontWeight:800}}>Abgleich</button>
       <button className="btn btn-sm" onClick={()=>setTab('soll')}
         style={{background:tab==='soll'?BRAND.main:'var(--card)',color:tab==='soll'?'#fff':'var(--text)',fontWeight:800}}>Soll-Erfüllung</button>
+      <button className="btn btn-sm" onClick={()=>setTab('parallel')}
+        style={{background:tab==='parallel'?BRAND.main:'var(--card)',color:tab==='parallel'?'#fff':'var(--text)',fontWeight:800}}>Drei Ebenen</button>
       <button className="btn btn-sm" onClick={()=>setTab('anteile')}
         style={{background:tab==='anteile'?BRAND.main:'var(--card)',color:tab==='anteile'?'#fff':'var(--text)',fontWeight:800}}>Abrechenbare Anteile</button>
     </div>
@@ -39107,6 +39376,8 @@ function HcHoursView({projects, team}){
       </div>}
 
       {/* Soll-Erfuellung je Person: was war geplant, was kam an, und woran die Differenz liegt. */}
+      {tab==='parallel'&&R&&R.parallel&&<HcParallel p={R.parallel} per={per} istOffen={R.istOffen}/>}
+
       {tab==='soll'&&R&&<React.Fragment>
         <div style={{border:'1px solid var(--border)',borderRadius:12,background:'var(--card)',marginBottom:12,overflow:'hidden'}}>
           <div style={{padding:'9px 14px',borderBottom:'1px solid var(--border)',background:'var(--surface-2)',display:'flex',gap:10,alignItems:'baseline',flexWrap:'wrap'}}>
@@ -39198,7 +39469,7 @@ function HcHoursView({projects, team}){
         </div>
       </React.Fragment>}
 
-      {tab!=='soll'&&<React.Fragment>
+      {tab!=='soll'&&tab!=='parallel'&&<React.Fragment>
       {/* Fuenf getrennte Zeitspannen, jede als eigener Block. Nichts wird vermischt: in einem Block
           beziehen sich alle Zahlen auf denselben Zeitraum. Der Forecast kommt taggenau aus
           forecast_day, Woche und Monat sind Summen derselben Tageswerte. */}
