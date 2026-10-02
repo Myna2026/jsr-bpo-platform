@@ -37060,6 +37060,59 @@ function cqNormHead(s){ return String(s==null?'':s).trim().toLowerCase().replace
 function cqNormName(s){ return String(s==null?'':s).normalize("NFD").replace(/[\u0300-\u036f]/g,"").trim().toLowerCase().replace(/\s+/g,' '); }
 // Reihenfolge-unabhängiger Schlüssel (Vorname/Nachname vertauscht in der CSV): Namens-Tokens sortiert.
 function cqNameKey(s){ return cqNormName(s).split(' ').filter(Boolean).sort().join(' '); }
+// ── EINE Namenszuordnung fuer ALLE Importe ───────────────────────────────────────────────────
+// Vorher hatte jeder Import seine eigene Fassung: der Mailer einen eigenen Alias-Speicher in
+// app_config, die Performance-KPIs keine Umkehrregel. Dieselbe Entscheidung an zwei Orten laeuft
+// irgendwann auseinander (Befund 2026-10-02), deshalb gibt es jetzt genau diese drei Funktionen.
+// Reihenfolge der Zuordnung: hinterlegter Alias → exakter Name → Namens-Tokens sortiert
+// (Vor- und Nachname vertauscht). Diakritika sind in allen drei Schritten gefaltet.
+// Einziger Speicher: Tabelle import_aliases, je Projekt. employee_id NULL heisst "ignorieren".
+async function importAliasLoad(projId){
+  const out={aliasMap:{}, ignoredSet:{}};
+  if(!projId) return out;
+  try{
+    const {data,error}=await sb.from('import_aliases').select('alias_name,employee_id').eq('project_id',projId);
+    if(error) throw error;
+    (data||[]).forEach(a=>{ const k=cqNormName(a.alias_name); if(!k) return;
+      if(a.employee_id) out.aliasMap[k]=a.employee_id; else out.ignoredSet[k]=true; });
+  }catch(e){ console.error('[import] Aliase nicht lesbar', e); }
+  return out;
+}
+// preferSkill: bei gleichnamigen Personen gewinnt die mit diesem Projekt-Skill (der Mailer braucht das,
+// weil die Kundendatei nur Vor- und Nachnamen fuehrt und Support gemeint ist).
+function importNameIndex(emps, preferSkill){
+  const byId={}, byName={}, byKey={};
+  (emps||[]).forEach(e=>{ if(!e||!e.id) return;
+    const full=((e.first_name||'')+' '+(e.last_name||'')).trim(); if(!full) return;
+    byId[e.id]=e;
+    const n=cqNormName(full), k=cqNameKey(full);
+    const besser=o=>!o||(preferSkill&&String(e.project_skill||'').toLowerCase()===preferSkill
+                          &&String(o.project_skill||'').toLowerCase()!==preferSkill);
+    if(besser(byName[n])) byName[n]=e;
+    if(k&&besser(byKey[k])) byKey[k]=e;
+  });
+  return {byId, byName, byKey};
+}
+function importResolver(idx, al){
+  return {
+    resolve:nm=>{ const n=cqNormName(nm);
+      if(al.aliasMap[n]) return idx.byId[al.aliasMap[n]]||null;
+      return idx.byName[n]||idx.byKey[cqNameKey(nm)]||null; },
+    ignored:nm=>!!al.ignoredSet[cqNormName(nm)],
+  };
+}
+// Alias setzen oder Namen auf ignorieren stellen. Ein Name je Projekt nur einmal, ein erneutes
+// Setzen ueberschreibt die alte Zuordnung, statt eine zweite Zeile danebenzulegen.
+async function importAliasSet(projId, nm, empId){
+  if(!projId||!nm) return {error:'Projekt oder Name fehlt'};
+  let uid=null, uname=null;
+  try{ const u=await sb.auth.getUser(); uid=u&&u.data&&u.data.user&&u.data.user.id||null;
+    if(uid){ const nr=await sb.from('app_users').select('full_name').eq('user_id',uid).single(); uname=nr&&nr.data&&nr.data.full_name||null; } }catch(e){}
+  try{ await sb.from('import_aliases').delete().eq('project_id',projId).eq('alias_name',nm); }catch(e){}
+  const {error}=await sb.from('import_aliases').insert({project_id:projId, alias_name:nm, employee_id:empId||null, created_by:uid, created_by_name:uname});
+  if(error){ console.error('[import] Alias nicht gespeichert', error); return {error:error.message||'nicht gespeichert'}; }
+  return {ok:true};
+}
 function cqSec(v){ const n=Number(String(v==null?'':v).toString().replace(',','.')); return isNaN(n)?0:n; }
 function cqHours(sec){ return Math.round((Number(sec)||0)/3600*100)/100; }
 function cqAutoMap(headers, fields){ const m={}; const H=headers.map(cqNormHead); (fields||ROHDATEN_FIELDS).forEach(f=>{ let idx=-1;
@@ -37256,12 +37309,9 @@ function RohdatenImport({projId, projName, employees, onSaved}){
 
   async function process(){ if(missingReq.length||!sheet) return; setBusy(true); setErr('');
     try{ await saveConfigToDB(cfgKey, map); }catch(e){}
-    const {data:aliasRows}=await sb.from('import_aliases').select('alias_name,employee_id').eq('project_id',projId);
-    const aliasMap={}, ignoredSet={}; (aliasRows||[]).forEach(a=>{ const k=cqNormName(a.alias_name); if(a.employee_id) aliasMap[k]=a.employee_id; else ignoredSet[k]=true; });
+    const al=await importAliasLoad(projId);
     const emps=(employees||[]).filter(e=>e&&e.project_id===projId);
-    const empById={}; const byName={}; emps.forEach(e=>{ empById[e.id]=e; byName[cqNormName((e.first_name||'')+' '+(e.last_name||''))]=e; });
-    const resolve=nm=>{ const n=cqNormName(nm); if(aliasMap[n]) return empById[aliasMap[n]]||null; return byName[n]||null; };
-    const ignored=nm=>!!ignoredSet[cqNormName(nm)];
+    const {resolve, ignored}=importResolver(importNameIndex(emps), al);
     const der=rohdatenDerive(sheet.rows, map, resolve, ignored);
     const facts=der.facts, dailyFacts=der.dailyFacts, weeks=der.weeks;
     const unmatchedList=Object.values(der.unmatched).sort((a,b)=>b.rows-a.rows);
@@ -37308,12 +37358,9 @@ function RohdatenImport({projId, projName, employees, onSaved}){
     try{
       const {data:imps}=await sb.from('data_imports').select('id,storage_path,created_at').eq('project_id',projId).eq('source_type','rohdaten').not('storage_path','is',null).order('created_at',{ascending:true});
       if(!imps||!imps.length){ setBfMsg('Keine archivierten Rohdatei-Läufe für dieses Projekt.'); setBfBusy(false); return; }
-      const {data:aliasRows}=await sb.from('import_aliases').select('alias_name,employee_id').eq('project_id',projId);
-      const aliasMap={}, ignoredSet={}; (aliasRows||[]).forEach(a=>{ const k=cqNormName(a.alias_name); if(a.employee_id) aliasMap[k]=a.employee_id; else ignoredSet[k]=true; });
+      const al=await importAliasLoad(projId);
       const emps=(employees||[]).filter(e=>e&&e.project_id===projId);
-      const empById={}, byName={}; emps.forEach(e=>{ empById[e.id]=e; byName[cqNormName((e.first_name||'')+' '+(e.last_name||''))]=e; });
-      const resolve=nm=>{ const n=cqNormName(nm); if(aliasMap[n]) return empById[aliasMap[n]]||null; return byName[n]||null; };
-      const ignored=nm=>!!ignoredSet[cqNormName(nm)];
+      const {resolve, ignored}=importResolver(importNameIndex(emps), al);
       let savedMap=null; try{ savedMap=await loadConfigFromDB(cfgKey); }catch(e){}
       let ok=0, days=0, skip=0;
       for(let i=0;i<imps.length;i++){ const imp=imps[i]; setBfMsg('Verarbeite '+(i+1)+'/'+imps.length+' …');
@@ -37474,15 +37521,12 @@ function PivotImport({projId, employees, source, fields, table, accept, hint, on
 
   async function process(){ if(missingReq.length||!sheet) return; setBusy(true); setErr('');
     try{ await saveConfigToDB(cfgKey, map); }catch(e){}
-    const {data:aliasRows}=await sb.from('import_aliases').select('alias_name,employee_id').eq('project_id',projId);
-    const aliasMap={}, ignoredSet={}; (aliasRows||[]).forEach(a=>{ const k=cqNormName(a.alias_name); if(a.employee_id) aliasMap[k]=a.employee_id; else ignoredSet[k]=true; });
+    const al=await importAliasLoad(projId);
     const emps=(employees||[]).filter(e=>e&&e.project_id===projId);
-    const empById={}, byName={}, byKey={}; emps.forEach(e=>{ const full=(e.first_name||'')+' '+(e.last_name||''); empById[e.id]=e; byName[cqNormName(full)]=e; const k=cqNameKey(full); if(k) byKey[k]=e; });
-    // exakt (diakritika-gefaltet) → sonst reihenfolge-unabhängig (Vorname/Nachname getauscht). Alias hat Vorrang.
-    const resolve=nm=>{ const n=cqNormName(nm); if(aliasMap[n]) return empById[aliasMap[n]]||null; return byName[n]||byKey[cqNameKey(nm)]||null; };
+    const {resolve, ignored}=importResolver(importNameIndex(emps), al);
     const seen={}, facts=[], unmatched={}, dups=[]; let ignoredCount=0; const durCols={};
     (sheet.rows||[]).forEach(r=>{ const nm=String(r[map.name]==null?'':r[map.name]).trim(); if(!nm) return;
-      if(ignoredSet[cqNormName(nm)]){ ignoredCount++; return; }
+      if(ignored(nm)){ ignoredCount++; return; }
       const emp=resolve(nm);
       if(!emp){ (unmatched[nm]=unmatched[nm]||{name:nm,rows:0}).rows++; return; }
       if(seen[emp.id]){ dups.push(nm); return; } seen[emp.id]=true;
@@ -37664,15 +37708,12 @@ function BookingImportAgent({projId, employees, onSaved, initKw, initYear}){
 
   async function process(){ if(missingReq.length||!sheet||!kpiIds||kpiIds.error) return; setBusy(true); setErr('');
     try{ await saveConfigToDB(cfgKey, map); }catch(e){}
-    const {data:aliasRows}=await sb.from('import_aliases').select('alias_name,employee_id').eq('project_id',projId);
-    const aliasMap={}, ignoredSet={}; (aliasRows||[]).forEach(a=>{ const k=cqNormName(a.alias_name); if(a.employee_id) aliasMap[k]=a.employee_id; else ignoredSet[k]=true; });
+    const al=await importAliasLoad(projId);
     const emps=(employees||[]).filter(e=>e&&e.project_id===projId);
-    const empById={}, byName={}, byKey={}; emps.forEach(e=>{ const full=(e.first_name||'')+' '+(e.last_name||''); empById[e.id]=e; byName[cqNormName(full)]=e; const k=cqNameKey(full); if(k) byKey[k]=e; });
-    // exakt (diakritika-gefaltet) → sonst reihenfolge-unabhängig (Vorname/Nachname getauscht). Alias hat Vorrang.
-    const resolve=nm=>{ const n=cqNormName(nm); if(aliasMap[n]) return empById[aliasMap[n]]||null; return byName[n]||byKey[cqNameKey(nm)]||null; };
+    const {resolve, ignored}=importResolver(importNameIndex(emps), al);
     const seen={}, facts=[], unmatched={}, dups=[]; let ignoredCount=0;
     (sheet.rows||[]).forEach(r=>{ const nm=String(r[map.name]==null?'':r[map.name]).trim(); if(!nm) return;
-      if(ignoredSet[cqNormName(nm)]){ ignoredCount++; return; }
+      if(ignored(nm)){ ignoredCount++; return; }
       const emp=resolve(nm);
       if(!emp){ (unmatched[nm]=unmatched[nm]||{name:nm,rows:0}).rows++; return; }
       if(seen[emp.id]){ dups.push(nm); return; } seen[emp.id]=true;
@@ -44147,8 +44188,8 @@ async function loadMyUploadDuties(projects){
   const items=[];
   for(const pid of Object.keys(byProj)){ const lastMap=await uploadLastMap(pid);
     for(const c of byProj[pid]){ const st=await computeUploadStatus(c, pid, today, lastMap);
-      if(st.bucket==='overdue'||st.bucket==='today'||st.bucket==='week'){ const p=(projects||[]).find(x=>x.id===pid); items.push({projId:pid, projName:p?p.name:pid, source:c.source_type, st}); } } }
-  const rank={overdue:0,today:1,week:2}; items.sort((a,b)=>rank[a.st.bucket]-rank[b.st.bucket]);
+      if(st.bucket==='overdue'||st.bucket==='today'||st.bucket==='week'||st.bucket==='names'){ const p=(projects||[]).find(x=>x.id===pid); items.push({projId:pid, projName:p?p.name:pid, source:c.source_type, st}); } } }
+  const rank={overdue:0,today:1,names:2,week:3}; items.sort((a,b)=>rank[a.st.bucket]-rank[b.st.bucket]);
   return {uid, dutyCount:mine.length, items};
 }
 function UploadDutyPanel({projects, onNavigate, compact}){
@@ -44159,11 +44200,12 @@ function UploadDutyPanel({projects, onNavigate, compact}){
   const jump=(pid,src)=>{ UPLOAD_JUMP={projId:pid, source:src}; if(onNavigate) onNavigate({kind:'view',view:'dataimport'}); };
   const goList=()=>{ if(onNavigate) onNavigate({kind:'view',view:'uploads'}); };
   const overdue=items.filter(i=>i.st.bucket==='overdue').length, todayN=items.filter(i=>i.st.bucket==='today').length, weekN=items.filter(i=>i.st.bucket==='week').length;
+  const namesN=items.filter(i=>i.st.bucket==='names').length;
   const cap=compact?4:12;
   return <div style={{border:'1px solid '+(overdue?'#fecaca':'var(--border)'),borderRadius:14,background:overdue?'#fef2f2':'var(--card)',padding:compact?'12px 14px':'14px 16px',marginBottom:14}}>
     <div onClick={goList} style={{display:'flex',alignItems:'center',gap:8,cursor:'pointer',marginBottom:n?8:0,flexWrap:'wrap'}}>
       <span style={{fontSize:14,fontWeight:800}}>🚦 Meine Uploads</span>
-      <span style={{fontSize:11,fontWeight:700,color:'var(--muted)'}}>{overdue} überfällig · {todayN} heute · {weekN} diese Woche →</span>
+      <span style={{fontSize:11,fontWeight:700,color:'var(--muted)'}}>{overdue} überfällig · {todayN} heute · {weekN} diese Woche{namesN?(' · '+namesN+' mit offenen Namen'):''} →</span>
     </div>
     {n===0 ? <div style={{fontSize:12,color:'#059669',fontWeight:700}}>✓ Alles aktuell.</div>
       : <div style={{display:'flex',flexDirection:'column',gap:6}}>{items.slice(0,cap).map(i=>{ const MB=UPLOAD_BUCKET_META[i.st.bucket]||{dot:'#9ca3af'};
@@ -44244,6 +44286,8 @@ const UPLOAD_BUCKET_META={
   overdue:{label:'Überfällig',          dot:'#dc2626', bg:'#fef2f2', bd:'#fecaca'},
   today:  {label:'Heute fällig',        dot:'#d97706', bg:'#fffbeb', bd:'#fde68a'},
   week:   {label:'Diese Woche fällig',  dot:'#d97706', bg:'#fffbeb', bd:'#fde68a'},
+  // Hochgeladen, aber Namen offen: die Datei ist da, ein Teil der Zahlen fehlt trotzdem.
+  names:  {label:'Namen zuordnen',      dot:'#2563eb', bg:'#eff6ff', bd:'#bfdbfe'},
 };
 // ── Statusrechner Upload-Ampel (Schnitt 2) — live gerechnet, nichts gespeichert ──
 async function uploadPresent(fn){ try{ const {count}=await fn(); return (count||0)>0; }catch(e){ return false; } }
@@ -44268,12 +44312,46 @@ function uploadDueDate(iso, wd){ const mon=isoWeekMonday(iso.year, iso.kw); cons
 function uploadWeeksOfMonth(Y, M){ const set=new Set(); const last=new Date(Y,M,0).getDate();
   for(let d=1; d<=last; d++){ const w=getISOWeek(new Date(Y,M-1,d)); if(w.year===Y) set.add(w.kw); } return Array.from(set); }
 async function uploadLastMap(projId){
-  try{ const {data}=await sb.from('data_imports').select('source_type,created_at').eq('project_id',projId).order('created_at',{ascending:false}).limit(300);
-    const m={}; (data||[]).forEach(r=>{ if(!m[r.source_type]) m[r.source_type]=new Date(r.created_at); }); return m;
+  try{ const {data}=await sb.from('data_imports')
+      .select('source_type,created_at,status,unmatched_count,warnings')
+      .eq('project_id',projId).order('created_at',{ascending:false}).limit(300);
+    const m={}; const offen={};
+    (data||[]).forEach(r=>{ if(!m[r.source_type]) m[r.source_type]=new Date(r.created_at);
+      // Offene Namen des JEWEILS LETZTEN Laufs je Quelle. Aeltere Laeufe zaehlen nicht mehr: wer
+      // danach sauber importiert hat, hat das Thema erledigt.
+      if(!(r.source_type in offen)){
+        const n=Number(r.unmatched_count)||0;
+        offen[r.source_type]={n, names:uploadOffeneNamen(r.warnings), when:new Date(r.created_at)};
+      } });
+    // nicht aufzaehlbar, damit die bisherigen Schleifen ueber lastMap unveraendert laufen
+    Object.defineProperty(m, '__offen', {value:offen, enumerable:false});
+    return m;
   }catch(e){ return {}; }
+}
+// Die offenen Namen stehen je nach Import an zwei Stellen im warnings-Feld: als Liste unter
+// "unmatched" (Mailer) oder als Warnung vom Typ "unmatched" mit details (alle anderen).
+function uploadOffeneNamen(w){
+  try{
+    if(!w) return [];
+    if(Array.isArray(w)){ const u=w.find(x=>x&&x.type==='unmatched'); return (u&&u.details)||[]; }
+    if(Array.isArray(w.unmatched)) return w.unmatched;
+    return [];
+  }catch(e){ return []; }
 }
 // Ampel + Bucket je konfigurierter Quelle. today = lokale Mitternacht.
 async function computeUploadStatus(cfg, projId, today, lastMap){
+  const st=await computeUploadStatusRoh(cfg, projId, today, lastMap);
+  // Hochgeladen ist nicht gleich angekommen: blieben beim letzten Lauf Namen ohne Zuordnung, fehlen
+  // deren Zahlen in jeder Auswertung. Das war bisher unsichtbar, die Ampel stand auf gruen
+  // (Befund 2026-10-02). Deshalb wird "fertig" in diesem Fall zu einer offenen Aufgabe.
+  const off=(lastMap&&lastMap.__offen&&lastMap.__offen[cfg.source_type])||null;
+  if(st.bucket==='done' && off && off.n>0){
+    return {...st, state:'yellow', bucket:'names', offen:off,
+      rel:(st.rel?st.rel+' · ':'')+off.n+' Name'+(off.n===1?'':'n')+' ohne Zuordnung'};
+  }
+  return off&&off.n>0 ? {...st, offen:off} : st;
+}
+async function computeUploadStatusRoh(cfg, projId, today, lastMap){
   if(!cfg.active) return {state:'grey', bucket:'inactive'};
   const grace=Number(cfg.grace_days)||0; const iso=getISOWeek(today);
   const dayDiff=(a,b)=>Math.floor((b-a)/86400000);
@@ -44344,14 +44422,14 @@ function UploadStatusView({team, projects, onNavigate}){
     const today=new Date(); today.setHours(0,0,0,0); const lastMap=await uploadLastMap(projId);
     const rows=(cfgs||[]).filter(c=>c.project_id===projId && c.active);
     const out=await Promise.all(rows.map(async c=>({cfg:c, st:await computeUploadStatus(c, projId, today, lastMap)})));
-    const rank={overdue:0,today:1,week:2,upcoming:3,done:4,inactive:5};
+    const rank={overdue:0,today:1,names:2,week:3,upcoming:4,done:5,inactive:6};
     out.sort((x,y)=>(rank[x.st.bucket]-rank[y.st.bucket])||String(UPLOAD_LABEL[x.cfg.source_type]||'').localeCompare(String(UPLOAD_LABEL[y.cfg.source_type]||'')));
     if(a) setItems(out);
   })(); return ()=>{a=false;}; },[projId, cfgs, tick]);
   const respName=cfg=>{ const uid=cfg.responsible_user||owners[cfg.project_id]||null; return uid?(users[uid]||'—'):'—'; };
   function jump(source){ UPLOAD_JUMP={projId, source}; if(onNavigate) onNavigate({kind:'view', view:'dataimport'}); }
   const count=b=>(items||[]).filter(i=>i.st.bucket===b).length;
-  const actionable=['overdue','today','week']; const doneList=(items||[]).filter(i=>i.st.bucket==='done'||i.st.bucket==='upcoming');
+  const actionable=['overdue','today','names','week']; const doneList=(items||[]).filter(i=>i.st.bucket==='done'||i.st.bucket==='upcoming');
   return <div style={{maxWidth:900}}>
     <div style={{fontSize:20,fontWeight:700,marginBottom:2}}>🚦 Upload-Status</div>
     <div style={{fontSize:13,color:'var(--muted)',marginBottom:14}}>Was heute und diese Woche fällig ist und was fehlt. Live berechnet aus dem Upload-Plan.</div>
@@ -44455,20 +44533,22 @@ function mailerYw(v){ const d=mailerDate(v); if(!d) return null; const w=getISOW
 function mailerDay(v){ const d=mailerDate(v); return d?isoLocal(d):null; }   // YYYY-MM-DD, Tagesebene wie die Kundenformel
 function mailerIsME(v){ return String(v==null?'':v).trim().toUpperCase()==='ME'; }   // Excel „=ME" ist case-insensitiv
 
-function MailerImport({employees, onSaved}){
+function MailerImport({projId, employees, onSaved}){
   const [file,setFile]=useState(null); const [fileHash,setFileHash]=useState('');
   const [step,setStep]=useState('upload'); const [result,setResult]=useState(null);
   const [busy,setBusy]=useState(false); const [saved,setSaved]=useState(false); const [err,setErr]=useState('');
   const [kpiId,setKpiId]=useState(undefined);  // undefined=lädt · null=fehlt · id
-  const [alias,setAlias]=useState({});          // normname -> emp_id | 'skip'
+  // Aliase kommen aus derselben Tabelle wie bei allen anderen Importen (import_aliases, je Projekt).
+  // Der frühere eigene Speicher in app_config ist am 2026-10-02 dorthin übernommen worden.
+  const [al,setAl]=useState({aliasMap:{}, ignoredSet:{}});
 
   useEffect(()=>{ let alive=true; (async()=>{
     try{ const {data}=await sb.from('kpi_config').select('id,name,skill');
       const k=(data||[]).find(x=>/^\s*mails?\s*\/?\s*h\s*$/i.test(x.name||'') && String(x.skill||'').toLowerCase()==='support');
       if(alive) setKpiId(k?k.id:null);
     }catch(e){ if(alive) setKpiId(null); }
-    try{ const a=await loadConfigFromDB('jsr_mailer_alias_v1'); if(alive&&a&&typeof a==='object') setAlias(a); }catch(e){}
-  })(); return ()=>{alive=false;}; },[]);
+    try{ const a=await importAliasLoad(projId); if(alive) setAl(a); }catch(e){}
+  })(); return ()=>{alive=false;}; },[projId]);
 
   function sheetAoa(wb,rx){ const nm=wb.SheetNames.find(n=>rx.test(n)); if(!nm) return null;
     const aoa=XLSX.utils.sheet_to_json(wb.Sheets[nm],{header:1,defval:''});
@@ -44523,23 +44603,22 @@ function MailerImport({employees, onSaved}){
   function compute(mails,hours,dmails,dhours){
     dmails=dmails||{}; dhours=dhours||{};
     // Skill-Index aus UNSEREM System (alle Mitarbeiter, nicht projektgebunden — Kennzahl ist skill-weit).
-    const bySkill={}, empByName={};
-    (employees||[]).forEach(e=>{ if(!e) return; const n=cqNormName((e.first_name||'')+' '+(e.last_name||''));
-      if(!empByName[n] || String(e.project_skill||'').toLowerCase()==='support') empByName[n]=e; });
+    // Gleiche Zuordnung wie in allen anderen Importen: Alias, exakter Name, dann Namens-Tokens
+    // sortiert. Bei Gleichnamigkeit gewinnt Support, denn die Kundendatei meint das Mail-Team.
+    const {resolve, ignored}=importResolver(importNameIndex(employees, 'support'), al);
     const names=[...new Set([...Object.keys(mails),...Object.keys(hours)].map(k=>k.split('|')[0]))];
     const factsByEmp={}, skippedSales=new Set(), unmatched={};
     names.forEach(nm=>{
-      const n=cqNormName(nm); const al=alias[n];
-      let emp = al==='skip' ? null : (al ? (employees||[]).find(e=>e&&e.id===al) : empByName[n]);
+      if(ignored(nm)) return;
+      const emp = resolve(nm);
       const skill = emp ? String(emp.project_skill||'').toLowerCase() : null;
-      if(al==='skip') return;
       if(!emp){ (unmatched[nm]=unmatched[nm]||{name:nm,mails:0}); Object.keys(mails).forEach(k=>{ if(k.split('|')[0]===nm) unmatched[nm].mails+=mails[k]; }); return; }
       if(skill!=='support'){ skippedSales.add(nm); return; }  // Sales/andere still übersprungen
     });
     // je Support-MA je Woche einen Fakt
     const facts=[];
-    names.forEach(nm=>{ const n=cqNormName(nm); const al=alias[n]; if(al==='skip') return;
-      const emp = al ? (employees||[]).find(e=>e&&e.id===al) : empByName[n];
+    names.forEach(nm=>{ if(ignored(nm)) return;
+      const emp = resolve(nm);
       if(!emp || String(emp.project_skill||'').toLowerCase()!=='support') return;
       const weeks=[...new Set([...Object.keys(mails),...Object.keys(hours)].filter(k=>k.split('|')[0]===nm).map(k=>k.split('|')[1]))];
       weeks.forEach(yw=>{ const key=nm+'|'+yw; const m=mails[key]||0; const h=hours[key]||0;
@@ -44551,8 +44630,8 @@ function MailerImport({employees, onSaved}){
     facts.sort((a,b)=>(a.year-b.year)||(a.kw-b.kw)||a.name.localeCompare(b.name,'de'));
     // Tages-Fakten je Support-MA je Tag (dieselbe Namensauflösung). Mails/h wird beim Lesen abgeleitet, hier nur roh.
     const dailyFacts=[];
-    names.forEach(nm=>{ const n=cqNormName(nm); const al=alias[n]; if(al==='skip') return;
-      const emp = al ? (employees||[]).find(e=>e&&e.id===al) : empByName[n];
+    names.forEach(nm=>{ if(ignored(nm)) return;
+      const emp = resolve(nm);
       if(!emp || String(emp.project_skill||'').toLowerCase()!=='support') return;
       const days=[...new Set([...Object.keys(dmails),...Object.keys(dhours)].filter(k=>k.split('|')[0]===nm).map(k=>k.split('|')[1]))];
       days.forEach(ds=>{ const key=nm+'|'+ds; const m=dmails[key]||0; const h=dhours[key]||0; if(m<=0 && h<=0) return;
@@ -44574,8 +44653,12 @@ function MailerImport({employees, onSaved}){
     setStep('preview');
   }
   function reCompute(){ if(window.__mailerAgg) compute(window.__mailerAgg.mails, window.__mailerAgg.hours, window.__mailerAgg.dmails, window.__mailerAgg.dhours); }
-  async function assignAlias(nm, val){ const n=cqNormName(nm); const next={...alias,[n]:val}; setAlias(next);
-    try{ await saveConfigToDB('jsr_mailer_alias_v1', next); }catch(e){} setTimeout(reCompute,0); }
+  // val = Mitarbeiter-ID oder 'skip' (ignorieren). Geschrieben wird in import_aliases, damit die
+  // Zuordnung auch für Performance-KPIs, Calls, Gauges und Buchungen gilt.
+  async function assignAlias(nm, val){
+    const r=await importAliasSet(projId, nm, val==='skip'?null:val);
+    if(r&&r.error){ setErr('Zuordnung nicht gespeichert: '+r.error); return; }
+    const a=await importAliasLoad(projId); setAl(a); setTimeout(reCompute,0); }
 
   async function save(){ if(!result||busy||!kpiId) return; setBusy(true); setErr('');
     try{
@@ -46153,7 +46236,7 @@ function DataImportView({projects, employees}){
             {s.key==='forecast_sales' && <ForecastImport projId={projId} skill="sales" initYear={Number(year)} onSaved={onSaved}/>}
             {s.key==='forecast_support' && <ForecastImport projId={projId} skill="support" initYear={Number(year)} onSaved={onSaved}/>}
             {s.key==='longterm' && <><LongtermImport projId={projId} initYear={Number(year)} onSaved={onSaved}/><LongtermManage projId={projId} refresh={tick}/></>}
-            {s.key==='mailer' && <MailerImport employees={employees} onSaved={onSaved}/>}
+            {s.key==='mailer' && <MailerImport projId={projId} employees={employees} onSaved={onSaved}/>}
           </div>}
         </div>;
       })}
@@ -46168,6 +46251,13 @@ function DataImportView({projects, employees}){
         <span style={{fontSize:12,fontWeight:600}}>{isMonth?('Monat '+im.kw+'/'+im.year):('KW '+im.kw+'/'+im.year)}</span>
         <span style={{fontSize:11,color:'var(--muted)',flex:1,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{im.file_name}</span>
         <span style={{fontSize:11,color:'var(--muted)'}}>{fmtDate(im.created_at)}{im.uploaded_by_name?' · '+im.uploaded_by_name:''}</span>
+        {/* Offene Namen gehoeren in die Liste, nicht nur in die Vorschau beim Hochladen: sonst sieht
+            man nach dem Import nie wieder, dass Zahlen fehlen (Befund 2026-10-02). */}
+        {Number(im.unmatched_count)>0&&(()=>{ const nm=uploadOffeneNamen(im.warnings);
+          return <span title={nm.length?('Nicht zugeordnet: '+nm.join(', ')):'Diese Namen wurden nicht importiert.'}
+            style={{fontSize:11,fontWeight:800,padding:'2px 8px',borderRadius:20,background:'#eff6ff',border:'1px solid #bfdbfe',color:'#1e40af',whiteSpace:'nowrap'}}>
+            {im.unmatched_count} Name{Number(im.unmatched_count)===1?'':'n'} offen{nm.length?(': '+nm.slice(0,3).join(', ')+(nm.length>3?' …':'')):''}
+          </span>; })()}
       </div>; })}</div>}
     <PausenGegencheck projId={projId}/>
   </div>;
