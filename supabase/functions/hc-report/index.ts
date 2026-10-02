@@ -4,7 +4,9 @@
 // und die Luecke. Empfaenger: info@mynaai.de, Thorsten, Rajner.
 //
 // Gerechnet wird wie im Leitstand ("HC Stundenabgleich"), eine gemeinsame Datei: _shared/hc_hours.ts.
-//  - Abrechenbar = Schichtplan netto (Pausen raus), abzueglich Urlaub/Krankheit, mal dem Anteil der Person.
+//  - Plan netto = Schichtplan (Pausen raus) abzueglich Urlaub/Krankheit. Abrechenbarer Plan = davon der Anteil
+//    der Person. Abrechenbar = davon gedeckelt auf den Forecast. "Geliefert" heisst ausschliesslich das Ist
+//    aus der Performance-Datei, nie eine Planzahl (Begriffe festgelegt 2026-10-02).
 //  - Um 13:00 zaehlt die bis dahin gelaufene Schichtzeit anteilig, abends der volle geplante Tag.
 //    Spaeter als 19:15 aendert sich nichts mehr: die Grundlage ist der Plan, nicht die Stempelung.
 //  - Das Ziel kommt aus report_forecast und liegt nur je Woche vor; fuer einen einzelnen Tag wird es
@@ -93,7 +95,7 @@ Deno.serve(async (req) => {
     const pct = s.ziel > 0 ? Math.round(bis / s.ziel * 100) : 0;
     const tone = s.ziel <= 0 ? "neutral" : (pct >= 98 ? "good" : (pct >= 90 ? "warn" : "bad"));
     const note = s.ziel > 0
-      ? (hrs(bis) + " geliefert von " + hrs(s.ziel) + " Ziel seit Montag · " + (s.luecke! >= 0 ? "+" : "") + hrs(s.luecke!)
+      ? (hrs(bis) + " abrechenbarer Plan von " + hrs(s.ziel) + " Ziel seit Montag · " + (s.luecke! >= 0 ? "+" : "") + hrs(s.luecke!)
          + (s.lueckeEur != null ? (" · " + eur(s.lueckeEur)) : "")
          + (bis > bisAbr + 0.05 ? (" · abrechenbar davon " + hrs(bisAbr)) : ""))
       : "kein Forecast hinterlegt, deshalb kein Ziel";
@@ -138,8 +140,8 @@ Deno.serve(async (req) => {
   inner += refLine((slot === "13"
     ? "Zwischenstand: die bis 13:00 Uhr gelaufene Schichtzeit, anteilig gerechnet."
     : "Tagesabschluss: der ganze geplante Tag. Grundlage ist der Schichtplan, nicht die Stempelung: später ändert sich daran nichts mehr.")
-    + " Abrechenbar = Schichtplan netto, abzüglich Urlaub und Krankheit, je Person mit ihrem hinterlegten Anteil,"
-    + " höchstens jedoch der Forecast des Tages: HolidayCheck bezahlt den kleineren der beiden Werte."
+    + " Plan netto = Schichtplan abzüglich Pausen, Urlaub und Krankheit. Abrechenbarer Plan = davon der Anteil je Person."
+    + " Abrechenbar = davon gedeckelt auf den Forecast des Tages: HolidayCheck bezahlt den kleineren der beiden Werte."
     + " Angeforderte Zusatzstunden heben diese Grenze für den betroffenen Tag."
     + " Die Kacheln zeigen den Tag, Ziel und Lücke dagegen die Woche seit Montag: der Forecast ist ein Wochenwert,"
     + " und ein einzelner Tag dagegen gestellt ergibt keine belastbare Aussage. Das anteilige Wochenziel richtet sich"
