@@ -38958,7 +38958,7 @@ function HcHoursView({projects, team}){
         sbAllData((a,b)=>sb.from('shift_assignments').select('employee_id,skill,work_date,net_hours,gross_hours,shift_value')
           .eq('project_id',proj.id).gte('work_date',rng.from).lte('work_date',rng.to).order('work_date',{ascending:true}).range(a,b)),
         sbAllData((a,b)=>sb.from('daily_hours').select('employee_id,skill,work_date,hours,raw')
-          .eq('project_id',proj.id).gte('work_date',per.from).lte('work_date',per.to).order('work_date',{ascending:true}).range(a,b)),
+          .eq('project_id',proj.id).gte('work_date',rng.from).lte('work_date',rng.to).order('work_date',{ascending:true}).range(a,b)),
         sb.from('report_forecast').select('skill,year,kw,fc_hours').eq('project_id',proj.id).in('year',years),
         // Tages-Forecast: seit dem Umstieg auf das Tagesblatt liegt das Ziel JE TAG vor. Damit
         // braucht die Tageszeile kein verteiltes Wochenziel mehr. Gegenprobe 2026-09-30: die Summe
@@ -39046,9 +39046,16 @@ function HcHoursView({projects, team}){
     // Ist aus dem Kundensystem. istByJ zaehlt nur die Tage, die der Zeitexport ueberhaupt abdeckt -
     // fuer spaetere Tage waere eine Null keine Untererfuellung, sondern ein fehlender Import.
     const istBisDs=raw.istBis||null;
-    const istBy={}, istByJ={}; (raw.dh||[]).forEach(r=>{ const k=r.employee_id+'|'+r.skill; const h=Number(r.hours)||0;
+    // Die Rueckmeldung wird ueber den ganzen geladenen Rahmen geholt (fuer die Bloecke "letzte Woche"
+    // und "laufender Monat"); fuer die Listen zaehlt aber nur der gewaehlte Zeitraum.
+    const istDay={};
+    const istBy={}, istByJ={}; (raw.dh||[]).forEach(r=>{ const h=Number(r.hours)||0;
+      const ds=String(r.work_date).slice(0,10); const sk=String(r.skill||'').toLowerCase();
+      istDay[sk+'|'+ds]=(istDay[sk+'|'+ds]||0)+h;
+      if(ds<per.from||ds>per.to) return;
+      const k=r.employee_id+'|'+r.skill;
       istBy[k]=(istBy[k]||0)+h;
-      const ds=String(r.work_date).slice(0,10); if(istBisDs&&ds<=istBisDs) istByJ[k]=(istByJ[k]||0)+h; });
+      if(istBisDs&&ds<=istBisDs) istByJ[k]=(istByJ[k]||0)+h; });
 
     // ── Der Forecast ist zugleich die Obergrenze ──────────────────────────────────────────────
     // HolidayCheck bezahlt den kleineren Wert aus Forecast und geliefert (Klarstellung Shkurte,
@@ -39222,12 +39229,13 @@ function HcHoursView({projects, team}){
     const monOf=ds=>{ const d=new Date(ds+'T00:00:00'); const dow=(d.getDay()||7); const m=new Date(d); m.setDate(d.getDate()-(dow-1)); return isoLocal(m); };
     const refMon=monOf(ref);
     const refM0=ref.slice(0,8)+'01';
-    const spanne=(sk,a,b)=>{ let fc=0, fcTage=0, netto=0, abr=0, plan=0, abrRoh=0, extra=0;
+    const spanne=(sk,a,b)=>{ let fc=0, fcTage=0, netto=0, abr=0, plan=0, abrRoh=0, extra=0, ist=0, istTage=0;
       let d=new Date(a+'T00:00:00'); const e=new Date(b+'T00:00:00');
       while(d<=e){ const ds=isoLocal(d);
         const f=fdBy[sk+'|'+ds]; if(f!=null){ fc+=f; fcTage++; }
         const dd=daySeries[ds+'|'+sk]; if(dd){ plan+=dd.plan; netto+=dd.netto; abr+=dd.abr; abrRoh+=(dd.abrRoh||0); }
         extra+=((exBy[sk+'|'+ds]||{}).h||0);
+        const iv=istDay[sk+'|'+ds]; if(iv!=null){ ist+=iv; istTage++; }
         d=new Date(d.getFullYear(),d.getMonth(),d.getDate()+1); }
       const rate=(()=>{ const x=((proj.skills||[]).find(y=>y.key===sk)||{}); const v=Number(x.rate); return isFinite(v)&&v>0?v:null; })();
       const hatZiel=fcTage>0;
@@ -39236,6 +39244,9 @@ function HcHoursView({projects, team}){
       // und die Information "wir haben mehr geliefert als bestellt" ginge verloren (Befund 2026-10-01).
       // In Euro steht die Abweichung nur, wenn sie negativ ist: Mehrlieferung bringt kein Geld.
       return {von:a, bis:b, fc:(hatZiel?fc:null), plan, netto, abr, abrRoh, gekappt:Math.max(0, abrRoh-abr), extra, rate, nichtAbr:netto-abr,
+              ist:(istTage?ist:null), istTage,
+              dIst:((istTage&&hatZiel)?ist-fc:null),
+              dIstEur:((istTage&&hatZiel&&rate!=null)?(ist-fc)*rate:null),
               eur:(rate!=null?abr*rate:null),
               delta:(hatZiel?abrRoh-fc:null),
               deltaEur:(hatZiel&&rate!=null&&abrRoh<fc?(abrRoh-fc)*rate:null)};
@@ -39256,6 +39267,8 @@ function HcHoursView({projects, team}){
       const ges={fc:(hatZ?rows.reduce((a,r)=>a+(r.fc||0),0):null), plan:rows.reduce((a,r)=>a+r.plan,0),
         netto:rows.reduce((a,r)=>a+r.netto,0), abr:rows.reduce((a,r)=>a+r.abr,0), abrRoh:rows.reduce((a,r)=>a+(r.abrRoh||0),0),
         gekappt:rows.reduce((a,r)=>a+(r.gekappt||0),0), extra:rows.reduce((a,r)=>a+(r.extra||0),0),
+        ist:(rows.some(r=>r.ist!=null)?rows.reduce((a,r)=>a+(r.ist||0),0):null),
+        dIst:(rows.some(r=>r.dIst!=null)?rows.reduce((a,r)=>a+(r.dIst||0),0):null),
         nichtAbr:rows.reduce((a,r)=>a+r.nichtAbr,0),
         eur:rows.reduce((a,r)=>a+(r.eur||0),0),
         delta:(hatZ?rows.reduce((a,r)=>a+(r.delta||0),0):null),
@@ -39639,44 +39652,48 @@ function HcHoursView({projects, team}){
           <div style={{overflowX:'auto'}}>
             <table style={{borderCollapse:'collapse',width:'100%',fontSize:12.5,minWidth:760}}>
               <thead><tr>
-                {['','Forecast','Plan netto','Abrechenbarer Plan','Abrechenbar','Abweichung'].map((h,i2)=>
+                {['','Plan brutto','Plan netto','Forecast','Rückmeldung','Delta'].map((h,i2)=>
                   <th key={i2} style={{textAlign:i2===0?'left':'right',padding:'6px 10px',fontSize:10.5,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.04em',whiteSpace:'nowrap'}}>{h}</th>)}
               </tr></thead>
               <tbody>
                 {b.rows.map(r=><tr key={r.skill} style={{borderTop:'1px solid var(--border)'}}>
                   <td style={{padding:'6px 10px',fontWeight:700}}>{r.label}</td>
-                  {zelle(r.fc==null?'—':cpoNum(r.fc,1), r.fc==null?{color:'var(--muted)'}:null)}
                   {zelle(cpoNum(r.netto,1),{color:'var(--muted)'})}
-                  {zelle(cpoNum(r.abrRoh,1), r.gekappt>0.05?{color:'#b45309'}:null)}
-                  {zelle(cpoNum(r.abr,1),{fontWeight:800,color:BRAND.main})}
-                  {dz(r.delta,false)}
+                  {zelle(cpoNum(r.abrRoh,1))}
+                  {zelle(r.fc==null?'—':cpoNum(r.fc,1), r.fc==null?{color:'var(--muted)'}:null)}
+                  {zelle(r.ist==null?'—':cpoNum(r.ist,1), r.ist==null?{color:'var(--muted)'}:{fontWeight:800,color:BRAND.main})}
+                  {dz(r.dIst,false)}
                 </tr>)}
                 {b.rows.length>1&&<tr style={{borderTop:'2px solid var(--border)',fontWeight:800}}>
                   <td style={{padding:'7px 10px'}}>Gesamt</td>
-                  {zelle(b.ges.fc==null?'—':cpoNum(b.ges.fc,1))}
                   {zelle(cpoNum(b.ges.netto,1))}
-                  {zelle(cpoNum(b.ges.abrRoh,1), b.ges.gekappt>0.05?{color:'#b45309'}:null)}
-                  {zelle(cpoNum(b.ges.abr,1),{color:BRAND.main})}
-                  {dz(b.ges.delta,false)}
+                  {zelle(cpoNum(b.ges.abrRoh,1))}
+                  {zelle(b.ges.fc==null?'—':cpoNum(b.ges.fc,1))}
+                  {zelle(b.ges.ist==null?'—':cpoNum(b.ges.ist,1),{color:BRAND.main})}
+                  {dz(b.ges.dIst,false)}
                 </tr>}
               </tbody>
             </table>
           </div>
           <div style={{padding:'7px 14px',borderTop:'1px solid var(--border)',fontSize:11.5,color:'var(--muted)',lineHeight:1.6}}>
-            <b style={{color:'var(--text)'}}>{cpoEur(b.ges.eur)}</b> abrechenbar{b.ges.deltaEur!=null?<span>, <b style={{color:'#b91c1c'}}>{cpoEur(b.ges.deltaEur)}</b> unter Forecast</span>:null}.
-            {b.ges.nichtAbr>0.05?<span> Nicht abrechenbar sind zusätzlich <b style={{color:'var(--text)'}}>{cpoHours(b.ges.nichtAbr)}</b> geplante Zeit von Teamleitung, Trainern und Projektleitung. Das ist der Aufschlag, den der Plan über dem Forecast braucht.</span>:null}
-            {b.ges.gekappt>0.05?<span> <b style={{color:'#b45309'}}>{cpoHours(b.ges.gekappt)}</b> liegen über dem Forecast und zählen nicht: HolidayCheck zahlt den kleineren der beiden Werte. Waren die Stunden angefordert, unten als Zusatzstunden eintragen.</span>:null}
+            {b.ges.ist==null
+              ? <span>Für diesen Zeitraum liegt noch keine Rückmeldung vor; der Zeitexport des Auftraggebers hinkt rund eine Woche hinterher.</span>
+              : <span>Abrechenbar daraus <b style={{color:'var(--text)'}}>{cpoEur(b.ges.eur)}</b> nach Anteilen und Forecast-Deckel.</span>}
+            {b.ges.gekappt>0.05?<span> <b style={{color:'#b45309'}}>{cpoHours(b.ges.gekappt)}</b> liegen über dem Forecast des Tages und zählen nicht: HolidayCheck zahlt den kleineren der beiden Werte. Waren die Stunden angefordert, unten als Zusatzstunden eintragen.</span>:null}
             {b.ges.extra>0.05?<span> Enthält <b style={{color:'var(--text)'}}>{cpoHours(b.ges.extra)}</b> angeforderte Zusatzstunden, die den Forecast dieser Tage anheben.</span>:null}
+            {b.ges.nichtAbr>0.05?<span> Zwischen Plan brutto und Plan netto liegen <b style={{color:'var(--text)'}}>{cpoHours(b.ges.nichtAbr)}</b> von Teamleitung, Trainern und Projektleitung.</span>:null}
           </div>
         </div>; })}
       {R&&R.bloecke.length>0&&<div style={{fontSize:11,color:'var(--muted)',lineHeight:1.55,margin:'-4px 0 16px',padding:'0 2px'}}>
         Abrechenbar = Anwesenheit laut Schichtplan, also ohne Pausen, Krankheit, Urlaub und unbezahlte Abwesenheit, je Person mit ihrem hinterlegten Anteil.
-        <b>Plan netto</b> = Schichtplan abzüglich Pausen und Abwesenheit, also die geplante Anwesenheit.
-        <b> Abrechenbarer Plan</b> = davon der Anteil je Person, ohne Projektleitung, Trainer und Teilanteile.
-        <b> Abrechenbar</b> = davon gedeckelt auf den Forecast des Tages plus Zusatzstunden, das ist die Zahl, die wir abrechnen.
-        Keine dieser drei Zahlen ist geleistete Zeit: was tatsächlich geliefert wurde, steht als Ist im Tab „Drei Ebenen".
+        <b>Plan brutto</b> = Schichtplan nach Abzug von Pausen, Urlaub und Krankheit.
+        <b> Plan netto</b> = davon der abrechenbare Anteil je Person, also ohne Projektleitung, Trainer und Teilanteile.
+        <b> Forecast</b> = das Ziel des Auftraggebers, taggenau aus dem Blatt „Tagesplanung"; Woche und Monat sind Summen genau dieser Tageswerte.
+        <b> Rückmeldung</b> = die zurückgemeldeten Stunden aus der Performance-Datei, die einzige tatsächlich geleistete Zahl hier.
+        <b> Delta</b> = Rückmeldung minus Forecast.
         Forecast = Tageswert aus dem Blatt „Tagesplanung" des Auftraggebers, Woche und Monat sind Summen genau dieser Tageswerte.
-        Abweichung = abrechenbarer Plan minus Forecast: plus heißt mehr eingeplant als bestellt (bringt kein Geld), minus heißt Unterdeckung.
+        Der Forecast-Deckel steht nicht mehr als Spalte: er wirkt auf die Abrechnung und wird je Block darunter genannt.
+        Die Rückmeldung bleibt leer, solange der Zeitexport den Zeitraum nicht abdeckt; eine Null stünde dort für einen Ausfall, den es nicht gab.
         Fehlt für einen Tag ein Forecast, bleibt das Ziel leer statt geschätzt zu werden.
         Der Forecast ist zugleich die Obergrenze: bezahlt wird der kleinere der beiden Werte, Forecast oder geliefert.
         Mehr als der Forecast zählt nur, wenn HolidayCheck die Stunden angefordert hat, dann stehen sie unten als Zusatzstunden.
