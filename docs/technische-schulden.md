@@ -133,6 +133,24 @@ Richtungen sind also verschieden und müssen getrennt formuliert werden.
 Vom User am 2026-09-30 ausdrücklich beauftragt, aber nach dem Kundenportal
 einzuplanen.
 
+### Tote Zusage-Spalten entfernen (freigegeben, wartet aufs Aufräumen)
+
+Wir geben dem Auftraggeber **keine Zusage** ab (Entscheidung User 2026-10-02). Es gibt drei Größen:
+Forecast, unsere Planung, Rückmeldung. Der Forecast-Import liest die beiden Spalten „geplante Stunden"
+des Monatsblatts seit dem 2026-10-02 nicht mehr, und niemand liest die Felder mehr.
+
+Zu löschen, sobald wieder aufgeräumt wird (vom User ausdrücklich freigegeben: „was nicht gepflegt wird,
+soll auch nicht dastehen"):
+
+- `forecast_day.committed` — Altbestand aus der Zeit vor dem 2026-10-02, teilweise falsch gefüllt (nur
+  die erste der beiden Spalten, bei Support rund ein Fünftel des echten Werts).
+- `report_forecast.planned_hours` — dieselbe Größe auf Wochenebene, wird ebenfalls nicht mehr
+  geschrieben. Vorher die beiden Edge Functions anpassen, die die Spalte noch in ihrer
+  Tabellenbeschreibung führen: `agent-dialogue` und `nlquery`.
+
+Beides ist ein reines Löschen ohne Ersatz; die letzten Leser im Frontend sind am 2026-10-02 entfernt
+worden (Forecast-Import und die Vorbefüllung der Präsentation).
+
 ## Auth-Konsolidierung — offene Go-Live-Blocker
 
 Kontext: Login/Rollen/Portale laufen bereits über Supabase (`app_users` +
