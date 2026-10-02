@@ -40205,7 +40205,8 @@ function LongtermImport({projId, initYear, onSaved}){
 // bei Sales "FC in Stunden (Salestelefonie + Backoffice)". Backoffice und Task zaehlen zur Leistung.
 // Das Wochenblatt "Planung + Rueckmeldung KW" wird NICHT mehr gelesen: es fuehrt nur die Telefonie
 // und hat den Bericht monatelang gegen ein zu kleines Ziel rechnen lassen.
-// Unsere Zusage steht im Blatt "Rueckmeldung Monatsebene", Spalte G, und wird mitgenommen.
+// Die Spalten "geplante Stunden" des Monatsblatts werden NICHT gelesen: wir geben keine Zusage ab
+// (Entscheidung User 2026-10-02). Es gibt drei Groessen: Forecast, unsere Planung, Rueckmeldung.
 // Geschrieben wird beides: die Tageswerte nach forecast_day und die Wochensumme nach report_forecast.
 // Angebrochene Wochen (weniger als sieben Tage in der Datei) liefern KEINEN Wochenwert, sonst faellt er
 // kuenstlich klein aus; ihre Tageswerte kommen trotzdem in die Datenbank.
@@ -40248,10 +40249,12 @@ function ForecastImport({projId, skill, initYear, onSaved}){
       const cDat=norm.findIndex(h=>h.indexOf('datum')===0);
       const cGes=norm.findIndex(h=>h.indexOf('fc_in_stunden')===0);
       if(cDat<0||cGes<0){ setErr('Im Blatt „'+tagNm+'" fehlen „Datum" und „FC in Stunden …". Gefunden: '+hd.filter(Boolean).join(' · ')); return; }
-      const zus={}; let rkList=null, rkInfo=null;
+      // Die Spalten "geplante Stunden" des Monatsblatts werden bewusst NICHT gelesen: wir geben dem
+      // Auftraggeber keine Zusage (Entscheidung User 2026-10-02). Es gibt drei Groessen, Forecast,
+      // unsere Planung und die Rueckmeldung.
+      let rkList=null, rkInfo=null;
       if(rmNm){ const rm=aoa(rmNm); const rn=(rm[0]||[]).map(cqNormHead);
-        const rdt=rn.findIndex(h=>h.indexOf('datum')===0); const rg=rn.findIndex(h=>h.indexOf('geplante_stunden')===0);
-        if(rdt>=0&&rg>=0) rm.slice(1).forEach(r=>{ const ds=xlDate(r[rdt]); if(ds) zus[ds]=cqNumV(r[rg]); });
+        const rdt=rn.findIndex(h=>h.indexOf('datum')===0);
         // Rueckmeldung des Auftraggebers: "Geleistet" und "Vergutet". Beide Spalten gibt es nicht in
         // jeder Datei (in den Septemberdateien fehlen sie), deshalb werden sie ueber die Beschriftung
         // gesucht und nur mitgenommen, wenn sie da sind. "Vergutet" ist die OBERGRENZE, also Forecast
@@ -40274,17 +40277,18 @@ function ForecastImport({projId, skill, initYear, onSaved}){
         }
       }
       const dl=[]; tg.slice(1).forEach(r=>{ const ds=xlDate(r[cDat]); if(!ds) return;
-        dl.push({ds, total:cqNumV(r[cGes]), main:cqNumV(r[cGes+1]), second:cqNumV(r[cGes+2]), committed:(zus[ds]==null?null:zus[ds])}); });
+        dl.push({ds, total:cqNumV(r[cGes]), main:cqNumV(r[cGes+1]), second:cqNumV(r[cGes+2])}); });
       if(!dl.length){ setErr('Im Blatt „'+tagNm+'" keine Zeile mit Datum gefunden.'); return; }
       const by={}; dl.forEach(d=>{ const w=getISOWeek(new Date(d.ds+'T00:00:00')); const k=w.year+'|'+w.kw;
-        const o=by[k]||(by[k]={year:w.year,kw:w.kw,fc:0,planned:0,tage:0,hatZusage:false});
-        o.fc+=d.total||0; if(d.committed!=null){ o.planned+=d.committed; o.hatZusage=true; } o.tage++; });
+        const o=by[k]||(by[k]={year:w.year,kw:w.kw,fc:0,tage:0});
+        o.fc+=d.total||0; o.tage++; });
       const out=Object.keys(by).map(k=>by[k]).sort((a,b)=>a.year-b.year||a.kw-b.kw)
-        .map(o=>({kw:o.kw, year:o.year, fc:Math.round(o.fc*10)/10, planned:(o.hatZusage?Math.round(o.planned*10)/10:null), tage:o.tage, voll:o.tage===7}));
+        .map(o=>({kw:o.kw, year:o.year, fc:Math.round(o.fc*10)/10, tage:o.tage, voll:o.tage===7}));
       const ws=[];
       const teil=out.filter(o=>!o.voll).map(o=>'KW '+o.kw+' ('+o.tage+' Tage)');
       if(teil.length) ws.push('Angebrochene Wochen ohne Wochenwert: '+teil.join(', ')+'. Die Tageswerte werden trotzdem gespeichert.');
       if(!rmNm) ws.push('Kein Blatt „Rückmeldung Monatsebene" gefunden, die zugesagten Stunden fehlen.');
+
       const tl=cqNormHead(hd[cGes]||''), fn=String(f.name||'').toLowerCase();
       if(skill==='sales'&&(tl.indexOf('support')>=0||fn.indexOf('support')>=0)) ws.push('Diese Datei sieht nach Support aus, du bist im Sales-Slot.');
       if(skill==='support'&&tl.indexOf('support')<0&&(tl.indexOf('sales')>=0||fn.indexOf('sales')>=0)) ws.push('Diese Datei sieht nach Sales aus, du bist im Support-Slot.');
@@ -40318,13 +40322,13 @@ function ForecastImport({projId, skill, initYear, onSaved}){
 
   async function save(){ if(!rows||!rows.length||busy) return; setBusy(true); setErr('');
     // Wochenwert nur aus vollstaendigen Wochen (7 Tage in der Datei). Tageswerte gehen immer mit.
-    const clean=rows.filter(r=>r.voll).map(r=>({kw:r.kw, year:r.year, fc:cqNumV(r.fc), planned:(r.planned==null||r.planned===''?null:cqNumV(r.planned))})).filter(r=>r.fc!=null);
+    const clean=rows.filter(r=>r.voll).map(r=>({kw:r.kw, year:r.year, fc:cqNumV(r.fc)})).filter(r=>r.fc!=null);
     if(!clean.length&&!(days||[]).length){ setBusy(false); setErr('Keine gültigen Werte zum Speichern.'); return; }
     let uid=null,uname=null; try{ const u=await sb.auth.getUser(); uid=u&&u.data&&u.data.user&&u.data.user.id||null; if(uid){ const nr=await sb.from('app_users').select('full_name').eq('user_id',uid).single(); uname=nr&&nr.data&&nr.data.full_name||null; } }catch(e){}
     // Tageswerte zuerst: sie sind die eigentliche Quelle, der Wochenwert ist daraus gerechnet.
     if((days||[]).length){
       const dRows=days.map(d2=>({project_id:projId, skill, work_date:d2.ds, fc_total:d2.total, fc_main:d2.main,
-        fc_second:d2.second, committed:d2.committed, file_name:(file&&file.name)||null, updated_by:uid, updated_at:new Date().toISOString()}));
+        fc_second:d2.second, file_name:(file&&file.name)||null, updated_by:uid, updated_at:new Date().toISOString()}));
       const dUp=await sb.from('forecast_day').upsert(dRows,{onConflict:'project_id,skill,work_date'});
       if(dUp.error){ setBusy(false); setErr('Tageswerte nicht gespeichert: '+(dUp.error.message||dUp.error)); return; }
     }
@@ -40340,17 +40344,17 @@ function ForecastImport({projId, skill, initYear, onSaved}){
     let voll=[]; const luecke=[];
     if(wl.length){
       const von=wl.map(w=>w.mo).sort()[0], bis=wl.map(w=>w.so).sort().pop();
-      const fdR=await sb.from('forecast_day').select('work_date,fc_total,committed')
+      const fdR=await sb.from('forecast_day').select('work_date,fc_total')
         .eq('project_id',projId).eq('skill',skill).gte('work_date',von).lte('work_date',bis);
       if(fdR.error){ setBusy(false); setErr('Tageswerte nicht lesbar: '+(fdR.error.message||fdR.error)); return; }
       const agg={}; (fdR.data||[]).forEach(r2=>{ const ds2=String(r2.work_date).slice(0,10);
-        const w=getISOWeek(new Date(ds2+'T00:00:00')); const a=agg[w.year+'|'+w.kw]||(agg[w.year+'|'+w.kw]={n:0,fc:0,pl:0,plN:0});
-        a.n++; a.fc+=Number(r2.fc_total)||0; if(r2.committed!=null){ a.pl+=Number(r2.committed)||0; a.plN++; } });
+        const w=getISOWeek(new Date(ds2+'T00:00:00')); const a=agg[w.year+'|'+w.kw]||(agg[w.year+'|'+w.kw]={n:0,fc:0});
+        a.n++; a.fc+=Number(r2.fc_total)||0; });
       const rnd=v=>Math.round(v*100)/100;
       wl.forEach(w=>{ const a=agg[w.year+'|'+w.kw];
         if(!a||a.n<7){ luecke.push('KW '+w.kw+' ('+((a&&a.n)||0)+' von 7 Tagen)'); return; }
         const eig=clean.find(c=>c.kw===w.kw&&c.year===w.year);       // im Vorschau-Feld gesetzt
-        voll.push({kw:w.kw, year:w.year, fc:(eig?eig.fc:rnd(a.fc)), planned:(eig&&eig.planned!=null)?eig.planned:(a.plN?rnd(a.pl):null)}); });
+        voll.push({kw:w.kw, year:w.year, fc:(eig?eig.fc:rnd(a.fc))}); });
     }
     if(!voll.length) voll=clean;   // ohne Tageswerte bleibt es bei der Rechnung aus der Datei
     const kws=voll.map(r=>r.kw); const jahre=[...new Set(voll.map(r=>r.year))];
@@ -40358,7 +40362,8 @@ function ForecastImport({projId, skill, initYear, onSaved}){
       for(const Y2 of jahre){ const kw2=voll.filter(r=>r.year===Y2).map(r=>r.kw);
         const del=await sb.from('report_forecast').delete().eq('project_id',projId).eq('skill',skill).eq('year',Y2).in('kw',kw2);
         if(del.error){ setBusy(false); setErr('Alte Werte nicht ersetzbar: '+(del.error.message||del.error)); return; } }
-      const insRows=voll.map(r=>({project_id:projId, skill, year:r.year, kw:r.kw, fc_hours:r.fc, planned_hours:r.planned, file_name:(file&&file.name)||null, updated_by:uid}));
+      // planned_hours bleibt leer: wir geben keine Zusage ab (Entscheidung 2026-10-02).
+      const insRows=voll.map(r=>({project_id:projId, skill, year:r.year, kw:r.kw, fc_hours:r.fc, file_name:(file&&file.name)||null, updated_by:uid}));
       const ins=await sb.from('report_forecast').insert(insRows).select('id');
       if(ins.error){ setBusy(false); setErr('Nicht gespeichert: '+(ins.error.message||ins.error)); return; }
       if((ins.data||[]).length!==insRows.length){ setBusy(false); setErr('Nur '+((ins.data||[]).length)+' von '+insRows.length+' Werten geschrieben (Rechte/Policy prüfen).'); return; }
@@ -40429,15 +40434,15 @@ function ForecastImport({projId, skill, initYear, onSaved}){
     {err && <div style={{padding:'8px 10px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:8,color:'#b91c1c',fontSize:12,marginBottom:8}}>{err}</div>}
     {saved && <div style={{padding:'8px 10px',background:'#ecfdf5',border:'1px solid #a7f3d0',borderRadius:8,color:'#059669',fontSize:12,fontWeight:700,marginBottom:8}}>✓ Forecast gespeichert.</div>}
     {rows && rows.length>0 && <React.Fragment>
-      <div style={{fontSize:11,color:'var(--muted)',marginBottom:6}}>Blatt <b>{meta&&meta.sheet}</b> · Spalte <b>{meta&&meta.col}</b> · {meta&&meta.tage} Tage · {rows.filter(r=>r.voll).length} vollständige Wochen{meta&&meta.rm?(' · Zusage aus „'+meta.rm+'"'):''}</div>
+      <div style={{fontSize:11,color:'var(--muted)',marginBottom:6}}>Blatt <b>{meta&&meta.sheet}</b> · Spalte <b>{meta&&meta.col}</b> · {meta&&meta.tage} Tage · {rows.filter(r=>r.voll).length} vollständige Wochen</div>
       {warn.map((w,i)=><div key={i} style={{padding:'6px 10px',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:8,color:'#92400e',fontSize:11,marginBottom:6}}>{w}</div>)}
       <div style={{overflowX:'auto'}}><table style={{borderCollapse:'collapse',fontSize:12}}>
-        <thead><tr style={{color:'var(--muted)'}}><th style={{padding:'4px 10px',textAlign:'left'}}>KW</th><th style={{padding:'4px 10px',textAlign:'right'}}>FC-Stunden</th><th style={{padding:'4px 10px',textAlign:'right'}}>Geplant (Rückm.)</th></tr></thead>
+        <thead><tr style={{color:'var(--muted)'}}><th style={{padding:'4px 10px',textAlign:'left'}}>KW</th><th style={{padding:'4px 10px',textAlign:'right'}}>FC-Stunden</th></tr></thead>
         <tbody>{rows.map(r=><tr key={r.year+'-'+r.kw} style={{borderTop:'1px solid var(--border)',opacity:r.voll?1:.55}}>
           <td style={{padding:'3px 10px',fontWeight:700}}>KW {r.kw}/{r.year}
             {!r.voll&&<span style={{marginLeft:6,fontSize:10.5,fontWeight:700,color:'#92400e'}}>nur {r.tage} Tage, kein Wochenwert</span>}</td>
           <td style={{padding:'3px 10px',textAlign:'right'}}><input value={r.fc==null?'':r.fc} onChange={e=>setFc(r.kw,e.target.value)} style={{width:90,padding:'4px 6px',border:'1px solid var(--border)',borderRadius:6,textAlign:'right',fontFamily:'var(--mono)'}}/></td>
-          <td style={{padding:'3px 10px',textAlign:'right',fontFamily:'var(--mono)',color:r.planned==null?'var(--muted)':'var(--text)'}}>{r.planned==null?'—':fmtNum(r.planned,1)}</td>
+
         </tr>)}</tbody>
       </table></div>
       {ivRows&&ivRows.length>0&&(()=>{
